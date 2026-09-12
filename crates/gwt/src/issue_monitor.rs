@@ -20592,6 +20592,80 @@ mod tests {
         );
     }
 
+    /// Issue #3732: cached inbox metadata is not the durable launch identity
+    /// that a new stop/failover process will validate.
+    #[test]
+    fn monitor_status_identity_remains_actionable_after_prefs_reload() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-current");
+        monitor.record_claimed(issue(42), "cached-claim");
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .expect("inbox row")
+            .launched_window_id = Some("tab-1::agent-old".to_string());
+        let row = monitor
+            .agent_status()
+            .inbox
+            .into_iter()
+            .find(|row| row.issue_number == 42)
+            .expect("status row");
+        let target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: row.claim_id,
+            delivery_id: row.delivery_id,
+            window_id: row.launched_window_id,
+        };
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(
+            matches!(
+                restored.stop_only(&target, "terminal Work", "2026-09-12T00:00:00Z"),
+                IssueMonitorStopOutcome::Stopped { .. }
+            ),
+            "fresh status must identify the durable launch"
+        );
+    }
+
+    /// Issue #3732: a failed inbox row must not make its still-reserved slot
+    /// impossible to release, and the old pane must not reclaim it afterwards.
+    #[test]
+    fn monitor_exact_failover_releases_a_terminal_row_and_its_old_binding() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-old");
+        let mut daemon =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        daemon.record_candidate(issue(42));
+        monitor.set_inbox_state(42, MonitorInboxState::NeedsHuman);
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.failover_restart(&target, "terminal Work", "2026-09-12T00:00:00Z"),
+            IssueMonitorFailoverOutcome::Restarting { .. }
+        ));
+        let prefs = monitor.prefs();
+        assert!(prefs.launched_issues.is_empty());
+        assert!(prefs.launched_claims.is_empty());
+        assert!(prefs.pending_launch_deliveries.is_empty());
+        assert!(!prefs.launch_bindings.contains_key("tab-1::agent-old"));
+        assert_eq!(
+            prefs.queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor
+            .readopt_live_launch_bindings(&live_windows(&["tab-1::agent-old"]))
+            .is_empty());
+        assert_eq!(monitor.active_count(), 0);
+        daemon.rebase_daemon_driver_prefs(&prefs);
+        assert_eq!(
+            daemon.active_count(),
+            0,
+            "a stale daemon cannot resurrect the revoked launch"
+        );
+        assert!(daemon
+            .readopt_live_launch_bindings(&live_windows(&["tab-1::agent-old"]))
+            .is_empty());
+    }
+
     /// SPEC-3431 FR-033: no collateral. Stopping one issue leaves every other
     /// launch, slot, and window exactly as it was.
     #[test]
