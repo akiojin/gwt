@@ -1213,7 +1213,14 @@ fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
 /// package-runner probe timed out`, and fails a test that was asserting
 /// something else entirely.
 fn write_fixture_package_runners(temp_root: &Path) -> PathBuf {
-    write_fixture_runners(temp_root, &["npx", "bunx"])
+    let bin = write_fixture_runners(temp_root, &["npx", "bunx"]);
+    #[cfg(windows)]
+    fs::write(
+        bin.join("npm.cmd"),
+        "@echo off\r\necho \"1.2.3\"\r\nexit /b 0\r\n",
+    )
+    .expect("write sibling npm metadata fixture");
+    bin
 }
 
 /// The fixture `npx` / `bunx` shared by the whole test binary.
@@ -44589,6 +44596,143 @@ exit 1
 }
 
 #[test]
+fn daemon_monitor_frames_only_update_the_active_project_display() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let active_root = temp.path().join("active");
+    let other_root = temp.path().join("other");
+    fs::create_dir_all(&active_root).expect("active project");
+    fs::create_dir_all(&other_root).expect("other project");
+    let tabs = vec![
+        sample_project_tab(
+            "active",
+            "Active",
+            active_root.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+        sample_project_tab("other", "Other", other_root.clone(), ProjectKind::Git, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("active"));
+    let mut active = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    active.set_max_active_agents(4);
+    let status = active.status_view();
+    let events = runtime.issue_monitor_daemon_status_events(&active_root, Box::new(status.clone()));
+    assert!(matches!(
+        &events[0].event,
+        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
+    ));
+    let other = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    assert!(runtime
+        .issue_monitor_daemon_status_events(&other_root, Box::new(other.status_view()))
+        .is_empty());
+    assert!(runtime
+        .issue_monitor_daemon_inbox_events(&other_root, Vec::new())
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorInbox { .. })));
+    assert!(runtime
+        .issue_monitor_daemon_inbox_events(&active_root, Vec::new())
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::IssueMonitorInbox { .. })));
+}
+
+#[test]
+fn list_issue_monitor_uses_the_daemon_gui_projection_without_local_scan() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    // No Git remote: even the old local scan cannot access the network.
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).expect("project");
+    let tab = sample_project_tab("active", "Project", root.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.set_max_active_agents(5);
+    monitor.record_scan_error("2026-09-12T00:00:00Z", "daemon scan failed");
+    let agent = serde_json::to_value(monitor.agent_status()).expect("agent status");
+    let expected = agent["gui_status"].clone();
+    reset_local_issue_monitor_remote_scan_count();
+
+    let events = runtime.list_issue_monitor_events_with_reader("client-1", |project_root| {
+        assert_eq!(project_root, root);
+        Ok(Some(agent))
+    });
+
+    assert_eq!(local_issue_monitor_remote_scan_count(), 0);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0].target, DispatchTarget::Client(id) if id == "client-1"));
+    let BackendEvent::IssueMonitorStatus { status } = &events[0].event else {
+        panic!("daemon status reply expected");
+    };
+    assert_eq!(serde_json::to_value(status).expect("GUI status"), expected);
+}
+
+#[test]
+fn list_issue_monitor_uncertain_and_legacy_daemon_reads_preserve_display() {
+    use gwt::runtime_daemon_events::IssueMonitorControlPublishError;
+
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).expect("project");
+    let tab = sample_project_tab("active", "Project", root, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    let mut legacy = serde_json::to_value(
+        gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).agent_status(),
+    )
+    .expect("legacy status");
+    legacy
+        .as_object_mut()
+        .expect("status object")
+        .remove("gui_status");
+    reset_local_issue_monitor_remote_scan_count();
+
+    for (result, expects_toast) in [
+        (
+            Err(IssueMonitorControlPublishError::OutcomeUnknown(
+                "status timed out".into(),
+            )),
+            true,
+        ),
+        (Ok(Some(serde_json::json!({"gui_status": "invalid"}))), true),
+        (Ok(Some(legacy)), false),
+    ] {
+        let events = runtime.list_issue_monitor_events_with_reader("client-1", |_| result);
+        assert!(events
+            .iter()
+            .all(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. })));
+        assert_eq!(events.len(), usize::from(expects_toast));
+    }
+    assert_eq!(local_issue_monitor_remote_scan_count(), 0);
+}
+
+#[test]
+fn issue_monitor_control_error_preserves_the_authoritative_display() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let events = runtime.issue_monitor_control_error_events(
+        Some("client-1"),
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+            "control timed out".to_string(),
+        ),
+        "max-active",
+        None,
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
+        )),
+        "a control error must not replace live counters with an empty monitor"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, message, .. }
+            if level == "error" && message.contains("control timed out")
+    )));
+}
+
+#[test]
 fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -44627,16 +44771,11 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
     FileExt::unlock(&lock).expect("release prefs lock");
 
     assert!(started.elapsed() < Duration::from_secs(1));
-    let status = events
-        .iter()
-        .find_map(|event| match &event.event {
-            BackendEvent::IssueMonitorStatus { status } => Some(status),
-            _ => None,
-        })
-        .expect("canonical status");
     assert!(
-        status.autonomous_mode,
-        "failed transaction must not render an uncommitted OFF state"
+        events
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::IssueMonitorStatus { .. })),
+        "failed transaction must preserve the last authoritative display"
     );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert!(persisted.autonomous_mode);

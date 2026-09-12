@@ -1166,6 +1166,47 @@ fn scan_candidates_ignores_claims_until_launch_time() {
 }
 
 #[test]
+fn agent_and_gui_status_share_projection_and_preserve_auto_apply_override() {
+    for (saved, now) in [
+        (Some(false), "2026-07-27T10:00:29Z"),
+        (None, "2026-07-27T10:00:30Z"),
+    ] {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                poll_interval_secs: 10,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                auto_apply_updates: saved,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        scan_issue_monitor_candidates(&mut monitor, &[], "2026-07-27T10:00:00Z");
+
+        let gui = monitor.status_view_at(now);
+        let agent = serde_json::to_value(monitor.agent_status_at(now)).expect("serialize status");
+
+        assert_eq!(
+            agent["gui_status"],
+            serde_json::to_value(&gui).expect("serialize GUI status")
+        );
+        assert_eq!(agent["last_error"], serde_json::Value::Null);
+        assert_eq!(
+            agent.get("auto_apply_updates"),
+            Some(&serde_json::json!(saved)),
+            "the saved override must remain distinct from the effective setting"
+        );
+        assert_eq!(
+            agent["auto_apply_updates_effective"],
+            serde_json::json!(gui.auto_apply_updates)
+        );
+        assert_eq!(gui.auto_apply_updates, saved.unwrap_or(true));
+    }
+}
+
+#[test]
 fn status_view_at_keeps_existing_state_before_three_poll_intervals() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,

@@ -2716,7 +2716,15 @@ pub struct IssueMonitorAgentStatus {
     pub active_launches: Vec<u64>,
     pub max_active: usize,
     pub enabled: bool,
+    /// Issue #4273: the authoritative GUI projection; absent in older daemons.
+    #[serde(default)]
+    pub gui_status: Option<IssueMonitorStatusView>,
     pub autonomous_mode: bool,
+    /// Issue #4273: expose the saved override separately from its effective value.
+    #[serde(default)]
+    pub auto_apply_updates: Option<bool>,
+    #[serde(default)]
+    pub auto_apply_updates_effective: Option<bool>,
     pub has_launch_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
@@ -8790,7 +8798,10 @@ impl IssueMonitorState {
             active_launches: self.active_issue_numbers(),
             max_active: self.config.max_active.max(1),
             enabled: self.config.enabled,
+            gui_status: Some(status.clone()),
             autonomous_mode: self.autonomous_mode,
+            auto_apply_updates: self.auto_apply_updates,
+            auto_apply_updates_effective: Some(status.auto_apply_updates),
             has_launch_profile: self.has_launch_profile(),
             quota_hold: status.quota_hold.clone(),
             update_drain: status.update_drain.clone(),
@@ -8900,6 +8911,7 @@ impl IssueMonitorState {
     /// whether a project is being driven.
     pub fn agent_status_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let mut status = self.agent_status_without_scan_at(now);
+        status.gui_status = Some(self.status_view_at(now));
         status.scan_stall = self.scan_stall_at(now);
         status
     }
@@ -14192,7 +14204,10 @@ mod tests {
                 active_launches: Vec::new(),
                 max_active: 3,
                 enabled: true,
+                gui_status: Some(monitor.status_view()),
                 autonomous_mode: false,
+                auto_apply_updates: None,
+                auto_apply_updates_effective: Some(false),
                 has_launch_profile: false,
                 quota_hold: None,
                 update_drain: None,

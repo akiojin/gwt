@@ -1172,11 +1172,10 @@ fn issue_monitor_daemon_user_event(
     match event_name {
         "status" => {
             let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorStatus {
-                    status: Box::new(status),
-                },
-            )]))
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: project_root.to_path_buf(),
+                status: Box::new(status),
+            })
         }
         "inbox" => {
             let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
@@ -1466,6 +1465,10 @@ enum UserEvent {
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
+    },
+    IssueMonitorDaemonStatus {
+        project_root: PathBuf,
+        status: Box<gwt::IssueMonitorStatusView>,
     },
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -2143,19 +2146,19 @@ mod tests {
             serde_json::to_value(status.clone()).expect("status serializes"),
             42,
         );
-        match super::daemon_broadcast_user_event(
+        let status_event = super::daemon_broadcast_user_event(
             gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
             status_payload,
             project_root,
             99,
-        ) {
-            Some(UserEvent::Dispatch(events)) => {
-                assert!(events.iter().any(|event| {
-                    matches!(
-                        &event.event,
-                        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
-                    )
-                }));
+        );
+        match status_event {
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: actual_project_root,
+                status: actual,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(*actual, status);
             }
             other => panic!("unexpected issue monitor status event: {other:?}"),
         }
@@ -9449,18 +9452,17 @@ fn main() -> std::io::Result<()> {
                 ));
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
+                project_root,
+                status,
+            }) => {
+                clients.dispatch(app.issue_monitor_daemon_status_events(&project_root, status));
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
                 project_root,
                 items,
             }) => {
-                // SPEC-3431 T-093: the wake decision runs before the frontend
-                // broadcast so a parked PM is revived by daemon-side activity.
-                app.replace_knowledge_monitor_snapshot(&project_root, &items);
-                let mut events = app.pm_wake_events(&project_root, &items);
-                events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
-                    items,
-                }));
-                clients.dispatch(events);
+                clients.dispatch(app.issue_monitor_daemon_inbox_events(&project_root, items));
             }
             Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
                 window_id,
