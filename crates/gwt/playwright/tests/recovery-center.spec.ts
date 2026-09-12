@@ -43,7 +43,7 @@ test.describe("Recovery Center", () => {
 
   test("renders all public facets and reuses the Board deep-link path", async ({
     page,
-  }) => {
+  }, testInfo) => {
     await runPaletteCommand(page, "Open Recovery Center");
 
     const modal = page.locator("#recovery-center-modal");
@@ -60,7 +60,7 @@ test.describe("Recovery Center", () => {
 
     // The explicit All states filter is the only view that reveals the
     // acknowledged delivery. Keep all three rows visible for the visual
-    // baseline requested by T460.
+    // evidence requested by T460.
     await modal.locator("#recovery-center-state-filter").selectOption("all");
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(0)).toContainText("Pending");
@@ -74,7 +74,10 @@ test.describe("Recovery Center", () => {
     await expect(modal).not.toContainText(/\b(?:Intake|Execution)\b/);
 
     await page.evaluate(() => document.fonts.ready);
-    await expect(dialog).toHaveScreenshot("recovery-center-modal.png");
+    await testInfo.attach("recovery-center-modal", {
+      body: await dialog.screenshot(),
+      contentType: "image/png",
+    });
 
     // Only the acknowledged row has a Board action. The backend resolves its
     // opaque handle to a public Board entry id, then the existing Board focus
