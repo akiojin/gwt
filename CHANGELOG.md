@@ -1,6 +1,128 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.95.1] - 2026-09-11
+
+### Bug Fixes
+
+- **ci:** Windows テストの重複実行を解消し Test workflow のクリティカルパスを短縮する
+- **ci:** Stable_server_port の 25 秒固定待ちを GTK a11y バスの opt-out で除去する
+- **ci:** Stable_server_port の 25 秒待ちに session bus を与えて解消する
+- **gui:** 入力遅延を計測して不要なGit照会を省く
+- **gui:** Work投影ごとにhook失敗ledgerを1回だけ読む
+- **verify:** Windows の derived matrix から gwt の bin target を外して host 検証の飢餓を止める
+- **verify:** Clippy の unnecessary_map_or に合わせて is_none_or を使う
+- **verify:** Derive への intra-doc link を関数指定にして rustdoc の曖昧リンクを解消する
+- **codex-config:** PATH の codex が読めない features table を書かず既存分を除去する
+- **issue-monitor:** 一覧から一度漏れた open Issue を同一 revision の観測で inbox へ戻す
+- **issue-monitor:** Priority.move/set の応答で queue に入らないことと inbox 外の番号を明示する
+
+### Documentation
+
+- **diagnostics:** 実運用データ量と追加比較の残件を記録
+
+### Miscellaneous Tasks
+
+- **work:** #4134 の Work event receipt を記録する
+- **work:** #4134 の Work event receipt を記録する
+- **work:** #4134 の terminal Work receipt を記録する
+- **work:** #4134 の Work event receipt を記録する
+- **diagnostics:** 入力停止の再現手順とスレッド実測を保全
+- **diagnostics:** Work別ledger全走査の量依存を実測して保全
+- **diagnostics:** Ledger snapshotの量依存解消を実測して保全
+- **work:** Issue #4172 の Work イベントを保存する
+- **work:** Record issue 4172 terminal work event shards
+- **work:** Issue #4182 の Work event receipt を記録する
+- **work:** Issue #4182 の terminal Work update を記録する
+- **work:** #4229 の Work イベントシャードを記録する
+- **work:** #4229 の終端 Work イベントを記録する
+- **work:** #4229 を done で終端する Work イベントを記録する
+- **work:** #4229 の Work イベントシャードを記録する
+- **work:** #4229 の Work イベントマージを終端として記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の終端 Work イベントを記録する
+- **work:** #4134 の Work event receipt を記録する
+
+### Testing
+
+- **verify:** Windows ゲート追従テストの参照先を nightly.yml の job に合わせる
+
+## [9.95.0] - 2026-09-11
+
+### Bug Fixes
+
+- **launch:** Trust managed Codex worktrees before spawn
+- **verify:** 解放された host 検証 lease を待機順に渡す
+- **ci:** Linux 依存インストールの締切をスクリプト側へ移しリトライとキャッシュを導入する
+- **ci:** 契約テストの bash 起動を禁止 API から resolved_command へ置き換える
+- **daemon:** 待ちヘルパーが broadcast の lag を「状態が来なかった」と誤報告するのを修正
+- **hooks:** Fail-openのhook失敗でbrowser-checkを拒否しない
+- **test:** Authority load の成功前提を負荷から分離
+- **index:** Issue再構築の失敗を停止して明示修復と差分更新を可能にする
+- **index:** 空コーパス拒否と衝突する公開失敗テストの前提を修正
+- **index:** 空の再構築が健全なコレクションを破壊するのを止める
+- **execution:** 視覚検証の記録とPR制御および手動再開の判定漏れを修正
+- **execution:** GUI起動経路の保存と手動Restartの判定を修正
+- **launch:** Manage Codex project trust lifecycle
+- **verify:** 予約待機中も検証leaseのFIFO順を維持する
+
+### Features
+
+- **execution:** 自律実行の起動経路を実行記録に持たせ視覚検証を待たずにDraft PRへ到達させる
+- **index:** Query encode を heavy lease へ組み込み v2 build に協調 yield を追加
+
+### Miscellaneous Tasks
+
+- **work:** Record execution state
+- **work:** Issue #4169 の作業イベントシャードを保存する
+- **work:** Issue #4169 の終端 Work 更新を保存する
+- **work:** Issue #4169 の Work を完了状態で保存する
+- **work:** #4199 の終端 Work イベントを記録する
+- **work:** #4199 の終端 Work イベントを記録する
+- **work:** #4199 の Work イベントシャードを記録する
+- **work:** #4199 の settlement Work イベントを記録する
+- **work:** #4199 の検証イベントを記録
+- **work:** #4217 の Work イベントシャードを記録する
+- **work:** #4205 の Work イベントシャードを記録する
+- **work:** #4217 の再起動世代の Work イベントシャードを記録する
+- **work:** Work event shard を記録する
+- **work:** Issue #4169 の終端 Work イベントを保存する
+
+### Testing
+
+- **verify:** 待機列の譲り合いが循環しないことを検証する
+- **daemon:** Issue Monitor 権限テストの判定を 250ms 予算から切り離す
+- **index:** 空Issueキャッシュの公開前停止を期待値に反映する
+- **execution:** 再起動テストのCodex状態を隔離
+- **index:** Interactive burst の livelock を pin し双方向の非 starvation を固定する
+
+## [9.94.1] - 2026-09-09
+
+### Bug Fixes
+
+- **release:** Release PR 本文を参照専用にして誤クローズを reopen する
+- **execution:** 正常完了時に同じ build lifecycle も終了する
+- **pm:** 復元された PM Session に $gwt-pm bootstrap prompt を再付与する
+- **issue-monitor:** 起動時の試行期限と再試行総期限を分離する
+- **launch:** Codex hook trust が materialize の pin した binary を照合するようにする
+
+### Miscellaneous Tasks
+
+- **work:** #3665 の既存作業履歴を保存する
+- **work:** Issue #3652 の既存 Work 記録を保全する
+- **work:** Record issue 3545 work events (done)
+- **work:** Issue #3545 の受け入れ監査と実行記録を保存
+- **work:** #3665 の自動再開履歴を保存する
+- **work:** Issue #3967 の受け入れ監査と検証履歴を保存する
+
+### Testing
+
+- **release:** Prepare-release の契約テストを Release PR 本文生成 step に追随させる
+
 ## [9.94.0] - 2026-09-09
 
 ### Bug Fixes

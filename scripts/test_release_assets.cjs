@@ -313,19 +313,32 @@ run("CI workflows call direct verification scripts and skip npm publish", () => 
   }
 });
 
-run("Windows CI proves the Rust suites with default parallelism three times", () => {
+run("Nightly CI proves the Rust suites with default parallelism three times", () => {
   const testWorkflow = fs.readFileSync(
     path.join(__dirname, "..", ".github", "workflows", "test.yml"),
     "utf8"
   );
-  assert.match(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
-  assert.match(testWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
-  assert.match(testWorkflow, /1\.\.3 \| ForEach-Object/);
-  assert.match(testWorkflow, /cargo test -p gwt --lib --all-features/);
+  // Issue #4134 AC-1: the loop cost 2806s and was test.yml's critical path,
+  // re-running on Windows a suite Linux had already run. It keeps its purpose
+  // on the nightly schedule instead of on every pull request.
+  assert.doesNotMatch(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
+  const nightlyWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "nightly.yml"),
+    "utf8"
+  );
+  assert.doesNotMatch(nightlyWorkflow, /pull_request/);
+  assert.match(nightlyWorkflow, /^ {2}test-windows-default-parallel:$/m);
+  assert.match(nightlyWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
+  assert.match(nightlyWorkflow, /1\.\.3 \| ForEach-Object/);
+  assert.match(nightlyWorkflow, /cargo test -p gwt --lib --all-features/);
+  // A scheduled run has no pull request to turn red, so the failure has to
+  // reach a named destination or the schedule silently stops meaning anything.
+  assert.match(nightlyWorkflow, /if: failure\(\)/);
+  assert.match(nightlyWorkflow, /gh issue create/);
   // The three runs must share one job so they share one SHA and one runner.
   // Splitting them across jobs would let a green run and a red run coexist.
-  const defaultParallelJob = testWorkflow.slice(
-    testWorkflow.indexOf("  test-windows-default-parallel:")
+  const defaultParallelJob = nightlyWorkflow.slice(
+    nightlyWorkflow.indexOf("  test-windows-default-parallel:")
   );
   assert.match(defaultParallelJob, /1\.\.3 \| ForEach-Object/);
   // The build must sit outside the timed loop, or the first iteration is

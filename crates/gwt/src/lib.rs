@@ -155,8 +155,8 @@ pub use issue_monitor::{
     IssueMonitorFailure, IssueMonitorIdleKind, IssueMonitorIdlePaneClose,
     IssueMonitorIdleReconciliation, IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow,
     IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorLaunchBindingReconciliation, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
-    IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfilePatch,
+    IssueMonitorLaunchBindingReconciliation, IssueMonitorLaunchIdentity, IssueMonitorLaunchPlan,
+    IssueMonitorLaunchProfile, IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfilePatch,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchProfileSwitchError,
     IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue,
     IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorPrefsReset,
@@ -172,7 +172,7 @@ pub use issue_monitor::{
     IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
     MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
     PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
@@ -198,7 +198,7 @@ pub use launch_wizard::{
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
-    refresh_managed_gwt_assets_for_worktree,
+    refresh_managed_gwt_assets_for_worktree, ManagedAssetMaterialization,
 };
 pub use native_app::{
     macos_bundle_identifier, APP_NAME, GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME,

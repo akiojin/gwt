@@ -21,6 +21,36 @@ use crate::{
 pub const CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY: &str =
     "features.context_management.experimental_mode";
 
+/// First codex CLI release that loads `[features.context_management]` as a
+/// table (Issue #4229). 0.148.0 through 0.152.0 refuse the whole config with
+/// `invalid type: map, expected a boolean`.
+pub const CODEX_FEATURE_TABLE_MIN_VERSION: &str = "0.153.0";
+
+/// How the codex CLI on `PATH` reads `features.<name>` entries (Issue #4229).
+///
+/// The host config is shared by every codex on the machine: the one gwt
+/// launches (often `bunx @openai/codex@latest`) and the one the user types
+/// (`codex` on `PATH`). They are different binaries, so a managed key is safe
+/// only when the `PATH` codex can load it too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexFeaturesSchema {
+    /// `features.<name>` may be a table: codex >= 0.153.0, or no codex on
+    /// `PATH` at all.
+    AcceptsTables,
+    /// Every `features.<name>` must be a boolean and a single table makes the
+    /// whole config unloadable: codex <= 0.152.x, or a version gwt could not
+    /// read.
+    BooleansOnly,
+}
+
+impl CodexFeaturesSchema {
+    /// Whether a codex reading with this schema loads `value` as a
+    /// `features.<name>` entry.
+    pub fn accepts_feature_value(self, value: &toml::Value) -> bool {
+        self == Self::AcceptsTables || value.is_bool()
+    }
+}
+
 /// What the managed-key pass did to the config file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexManagedConfigOutcome {
@@ -28,6 +58,12 @@ pub enum CodexManagedConfigOutcome {
     Written,
     /// The key already had a value (any value); the file was not touched.
     Preserved,
+    /// The key was absent, but the `PATH` codex cannot load it; nothing was
+    /// written.
+    Skipped,
+    /// A `features.context_management` table the `PATH` codex cannot load was
+    /// removed so that codex can read the config again.
+    Repaired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,8 +80,14 @@ pub struct CodexManagedConfigReport {
 /// missing parent tables are created. A config that cannot be parsed, or whose
 /// `features` / `features.context_management` entries are not tables, is an
 /// `InvalidData` error and the file is left as-is.
+///
+/// `schema` is how the codex on `PATH` reads `features` (Issue #4229). Under
+/// [`CodexFeaturesSchema::BooleansOnly`] the table is never written, and one
+/// already present is removed because it makes that codex unable to load any
+/// of the config.
 pub fn ensure_codex_context_management_experimental_mode(
     config_path: &Path,
+    schema: CodexFeaturesSchema,
 ) -> io::Result<CodexManagedConfigReport> {
     // Issue #4071: the hook trust registration mutates this same shared file,
     // so both writers take the same lock or one of them loses its update.
@@ -58,16 +100,27 @@ pub fn ensure_codex_context_management_experimental_mode(
             )
         })?;
         let features = ensure_child_table(root_table, "features")?;
+        if schema == CodexFeaturesSchema::BooleansOnly {
+            let entry_loads = features
+                .get("context_management")
+                .map(|entry| schema.accepts_feature_value(entry));
+            return match entry_loads {
+                None => Ok(CodexManagedConfigOutcome::Skipped),
+                Some(true) => Ok(CodexManagedConfigOutcome::Preserved),
+                Some(false) => {
+                    features.remove("context_management");
+                    write_codex_config(config_path, &root)?;
+                    Ok(CodexManagedConfigOutcome::Repaired)
+                }
+            };
+        }
         let context_management = ensure_child_table(features, "context_management")?;
         if context_management.contains_key("experimental_mode") {
             return Ok(CodexManagedConfigOutcome::Preserved);
         }
         context_management.insert("experimental_mode".to_string(), toml::Value::Boolean(true));
 
-        let rendered = toml::to_string_pretty(&root).map_err(|err| {
-            io::Error::other(format!("Codex config TOML serialize failed: {err}"))
-        })?;
-        write_text_atomically(config_path, &rendered)?;
+        write_codex_config(config_path, &root)?;
         Ok(CodexManagedConfigOutcome::Written)
     })?;
 
@@ -75,6 +128,12 @@ pub fn ensure_codex_context_management_experimental_mode(
         config_path: config_path.to_path_buf(),
         outcome,
     })
+}
+
+fn write_codex_config(config_path: &Path, root: &toml::Value) -> io::Result<()> {
+    let rendered = toml::to_string_pretty(root)
+        .map_err(|err| io::Error::other(format!("Codex config TOML serialize failed: {err}")))?;
+    write_text_atomically(config_path, &rendered)
 }
 
 #[cfg(test)]
@@ -119,7 +178,11 @@ trust_level = "trusted"
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, EXISTING_CONFIG).unwrap();
 
-        let report = ensure_codex_context_management_experimental_mode(&path).unwrap();
+        let report = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
 
         assert_eq!(report.outcome, CodexManagedConfigOutcome::Written);
         assert_eq!(report.config_path, path);
@@ -135,7 +198,11 @@ trust_level = "trusted"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/config.toml");
 
-        let report = ensure_codex_context_management_experimental_mode(&path).unwrap();
+        let report = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
 
         assert_eq!(report.outcome, CodexManagedConfigOutcome::Written);
         assert_eq!(
@@ -153,7 +220,11 @@ trust_level = "trusted"
         fs::write(&path, content).unwrap();
         let before = fs::metadata(&path).unwrap().modified().unwrap();
 
-        let report = ensure_codex_context_management_experimental_mode(&path).unwrap();
+        let report = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
 
         assert_eq!(report.outcome, CodexManagedConfigOutcome::Preserved);
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
@@ -169,7 +240,11 @@ trust_level = "trusted"
             "# user comment\n[features.context_management]\nexperimental_mode = true # keep\n";
         fs::write(&path, content).unwrap();
 
-        let report = ensure_codex_context_management_experimental_mode(&path).unwrap();
+        let report = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
 
         assert_eq!(report.outcome, CodexManagedConfigOutcome::Preserved);
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
@@ -183,7 +258,11 @@ trust_level = "trusted"
         fs::write(&path, EXISTING_CONFIG).unwrap();
         let before: toml::Value = toml::from_str(EXISTING_CONFIG).unwrap();
 
-        ensure_codex_context_management_experimental_mode(&path).unwrap();
+        ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
 
         let after = parsed(&path);
         assert_eq!(after.get("model"), before.get("model"));
@@ -203,11 +282,19 @@ trust_level = "trusted"
         let path = dir.path().join("config.toml");
         fs::write(&path, EXISTING_CONFIG).unwrap();
 
-        ensure_codex_context_management_experimental_mode(&path).unwrap();
+        ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
         let written = fs::read_to_string(&path).unwrap();
         let mtime = fs::metadata(&path).unwrap().modified().unwrap();
 
-        let report = ensure_codex_context_management_experimental_mode(&path).unwrap();
+        let report = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap();
 
         assert_eq!(report.outcome, CodexManagedConfigOutcome::Preserved);
         assert_eq!(fs::read_to_string(&path).unwrap(), written);
@@ -222,7 +309,11 @@ trust_level = "trusted"
         let content = "[features\nthis is not toml";
         fs::write(&path, content).unwrap();
 
-        let error = ensure_codex_context_management_experimental_mode(&path).unwrap_err();
+        let error = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(
@@ -240,9 +331,73 @@ trust_level = "trusted"
         let content = "features = \"oops\"\n";
         fs::write(&path, content).unwrap();
 
-        let error = ensure_codex_context_management_experimental_mode(&path).unwrap_err();
+        let error = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::AcceptsTables,
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
+    }
+
+    /// Issue #4229 AC-4: what codex 0.148.0–0.152.x accepts — every
+    /// `features.<name>` is a boolean, or the whole config fails to load.
+    fn loads_under_codex_0_148_schema(value: &toml::Value) -> bool {
+        value
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .is_none_or(|features| {
+                features
+                    .values()
+                    .all(|entry| CodexFeaturesSchema::BooleansOnly.accepts_feature_value(entry))
+            })
+    }
+
+    // Issue #4229 AC-2 / AC-4
+    #[test]
+    fn booleans_only_path_codex_never_gets_the_table_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, EXISTING_CONFIG).unwrap();
+
+        let report = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::BooleansOnly,
+        )
+        .unwrap();
+
+        assert_eq!(report.outcome, CodexManagedConfigOutcome::Skipped);
+        assert_eq!(fs::read_to_string(&path).unwrap(), EXISTING_CONFIG);
+        assert!(loads_under_codex_0_148_schema(&parsed(&path)));
+    }
+
+    // Issue #4229 AC-3 / AC-4
+    #[test]
+    fn booleans_only_path_codex_gets_an_existing_table_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let broken =
+            format!("{EXISTING_CONFIG}\n[features.context_management]\nexperimental_mode = true\n");
+        fs::write(&path, &broken).unwrap();
+        let before: toml::Value = toml::from_str(&broken).unwrap();
+        assert!(!loads_under_codex_0_148_schema(&before));
+
+        let report = ensure_codex_context_management_experimental_mode(
+            &path,
+            CodexFeaturesSchema::BooleansOnly,
+        )
+        .unwrap();
+
+        assert_eq!(report.outcome, CodexManagedConfigOutcome::Repaired);
+        let after = parsed(&path);
+        assert!(loads_under_codex_0_148_schema(&after));
+        assert_eq!(experimental_mode(&after), None);
+        assert_eq!(
+            after.get("features").and_then(|f| f.get("web_search")),
+            Some(&toml::Value::Boolean(true))
+        );
+        assert_eq!(after.get("hooks"), before.get("hooks"));
+        assert_eq!(after.get("projects"), before.get("projects"));
     }
 }
