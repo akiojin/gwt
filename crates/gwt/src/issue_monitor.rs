@@ -3195,10 +3195,19 @@ pub struct IssueMonitorInboxSummary {
     /// healthy queue from the outside. These two project the autonomous
     /// record, the only place that survives the relaunch, so the pair the
     /// escalation gate judges on is the pair the reader sees.
-    #[serde(default)]
+    ///
+    /// Omitted at zero like every other diagnostic on this row: a row that has
+    /// never failed has nothing to report, and spending a field on every
+    /// healthy row is what made the interesting ones hard to find.
+    #[serde(default, skip_serializing_if = "attempt_count_is_zero")]
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure_message: Option<String>,
+}
+
+/// Issue #4161 AC-9: serde cannot ask a `u32` whether it is worth serializing.
+fn attempt_count_is_zero(attempts: &u32) -> bool {
+    *attempts == 0
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
