@@ -14,6 +14,19 @@
 //! failure as a dependency failure. The workflow `timeout-minutes` is only the
 //! outer net, and these tests pin that it stays above the script's own budget
 //! — otherwise the step clock kills the script before it can say why.
+//!
+//! Issue #4268 continues from there. The retry budget above did not stop the
+//! failures: run 34575831565 spent all three attempts on the same stall, and
+//! the log showed why only in hindsight — `Need to get 59.2 MB of archives.`
+//! followed by `Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]` and
+//! then 239 seconds of silence, with the archive cache reported as a miss. Not
+//! one byte of the 59.2 MB arrived. apt has no acquire timeout by default, so
+//! a mirror that accepts the connection and stops sending is waited on
+//! forever; the outer `timeout` is the only cut-off, it takes the whole
+//! attempt with it, and the retry restarts against the same stalled mirror.
+//! The tests below pin the three things that changed: apt gets bounded acquire
+//! timeouts before it fetches anything, a failed attempt says where its budget
+//! went, and the archive cache reports whether it was warm or cold.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +36,10 @@ const DEP_STEP: &str = "Install tray + GTK dependencies (Linux)";
 const CACHE_STEP: &str = "Cache Linux GTK dependency packages";
 const CACHE_ENV: &str = "GWT_APT_CACHE_DIR";
 const GTK_DEPS_MODE: &str = "gtk-deps";
+/// Issue #4268: the apt drop-in `scripts/ci-apt.sh` writes before it fetches.
+const ACQUIRE_CONF: &str = "99-gwt-ci-apt-acquire";
+/// The cache namespace every Linux job that installs only `gtk-deps` writes to.
+const SHARED_CACHE_PREFIX: &str = "gwt-apt-gtk-${{ runner.os }}-";
 
 /// Seconds the step cap must clear the script's own deadline by, covering
 /// checkout-relative process start, `sudo`, and the `timeout` kill grace.
@@ -257,6 +274,93 @@ fn dependency_install_is_cached_and_keyed_on_the_package_set() {
     );
 }
 
+/// Issue #4268 AC-2/AC-3: the key carries `hashFiles('scripts/ci-apt.sh')`, so
+/// every edit to that script retires the cache. Without a prefix fallback the
+/// next run fetches all 59.2 MB from a mirror — and a run fetching 59.2 MB is
+/// exactly the run a stalled mirror kills. `Test (Rust)` had it worse: its
+/// `gwt-apt-gtk-xvfb-dbus-` prefix is a namespace of its own, its key was
+/// written only by a run that succeeded, and the run that kept failing was
+/// that one. Each cache step must therefore fall back to its own key with the
+/// hash stripped, and `Test (Rust)` must also reach the shared namespace the
+/// other Linux jobs keep warm.
+#[test]
+fn the_archive_cache_falls_back_to_a_prefix_when_the_hash_changes() {
+    let steps = dependency_install_steps();
+    assert!(
+        !steps.is_empty(),
+        "the workflows must still install the Linux GTK dependencies"
+    );
+
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for (workflow, _, workflow_text) in &steps {
+        let Some((_, cache_body)) = named_steps(workflow_text)
+            .into_iter()
+            .find(|(name, _)| name == CACHE_STEP)
+        else {
+            continue;
+        };
+        checked += 1;
+
+        let key = cache_body
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("key:"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} / `{CACHE_STEP}` must declare a key:\n{cache_body}",
+                    display(workflow)
+                )
+            })
+            .trim()
+            .to_string();
+        // The stable half of the key: everything before the content hash.
+        let prefix = key.split("${{ hashFiles").next().unwrap_or("").to_string();
+        assert!(
+            !prefix.is_empty(),
+            "{} / `{CACHE_STEP}` key has no stable prefix: {key}",
+            display(workflow)
+        );
+
+        if !cache_body.contains("restore-keys:") {
+            failures.push(format!(
+                "{} / `{CACHE_STEP}` declares no restore-keys, so the cache \
+                 only ever hits on an unchanged {CI_APT}; the run after any \
+                 edit to it re-downloads every package:\n{cache_body}",
+                display(workflow)
+            ));
+            continue;
+        }
+        // Twice: once in the key it was taken from, once as a restore-key.
+        if cache_body.matches(&prefix).count() < 2 {
+            failures.push(format!(
+                "{} / `{CACHE_STEP}` must fall back to `{prefix}`, its own key \
+                 with the hash stripped:\n{cache_body}",
+                display(workflow)
+            ));
+        }
+        // The `Test (Rust)` job is the one that was stranded in its own
+        // namespace, and `gtk-deps` is a strict subset of what it installs.
+        if prefix.contains("xvfb") && !cache_body.contains(SHARED_CACHE_PREFIX) {
+            failures.push(format!(
+                "{} / `{CACHE_STEP}` must also fall back to \
+                 `{SHARED_CACHE_PREFIX}`, the namespace the other Linux jobs \
+                 keep warm; on its own prefix it can only reuse a cache written \
+                 by a run of this same job that succeeded:\n{cache_body}",
+                display(workflow)
+            ));
+        }
+    }
+
+    assert!(checked > 0, "no `{CACHE_STEP}` step was found to check");
+    assert!(
+        failures.is_empty(),
+        "a cache that only hits on an exact key cannot survive a change to \
+         {CI_APT}:\n{}",
+        failures.join("\n\n")
+    );
+}
+
 #[cfg(unix)]
 mod wrapper {
     use super::*;
@@ -303,6 +407,10 @@ mod wrapper {
             command.env("GWT_APT_STATE_DIR", self.path("state"));
             // No dpkg lock in the harness; the probe is the only lock source.
             command.env("GWT_APT_LOCK_PROBE", self.path("no-lock"));
+            // Keep the acquire drop-in inside the harness. Left at its default
+            // the script would try to write /etc/apt/apt.conf.d, which on a
+            // Linux host means escalating through sudo from a test.
+            command.env("GWT_APT_CONF_DIR", self.path("apt.conf.d"));
             for (key, value) in extra_env {
                 command.env(key, value);
             }
@@ -466,6 +574,183 @@ exit 0
         assert!(
             cache.join("partial").is_dir(),
             "the archive dir needs its partial/ subdirectory or apt refuses it"
+        );
+    }
+
+    /// An apt-get that announces a 59.2 MB download, acquires only the
+    /// mirrorlist, and is then killed on the attempt budget — the exact shape
+    /// of run 34575831565. It reports the timeout itself (124, what GNU
+    /// `timeout` returns) instead of hanging, so the test pins the diagnosis
+    /// rather than the host's `timeout` implementation; macOS has none, and
+    /// waiting out a real budget would put a multi-second sleep in the suite.
+    fn stalled_apt_get() -> &'static str {
+        r#"#!/usr/bin/env bash
+mkdir -p "${GWT_APT_STATE_DIR}"
+printf '%s\n' "$*" >> "${GWT_APT_STATE_DIR}/argv"
+if [[ "$*" == *install* ]]; then
+  echo "Need to get 59.2 MB of archives."
+  echo "Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]"
+  exit 124
+fi
+exit 0
+"#
+    }
+
+    /// Issue #4268 AC-3: the root cause is that apt waits on a stalled mirror
+    /// without a deadline of its own, so the drop-in that bounds an acquire
+    /// must be in place before the first fetch — not after the first failure.
+    /// Bounding the connection is what lets apt fail over and retry inside the
+    /// attempt instead of handing the whole attempt to the outer `timeout`.
+    #[test]
+    fn apt_acquire_is_bounded_before_the_first_fetch() {
+        let harness = Harness::new("harden");
+        harness.write_executable("no-lock", no_lock_probe());
+        let apt_get = harness.write_executable("fake-apt-get", &flaky_apt_get(1));
+        let conf_dir = harness.path("apt.conf.d");
+        fs::create_dir_all(&conf_dir).expect("create apt.conf.d");
+
+        let output = harness.run(
+            &[GTK_DEPS_MODE],
+            &[
+                ("GWT_APT_GET", apt_get.to_string_lossy().as_ref()),
+                ("GWT_APT_CONF_DIR", conf_dir.to_string_lossy().as_ref()),
+            ],
+        );
+        let log = combined(&output);
+        assert!(output.status.success(), "ci-apt must succeed:\n{log}");
+
+        let conf = conf_dir.join(ACQUIRE_CONF);
+        let body = fs::read_to_string(&conf)
+            .unwrap_or_else(|error| panic!("read {}: {error}\n{log}", conf.display()));
+        for directive in [
+            "Acquire::Retries",
+            "Acquire::http::Timeout",
+            "Acquire::https::Timeout",
+            "Acquire::ForceIPv4",
+        ] {
+            assert!(
+                body.contains(directive),
+                "{CI_APT} must bound the acquire with {directive}; without it a \
+                 mirror that stops sending is waited on forever:\n{body}"
+            );
+        }
+
+        let applied = log
+            .find("apt-hardening=applied")
+            .unwrap_or_else(|| panic!("the hardening must be logged:\n{log}"));
+        let first_fetch = log
+            .find("cmd=")
+            .unwrap_or_else(|| panic!("the apt-get invocation must be logged:\n{log}"));
+        assert!(
+            applied < first_fetch,
+            "the acquire bound must be applied before the first apt-get call, \
+             or the first fetch is the unbounded one:\n{log}"
+        );
+    }
+
+    /// Issue #4268 AC-1: a failed attempt must say where its budget went.
+    /// "timed out after 240s" alone cannot be told apart from a slow mirror, a
+    /// dpkg lock wait, or a download that never started, and the triage cost of
+    /// that ambiguity is what kept eight pull requests parked.
+    #[test]
+    fn a_stalled_fetch_reports_where_the_attempt_budget_went() {
+        let harness = Harness::new("stall");
+        harness.write_executable("no-lock", no_lock_probe());
+        let apt_get = harness.write_executable("fake-apt-get", stalled_apt_get());
+        let summary = harness.path("step-summary.md");
+        fs::write(&summary, "").expect("seed step summary");
+
+        let output = harness.run(
+            &[GTK_DEPS_MODE],
+            &[
+                ("GWT_APT_GET", apt_get.to_string_lossy().as_ref()),
+                ("GWT_APT_ATTEMPTS", "1"),
+                ("GWT_APT_RETRY_DELAY", "0"),
+                ("GITHUB_STEP_SUMMARY", summary.to_string_lossy().as_ref()),
+            ],
+        );
+        let log = combined(&output);
+        assert!(
+            !output.status.success(),
+            "a stalled fetch must still fail the step:\n{log}"
+        );
+
+        for field in [
+            // which of the two apt-get calls stalled
+            "step=install",
+            // the lock wait, so it is never confused with a slow download
+            "lock_wait=0s",
+            // how much was asked for, against how many items actually landed:
+            // 59.2 MB was wanted and only the 144-byte mirrorlist arrived
+            "needed=59.2MB",
+            "acquired=1",
+            // the mirror the fetch was sitting on when the budget ran out
+            "stalled_after=Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist",
+        ] {
+            assert!(
+                log.contains(field),
+                "the failure diagnosis must report `{field}` so 240s of silence \
+                 is attributable to a mirror rather than to the change under \
+                 review:\n{log}"
+            );
+        }
+
+        let summary_text = fs::read_to_string(&summary).expect("read step summary");
+        assert!(
+            summary_text.contains("stalled_after="),
+            "the job summary carries the diagnosis too, because that is what a \
+             reviewer reads before the raw log:\n{summary_text}"
+        );
+    }
+
+    /// Issue #4268 AC-2: whether the archive cache was warm is the difference
+    /// between fetching 59.2 MB from a mirror and fetching nothing, so each run
+    /// states it and a cold cache is annotated — a key that misses run after
+    /// run is then visible without opening a log.
+    #[test]
+    fn the_archive_cache_reports_whether_it_was_warm_or_cold() {
+        let harness = Harness::new("cache-state");
+        harness.write_executable("no-lock", no_lock_probe());
+        let apt_get = harness.write_executable("fake-apt-get", &flaky_apt_get(1));
+        let cache = harness.path("archives");
+
+        let cold = harness.run(
+            &[GTK_DEPS_MODE],
+            &[
+                ("GWT_APT_GET", apt_get.to_string_lossy().as_ref()),
+                (CACHE_ENV, cache.to_string_lossy().as_ref()),
+            ],
+        );
+        let cold_log = combined(&cold);
+        assert!(cold.status.success(), "ci-apt must succeed:\n{cold_log}");
+        assert!(
+            cold_log.contains("cache_state=cold"),
+            "an empty archive dir must be reported as a miss:\n{cold_log}"
+        );
+        assert!(
+            cold_log.contains("::warning title=Linux dependency cache miss::"),
+            "a cold cache must be annotated, so a key that never hits is \
+             detectable from the run summary:\n{cold_log}"
+        );
+
+        fs::write(cache.join("libgtk-3-dev_amd64.deb"), b"deb").expect("seed archive");
+        let warm = harness.run(
+            &[GTK_DEPS_MODE],
+            &[
+                ("GWT_APT_GET", apt_get.to_string_lossy().as_ref()),
+                (CACHE_ENV, cache.to_string_lossy().as_ref()),
+            ],
+        );
+        let warm_log = combined(&warm);
+        assert!(warm.status.success(), "ci-apt must succeed:\n{warm_log}");
+        assert!(
+            warm_log.contains("cache_state=warm") && warm_log.contains("archives=1"),
+            "a populated archive dir must be reported as a hit, with the count \
+             that makes the hit rate measurable:\n{warm_log}"
+        );
+        assert!(
+            !warm_log.contains("::warning title=Linux dependency cache miss::"),
+            "a warm cache must not be annotated as a miss:\n{warm_log}"
         );
     }
 }
