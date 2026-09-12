@@ -20,10 +20,10 @@ test.describe.serial("Recovery Center live backend", () => {
   test.setTimeout(90_000);
 
   test.beforeEach(async ({ page }, testInfo) => {
-    test.skip(
-      testInfo.project.name !== "chromium-dark",
-      "Recovery Center live E2E runs once against the shared backend",
-    );
+    page.on("pageerror", (error) => { throw error; });
+    page.on("console", (message) => {
+      if (message.type() === "error") throw new Error(message.text());
+    });
     releaseLiveBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     await installRecoveryCenterWireCapture(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });

@@ -15,6 +15,10 @@ test.describe("Recovery Center", () => {
   });
 
   test.beforeEach(async ({ page }) => {
+    page.on("pageerror", (error) => { throw error; });
+    page.on("console", (message) => {
+      if (message.type() === "error") throw new Error(message.text());
+    });
     await installEmbeddedRoutes(page);
     await installRecoveryCenterBackend(page);
     await page.goto(APP_URL);
