@@ -7720,7 +7720,11 @@ fn init_git_clone_with_origin(repo: &Path) -> PathBuf {
     run_git(&seed, &["add", "README.md"]);
     run_git(&seed, &["commit", "-qm", "init"]);
     run_git_with_paths(&["clone", "--bare"], &[&seed, &origin]);
-    run_git_with_paths(&["clone"], &[&origin, repo]);
+    // Keep checkout bytes independent of the host's Git line-ending settings.
+    run_git_with_paths(
+        &["clone", "--config", "core.autocrlf=false"],
+        &[&origin, repo],
+    );
     run_git(repo, &["config", "user.name", "Codex"]);
     run_git(repo, &["config", "user.email", "codex@example.com"]);
     run_git(repo, &["remote", "set-head", "origin", "-a"]);
