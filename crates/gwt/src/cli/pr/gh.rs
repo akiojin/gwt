@@ -505,7 +505,8 @@ pub fn update_branch_failure_is_conflict(message: &str) -> bool {
 /// of `BEHIND`, and the one action `default_action` has been recommending
 /// without an operation behind it.
 ///
-/// A conflicting update is reported as [`PrUpdateBranchOutcome::Conflicted`]
+/// A conflicting update is reported as
+/// [`PrUpdateBranchOutcome::Conflicted`](super::types::PrUpdateBranchOutcome::Conflicted)
 /// and pushes nothing: resolving conflicts stays the owner's work (FR-007).
 pub fn update_pr_branch_via_gh(
     repo_slug: &str,
