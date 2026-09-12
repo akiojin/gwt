@@ -216,7 +216,8 @@ fn windows_launch_e2e_preflights_the_loopback_registry_with_bounded_diagnostics(
         .unwrap_or_else(|error| panic!("read {}: {error}", e2e_path.display()));
     let fixture_path = root.join("crates/gwt-core/src/test_support.rs");
     let fixture = fs::read_to_string(&fixture_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display()));
+        .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display()))
+        .replace("\r\n", "\n");
     let workflow_path = root.join(".github/workflows/test.yml");
     let workflow = fs::read_to_string(&workflow_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
