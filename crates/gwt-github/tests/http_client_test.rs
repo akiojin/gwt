@@ -362,14 +362,32 @@ fn red_58_set_state_closed_sends_state_field() {
     ));
     let client = client_with(transport);
     let snap = client
-        .set_state(IssueNumber(5), IssueState::Closed)
+        .set_state(
+            IssueNumber(5),
+            IssueState::Closed,
+            Some(gwt_github::IssueCloseReason::Duplicate),
+        )
         .unwrap();
 
     let reqs = client.transport().recorded();
     let payload: serde_json::Value =
         serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(payload["state"], "closed");
+    assert_eq!(payload["state_reason"], "duplicate");
     assert_eq!(snap.state, IssueState::Closed);
+
+    client.transport().enqueue(ok_body(
+        r#"{"number":5,"title":"T","body":"B","state":"open","updated_at":"t","labels":[]}"#,
+    ));
+    let reopened = client
+        .set_state(IssueNumber(5), IssueState::Open, None)
+        .unwrap();
+    let requests = client.transport().recorded();
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["state"], "open");
+    assert!(payload.get("state_reason").is_none());
+    assert_eq!(reopened.state, IssueState::Open);
 }
 
 // -----------------------------------------------------------------------

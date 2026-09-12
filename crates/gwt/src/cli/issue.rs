@@ -524,30 +524,39 @@ fn run_monitor_status<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
-    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(&project_root)
+    let mut status = load_monitor_agent_status(&project_root)?;
+    merge_board_escalations_into_needs_human(&project_root, &mut status);
+    attach_github_budget(&mut status);
+    attach_disk_space(&project_root, &mut status);
+    attach_issue_cache_status(&project_root, &mut status);
+    out.push_str(
+        &serde_json::to_string(&status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?,
+    );
+    out.push('\n');
+    Ok(0)
+}
+
+/// The Issue Monitor projection `issue.monitor.status` reports: the daemon's
+/// published status while one is live, otherwise a projection rebuilt from
+/// prefs and the local Issue cache.
+fn load_monitor_agent_status(
+    project_root: &std::path::Path,
+) -> Result<crate::IssueMonitorAgentStatus, SpecOpsError> {
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
-        let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
-            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
-        merge_board_escalations_into_needs_human(&project_root, &mut status);
-        attach_github_budget(&mut status);
-        attach_disk_space(&project_root, &mut status);
-        attach_issue_cache_status(&project_root, &mut status);
-        out.push_str(
-            &serde_json::to_string(&status)
-                .map_err(|error| io_as_api_error(io::Error::other(error)))?,
-        );
-        out.push('\n');
-        return Ok(0);
+        return serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)));
     }
-    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
     // Issue #3633 AC-5: the only durable evidence of the real scan cadence.
     // Reaching this branch at all means no live daemon holds the projection.
     let persisted_last_scan_at = prefs.last_scan_at.clone();
     let mut monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
-    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_root);
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
     let candidates = crate::issue_monitor_worker::load_cached_issue_monitor_candidates(&cache_root)
         .map_err(|error| io_as_api_error(io::Error::other(error)))?;
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -562,17 +571,7 @@ fn run_monitor_status<E: CliEnv>(
     // offline fallback used to hand-roll an equivalent JSON object, so every
     // field added to the snapshot had to be added twice or the two branches
     // would silently disagree about what a caller can rely on.
-    let mut status = monitor.agent_status_at(&now);
-    merge_board_escalations_into_needs_human(&project_root, &mut status);
-    attach_github_budget(&mut status);
-    attach_disk_space(&project_root, &mut status);
-    attach_issue_cache_status(&project_root, &mut status);
-    out.push_str(
-        &serde_json::to_string(&status)
-            .map_err(|error| io_as_api_error(io::Error::other(error)))?,
-    );
-    out.push('\n');
-    Ok(0)
+    Ok(monitor.agent_status_at(&now))
 }
 
 /// Issue #3478 (AC-9): the questions autonomous executions are parked on.
@@ -685,9 +684,44 @@ fn run_monitor_priority_move<E: CliEnv>(
         Ok(())
     })
     .map_err(io_as_api_error)?;
-    out.push_str(&serde_json::json!({"priority_order": prefs.priority_order}).to_string());
+    out.push_str(
+        &monitor_priority_reply(&project_root, &prefs.priority_order, &[number]).to_string(),
+    );
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #4231 AC-5: `priority_order` orders Issues the Monitor already
+/// tracks; it never adds one to the queue. Answering only `ok: true` and the
+/// new order read as "queued" to the PM, so the reply says so and names the
+/// placed numbers that have no inbox row. `not_in_inbox` is omitted when the
+/// status cannot be read: the order is already persisted, and failing the
+/// call now would report a write that happened as one that did not.
+fn monitor_priority_reply(
+    project_root: &std::path::Path,
+    priority_order: &[u64],
+    placed: &[u64],
+) -> serde_json::Value {
+    let mut reply = serde_json::json!({
+        "priority_order": priority_order,
+        "note": "priority_order only orders Issues already in the Issue Monitor inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
+    });
+    if let Ok(status) = load_monitor_agent_status(project_root) {
+        let not_in_inbox = placed
+            .iter()
+            .filter(|number| !status.inbox.iter().any(|row| row.issue_number == **number))
+            .map(|number| {
+                let reason = if status.closure_held.contains(number) {
+                    "closure_held"
+                } else {
+                    "no_inbox_row"
+                };
+                serde_json::json!({"issue_number": number, "reason": reason})
+            })
+            .collect::<Vec<_>>();
+        reply["not_in_inbox"] = serde_json::Value::Array(not_in_inbox);
+    }
+    reply
 }
 
 fn run_monitor_priority_set<E: CliEnv>(
@@ -703,7 +737,9 @@ fn run_monitor_priority_set<E: CliEnv>(
         Ok(())
     })
     .map_err(io_as_api_error)?;
-    out.push_str(&serde_json::json!({"priority_order": prefs.priority_order}).to_string());
+    out.push_str(
+        &monitor_priority_reply(&project_root, &prefs.priority_order, issue_numbers).to_string(),
+    );
     out.push('\n');
     Ok(0)
 }
@@ -2576,7 +2612,7 @@ fn run_issue_set_state<E: CliEnv>(
     let issue = IssueNumber(number);
     // Authoritative, not cached: the idempotence answer below is only as good
     // as the state it is compared against.
-    let current = load_or_refresh_issue(env, issue, true)?.snapshot;
+    let current = refresh_issue_cache(env, issue)?.snapshot;
     if current.state == target {
         // `reason` describes what was written, and nothing was: echoing the
         // requested one here would claim a rationale GitHub never recorded.
@@ -3987,6 +4023,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_reopen_does_not_use_stale_cache_for_idempotence_when_throttled() {
+        let (tmp, mut env) = seeded_edit_env(&["bug"]);
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let cached = fetched(&env, 7);
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .unwrap();
+        let mut remote = cached;
+        remote.state = IssueState::Closed;
+        env.client.seed(remote);
+        let now = chrono::Utc::now();
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(300),
+            },
+            now,
+        );
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("the client provides the current remote state");
+
+        assert_eq!(state_result(&out)["changed"], true, "{out}");
+        assert_eq!(fetched(&env, 7).state, IssueState::Open);
+    }
+
     /// SPEC #4249 FR-001: an unknown Issue number fails with its own cause and
     /// writes nothing.
     #[test]
@@ -4637,6 +4710,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
@@ -4693,6 +4767,7 @@ mod tests {
                 idle_since: None,
                 duplicate_launch_refusal: None,
             }],
+            closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
@@ -4800,6 +4875,7 @@ mod tests {
                     idle_since: None,
                     duplicate_launch_refusal: None,
                 }],
+                closure_held: Vec::new(),
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
@@ -4857,6 +4933,7 @@ mod tests {
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
             inbox: Vec::new(),
+            closure_held: Vec::new(),
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
             scan_stall: None,
@@ -5380,6 +5457,56 @@ mod tests {
                 .get("queue"),
             Some(&serde_json::json!([]))
         );
+    }
+
+    /// Issue #4231 AC-5: `priority_order` is an ordering, not queue membership.
+    /// The reply must say so and name the numbers that have no inbox row,
+    /// because `ok: true` plus the new order read as "queued" to the PM.
+    #[test]
+    fn issue_monitor_priority_operations_state_they_do_not_enqueue() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        for (command, expected) in [
+            (
+                IssueCommand::MonitorPrioritySet {
+                    project_root: Some(repo.clone()),
+                    issue_numbers: vec![8, 5],
+                },
+                vec![8, 5],
+            ),
+            (
+                IssueCommand::MonitorPriorityMove {
+                    project_root: Some(repo.clone()),
+                    number: 13,
+                    position: crate::cli::IssueMonitorPriorityPosition::Head,
+                },
+                vec![13],
+            ),
+        ] {
+            let mut out = String::new();
+            assert_eq!(run(&mut env, command, &mut out).expect("priority op"), 0);
+            let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("json reply");
+            assert!(
+                reply["note"]
+                    .as_str()
+                    .is_some_and(|note| note.contains("does not enqueue")),
+                "{reply}"
+            );
+            let missing = reply["not_in_inbox"]
+                .as_array()
+                .expect("not_in_inbox")
+                .iter()
+                .map(|row| {
+                    assert_eq!(row["reason"], "no_inbox_row", "{reply}");
+                    row["issue_number"].as_u64().expect("issue_number")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(missing, expected, "{reply}");
+        }
     }
 
     #[test]
@@ -6469,6 +6596,7 @@ mod tests {
                 steering: None,
                 duplicate_launch_refusal: None,
             }],
+            closure_held: Vec::new(),
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
             scan_stall: None,
