@@ -5251,6 +5251,7 @@ mod tests {
             gwt_git::PrStatus {
                 number: 3854,
                 title: "typed quarantine".to_string(),
+                head_ref_name: String::new(),
                 state: gwt_git::pr_status::PrState::Open,
                 url: "https://example.invalid/pull/3854".to_string(),
                 created_at: None,
