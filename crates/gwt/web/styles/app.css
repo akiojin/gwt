@@ -2614,7 +2614,8 @@ body {
 
 .knowledge-monitor-summary,
 .knowledge-monitor-settings-copy,
-.knowledge-monitor-max-active {
+.knowledge-monitor-max-active,
+.knowledge-monitor-blackout {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
@@ -2739,6 +2740,16 @@ body {
   color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--type-sm);
+}
+
+/* A project-wide outage: no implementation agent is running at all. Ranked as
+   its own banner because the per-issue error text cannot express a fleet-level
+   fact. */
+.knowledge-monitor-blackout {
+  padding: 6px 8px;
+  border: 1px solid var(--color-state-blocked);
+  border-radius: var(--radius-sm);
+  color: var(--color-state-blocked);
 }
 
 .knowledge-row {

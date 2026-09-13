@@ -156,6 +156,12 @@ const ISSUE_ROW_STOPPABLE_AGENT_STATUSES = new Set([
   "waiting",
 ]);
 const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_failed"]);
+// Issue #3628 (AC-3): the states that hold a row out of the queue. Launch Now
+// only opens the wizard and never touches the hold, so returning a row to the
+// queue *without* starting an agent had no control at all and meant hand-editing
+// issue-monitor.json. Offered only where such a hold exists, so the button never
+// promises a change that cannot happen.
+const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed"]);
 const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
   closed: Object.freeze({ label: "Done", tone: "done" }),
   remote: Object.freeze({ label: "Remote", tone: "remote" }),
@@ -252,7 +258,14 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
     case "launch_failed":
     case "agent_failed":
       return {
-        order: ["launch-now", "continue-work", "resume-work", "configure-issue", "cleanup-work"],
+        order: [
+          "launch-now",
+          "requeue-issue",
+          "continue-work",
+          "resume-work",
+          "configure-issue",
+          "cleanup-work",
+        ],
       };
     case "merged":
     case "released":
@@ -290,6 +303,8 @@ function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, can
     }
     case "launch-now":
       return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
+    case "requeue-issue":
+      return ISSUE_ROW_REQUEUE_STATES.has(monitor?.state);
     case "configure-issue":
       return Boolean(monitor);
     case "move-up":
@@ -703,6 +718,15 @@ export function createKnowledgeKanbanSurface({
             : "Auto-apply updates: OFF";
           autoApply.dataset.enabled = enabled ? "true" : "false";
           autoApply.classList.toggle("primary", enabled);
+        }
+        // Issue #3628 (AC-5): a fleet-wide outage is not a per-issue failure,
+        // so it gets a line of its own. `last_error` is reported through the
+        // notification path and is always occupied by whichever launch failed
+        // first, which is how the 2026-08-17 outage stayed invisible.
+        const blackout = panel.querySelector(".knowledge-monitor-blackout");
+        if (blackout) {
+          blackout.textContent = issueMonitorStatus.agent_blackout || "";
+          blackout.hidden = !issueMonitorStatus.agent_blackout;
         }
       }
 
@@ -3003,6 +3027,11 @@ export function createKnowledgeKanbanSurface({
           label: "Stop agent",
           aria: "Stop the agent for",
         }),
+        // Issue #3628 (AC-3): release the failure hold without launching.
+        "requeue-issue": Object.freeze({
+          label: "Return to queue",
+          aria: "Return to the queue",
+        }),
       });
       // Actions rendered inside the agent status row rather than the row's
       // action group.
@@ -3066,6 +3095,15 @@ export function createKnowledgeKanbanSurface({
             if (target?.id) {
               send({ kind: "stop_window", id: target.id });
             }
+            return;
+          // Issue #3628 (AC-3): identity-free by design — the rows this exists
+          // for have no launch left to name. The driver refuses any row a live
+          // launch still owns, so the button cannot kill a running agent.
+          case "requeue-issue":
+            send({
+              kind: "issue_monitor_requeue",
+              issue_number: entry.number,
+            });
             return;
           default:
             return;
@@ -3519,6 +3557,7 @@ export function createKnowledgeKanbanSurface({
                     <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />
                     <button type="button" class="wizard-button" data-action="quick-register-launch">⚡ Register &amp; Launch</button>
                   </div>
+                  <div class="knowledge-monitor-blackout" role="alert" hidden></div>
                 </section>
                 <div class="knowledge-status"></div>
                 <div class="knowledge-split workspace-split issue-list-shell">

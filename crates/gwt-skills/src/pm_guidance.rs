@@ -142,11 +142,12 @@ body cannot hold `plan` / `tasks` sections.
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the inbox rows (state, `blocked_by_owner`,
   `blocked_by_claim_id`, `claim_expires_at`, `exclusion_reason`,
-  `launched_window_id`, `error_message`), and `last_error`. That
-  snapshot is your source of truth. A row held out of the queue by
-  another Monitor's claim says so in `exclusion_reason` and names the
-  deadline in `claim_expires_at` — read those before concluding that a
-  queued-looking Issue is simply waiting its turn.
+  `launched_window_id`, `error_message`), `last_error`, and
+  `agent_blackout`. That snapshot is your source of truth. A row held
+  out of the queue by another Monitor's claim says so in
+  `exclusion_reason` and names the deadline in `claim_expires_at` —
+  read those before concluding that a queued-looking Issue is simply
+  waiting its turn.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI
@@ -918,6 +919,13 @@ Board naming the holder. Your part:
   conversation, then apply the answer through existing operations
   (requeue via priority operations, hold via labels, or propose
   closing).
+- `agent_blackout` is the same escalation for the whole project: no
+  implementation agent has been running for longer than the blackout
+  window while issues were runnable. It is set independently of
+  `needs_human`, which is empty in exactly this situation — every issue
+  is individually fine and nothing can start. Report it immediately and
+  say what you observed; do not resolve it by requeueing the held rows
+  one by one, because a fleet that cannot launch will fail them again.
 - In autonomous mode `needs_human` has exactly two kinds, read from
   `needs_human_kind` on the autonomous row: `destructive_change_approval`
   (the reason line names the change to approve or refuse) and
@@ -995,9 +1003,9 @@ and urgency.
   `needs_human` escalation, and a fatal failure. Collapse a run of
   milestones into one digest instead of narrating each one. The
   immediate-reporting conditions below are exceptions to this rule.
-- `needs_human`, fatal failures, and `stale` or `unknown` worktree
-  freshness are always presented immediately and are never held for a
-  digest.
+- `needs_human`, `agent_blackout`, fatal failures, and `stale` or
+  `unknown` worktree freshness are always presented immediately and are
+  never held for a digest.
 - Every unresolved user-input or decision wait is an escalation. Report it
   immediately when first detected and again in every resident cycle until
   it is resolved, using the affected window title and the action required
@@ -1327,6 +1335,11 @@ mod tests {
             "code-derived claims are degraded",
             // FR-011: NeedsHuman routing.
             "`needs_human`",
+            // Issue #3628 AC-5: the fleet outage the per-issue escalation
+            // cannot express. On 2026-08-17 `needs_human` was empty while
+            // nothing could launch, so the PM saw a healthy queue.
+            "`agent_blackout`",
+            "no implementation agent has been running",
             // Issue #3944 AC-1/AC-2: the two park kinds and the steering request.
             "`needs_human_kind`",
             "`destructive_change_approval`",
