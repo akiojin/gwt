@@ -65,6 +65,41 @@ pub enum IssueState {
     Closed,
 }
 
+/// Why an Issue is being closed (SPEC #4249 FR-001). Mirrors the GitHub REST
+/// `state_reason` field; `None` leaves the reason to GitHub's default, and the
+/// field is meaningless when reopening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IssueCloseReason {
+    Completed,
+    NotPlanned,
+    Duplicate,
+}
+
+impl IssueCloseReason {
+    /// The literal GitHub REST `state_reason` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+            Self::Duplicate => "duplicate",
+        }
+    }
+
+    /// Parse an operation parameter. Accepts the REST spellings plus the
+    /// hyphenated form agents type by habit.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "completed" => Some(Self::Completed),
+            "not_planned" => Some(Self::NotPlanned),
+            "duplicate" => Some(Self::Duplicate),
+            _ => None,
+        }
+    }
+
+    /// Every accepted spelling, for refusal messages.
+    pub const ACCEPTED: [&'static str; 3] = ["completed", "not_planned", "duplicate"];
+}
+
 /// Snapshot of a single Issue including its body and every artifact comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueSnapshot {
@@ -270,7 +305,14 @@ pub trait IssueClient: Send + Sync {
     fn set_labels(&self, number: IssueNumber, labels: &[String])
         -> Result<IssueSnapshot, ApiError>;
 
-    fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError>;
+    /// Move an Issue between open and closed. `reason` is the GitHub
+    /// `state_reason` and is only meaningful when closing (SPEC #4249 FR-001).
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: IssueState,
+        reason: Option<IssueCloseReason>,
+    ) -> Result<IssueSnapshot, ApiError>;
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError>;
 }

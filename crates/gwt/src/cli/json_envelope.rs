@@ -319,6 +319,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .map(|_| optional_string_vec(params, "labels"))
                 .transpose()?,
         }),
+        "issue.close" => CliCommand::Issue(IssueCommand::Close {
+            number: required_u64(params, "number")?,
+            reason: issue_close_reason(params)?,
+            comment: optional_string(params, "comment")?,
+        }),
+        "issue.reopen" => CliCommand::Issue(IssueCommand::Reopen {
+            number: required_u64(params, "number")?,
+            comment: optional_string(params, "comment")?,
+        }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -1570,6 +1579,25 @@ fn issue_monitor_priority_position(
             "position must be \"head\" or a non-negative numeric index".to_string(),
         )),
     }
+}
+
+/// SPEC #4249 FR-001: `reason` is the optional GitHub `state_reason` of a
+/// close. An unrecognised spelling is refused rather than silently dropped,
+/// because a dropped reason closes the Issue with the wrong rationale.
+fn issue_close_reason(
+    params: &Map<String, Value>,
+) -> Result<Option<gwt_github::client::IssueCloseReason>, CliParseError> {
+    let Some(raw) = optional_string(params, "reason")? else {
+        return Ok(None);
+    };
+    gwt_github::client::IssueCloseReason::parse(&raw)
+        .map(Some)
+        .ok_or_else(|| {
+            CliParseError::InvalidJson(format!(
+                "reason must be one of {:?}",
+                gwt_github::client::IssueCloseReason::ACCEPTED
+            ))
+        })
 }
 
 /// Issue #4037 AC-5 / #3906 AC-3: `update_drain` is the operator bool or the
@@ -3228,6 +3256,67 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// SPEC #4249 FR-001: `issue.close` / `issue.reopen` need only `number`;
+    /// `reason` accepts the GitHub spellings and is refused — never silently
+    /// dropped — when it is not one of them, because a dropped reason closes the
+    /// Issue with the wrong rationale.
+    #[test]
+    fn issue_close_and_reopen_parse_their_optional_params() {
+        assert!(matches!(
+            ok("issue.close", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.close",
+                json!({"number": 7, "reason": "not-planned", "comment": "why"})
+            ),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                ..
+            })
+        ));
+        for reason in ["completed", "not_planned", "duplicate"] {
+            assert!(
+                matches!(
+                    ok("issue.close", json!({"number": 7, "reason": reason})),
+                    CliCommand::Issue(IssueCommand::Close {
+                        reason: Some(_),
+                        ..
+                    })
+                ),
+                "{reason}"
+            );
+        }
+        match err("issue.close", json!({"number": 7, "reason": "wontfix"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("not_planned"), "{message}")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("issue.close", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert!(matches!(
+            ok("issue.reopen", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            })
+        ));
+        match err("issue.reopen", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,

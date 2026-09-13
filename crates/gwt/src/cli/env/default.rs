@@ -135,8 +135,9 @@ impl IssueClient for LazyIssueClient {
         &self,
         number: IssueNumber,
         state: gwt_github::client::IssueState,
+        reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
-        self.resolve()?.set_state(number, state)
+        self.resolve()?.set_state(number, state, reason)
     }
 
     fn list_spec_issues(
