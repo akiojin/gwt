@@ -19,6 +19,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+mod context;
 pub mod coordination_event;
 pub mod diagnostics;
 pub mod effect_classifier;
@@ -66,7 +67,23 @@ pub(crate) use identity::{
 /// must be deterministic per worktree so an ambient value from another session
 /// can never redirect policy.
 pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
-    crate::pm_registry::is_pm_worktree(&gwt_core::paths::resolve_current_worktree_root(worktree))
+    if crate::pm_registry::is_pm_worktree(worktree) {
+        return true;
+    }
+    // The dispatcher already supplies a worktree root. Ordinary agent roots
+    // cannot become the canonical PM merely by running `git rev-parse`, so
+    // reject every path outside the exact `pm/worktree` shape without a child
+    // process. UserPromptSubmit invokes this gate from multiple bookkeeping
+    // stages; spawning git here made the warm prompt budget pay the same
+    // repository discovery latency repeatedly.
+    if worktree.file_name() != Some(std::ffi::OsStr::new("worktree"))
+        || worktree.parent().and_then(std::path::Path::file_name)
+            != Some(std::ffi::OsStr::new("pm"))
+    {
+        return false;
+    }
+    let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    crate::pm_registry::is_canonical_pm_worktree(&canonical)
 }
 
 /// Every hook name exposed via `gwtd hook <name>`.

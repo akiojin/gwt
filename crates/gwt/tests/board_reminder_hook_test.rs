@@ -14,6 +14,8 @@ use gwt::cli::hook::board_reminder;
 use serde_json::Value;
 use std::{ffi::OsString, path::Path, sync::Mutex};
 
+const BOARD_REMINDER_SOURCE: &str = include_str!("../src/cli/hook/board_reminder/mod.rs");
+
 struct ScopedEnvVar {
     key: &'static str,
     previous: Option<OsString>,
@@ -113,6 +115,27 @@ fn reminder_payload_shape_matches_claude_code_contract() {
         assert!(additional.contains("phase"));
         assert!(additional.contains("Do NOT") || additional.contains("手動で作成"));
     });
+}
+
+#[test]
+fn compute_plan_uses_invocation_context_for_projection_reuse() {
+    let start = BOARD_REMINDER_SOURCE
+        .find("pub fn compute_plan(")
+        .expect("compute_plan source");
+    let end = BOARD_REMINDER_SOURCE[start..]
+        .find("\nfn terminal_work_state_reminders_suppressed")
+        .map(|offset| start + offset)
+        .expect("compute_plan end");
+    let source = &BOARD_REMINDER_SOURCE[start..end];
+
+    assert!(
+        source.contains("HookContext::for_board_reminder(session)"),
+        "compute_plan must load audience/canonical projections through one invocation context"
+    );
+    assert!(
+        !source.contains("agent_title_summary_missing(session)"),
+        "title/stale/progress must share the canonical projection instead of reloading it"
+    );
 }
 
 #[test]

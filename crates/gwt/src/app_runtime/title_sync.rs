@@ -51,7 +51,9 @@ impl AppRuntime {
     ///   `BackendEvent::ActiveWorkProjection` broadcast for the active tab
     ///   is emitted unconditionally — that surface refreshes the Active
     ///   Work card and Workspace Kanban entries regardless of whether a
-    ///   pane heading was touched.
+    ///   pane heading was touched. The potentially large projection is
+    ///   prepared and serialized on the blocking worker, then broadcast by
+    ///   the tao continuation instead of being returned in this event batch.
     pub(crate) fn apply_workspace_projection_title_sync(
         &mut self,
         project_root: &Path,

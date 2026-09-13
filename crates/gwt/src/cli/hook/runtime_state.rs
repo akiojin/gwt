@@ -9,12 +9,15 @@ use std::{
     io,
     io::Read,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chrono::{SecondsFormat, Utc};
+#[cfg(test)]
+use gwt_agent::persist_agent_session_id;
 use gwt_agent::{
-    persist_agent_session_id, persist_session_status, AgentStatus, PendingDiscussionResume,
-    Session, SessionRuntimeState,
+    persist_session_hook_metadata_with_wait, persist_session_status, AgentStatus,
+    PendingDiscussionResume, Session, SessionRuntimeState,
 };
 use serde::Serialize;
 
@@ -24,6 +27,8 @@ use super::{
 };
 use crate::discussion_resume::load_pending_resume;
 use crate::window_state::window_state_for_hook_event;
+
+const HOOK_SESSION_METADATA_LEASE_WAIT: Duration = Duration::from_millis(25);
 
 /// The JSON shape the Branches tab polls from `$GWT_SESSION_RUNTIME_PATH`.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -190,6 +195,7 @@ fn current_session_for_id(sessions_dir: &Path, gwt_session_id: &GwtSessionId) ->
     }
 }
 
+#[cfg(test)]
 fn sync_agent_session_id(
     sessions_dir: &Path,
     gwt_session_id: &GwtSessionId,
@@ -200,6 +206,13 @@ fn sync_agent_session_id(
         gwt_session_id.as_str(),
         agent_session_id.as_str(),
     )
+}
+
+fn agent_session_id_needs_sync(
+    session: Option<&Session>,
+    agent_session_id: &HookSessionId,
+) -> bool {
+    session.and_then(Session::exact_resume_session_id) != Some(agent_session_id.as_str())
 }
 
 fn validated_hook_agent_session_id(
@@ -270,8 +283,15 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
+    handle_with_input_prepared(event, input).map(|_| ())
+}
+
+pub(crate) fn handle_with_input_prepared(
+    event: &str,
+    input: &str,
+) -> Result<Option<Session>, HookError> {
     let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
-        return Ok(());
+        return Ok(None);
     };
     let runtime_path = PathBuf::from(runtime_path);
     let hook_event = if input.trim().is_empty() {
@@ -281,33 +301,45 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     };
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
-    let session = current_session_for_id(&sessions_dir, &gwt_session_id);
+    let mut session = current_session_for_id(&sessions_dir, &gwt_session_id);
     let agent_session_id = validated_hook_agent_session_id(
         event,
         &gwt_session_id,
         session.as_ref(),
         hook_event.as_ref(),
     )?;
-    if let Some(agent_session_id) = agent_session_id.as_ref() {
-        if let Err(error) = sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)
-        {
-            log_session_metadata_error("sync agent_session_id for", &gwt_session_id, &error);
-        }
-    }
     if session.is_some() {
-        if let Err(error) =
-            gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)
-        {
-            log_session_metadata_error("record hook event for", &gwt_session_id, &error);
+        let legacy_project_state_root = session.as_ref().and_then(|session| {
+            session.project_state_root.is_none().then(|| {
+                crate::agent_project_state::canonical_project_state_root_for_session(
+                    session,
+                    &session.worktree_path,
+                )
+            })
+        });
+        let agent_session_id_to_sync = agent_session_id.as_ref().filter(|agent_session_id| {
+            agent_session_id_needs_sync(session.as_ref(), agent_session_id)
+        });
+        match persist_session_hook_metadata_with_wait(
+            &sessions_dir,
+            gwt_session_id.as_str(),
+            event,
+            agent_session_id_to_sync.map(HookSessionId::as_str),
+            legacy_project_state_root.as_deref(),
+            HOOK_SESSION_METADATA_LEASE_WAIT,
+        ) {
+            Ok(updated) => session = Some(updated),
+            Err(error) => {
+                log_session_metadata_error("record hook metadata for", &gwt_session_id, &error);
+            }
         }
     }
 
-    let pending_discussion = session.as_ref().and_then(|session| {
-        pending_discussion_for_session(&sessions_dir, &session.id)
-            .ok()
-            .flatten()
-    });
+    let pending_discussion = session
+        .as_ref()
+        .and_then(|session| load_pending_resume(&session.worktree_path).ok().flatten());
     write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
+        .map(|_| session)
 }
 
 pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<String> {
@@ -409,9 +441,11 @@ fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use fs2::FileExt;
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::coordination::{coordination_events_segments_dir, load_snapshot};
     use std::ffi::OsString;
+    use std::fs::OpenOptions;
     use std::time::Duration;
 
     use super::*;
@@ -859,6 +893,62 @@ mod tests {
         let state: RuntimeState = serde_json::from_str(&raw).unwrap();
         assert_eq!(state.status, "Running");
         assert_eq!(state.source_event, "PreToolUse");
+    }
+
+    #[test]
+    fn user_prompt_submit_session_bookkeeping_fails_open_under_lease_contention() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session = Session::new(&worktree, "feature/demo", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        let lease = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(sessions_dir.join(format!(".{session_id}.lock")))
+            .unwrap();
+        lease.lock_exclusive().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            lease.unlock().unwrap();
+        });
+
+        handle_with_input("UserPromptSubmit", r#"{"session_id":"agent-new"}"#)
+            .expect("contended bookkeeping must fail open");
+        release.join().unwrap();
+
+        // Assert the bound itself rather than how long the call happened to
+        // take. The wall clock measures the runner as much as the code: under
+        // CI's default parallelism this observed 259ms against a 200ms limit
+        // even though the wait was clamped (Issue #3777, CI run 34490959331).
+        // The hook waits `HOOK_SESSION_METADATA_LEASE_WAIT` for the Session
+        // lease, so holding that constant below the 300ms the thread above
+        // keeps the lease is what proves the hook cannot have waited the
+        // contended lease out — and it stays true on a loaded runner.
+        assert!(
+            HOOK_SESSION_METADATA_LEASE_WAIT <= Duration::from_millis(25),
+            "the Session lease wait must stay clamped well under the contended \
+             hold, otherwise UserPromptSubmit blocks on it: \
+             {HOOK_SESSION_METADATA_LEASE_WAIT:?}"
+        );
+        let raw = std::fs::read_to_string(&runtime_path).expect("runtime state written");
+        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(state.status, "Running");
+        assert_eq!(state.source_event, "UserPromptSubmit");
     }
 
     #[test]

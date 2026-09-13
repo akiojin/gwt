@@ -1150,6 +1150,54 @@ where
     }
 }
 
+fn with_session_lock_wait<T, F>(
+    dir: &Path,
+    session_id: &str,
+    wait: Duration,
+    action: F,
+) -> io::Result<T>
+where
+    F: FnOnce() -> io::Result<T>,
+{
+    let _thread_guard = SessionLeaseThreadGuard::enter()?;
+    fs::create_dir_all(dir)?;
+    let lock_path = session_lock_path(dir, session_id);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+            {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Session lease is held by another gwt operation; hook bookkeeping skipped",
+                    ));
+                }
+                std::thread::sleep(SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let result = action();
+    match lock_file.unlock() {
+        Ok(()) => result,
+        Err(unlock_error) => match result {
+            Ok(_) => Err(unlock_error),
+            Err(action_error) => Err(action_error),
+        },
+    }
+}
+
 /// Hold the per-Session lease while classifying its durable path and running
 /// one operation without releasing the lease after a `Missing` observation.
 ///
@@ -1332,6 +1380,29 @@ where
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load_and_migrate(&path)?;
+        mutate(&mut session)?;
+        let content = serialize_session_toml(&session)?;
+        write_session_toml_atomic(&path, &content)?;
+        Ok(session)
+    })
+}
+
+/// [`update_session`] with an explicit lease wait bound for latency-critical,
+/// fail-open callers such as managed hook bookkeeping.
+pub fn update_session_with_wait<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    wait: Duration,
+    mutate: F,
+) -> io::Result<Session>
+where
+    F: FnOnce(&mut Session) -> io::Result<()>,
+{
+    validate_session_id_path_component(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    with_session_lock_wait(sessions_dir, session_id, wait, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
         mutate(&mut session)?;
@@ -2428,27 +2499,58 @@ pub fn persist_agent_session_id(
     }
 
     update_session(sessions_dir, session_id, |session| {
-        if session.agent_session_id.as_deref() == Some(agent_session_id) {
-            return Ok(());
-        }
-        // Forward-only Session history: record each distinct conversation UUID the
-        // first time we see it, before promoting it to the latest. Splits already
-        // arrive via the SessionStart hook, so appending here (instead of
-        // overwriting) is enough to reconstruct the full Session list under a Work.
-        if !session
-            .session_history
-            .iter()
-            .any(|entry| entry.agent_session_id == agent_session_id)
-        {
-            session.session_history.push(AgentSessionHistoryEntry {
-                agent_session_id: agent_session_id.to_string(),
-                started_at: Utc::now(),
-            });
-        }
-        session.agent_session_id = Some(agent_session_id.to_string());
+        apply_agent_session_id(session, agent_session_id);
         Ok(())
     })
     .map(|_| ())
+}
+
+fn apply_agent_session_id(session: &mut Session, agent_session_id: &str) {
+    if session.agent_session_id.as_deref() == Some(agent_session_id) {
+        return;
+    }
+    // Forward-only Session history: record each distinct conversation UUID the
+    // first time we see it, before promoting it to the latest. Splits already
+    // arrive via the SessionStart hook, so appending here (instead of
+    // overwriting) is enough to reconstruct the full Session list under a Work.
+    if !session
+        .session_history
+        .iter()
+        .any(|entry| entry.agent_session_id == agent_session_id)
+    {
+        session.session_history.push(AgentSessionHistoryEntry {
+            agent_session_id: agent_session_id.to_string(),
+            started_at: Utc::now(),
+        });
+    }
+    session.agent_session_id = Some(agent_session_id.to_string());
+}
+
+/// Persist one hook event and an optional provider Session id under one
+/// bounded lease. A contended lease returns `WouldBlock` without changing the
+/// durable Session so the caller can fail open and keep action-critical hook
+/// output within its wall-clock budget.
+pub fn persist_session_hook_metadata_with_wait(
+    sessions_dir: &Path,
+    session_id: &str,
+    event: &str,
+    agent_session_id: Option<&str>,
+    project_state_root: Option<&Path>,
+    wait: Duration,
+) -> io::Result<Session> {
+    let agent_session_id = agent_session_id
+        .map(str::trim)
+        .filter(|agent_session_id| !agent_session_id.is_empty());
+    update_session_with_wait(sessions_dir, session_id, wait, |session| {
+        if let Some(agent_session_id) = agent_session_id {
+            apply_agent_session_id(session, agent_session_id);
+        }
+        if session.project_state_root.is_none() {
+            session.project_state_root = project_state_root.map(Path::to_path_buf);
+        }
+        session.record_hook_event(event);
+        Ok(())
+    })
 }
 
 /// Persist or clear a Session's Execution generation projection under the
@@ -2571,6 +2673,46 @@ mod tests {
         assert!(!session.restore_window_on_startup);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn hook_metadata_backfills_project_state_root_without_overwriting_authority() {
+        let sessions = tempfile::tempdir().expect("sessions dir");
+        let worktree = sessions.path().join("worktree");
+        let canonical = sessions.path().join("canonical");
+        let replacement = sessions.path().join("replacement");
+        let session = Session::new(&worktree, "work/issue-3777", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(sessions.path()).expect("save Session");
+
+        let updated = persist_session_hook_metadata_with_wait(
+            sessions.path(),
+            &session_id,
+            "UserPromptSubmit",
+            None,
+            Some(&canonical),
+            Duration::from_millis(25),
+        )
+        .expect("backfill canonical root");
+        assert_eq!(
+            updated.project_state_root.as_deref(),
+            Some(canonical.as_path())
+        );
+
+        let preserved = persist_session_hook_metadata_with_wait(
+            sessions.path(),
+            &session_id,
+            "UserPromptSubmit",
+            None,
+            Some(&replacement),
+            Duration::from_millis(25),
+        )
+        .expect("preserve canonical root");
+        assert_eq!(
+            preserved.project_state_root.as_deref(),
+            Some(canonical.as_path()),
+            "later hook observations must not replace the launch authority"
+        );
     }
 
     #[test]

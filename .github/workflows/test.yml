@@ -212,6 +212,12 @@ jobs:
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
+      # Issue #3777: measure the warm 250ms acceptance contract without other
+      # tests competing for CPU and file I/O. The full default-parallel proof
+      # remains in nightly.yml alongside the other deadline-sensitive tests.
+      - name: Measure warm prompt latency in isolation
+        run: cargo test -p gwt --lib --all-features cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1
+        timeout-minutes: 15
 
   # The default-parallel determinism proof lives in nightly.yml (Issue #4134
   # AC-1). It re-ran on Windows a suite Linux had already run, cost 2806s, and
