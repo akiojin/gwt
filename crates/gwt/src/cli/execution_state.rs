@@ -16616,8 +16616,15 @@ mod tests {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let _session_env = unset_live_session_env();
 
+        // Each owner needs its own worktree: the flat execution-control mirror
+        // is per-worktree, so a second genesis in the same one is refused
+        // before the fixture is even built.
         let worktree = tempfile::tempdir().unwrap();
         crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let started_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(started_worktree.path());
+        let starting_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(starting_worktree.path());
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let process_started_at = crate::process::host_process_start_time(std::process::id())
             .expect("current process start identity");
@@ -16728,7 +16735,7 @@ mod tests {
         let started_session = "started-launch-holder";
         let (started_candidate, started_identity) =
             startup_reaper_active_fixture_with_status_and_age(
-                worktree.path(),
+                started_worktree.path(),
                 started_owner,
                 started_session,
                 gwt_agent::AgentStatus::Running,
@@ -16752,10 +16759,10 @@ mod tests {
         started.record_hook_event("SessionStart");
         started.save(&sessions_dir).unwrap();
 
-        let authority_before = generation_authority_bytes(worktree.path(), started_owner);
+        let authority_before = generation_authority_bytes(started_worktree.path(), started_owner);
         assert_eq!(
             release_unstarted_launch_generation(
-                worktree.path(),
+                started_worktree.path(),
                 started_owner,
                 &sessions_dir,
                 "the launch never started an agent",
@@ -16768,7 +16775,7 @@ mod tests {
             }
         );
         assert_eq!(
-            generation_authority_bytes(worktree.path(), started_owner),
+            generation_authority_bytes(started_worktree.path(), started_owner),
             authority_before,
             "a refused release is byte-preserving"
         );
@@ -16778,7 +16785,7 @@ mod tests {
         fs::remove_file(&started_path).unwrap();
         assert_eq!(
             release_unstarted_launch_generation(
-                worktree.path(),
+                started_worktree.path(),
                 started_owner,
                 &sessions_dir,
                 "the launch never started an agent",
@@ -16790,7 +16797,7 @@ mod tests {
             }
         );
         assert_eq!(
-            generation_authority_bytes(worktree.path(), started_owner),
+            generation_authority_bytes(started_worktree.path(), started_owner),
             authority_before,
             "an unreadable holder is byte-preserving too"
         );
@@ -16805,15 +16812,15 @@ mod tests {
         };
         let starting_session = "starting-launch-holder";
         let (starting_candidate, _starting_identity) = startup_reaper_active_fixture_with_status(
-            worktree.path(),
+            starting_worktree.path(),
             starting_owner,
             starting_session,
             gwt_agent::AgentStatus::Running,
         );
-        let authority_before = generation_authority_bytes(worktree.path(), starting_owner);
+        let authority_before = generation_authority_bytes(starting_worktree.path(), starting_owner);
         assert_eq!(
             release_unstarted_launch_generation(
-                worktree.path(),
+                starting_worktree.path(),
                 starting_owner,
                 &sessions_dir,
                 "the launch never started an agent",
@@ -16825,7 +16832,7 @@ mod tests {
             }
         );
         assert_eq!(
-            generation_authority_bytes(worktree.path(), starting_owner),
+            generation_authority_bytes(starting_worktree.path(), starting_owner),
             authority_before,
             "a generation inside the start-up grace is byte-preserving"
         );
