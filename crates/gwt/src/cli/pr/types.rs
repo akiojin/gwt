@@ -41,6 +41,38 @@ pub struct PrChecksSummary {
     pub checks: Vec<PrCheckItem>,
 }
 
+/// What GitHub did when `pr.update_branch` asked it to merge the base branch
+/// into the PR head (SPEC #3835 AC-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrUpdateBranchOutcome {
+    /// The head now carries the base branch's commits, so the PR leaves
+    /// `BEHIND`.
+    Updated,
+    /// Merging the base into the head would conflict, so GitHub refused and
+    /// nothing was pushed. Resolving it is the owner's work, never the PM's
+    /// automatic action (FR-007).
+    Conflicted,
+}
+
+impl PrUpdateBranchOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Updated => "UPDATED",
+            Self::Conflicted => "CONFLICTED",
+        }
+    }
+}
+
+/// Result of one `pr.update_branch` call.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrUpdateBranchResult {
+    pub number: u64,
+    pub outcome: PrUpdateBranchOutcome,
+    /// GitHub's own wording, kept verbatim so a refusal stays diagnosable.
+    pub detail: String,
+}
+
 /// PR review summary used by `pr.reviews`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrReview {

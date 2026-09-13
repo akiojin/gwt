@@ -440,13 +440,26 @@ fn is_gwt_managed_override_path(worktree: &Path, target: &Path) -> bool {
     target
         .strip_prefix(worktree)
         .ok()
-        .and_then(|relative| relative.to_str())
-        .map(|relative| relative.replace('\\', "/"))
-        .is_some_and(|relative| {
-            GWT_MANAGED_OVERRIDE_PREFIXES
-                .iter()
-                .any(|prefix| relative.starts_with(prefix))
+        .is_some_and(is_gwt_managed_skill_or_command_path)
+}
+
+/// The reserved skill/command namespace shared by distribution and PM
+/// repoint preservation. Ignore rules alone never establish gwt ownership.
+pub fn is_gwt_managed_skill_or_command_path(relative: &Path) -> bool {
+    let Some(components) = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
         })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let relative = components.join("/");
+    GWT_MANAGED_OVERRIDE_PREFIXES
+        .iter()
+        .any(|prefix| relative.starts_with(prefix))
 }
 
 fn should_skip_tracked_path(
@@ -509,6 +522,34 @@ fn is_git_worktree(worktree: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_skill_namespace_rejects_user_and_noncanonical_paths() {
+        for path in [
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-old/scripts/run.sh",
+            ".claude/commands/gwt-build.md",
+        ] {
+            assert!(
+                is_gwt_managed_skill_or_command_path(Path::new(path)),
+                "{path}"
+            );
+        }
+        for path in [
+            ".claude/skills/user/SKILL.md",
+            ".codex/hooks.json",
+            ".gwt/work/events.jsonl",
+            ".gwt/hermes/skills/gwt-execute/SKILL.md",
+            "../.claude/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-execute/../../user.md",
+            "/.claude/skills/gwt-execute/SKILL.md",
+        ] {
+            assert!(
+                !is_gwt_managed_skill_or_command_path(Path::new(path)),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn distribute_creates_claude_skills() {

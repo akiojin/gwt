@@ -286,13 +286,26 @@ things:
   launch's authority, frees its slot, and holds the issue.
   It spends no retry attempt and puts nothing back in the queue.
 
-  Send the identity exactly as the snapshot reports it. Omitting a
-  component the Monitor is holding is a mismatch, not a wildcard, and a
+  Send the identity exactly as the snapshot reports it. Naming a
+  different window or delivery than the one the Monitor holds — or
+  omitting one it is holding — is a mismatch, not a wildcard, and a
   mismatch stops nothing at all. That is deliberate: a stale snapshot
   names a real issue number just as convincingly as a fresh one, and
-  killing the wrong agent cannot be undone. If you get `refused`, re-read
-  the snapshot instead of retrying — the `mismatch` field names the
-  component that disagreed.
+  killing the wrong agent cannot be undone.
+
+  The claim is the one component that tolerates silence. The durable
+  state does not always record the claim behind a bound launch, so a
+  `claim_id` you read from the Issue's claim comment — or leave out
+  entirely — refuses only when the Monitor holds a *different* one. Before
+  that, a matching `window_id` still failed `claim_mismatch` and a launch
+  whose owner had already declared `execution.blocked` kept its slot with
+  no way to return it.
+
+  If you get `refused`, read `live_launch` in the reply: it reports the
+  `claim_id`, `delivery_id`, and `window_id` the Monitor actually holds,
+  plus whether the issue still holds a slot. Build the next request from
+  that answer rather than retrying blindly; the `mismatch` field names
+  the component that disagreed.
 
   The stop does not close the pane. Close it yourself afterwards with
   `pane.close`; the launch is already revoked, so that close cannot
@@ -507,6 +520,17 @@ re-derives the failure from the persisted hold, so the row does not move.
 - The reply returns `stale_window_id` when the failure retained an error
   window. Close it with `pane.close`; the release already unbound it, so
   the close cannot requeue the issue again.
+- A row that still reads `launched` while nothing owns it is the same
+  state wearing a different label, and it used to be the one state with
+  no way out at all. `issue.monitor.stop` answers `unknown_issue` —
+  there is no launch left to name — and the failure gate answers
+  `not_held`, because nothing failed. Both refusals are right; the
+  combination stranded four rows for five to nine hours in the reported
+  snapshot. `issue.monitor.requeue` now covers it too: when the live
+  projection shows a `launched` row holding no active slot, the reply is
+  `released_hold: "stranded_launch"` and the issue returns to the queue.
+  The scan does the same unattended once such a row has waited eight
+  hours without the completion evidence that would have ended it.
 - Recovering a row does not fix why it failed. If the launch is refused
   for a durable reason (a stranded execution generation, a repository
   lock), the requeued issue fails the same way on its next scan. Read the
@@ -727,8 +751,23 @@ quota:
   (the triage procedure is #3790's, not yours to redefine), arrange a
   rerun when it is a flake, arrange a fresh launch when it is a
   regression, and escalate to the user immediately when neither is
-  possible. You may run `gh pr update-branch` and canonical `pr.ready`
-  yourself; never bypass them with other `gh` mutations.
+  possible. You may run canonical `pr.update_branch` and `pr.ready`
+  yourself; never bypass them with `gh` mutations.
+- `default_action_operation` names the operation that performs
+  `default_action` when it needs one: `pr.update_branch` for `BEHIND`,
+  `pr.ready` for a Draft `MERGE-CANDIDATE`. A row with no
+  `default_action_operation` is advice you act on, not a call you make.
+  Never invent an operation for a row that names none.
+- **Run `pr.update_branch` one PR at a time.** Every merge into the base
+  puts every other open PR back to `BEHIND`, so a fan-out re-runs CI on
+  branches that are about to go stale again. Each cycle, pick the single
+  PR closest to promotion — `BEHIND` with no failing check, nothing in
+  progress, and no unresolved review thread — update that one, and let
+  the next cycle pick the next. Do not update a second PR in the same
+  cycle, and never update every `BEHIND` row at once.
+- `pr.update_branch` refuses a PR whose base would conflict and reports
+  `CONFLICTED` without pushing anything. That is the owner's work:
+  relaunch the owner, and never resolve a conflict yourself.
 - A cycle in which at least one open PR is `CI-RED` or `CONFLICTED` is
   never a no-change cycle. Advance at least one such PR (triage posted,
   rerun arranged, fresh launch arranged, update-branch run) or state in
@@ -1203,6 +1242,15 @@ mod tests {
             "starts a fresh bounded retry cycle",
             "launch_live",
             "not_held",
+            // Issue #3992: the two halves of the recovery this Issue added —
+            // the refusal that names the launch it disagreed with, and the
+            // escape from a `launched` row nothing owns. Without both in the
+            // contract the PM reads `unknown_issue` / `not_held` and concludes,
+            // correctly for the old build, that no recovery exists.
+            "`live_launch`",
+            "the one component that tolerates silence",
+            "stranded_launch",
+            "has waited eight",
             "Never repair Issue Monitor state by editing `issue-monitor.json`",
             "they re-stamp what you removed on their next commit",
             "Recovering a row does not fix why it failed",
@@ -1686,7 +1734,7 @@ mod tests {
             "arrange a rerun when it is a flake",
             "arrange a fresh launch when it is a regression",
             "escalate to the user immediately when neither is possible",
-            "`gh pr update-branch`",
+            "canonical `pr.update_branch` and `pr.ready`",
             "at least one open PR is `CI-RED` or `CONFLICTED` is never a no-change cycle",
             "`dwell_hours`",
             "`stale_after_hours`",
@@ -1709,6 +1757,42 @@ mod tests {
             ),
             "the silent-cycle rule must carry the red-PR exception"
         );
+    }
+
+    /// SPEC #3835 AC-16: `update-branch` is serialized. One merge into the
+    /// base puts every other open PR back to `BEHIND`, so updating them all at
+    /// once burns CI on branches that go stale again before they land. The PM
+    /// advances the single PR closest to promotion and leaves the rest.
+    #[test]
+    fn contract_serializes_update_branch_to_the_pr_closest_to_promotion() {
+        let body = body();
+        for phrase in [
+            "Run `pr.update_branch` one PR at a time",
+            "puts every other open PR back to `BEHIND`",
+            "pick the single PR closest to promotion",
+            "Do not update a second PR in the same cycle",
+            "never update every `BEHIND` row at once",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// SPEC #3835 AC-17 / FR-007: a row says which operation performs its
+    /// default action, and a conflicting update is handed back to the owner
+    /// rather than resolved by the PM.
+    #[test]
+    fn contract_names_the_operation_behind_each_default_action() {
+        let body = body();
+        for phrase in [
+            "`default_action_operation` names the operation that performs `default_action`",
+            "`pr.update_branch` for `BEHIND`",
+            "`pr.ready` for a Draft `MERGE-CANDIDATE`",
+            "Never invent an operation for a row that names none",
+            "refuses a PR whose base would conflict and reports `CONFLICTED`",
+            "never resolve a conflict yourself",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
     }
 
     /// Issue #3868 AC-9 / AC-10 / AC-11: quota exhaustion is reported as an

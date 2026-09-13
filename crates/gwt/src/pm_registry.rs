@@ -3059,6 +3059,123 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
     Ok(())
 }
 
+fn tracked_pm_work_diagnosis(worktree: &Path) -> String {
+    let mut paths = std::collections::BTreeSet::new();
+    for args in [
+        vec!["diff", "--name-only", "--no-renames", "-z", "--"],
+        vec![
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "--",
+        ],
+    ] {
+        match gwt_core::process::run_git_logged(&args, Some(worktree)) {
+            Ok(output) if output.status.success() => {
+                paths.extend(
+                    output
+                        .stdout
+                        .split(|byte| *byte == 0)
+                        .filter(|path| !path.is_empty())
+                        .map(|path| String::from_utf8_lossy(path).into_owned()),
+                );
+            }
+            _ => {
+                return "user-owned changes: tracked or index changes; path inspection unavailable"
+                    .to_string()
+            }
+        }
+    }
+    let mut groups = std::collections::BTreeMap::<&str, Vec<String>>::new();
+    for path in paths {
+        let category = if gwt_skills::is_gwt_managed_skill_or_command_path(Path::new(&path)) {
+            "managed artifacts"
+        } else if path == ".gwt/work/events.jsonl" || path.starts_with(".gwt/work/events/") {
+            "Work history"
+        } else {
+            "user-owned changes"
+        };
+        groups.entry(category).or_default().push(path);
+    }
+    let groups = groups
+        .into_iter()
+        .map(|(category, paths)| {
+            let examples = paths
+                .iter()
+                .take(5)
+                .map(|path| {
+                    path.chars()
+                        .take(120)
+                        .flat_map(char::escape_default)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{category}: {} tracked/index path(s): {examples}",
+                paths.len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("PM worktree has tracked or index changes; {groups}")
+}
+
+fn repoint_and_refresh_pm_assets(
+    manager: &gwt_git::WorktreeManager,
+    worktree: &Path,
+    old_head: &str,
+    target: &str,
+) -> Result<(), (PmWorktreeRefreshFailureStage, io::Error)> {
+    let mut stage = PmWorktreeRefreshFailureStage::Repoint;
+    let result = crate::managed_assets::with_pm_repoint_transaction(worktree, target, || {
+        let refresh = (|| {
+            // A self-heal writer may have run since the initial preflight.
+            // This lock remains held until checkout and regeneration end.
+            normalize_previous_generated_hook_configs(worktree)?;
+            manager
+                .repoint_detached(worktree, target)
+                .map_err(|error| {
+                    io::Error::other(format!("managed artifacts: repoint failed: {error}"))
+                })?;
+            stage = PmWorktreeRefreshFailureStage::ManagedAssets;
+            crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
+                .map_err(|error| {
+                    io::Error::other(format!("managed artifacts: regeneration failed: {error}"))
+                })
+        })();
+        if let Err(error) = refresh {
+            // Git can advance HEAD and then report failure from post-checkout.
+            // Inspect the actual commit before restoring displaced assets.
+            let rollback = detached_worktree_head_sha(worktree).and_then(|head| {
+                if head.as_deref() == Some(old_head) {
+                    return Ok(());
+                }
+                if head.as_deref() != Some(target) {
+                    return Err(io::Error::other(
+                        "PM HEAD changed outside the refresh transaction",
+                    ));
+                }
+                normalize_previous_generated_hook_configs(worktree)?;
+                manager
+                    .repoint_detached(worktree, old_head)
+                    .map_err(|error| io::Error::other(error.to_string()))
+            });
+            let mut reason = error.to_string();
+            if let Err(rollback_error) = rollback {
+                reason.push_str(&format!(
+                    "; restoring prior PM worktree HEAD {old_head} also failed: {rollback_error}"
+                ));
+            }
+            return Err(io::Error::other(reason));
+        }
+        Ok(())
+    });
+    result.map_err(|error| (stage, error))
+}
+
 fn refresh_pm_worktree_at_locked(
     git_root: &Path,
     // Fetch and worktree administration belong to the shared main Git root,
@@ -3315,7 +3432,7 @@ fn refresh_pm_worktree_at_locked(
                 )),
                 Ok(gwt_git::worktree::DetachedRepointSafety::TrackedOrIndexChanges) => Some((
                     PmWorktreeRefreshFailureStage::LocalWork,
-                    "PM worktree has tracked or index changes".to_string(),
+                    tracked_pm_work_diagnosis(worktree),
                 )),
                 Ok(gwt_git::worktree::DetachedRepointSafety::DetachedOnlyCommit) => Some((
                     PmWorktreeRefreshFailureStage::LocalWork,
@@ -3335,19 +3452,39 @@ fn refresh_pm_worktree_at_locked(
                 return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
             }
         }
+        let mut assets_refreshed = false;
         if let Some(head) = old_head.as_deref().filter(|head| *head != target_sha) {
-            if let Err(error) = manager.repoint_detached(worktree, &target_sha) {
+            if let Err((stage, error)) =
+                repoint_and_refresh_pm_assets(&manager, worktree, head, &target_sha)
+            {
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
-                    PmWorktreeRefreshFailureStage::Repoint,
+                    stage,
                     error.to_string(),
                 );
-                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+                if stage == PmWorktreeRefreshFailureStage::ManagedAssets {
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(error);
+                }
+                // The transaction already restored its prior assets. A second
+                // materialization here would immediately overwrite them.
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                if let Some(snapshot) = generated_hook_snapshot.take() {
+                    if let Err(restore_error) = snapshot.restore() {
+                        let reason = format!("restoring prior generated PM hook configs also failed: {restore_error}");
+                        append_pm_worktree_refresh_failure_reason(project_dir, &reason)?;
+                        return Err(io::Error::other(format!("{error}; {reason}")));
+                    }
+                }
+                return Ok(PmWorktreeRefreshOutcome {
+                    worktree: worktree.to_path_buf(),
+                    freshness,
+                });
             }
-            debug_assert!(!head.is_empty());
+            assets_refreshed = true;
         } else if !existed {
             if let Some(parent) = worktree.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
@@ -3377,37 +3514,21 @@ fn refresh_pm_worktree_at_locked(
             }
         }
 
-        if let Err(error) =
-            crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
-        {
-            let mut failure_reason = error.to_string();
-            if let Some(old_head) = old_head
-                .as_deref()
-                .filter(|old_head| *old_head != target_sha)
+        if !assets_refreshed {
+            if let Err(error) =
+                crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
             {
-                let rollback = normalize_previous_generated_hook_configs(worktree)
-                    .map_err(|error| error.to_string())
-                    .and_then(|()| {
-                        manager
-                            .repoint_detached(worktree, old_head)
-                            .map_err(|error| error.to_string())
-                    });
-                if let Err(rollback_error) = rollback {
-                    failure_reason.push_str(&format!(
-                    "; restoring prior PM worktree HEAD {old_head} also failed: {rollback_error}"
-                ));
-                }
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    Some(target_sha),
+                    PmWorktreeTargetObservation::Fresh,
+                    PmWorktreeRefreshFailureStage::ManagedAssets,
+                    format!("managed artifacts: regeneration failed: {error}"),
+                );
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                return Err(error);
             }
-            let freshness = pm_refresh_failure(
-                git_root,
-                worktree,
-                Some(target_sha),
-                PmWorktreeTargetObservation::Fresh,
-                PmWorktreeRefreshFailureStage::ManagedAssets,
-                &failure_reason,
-            );
-            persist_pm_worktree_freshness(project_dir, &freshness)?;
-            return Err(io::Error::other(failure_reason));
         }
 
         let observed_head = match detached_worktree_head_sha(worktree) {
