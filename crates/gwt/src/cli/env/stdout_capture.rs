@@ -114,6 +114,13 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.convert_pr_to_draft(number)
     }
 
+    fn update_pr_branch(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::types::PrUpdateBranchResult> {
+        self.inner.update_pr_branch(number)
+    }
+
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()> {
         self.inner.comment_on_pr(number, body)
     }
