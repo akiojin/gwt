@@ -31,6 +31,8 @@ impl std::fmt::Display for PrState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrStatus {
     pub number: u64,
+    #[serde(default)]
+    pub head_ref_name: String,
     pub title: String,
     pub state: PrState,
     pub url: String,
@@ -272,6 +274,15 @@ pub struct PrLifecycleDecision {
     pub dwell_hours: Option<i64>,
     /// Whether the PM can execute `default_action` through JSON operations.
     pub default_action_executable: bool,
+    /// SPEC #3835 AC-17: the JSON operation that performs `default_action`,
+    /// when the action needs one. `None` means the action is advisory (a
+    /// digest line, a hold, "leave in progress") or runs through the owner
+    /// relaunch path, whose executability `blocker` already governs.
+    ///
+    /// An action that needs an operation and has none must never be reported
+    /// executable — that is exactly how `update-branch` spent 21 of 25 open
+    /// PRs recommending a step no surface could take.
+    pub default_action_operation: Option<&'static str>,
     /// Why the owner cannot be relaunched, when known (Issue #3868 AC-1).
     pub blocker: Option<String>,
     /// The fallback order to apply when `default_action` is not executable.
@@ -304,6 +315,9 @@ pub struct PrInventoryItem {
     pub owner_issue_closed: bool,
     #[serde(default)]
     pub owner_issue: Option<u64>,
+    /// Whether the owner is explicit (`closing_issues`) or inferred (`head_branch`).
+    #[serde(default)]
+    pub owner_issue_source: Option<String>,
     pub default_action: String,
     #[serde(default)]
     pub dwell_hours: Option<i64>,
@@ -311,6 +325,9 @@ pub struct PrInventoryItem {
     pub stale_after_hours: i64,
     #[serde(default = "default_true")]
     pub default_action_executable: bool,
+    /// SPEC #3835 AC-17: the JSON operation that performs `default_action`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_action_operation: Option<String>,
     #[serde(default)]
     pub blocker: Option<String>,
     #[serde(default)]
@@ -456,6 +473,7 @@ impl PrInventoryItem {
         self.lifecycle_source = "held".to_string();
         self.default_action = decision.default_action;
         self.default_action_executable = decision.default_action_executable;
+        self.default_action_operation = decision.default_action_operation.map(str::to_string);
         self.blocker = decision.blocker;
         self.fallback = decision.fallback;
     }
@@ -585,6 +603,7 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     } else {
         None
     };
+    let default_action_operation = default_action_operation(class, fields.is_draft);
     let default_action_executable = !(class.relaunches_owner() && blocker.is_some());
     let fallback =
         (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string());
@@ -596,8 +615,29 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         default_action,
         dwell_hours: None,
         default_action_executable,
+        default_action_operation,
         blocker: blocker.map(str::to_string),
         fallback,
+    }
+}
+
+/// The JSON operation that performs the class's default action, when the
+/// action is one a surface executes rather than advice the PM acts on
+/// (SPEC #3835 AC-17).
+///
+/// Every name returned here must be an operation the envelope parser accepts;
+/// `crates/gwt` fixes that with a test, because this crate cannot see the
+/// operation table.
+fn default_action_operation(class: PrLifecycleClass, is_draft: bool) -> Option<&'static str> {
+    match (class, is_draft) {
+        // "mark ready"
+        (PrLifecycleClass::MergeCandidate, true) => Some("pr.ready"),
+        // "update-branch"
+        (PrLifecycleClass::Behind, _) => Some("pr.update_branch"),
+        // "propose merge" is a proposal, and merging is `auto-merge.yml`'s job.
+        // Conflict and CI-red relaunch the owner; superseded, in-progress and
+        // undetermined are digest lines and holds.
+        _ => None,
     }
 }
 
@@ -616,6 +656,13 @@ fn inventory_item_from_fields(
         .include
         .body
         .then(|| body_defers_user_verification(&fields.body));
+    let owner_issue_source = if !fields.closing_issues.is_empty() {
+        Some("closing_issues")
+    } else if decision.owner_issue.is_some() {
+        Some("head_branch")
+    } else {
+        None
+    };
     PrInventoryItem {
         number: fields.number,
         title: fields.title,
@@ -634,10 +681,12 @@ fn inventory_item_from_fields(
         stale: decision.stale,
         owner_issue_closed: decision.owner_issue_closed,
         owner_issue: decision.owner_issue,
+        owner_issue_source: owner_issue_source.map(str::to_string),
         default_action: decision.default_action,
         dwell_hours: decision.dwell_hours,
         stale_after_hours: options.stale_after_hours,
         default_action_executable: decision.default_action_executable,
+        default_action_operation: decision.default_action_operation.map(str::to_string),
         blocker: decision.blocker,
         fallback: decision.fallback,
         unchanged_cycles: 0,
@@ -1321,7 +1370,7 @@ pub fn fetch_pr_status(repo_slug: &str, number: u64) -> Result<PrStatus> {
         "--repo",
         repo_slug,
         "--json",
-        "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+        "number,title,state,url,headRefName,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
     ];
     let label = format!("gh pr view {}", number);
     let output = gwt_core::process_console::spawn_logged_blocking(
@@ -1370,6 +1419,7 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
 
     Ok(PrStatus {
         number,
+        head_ref_name: v["headRefName"].as_str().unwrap_or_default().to_string(),
         title,
         state,
         url,
@@ -1770,7 +1820,7 @@ where
             "pr",
             "list",
             "--json",
-            "number,title,state,url,createdAt,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
+            "number,title,state,url,headRefName,createdAt,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
             "--state",
             "all",
             "--limit",
@@ -1854,6 +1904,7 @@ fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
                 }
             };
             PrStatus {
+                head_ref_name: v["head"]["ref"].as_str().unwrap_or_default().to_string(),
                 number: v
                     .get("number")
                     .and_then(serde_json::Value::as_u64)
@@ -2936,6 +2987,7 @@ mod tests {
         let json = r#"{
             "number": 123,
             "title": "Add feature",
+            "headRefName": "work/issue-3835",
             "state": "OPEN",
             "url": "https://github.com/owner/repo/pull/123",
             "mergeable": "MERGEABLE",
@@ -2949,12 +3001,46 @@ mod tests {
         let pr = parse_pr_status_json(json).unwrap();
         assert_eq!(pr.number, 123);
         assert_eq!(pr.title, "Add feature");
+        assert_eq!(
+            serde_json::to_value(&pr).unwrap()["head_ref_name"],
+            "work/issue-3835"
+        );
         assert_eq!(pr.state, PrState::Open);
         assert_eq!(pr.ci_status, "SUCCESS");
         assert_eq!(pr.mergeable, "MERGEABLE");
         assert_eq!(pr.merge_state_status, "CLEAN");
         assert_eq!(pr.effective_merge_status(), "MERGEABLE");
         assert_eq!(pr.review_status, "APPROVED");
+    }
+
+    #[test]
+    fn inventory_owner_source_distinguishes_closing_issue_branch_and_unknown() {
+        let mut fields = sample_inventory_fields();
+        fields.head_ref_name = "work/issue-3835".to_string();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("OPEN".to_string()),
+        }];
+        for (owner, source) in [
+            (Some(10), Some("closing_issues")),
+            (Some(3835), Some("head_branch")),
+            (None, None),
+        ] {
+            let row = inventory_item_from_fields(
+                fields.clone(),
+                now_3868(),
+                &PrInventoryOptions::default(),
+            );
+            assert_eq!(row.owner_issue, owner);
+            assert_eq!(
+                serde_json::to_value(row).unwrap()["owner_issue_source"],
+                serde_json::json!(source)
+            );
+            if fields.closing_issues.is_empty() {
+                fields.head_ref_name = "feature/no-owner".to_string();
+            }
+            fields.closing_issues.clear();
+        }
     }
 
     #[test]
@@ -3176,6 +3262,7 @@ mod tests {
     #[test]
     fn latest_pr_by_created_at_prefers_newest_pr() {
         let older = PrStatus {
+            head_ref_name: String::new(),
             number: 2537,
             title: "Older PR".to_string(),
             state: PrState::Closed,
@@ -3187,6 +3274,7 @@ mod tests {
             review_status: "APPROVED".to_string(),
         };
         let newer = PrStatus {
+            head_ref_name: String::new(),
             number: 2538,
             title: "Newer PR".to_string(),
             state: PrState::Open,
@@ -3215,6 +3303,7 @@ mod tests {
             {
                 "number": 11,
                 "title": "REST fallback PR",
+                "head": { "ref": "work/issue-3835" },
                 "state": "open",
                 "html_url": "https://github.com/o/r/pull/11"
             }
@@ -3224,6 +3313,10 @@ mod tests {
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].number, 11);
         assert_eq!(prs[0].title, "REST fallback PR");
+        assert_eq!(
+            serde_json::to_value(&prs[0]).unwrap()["head_ref_name"],
+            "work/issue-3835"
+        );
         assert_eq!(prs[0].state, PrState::Open);
         assert_eq!(prs[0].url, "https://github.com/o/r/pull/11");
         assert_eq!(prs[0].ci_status, "UNKNOWN");
@@ -3239,6 +3332,8 @@ mod tests {
 
         let prs = fetch_pr_list_with(repo_path, |path, args| {
             assert_eq!(path, repo_path);
+            assert!(args.windows(2).any(|pair| pair[0] == "--json"
+                && pair[1].split(',').any(|field| field == "headRefName")));
             calls.push(args[..2].join(" "));
             match args {
                 ["pr", "list", ..] => Ok(GhCliOutput {
@@ -4083,6 +4178,53 @@ mod tests {
         let decision = classify_pr_lifecycle_with(&fields, now_3868(), &tight);
         assert!(decision.stale, "25h exceeds a 24h threshold");
         assert_eq!(decision.default_action, "escalate: no update for 24h");
+    }
+
+    /// SPEC #3835 AC-17: `update-branch` names the operation that performs it,
+    /// so "the PM may do this" and "a surface can do this" stop disagreeing.
+    #[test]
+    fn a_behind_pr_names_the_operation_that_resolves_it() {
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::Behind);
+        assert_eq!(decision.default_action, "update-branch");
+        assert_eq!(decision.default_action_operation, Some("pr.update_branch"));
+        assert!(decision.default_action_executable);
+    }
+
+    /// SPEC #3835 AC-17: advisory actions name no operation. "leave in
+    /// progress" and "propose close in digest" are things the PM decides, not
+    /// calls it makes, so claiming an operation for them would be the same
+    /// dishonesty in the other direction.
+    #[test]
+    fn advisory_default_actions_name_no_operation() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "PENDING".to_string();
+        let in_progress = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(in_progress.class, PrLifecycleClass::InProgress);
+        assert_eq!(in_progress.default_action_operation, None);
+
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("CLOSED".to_string()),
+        }];
+        let superseded = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(superseded.class, PrLifecycleClass::Superseded);
+        assert_eq!(superseded.default_action_operation, None);
+    }
+
+    /// SPEC #3835 AC-17: a Draft merge candidate is promoted through the
+    /// canonical `pr.ready`, never through a bare `gh` mutation.
+    #[test]
+    fn a_draft_merge_candidate_names_pr_ready() {
+        let mut fields = sample_inventory_fields();
+        fields.is_draft = true;
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+        assert_eq!(decision.default_action, "mark ready");
+        assert_eq!(decision.default_action_operation, Some("pr.ready"));
     }
 
     /// Issue #4074 AC-2: the launch guard now inherits a launch ref carrying
