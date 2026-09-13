@@ -579,6 +579,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
         }),
+        // SPEC #3835 AC-15 / AC-17: the operation behind the `update-branch`
+        // default action, which `pr.list` recommended for a year without one.
+        "pr.update_branch" | "pr.update-branch" => CliCommand::Pr(PrCommand::UpdateBranch {
+            number: required_u64(params, "number")?,
+        }),
         "pr.comment" => CliCommand::Pr(PrCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -633,6 +638,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
             hook_register_codex_trust(params)?
         }
+        "hook.register_codex_managed_project_trust"
+        | "hook.register-codex-managed-project-trust" => hook_register_codex_project_trust(params)?,
         "hook.health" => hook_health(params)?,
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
@@ -1104,6 +1111,24 @@ fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, 
     }
     Ok(CliCommand::Hook(HookCommand::Run {
         name: "register-codex-managed-hook-trust".to_string(),
+        rest,
+    }))
+}
+
+fn hook_register_codex_project_trust(
+    params: &Map<String, Value>,
+) -> Result<CliCommand, CliParseError> {
+    let mut rest = Vec::new();
+    if let Some(project_root) = optional_string(params, "project_root")? {
+        rest.push("--project-root".to_string());
+        rest.push(project_root);
+    }
+    if let Some(codex_config) = optional_string(params, "codex_config")? {
+        rest.push("--codex-config".to_string());
+        rest.push(codex_config);
+    }
+    Ok(CliCommand::Hook(HookCommand::Run {
+        name: "register-codex-managed-project-trust".to_string(),
         rest,
     }))
 }
@@ -1728,6 +1753,78 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    /// SPEC #3835 AC-15: the operation behind the `update-branch` default
+    /// action, so a `BEHIND` PR has a surface that can move it.
+    #[test]
+    fn pr_update_branch_parses_under_both_spellings() {
+        use crate::cli::PrCommand;
+        for operation in ["pr.update_branch", "pr.update-branch"] {
+            assert_eq!(
+                ok(operation, json!({"number": 4139})),
+                CliCommand::Pr(PrCommand::UpdateBranch { number: 4139 })
+            );
+        }
+        assert!(matches!(
+            err("pr.update_branch", json!({})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// SPEC #3835 AC-17: every default action that names an operation names a
+    /// real one. `pr.list` reported `default_action: "update-branch"` with
+    /// `default_action_executable: true` on 21 of 25 open PRs while no such
+    /// operation existed, so its only recommended action was unrunnable.
+    ///
+    /// This test is the structural guard: `gwt-git` cannot see the operation
+    /// table, so the invariant has to be fixed from this side.
+    #[test]
+    fn every_named_pr_default_action_operation_is_callable() {
+        use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
+
+        let now = chrono::Utc::now();
+        let mut seen_update_branch = false;
+        for (mergeable, merge_state_status, ci_status, is_draft) in [
+            ("MERGEABLE", "BEHIND", "SUCCESS", true),
+            ("MERGEABLE", "BEHIND", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "SUCCESS", true),
+            ("MERGEABLE", "CLEAN", "SUCCESS", false),
+            ("CONFLICTING", "DIRTY", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "FAILURE", false),
+            ("MERGEABLE", "CLEAN", "PENDING", false),
+            ("UNKNOWN", "UNKNOWN", "UNKNOWN", false),
+        ] {
+            let fields = PrInventoryFields {
+                number: 4139,
+                title: "a PR".to_string(),
+                url: "https://example.com/pr/4139".to_string(),
+                is_draft,
+                head_ref_name: "work/issue-4131".to_string(),
+                updated_at: Some(now),
+                mergeable: mergeable.to_string(),
+                merge_state_status: merge_state_status.to_string(),
+                ci_status: ci_status.to_string(),
+                review_status: "APPROVED".to_string(),
+                body: String::new(),
+                closing_issues: Vec::new(),
+            };
+            let decision = classify_pr_lifecycle(&fields, now);
+            let Some(operation) = decision.default_action_operation else {
+                continue;
+            };
+            seen_update_branch |= operation == "pr.update_branch";
+            if let Err(error) = parse(&envelope(operation, json!({"number": 4139}))) {
+                panic!(
+                    "`{}` recommends `{operation}`, which no operation implements: {error}",
+                    decision.default_action
+                );
+            }
+        }
+        assert!(
+            seen_update_branch,
+            "a BEHIND PR must name the operation that resolves it"
+        );
     }
 
     /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
@@ -3947,6 +4044,24 @@ mod tests {
             ),
             CliCommand::Hook(_)
         ));
+        assert_eq!(
+            ok(
+                "hook.register_codex_managed_project_trust",
+                json!({
+                    "project_root": "/repo",
+                    "codex_config": "/cfg",
+                })
+            ),
+            CliCommand::Hook(HookCommand::Run {
+                name: "register-codex-managed-project-trust".to_string(),
+                rest: vec![
+                    "--project-root".to_string(),
+                    "/repo".to_string(),
+                    "--codex-config".to_string(),
+                    "/cfg".to_string(),
+                ],
+            })
+        );
     }
 
     #[test]

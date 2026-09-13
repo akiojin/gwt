@@ -2287,6 +2287,40 @@ pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
 /// spends the real budget from every fixture-free test.
 const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
 
+/// Every environment override a `verify.run` child receives, as explicit
+/// `(key, value)` pairs on top of the inherited environment — `None` removes
+/// the variable (#4182 AC-7 / AC-11).
+///
+/// This list exists so the contract is written once instead of being patched
+/// one symptom at a time. A `verify.run` child is a test runner, and a test
+/// runner that differs from an ordinary shell produces verdicts nobody can
+/// reproduce: a command that passes in the terminal but fails under
+/// `verify.run` reads as a real RED and sends its owner after a bug that is
+/// not there.
+fn child_environment_contract() -> Vec<(&'static str, Option<&'static str>)> {
+    vec![
+        // Live GitHub opt-in must never cross the child boundary (SPEC #4093
+        // FR-008, Issue #3850): a `cargo test` child that inherits it spends
+        // the real budget from every fixture-free test.
+        (LIVE_GITHUB_OPT_IN_ENV, None),
+        // A test that fetches an unreachable remote makes Windows'
+        // `git-credential-manager` ask for input, and a child with no console
+        // waits on that prompt forever — taking the host-wide verification
+        // lease down with it (#4182 AC-7). GitHub's runners set this for
+        // every step, which is precisely why CI never sees the hang.
+        ("GIT_TERMINAL_PROMPT", Some("0")),
+    ]
+}
+
+fn apply_child_environment_contract(process: &mut std::process::Command) {
+    for (key, value) in child_environment_contract() {
+        match value {
+            Some(value) => process.env(key, value),
+            None => process.env_remove(key),
+        };
+    }
+}
+
 fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
     execute_command_with_isolation(worktree, command, false)
 }
@@ -2298,10 +2332,8 @@ fn execute_command_with_isolation(
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
     let mut process = gwt_core::process::hidden_command(&args[0]);
-    process
-        .args(&args[1..])
-        .current_dir(worktree)
-        .env_remove(LIVE_GITHUB_OPT_IN_ENV);
+    process.args(&args[1..]).current_dir(worktree);
+    apply_child_environment_contract(&mut process);
     if isolated_baseline {
         gwt_core::process::scrub_git_env(&mut process);
         process.env_remove("CARGO_TARGET_DIR");
@@ -4561,6 +4593,42 @@ mod tests {
         );
     }
 
+    // #4182 AC-7 / AC-11: the child environment is one declared contract,
+    // not a pile of per-symptom patches at the spawn site. Pinning the list
+    // here is what makes a future omission visible before a Windows host
+    // hangs on it again.
+    #[test]
+    fn verify_run_child_environment_contract_is_declared_in_one_place() {
+        assert_eq!(
+            child_environment_contract(),
+            vec![
+                ("GWT_ALLOW_REAL_GH", None),
+                ("GIT_TERMINAL_PROMPT", Some("0")),
+            ],
+            "the verify.run child environment contract changed — update #4182's rationale with it"
+        );
+    }
+
+    // #4182 AC-7: a test that fetches an unreachable remote makes Windows'
+    // `git-credential-manager` prompt for input on a child with no console,
+    // and the whole run blocks there forever while holding the host-wide
+    // verification lease. CI never sees it because GitHub's runners set this
+    // variable for every step; verify.run has to do the same.
+    #[test]
+    fn verify_run_child_cannot_be_blocked_by_a_git_credential_prompt() {
+        let mut process = gwt_core::process::hidden_command("git");
+        apply_child_environment_contract(&mut process);
+        let terminal_prompt = process
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("GIT_TERMINAL_PROMPT"))
+            .map(|(_, value)| value);
+        assert_eq!(
+            terminal_prompt,
+            Some(Some(std::ffi::OsStr::new("0"))),
+            "verify.run children must never be able to open a credential prompt"
+        );
+    }
+
     // record is written even when a command fails.
     #[test]
     fn run_verification_records_pass_and_fail() {
@@ -5184,6 +5252,7 @@ mod tests {
             gwt_git::PrStatus {
                 number: 3854,
                 title: "typed quarantine".to_string(),
+                head_ref_name: String::new(),
                 state: gwt_git::pr_status::PrState::Open,
                 url: "https://example.invalid/pull/3854".to_string(),
                 created_at: None,
