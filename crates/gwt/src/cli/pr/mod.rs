@@ -24,7 +24,8 @@ pub(super) use gh::{
     parse_available_fields, parse_pr_checks_items_json, parse_pr_checks_items_response,
     parse_pr_number_from_url, probe_github_rate_limit_via_gh,
     reply_and_resolve_pr_review_threads_via_gh, review_thread_has_comment_body,
-    should_reply_to_review_thread, should_resolve_review_thread,
+    should_reply_to_review_thread, should_resolve_review_thread, update_branch_failure_is_conflict,
+    update_pr_branch_via_gh,
 };
 
 use gwt_git::PrStatus;
@@ -71,6 +72,11 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Draft { number })
+        }
+        Some("update-branch") => {
+            let number = super::parse_required_number(it.next())?;
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::UpdateBranch { number })
         }
         Some("comment") => {
             let number = super::parse_required_number(it.next())?;
@@ -244,6 +250,34 @@ fn verification_adjudication_note(
     note
 }
 
+/// The body a Ready handoff would publish, or the body the target PR already
+/// carries (Issue #4217 AC-4).
+fn ready_handoff_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<String> {
+    match cmd {
+        PrCommand::CreateBody { body, .. } => Ok(body.clone()),
+        PrCommand::Create { file, .. } => env.read_file(file),
+        PrCommand::Ready { number } => env
+            .fetch_pr_quarantine_context(*number)
+            .map(|context| context.body),
+        other => Err(std::io::Error::other(format!(
+            "not a Ready handoff: {other:?} carries no PR body"
+        ))),
+    }
+}
+
+/// Issue #4217 AC-4 / FR-004: why a deferred verification stops at Draft.
+fn deferred_user_verification_refusal() -> String {
+    format!(
+        "PR handoff refused: this PR records `{label} {deferred}`, so it stays Draft until \
+         the owner performs the visual check. Automation ends at PR creation; the merge \
+         decision is the owner's. List what is waiting with `pr.list` \
+         (`include: [\"body\"]`, field `deferred_user_verification`), and mark this PR Ready \
+         only after the result is `confirmed`.\n",
+        label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+        deferred = gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+    )
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     cmd: PrCommand,
@@ -296,6 +330,27 @@ pub(super) fn run<E: CliEnv>(
                 PrCommand::Ready { number } => Some(*number),
                 _ => None,
             };
+            // Issue #4217 AC-4: a body that postpones the owner's visual check
+            // keeps its PR Draft. Deferral is not a verdict, and Ready is the
+            // step that hands the change to `auto-merge.yml` — which keys on
+            // `draft == false` — so this is exactly where the postponement has
+            // to hold. Nothing here touches the Draft flow: only the Ready door.
+            //
+            // An unreadable body cannot establish whether verification was
+            // deferred. Keep the PR Draft until the body can be checked.
+            let body = match ready_handoff_body(env, &cmd) {
+                Ok(body) => body,
+                Err(error) => {
+                    out.push_str(&format!(
+                        "PR handoff refused: PR body is unreadable: {error}. Restore body access and retry the Ready handoff.\n"
+                    ));
+                    return Ok(2);
+                }
+            };
+            if gwt_git::pr_status::body_defers_user_verification(&body) {
+                out.push_str(&deferred_user_verification_refusal());
+                return Ok(2);
+            }
             let completed_evidence = crate::cli::execution_state::load(&worktree)
                 .map_err(super::io_as_api_error)?
                 .filter(|record| {
@@ -590,6 +645,34 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(&format!("converted pull request #{number} to draft\n"));
             render_pr(out, &pr);
             0
+        }
+        // SPEC #3835 AC-15: the way out of `BEHIND`. Deliberately not a
+        // "PR mutation" in the Ready-gate sense — it changes no PR content and
+        // claims no verification, so the PM can run it on any owner's PR
+        // without holding that owner's execution binding.
+        PrCommand::UpdateBranch { number } => {
+            let result = env
+                .update_pr_branch(number)
+                .map_err(super::io_as_api_error)?;
+            match result.outcome {
+                crate::cli::PrUpdateBranchOutcome::Updated => {
+                    out.push_str(&format!(
+                        "updated pull request #{number} branch with its base\n"
+                    ));
+                    0
+                }
+                crate::cli::PrUpdateBranchOutcome::Conflicted => {
+                    out.push_str(&format!(
+                        "update-branch refused: PR #{number} is CONFLICTED — merging the base \
+                         would conflict, so nothing was pushed. Resolving the conflict is the \
+                         owner's work; relaunch the owner instead of retrying.\n"
+                    ));
+                    if !result.detail.is_empty() {
+                        out.push_str(&format!("detail: {}\n", result.detail));
+                    }
+                    2
+                }
+            }
         }
         PrCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
@@ -1056,7 +1139,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         .items
         .iter()
         .map(|item| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "number": item.number,
                 "title": item.title,
                 "url": item.url,
@@ -1075,14 +1158,20 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
                 "dwell_hours": item.dwell_hours,
                 "owner_issue_closed": item.owner_issue_closed,
                 "owner_issue": item.owner_issue,
+                "owner_issue_source": item.owner_issue_source,
                 "default_action": item.default_action,
                 "default_action_executable": item.default_action_executable,
+                "default_action_operation": item.default_action_operation,
                 "blocker": item.blocker,
                 "fallback": item.fallback,
                 "unchanged_cycles": item.unchanged_cycles,
                 "escalate_after_cycles": item.escalate_after_cycles,
                 "escalation_due": item.escalation_due,
-            })
+            });
+            if let Some(deferred) = item.deferred_user_verification {
+                row["deferred_user_verification"] = serde_json::json!(deferred);
+            }
+            row
         })
         .collect();
     // Issue #4074 FR-005: branches whose commits have nowhere to land ride
@@ -1126,6 +1215,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
 pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
     out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
+    out.push_str(&format!("head_ref_name: {}\n", pr.head_ref_name));
     out.push_str(&format!("ci: {}\n", pr.ci_status));
     out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
     out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
@@ -1209,6 +1299,17 @@ mod tests {
         value.to_string()
     }
 
+    fn seed_readable_pr_body(env: &mut crate::cli::TestEnv) {
+        env.pr_quarantine_contexts.insert(
+            7,
+            PrQuarantineContext {
+                number: 7,
+                body: "User Verification Result: confirmed\n".to_string(),
+                comments: Vec::new(),
+            },
+        );
+    }
+
     fn seeded_inventory_item() -> gwt_git::PrInventoryItem {
         gwt_git::PrInventoryItem {
             number: 7,
@@ -1228,20 +1329,24 @@ mod tests {
             stale: false,
             owner_issue_closed: false,
             owner_issue: Some(7),
+            owner_issue_source: Some("head_branch".to_string()),
             default_action: "propose merge".to_string(),
             dwell_hours: Some(5),
             stale_after_hours: 72,
             default_action_executable: false,
+            default_action_operation: None,
             blocker: Some("owner_issue_closed".to_string()),
             fallback: Some(gwt_git::PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string()),
             unchanged_cycles: 2,
             escalate_after_cycles: 3,
             escalation_due: false,
+            deferred_user_verification: None,
         }
     }
 
     fn seeded_pr() -> gwt_git::PrStatus {
         gwt_git::PrStatus {
+            head_ref_name: String::new(),
             number: 7,
             title: "CLI family split".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -1461,6 +1566,7 @@ mod tests {
         );
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
 
         let mut out = String::new();
@@ -1580,6 +1686,7 @@ mod tests {
         ));
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
 
         let mut out = String::new();
@@ -1688,6 +1795,7 @@ mod tests {
 
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
         let mut out = String::new();
         assert_eq!(
             run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
@@ -1857,6 +1965,7 @@ mod tests {
                 crate::cli::verification_record::VerifyCommand::Run {
                     commands: vec!["git --version".to_string()],
                     max_wait_secs: None,
+                    user_verification_result: None,
                 },
                 &mut verify_out,
             )
@@ -1991,6 +2100,7 @@ mod tests {
                 crate::cli::verification_record::VerifyCommand::Run {
                     commands: vec!["git --version".to_string()],
                     max_wait_secs: None,
+                    user_verification_result: None,
                 },
                 &mut verify_out,
             )
@@ -2005,6 +2115,7 @@ mod tests {
             "verification must not manufacture the missing receipt used by this acceptance case",
         );
         env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
 
         // Comment was already outside `is_pr_mutation`; keep it in this
@@ -2129,6 +2240,7 @@ mod tests {
 
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
 
         // Active execution without evidence: non-draft create and Ready refuse.
@@ -2341,6 +2453,7 @@ mod tests {
 
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
         let mut verify_out = String::new();
         let code = crate::cli::verification_record::run(
@@ -2469,6 +2582,40 @@ mod tests {
     }
 
     #[test]
+    fn pr_list_renders_deferred_user_verification_for_owner_review() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut item = seeded_inventory_item();
+        item.is_draft = true;
+        item.deferred_user_verification = Some(true);
+        env.seed_pr_inventory(vec![item]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+                refresh: false,
+                include: Some(gwt_git::PrInventoryInclude {
+                    body: true,
+                    ..gwt_git::PrInventoryInclude::default()
+                }),
+                force_reason: None,
+            },
+            &mut out,
+        )
+        .expect("list deferred PRs");
+
+        assert_eq!(code, 0, "{out}");
+        let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            payload["pull_requests"][0]["deferred_user_verification"],
+            true
+        );
+    }
+
+    #[test]
     fn pr_family_run_renders_open_pr_inventory_json() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
@@ -2490,6 +2637,11 @@ mod tests {
 
         assert_eq!(code, 0);
         assert_eq!(env.pr_list_call_count, 1);
+        let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            payload["pull_requests"][0]["owner_issue_source"],
+            "head_branch"
+        );
         assert!(out.contains("\"lifecycle\": \"MERGE-CANDIDATE\""), "{out}");
         assert!(
             out.contains("\"default_action\": \"propose merge\""),
@@ -2497,6 +2649,7 @@ mod tests {
         );
         assert!(out.contains("\"count\": 1"), "{out}");
         assert!(!out.contains("CLI family split body"), "{out}");
+        assert!(!out.contains("deferred_user_verification"), "{out}");
         // Issue #3891 AC-1 / AC-4: where the rows came from and what the read
         // cost are part of every answer, so a throttled or cached read is
         // observable by the PM.
@@ -2529,6 +2682,16 @@ mod tests {
             env.pr_list_options,
             Some(gwt_git::PrInventoryOptions::default())
         );
+    }
+
+    #[test]
+    fn pr_view_renders_the_head_branch() {
+        let mut value = serde_json::to_value(seeded_pr()).unwrap();
+        value["head_ref_name"] = serde_json::json!("work/issue-3835");
+        let pr = serde_json::from_value(value).unwrap();
+        let mut out = String::new();
+        render_pr(&mut out, &pr);
+        assert!(out.contains("head_ref_name: work/issue-3835\n"), "{out}");
     }
 
     #[test]
@@ -2612,11 +2775,188 @@ mod tests {
         );
     }
 
+    /// SPEC #3835 AC-15: `update-branch` is the PM's only way out of `BEHIND`,
+    /// and until now it had no operation behind it — 15 fully green PRs sat
+    /// waiting on a step no surface could take (Issue #3835, 2026-09-11).
+    #[test]
+    fn update_branch_merges_the_base_into_a_behind_pr() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.pr_update_branch_outcomes.insert(
+            7,
+            crate::cli::PrUpdateBranchResult {
+                number: 7,
+                outcome: crate::cli::PrUpdateBranchOutcome::Updated,
+                detail: String::new(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::UpdateBranch { number: 7 }, &mut out)
+            .expect("run pr update-branch");
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_update_branch_call_log, vec![7]);
+        assert!(out.contains("updated pull request #7 branch"), "{out}");
+    }
+
+    /// SPEC #3835 AC-15 / FR-007: a conflicting update is refused, not
+    /// resolved. The PM reports `CONFLICTED` and hands the work back to the
+    /// owner; conflict resolution is never a PM automatic action.
+    #[test]
+    fn update_branch_refuses_a_conflicting_pr_as_conflicted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.pr_update_branch_outcomes.insert(
+            7,
+            crate::cli::PrUpdateBranchResult {
+                number: 7,
+                outcome: crate::cli::PrUpdateBranchOutcome::Conflicted,
+                detail: "merge conflict between base and head".to_string(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::UpdateBranch { number: 7 }, &mut out)
+            .expect("run pr update-branch");
+
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("CONFLICTED"), "{out}");
+        assert!(out.contains("owner"), "{out}");
+        assert!(
+            out.contains("merge conflict between base and head"),
+            "GitHub's own wording has to survive to the PM: {out}"
+        );
+    }
+
+    /// Issue #4217 AC-4 / FR-004: automation ends at PR creation. A body that
+    /// postpones the owner's visual check keeps its PR Draft, so
+    /// `auto-merge.yml` — which acts only on `draft == false` — never sees it.
+    #[test]
+    fn a_deferred_user_verification_keeps_its_pr_draft() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.pr_quarantine_contexts.insert(
+            7,
+            crate::cli::pr::PrQuarantineContext {
+                number: 7,
+                body: format!(
+                    "## Verification\n{} {}\n",
+                    gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+                    gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+                ),
+                comments: Vec::new(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("stays Draft"), "{out}");
+        assert!(
+            env.pr_ready_call_log.is_empty(),
+            "the refusal must happen before the mutation"
+        );
+
+        // The same postponement refuses a Ready-at-creation, which is the
+        // other door into `draft == false`.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: "develop".to_string(),
+                head: None,
+                title: "feat: deferred".to_string(),
+                body: format!(
+                    "{} {}\n",
+                    gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+                    gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+                ),
+                labels: Vec::new(),
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run pr create");
+        assert_eq!(code, 2, "{out}");
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "the refusal must happen before the mutation"
+        );
+    }
+
+    /// AC-4: an unreadable body cannot prove that the owner completed their
+    /// visual verification, so Ready must wait for a successful read.
+    #[test]
+    fn unreadable_user_verification_keeps_its_pr_draft() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("PR body is unreadable"), "{out}");
+        assert!(out.contains("retry"), "{out}");
+        assert!(
+            env.pr_ready_call_log.is_empty(),
+            "an unreadable body must refuse before the Ready mutation"
+        );
+    }
+
+    /// AC-4 non-regression: the Draft flow stays open mid-work, and a PR whose
+    /// verification was performed or never applied is unaffected.
+    #[test]
+    fn a_settled_user_verification_still_reaches_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+        env.pr_quarantine_contexts.insert(
+            7,
+            crate::cli::pr::PrQuarantineContext {
+                number: 7,
+                body: "## Verification\nUser Verification Result: confirmed\n".to_string(),
+                comments: Vec::new(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: "develop".to_string(),
+                head: None,
+                title: "feat: deferred but draft".to_string(),
+                body: format!(
+                    "{} {}\n",
+                    gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+                    gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
+                ),
+                labels: Vec::new(),
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run pr create draft");
+        assert_eq!(
+            code, 0,
+            "a deferred verification is exactly what a Draft PR is for: {out}"
+        );
+    }
+
     #[test]
     fn pr_family_ready_and_draft_dispatch_through_env() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
+        seed_readable_pr_body(&mut env);
 
         let mut out = String::new();
         let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
@@ -2658,6 +2998,7 @@ mod tests {
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
             number: 2538,
+            head_ref_name: String::new(),
             title: "Active Work title".to_string(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://github.com/akiojin/gwt/pull/2538".to_string(),
@@ -2964,6 +3305,7 @@ mod tests {
         env.files.insert("body.md".to_string(), "Body".to_string());
         env.seed_created_pr(gwt_git::PrStatus {
             number: 2540,
+            head_ref_name: String::new(),
             title: "Other branch PR".to_string(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://github.com/akiojin/gwt/pull/2540".to_string(),
@@ -3312,6 +3654,7 @@ mod tests {
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
             number: 9999,
+            head_ref_name: String::new(),
             title: "Auto-done PR".to_string(),
             state: gwt_git::pr_status::PrState::Merged,
             url: "https://github.com/akiojin/gwt/pull/9999".to_string(),
@@ -3438,7 +3781,14 @@ mod tests {
             review_status: "REVIEW_REQUIRED".to_string(),
         }));
 
-        let mut current = WorkspaceProjection::default_for_project(&repo);
+        // The producer resolves the project state root through
+        // `resolve_current_worktree_root`, so the transaction rewrites
+        // `project_root` into git's own spelling (`C:/...` on Windows) even
+        // when nothing else changes. Seed the fixture with the same resolver
+        // so the whole-struct comparison below stays a PR-metadata assertion
+        // instead of a path-spelling one.
+        let project_state_root = gwt_core::paths::resolve_current_worktree_root(&repo);
+        let mut current = WorkspaceProjection::default_for_project(&project_state_root);
         current.id = "foreign-current".to_string();
         current.git_details = Some(GitDetails {
             branch: Some("work/foreign-current".to_string()),

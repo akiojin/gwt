@@ -569,6 +569,67 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.match(text, /board-claim-1/);
 });
 
+// Issue #3697 AC-7: the Work event producer now carries pr_number / pr_url /
+// pr_state, but Linked Work printed the number as plain text and dropped the
+// URL, so the PR the Work is linked to was not reachable from the detail pane.
+test("Linked Work links the PR through the shared PR renderer", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, sampleProjection());
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const detail = fixture.body.querySelector(".workspace-overview-detail-pane");
+  assert.ok(detail);
+  const linkedWork = Array.from(
+    detail.querySelectorAll(".workspace-detail-section"),
+  ).find(
+    (section) =>
+      section.querySelector(".workspace-detail-section-title")?.textContent ===
+      "Linked Work",
+  );
+  assert.ok(linkedWork, "expected a Linked Work section");
+
+  const link = linkedWork.querySelector("a.workspace-pr-link");
+  assert.ok(link, "expected the Linked Work PR row to be a link, not plain text");
+  assert.equal(link.getAttribute("href"), "https://github.com/akiojin/gwt/pull/2847");
+  assert.equal(link.textContent, "PR #2847");
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.equal(link.getAttribute("rel"), "noopener noreferrer");
+
+  // The shared renderer already carries the PR state, so the section shows it
+  // exactly once rather than duplicating it in a separate row.
+  const sectionText = linkedWork.textContent.replace(/\s+/g, " ").trim();
+  assert.equal(sectionText.match(/open/g)?.length, 1);
+});
+
+test("Linked Work falls back to plain PR text when the projection has no PR url", () => {
+  const projection = sampleProjection();
+  projection.works[0].pr_url = "";
+  projection.pr_url = "";
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const detail = fixture.body.querySelector(".workspace-overview-detail-pane");
+  const linkedWork = Array.from(
+    detail.querySelectorAll(".workspace-detail-section"),
+  ).find(
+    (section) =>
+      section.querySelector(".workspace-detail-section-title")?.textContent ===
+      "Linked Work",
+  );
+  assert.ok(linkedWork);
+  assert.equal(linkedWork.querySelector("a.workspace-pr-link"), null);
+  assert.match(linkedWork.textContent.replace(/\s+/g, " "), /PR #2847/);
+});
+
 test("Workspace detail renders backend execution diagnosis without replacing the Work purpose", () => {
   const projection = sampleProjection();
   projection.works[0].works = [
@@ -1893,10 +1954,24 @@ function createSurface(fixture, projection, overrides = {}) {
       if (!value) return;
       container.appendChild(createNode(fixture.document, "span", "", value));
     },
+    // Mirrors app.js `createWorkspacePrMeta`: the PR number is an anchor to
+    // `pr_url` when one exists, with the PR state appended as meta text.
     createWorkspacePrMeta: (entry) => {
       if (!entry?.pr_number) return null;
       const node = createNode(fixture.document, "span", "workspace-pr-meta");
-      node.textContent = `PR #${entry.pr_number}`;
+      const label = `PR #${entry.pr_number}`;
+      if (entry.pr_url) {
+        const link = createNode(fixture.document, "a", "workspace-pr-link", label);
+        link.href = entry.pr_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        node.appendChild(link);
+      } else {
+        node.appendChild(createNode(fixture.document, "span", "", label));
+      }
+      if (entry.pr_state) {
+        node.appendChild(createNode(fixture.document, "span", "", entry.pr_state));
+      }
       return node;
     },
     createNode: (tag, className, text) =>

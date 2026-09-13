@@ -931,7 +931,15 @@ export function createWorkspaceKanbanSurface({
     for (const [label, value] of rows) {
       if (!value) continue;
       list.appendChild(createNode("dt", "", label));
-      list.appendChild(createNode("dd", "", value));
+      // A row may carry a prebuilt node (e.g. the shared PR renderer) so the
+      // detail pane keeps the same anchors the list rows use.
+      if (typeof value === "object") {
+        const cell = createNode("dd", "");
+        cell.appendChild(value);
+        list.appendChild(cell);
+      } else {
+        list.appendChild(createNode("dd", "", value));
+      }
     }
     if (list.childNodes.length > 0) {
       container.appendChild(list);
@@ -1850,13 +1858,16 @@ export function createWorkspaceKanbanSurface({
     );
     container.appendChild(
       detailSection("Linked Work", (body) => {
-        const prMeta = createWorkspacePrMeta?.(workspace);
+        // Issue #3697 AC-7: reuse the shared PR renderer so Linked Work links
+        // to `pr_url` instead of printing the number as plain text. The
+        // renderer already appends the PR state, so the separate state row is
+        // only needed on the plain-text fallback.
+        const prMeta = workspace.pr_number ? createWorkspacePrMeta?.(workspace) : null;
         appendDefinitionList(body, [
           ["Owner", workspace.owner],
-          ["PR", !prMeta && workspace.pr_number ? `PR #${workspace.pr_number}` : ""],
+          ["PR", prMeta || (workspace.pr_number ? `PR #${workspace.pr_number}` : "")],
           ["PR state", prMeta ? "" : workspace.pr_state],
         ]);
-        if (prMeta) body.appendChild(prMeta);
         const hadBoardRefs = appendBoardDiagnostics(body, boardDiagnosticRefs(workspace));
         if (!workspace.owner && !workspace.pr_number && !workspace.pr_state && !hadBoardRefs) {
           body.appendChild(createNode("div", "workspace-overview-empty", "No linked work"));
