@@ -1304,6 +1304,7 @@ fn red_108_dispatch_pr_current_is_live_first() {
     env.seed_current_pr(Some(PrStatus {
         number: 77,
         title: "Current PR".to_string(),
+        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://example.com/pr/77".to_string(),
         created_at: None,
@@ -1334,6 +1335,7 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
     env.seed_created_pr(PrStatus {
         number: 88,
         title: "Created PR".to_string(),
+        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://example.com/pr/88".to_string(),
         created_at: None,
@@ -1393,6 +1395,7 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
         PrStatus {
             number: 42,
             title: "Updated PR".to_string(),
+            head_ref_name: String::new(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://example.com/pr/42".to_string(),
             created_at: None,
@@ -1443,6 +1446,7 @@ fn red_109_dispatch_pr_view_reads_live_data() {
         PrStatus {
             number: 42,
             title: "Viewed PR".to_string(),
+            head_ref_name: String::new(),
             state: gwt_git::pr_status::PrState::Merged,
             url: "https://example.com/pr/42".to_string(),
             created_at: None,
@@ -1470,6 +1474,7 @@ fn red_109_dispatch_pr_current_surfaces_branch_behind_as_effective_merge_state()
     env.seed_current_pr(Some(PrStatus {
         number: 91,
         title: "Update branch required".to_string(),
+        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://example.com/pr/91".to_string(),
         created_at: None,
