@@ -1050,7 +1050,8 @@ mod tests {
         )
         .expect("prepare receipt");
         let input = serde_json::json!({
-            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+            "prompt": pm_registry::protected_pm_delivery_prompt(operation_id, body)
+                .expect("protected PM prompt")
         })
         .to_string();
 

@@ -64242,7 +64242,10 @@ fn both_wake_prompts_carry_the_open_escalation_bodies() {
         .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
         .expect("an open escalation is standing supervision work on its own");
 
-    for (prompt, label) in [(&delta.prompt, "delta"), (&periodic.prompt, "periodic")] {
+    for (prompt, label) in [
+        (delta.delivery_prompt(), "delta"),
+        (periodic.delivery_prompt(), "periodic"),
+    ] {
         assert!(
             prompt.contains("UNRESOLVED BLOCKED ESCALATIONS (1)"),
             "{label} wake must name the standing blockers; got: {prompt}"
@@ -68967,4 +68970,245 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
         after_second.is_empty(),
         "restore failures must not accumulate across generations: {after_second:?}"
     );
+}
+
+#[test]
+fn pm_delivery_refuses_self_with_durable_receipt() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_pm_delivery_refused(&temp, false, false);
+}
+
+#[test]
+fn pm_delivery_refuses_pm_role_with_durable_receipt() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_pm_delivery_refused(&temp, true, false);
+}
+
+#[test]
+fn pm_delivery_replay_preserves_pending_refusal() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    assert_pm_delivery_refused(&temp, false, true);
+}
+
+fn assert_pm_delivery_refused(
+    temp: &tempfile::TempDir,
+    other_session: bool,
+    pending_refusal: bool,
+) {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    {
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let (repo, mut runtime, pm_window_id) = pm_wake_fixture(temp);
+        insert_test_pane_runtime(&mut runtime, &pm_window_id);
+        let pm_pane = runtime.runtimes[&pm_window_id].pane.clone();
+        runtime.register_pty_writer(&pm_window_id, &pm_pane);
+        let target = if other_session {
+            let target = "tab-1::other-window".to_string();
+            let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+            fs::create_dir_all(&worktree).expect("PM worktree");
+            runtime
+                .active_agent_sessions
+                .get_mut(&target)
+                .unwrap()
+                .worktree_path = worktree;
+            insert_test_pane_runtime(&mut runtime, &target);
+            let pane = runtime.runtimes[&target].pane.clone();
+            runtime.register_pty_writer(&target, &pane);
+            target
+        } else {
+            pm_window_id
+        };
+        let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:43123/internal/hook-live",
+            "ws://127.0.0.1:43124/ws",
+            "ws://127.0.0.1:43123/internal/pane-ws",
+        );
+        let capability = issuer.issue(&repo, "pm-session-live").expect("capability");
+        let grant = issuer.grant_for_test(&capability.token).expect("grant");
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let pending = pending_refusal.then(|| {
+            let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+            let hash = gwt::pm_registry::pm_delivery_prompt_sha256("do not deliver to the PM");
+            let receipt = gwt::pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.clone(),
+                recorded_at: Utc::now().to_rfc3339(),
+                status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session-live".to_string(),
+                target_window_id: target.clone(),
+                target_session_id: "pm-session-live".to_string(),
+                body_sha256: hash.clone(),
+                reason: None,
+            };
+            gwt::pm_registry::prepare_pm_delivery_receipt(&path, &receipt).unwrap();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(450));
+                gwt::pm_registry::finish_pm_delivery_receipt(
+                    &path,
+                    &receipt.operation_id,
+                    &receipt.target_session_id,
+                    &hash,
+                    gwt::pm_registry::PmDeliveryReceiptStatus::Refused,
+                    Some(&format!(
+                        "self-delivery refused for {}",
+                        receipt.target_window_id
+                    )),
+                )
+                .unwrap();
+            })
+        });
+        let (responder, response, cancellation) =
+            AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
+        runtime.authenticated_pm_pane_send_input_events(
+            &issuer,
+            "client".to_string(),
+            grant,
+            &operation_id,
+            &target,
+            "do not deliver to the PM\r",
+            Some(responder),
+        );
+        let response = response.blocking_recv().expect("response");
+        if let Some(pending) = pending {
+            pending.join().unwrap();
+        }
+        assert!(
+            matches!(&response, BackendEvent::PmMessageSendResult {status, reason: Some(reason), ..}
+            if status == "refused" && reason.contains("self") && reason.contains(&target)),
+            "{response:?}"
+        );
+        assert!(
+            !cancellation.cancel(),
+            "refusal must precede physical input commit"
+        );
+        let receipts = gwt::pm_registry::load_pm_delivery_receipts(
+            &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
+        )
+        .expect("receipts");
+        let receipt = receipts.last().expect("refused receipt");
+        assert_eq!(
+            receipt.status,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Refused
+        );
+        assert!(receipt
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("self") && reason.contains(&target)));
+    }
+}
+
+fn seed_pm_session_escalation(repo: &Path, session: &gwt_agent::Session, body: &str) {
+    session
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("save subject session");
+    let mut entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Blocked,
+        body,
+        None,
+        None,
+        vec![],
+        vec!["4274".to_string()],
+    );
+    entry.origin_session_id = Some(session.id.clone());
+    post_entry(repo, entry).expect("post escalation");
+}
+
+#[test]
+fn pm_wakes_exclude_terminal_and_superseded_escalations() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let mut active = gwt_agent::Session::new(&repo, "work/active", gwt_agent::AgentId::Codex);
+    active.status = gwt_agent::AgentStatus::Idle;
+    seed_pm_session_escalation(&repo, &active, "ACTIVE-SUBJECT");
+    let mut stopped = gwt_agent::Session::new(&repo, "work/stopped", gwt_agent::AgentId::Codex);
+    stopped.status = gwt_agent::AgentStatus::Stopped;
+    seed_pm_session_escalation(&repo, &stopped, "STOPPED-SUBJECT");
+    let mut superseded = gwt_agent::Session::new(&repo, "work/old", gwt_agent::AgentId::Codex);
+    superseded.status = gwt_agent::AgentStatus::Running;
+    superseded.linked_issue_number = Some(4274);
+    seed_pm_session_escalation(&repo, &superseded, "SUPERSEDED-SUBJECT");
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        4274,
+        "successor-session",
+        "gwt-execute",
+        false,
+    )
+    .expect("current owner");
+    runtime.pm_wake_decision_at(&repo, &[], "2026-08-18T01:00:00Z");
+    let delta = runtime
+        .pm_wake_decision_at(
+            &repo,
+            &[pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)],
+            "2026-08-18T01:01:00Z",
+        )
+        .expect("delta");
+    let periodic = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:05:00Z")
+        .expect("active blocker");
+    for prompt in [delta.delivery_prompt(), periodic.delivery_prompt()] {
+        assert!(prompt.contains("ACTIVE-SUBJECT"));
+        assert!(!prompt.contains("STOPPED-SUBJECT"), "{prompt}");
+        assert!(!prompt.contains("SUPERSEDED-SUBJECT"), "{prompt}");
+    }
+    active.status = gwt_agent::AgentStatus::Stopped;
+    active
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("stop last active subject");
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-18T01:10:00Z")
+        .is_none());
+    assert_eq!(
+        gwt_core::coordination::load_escalation_store(&repo)
+            .unwrap()
+            .open_escalations()
+            .len(),
+        3,
+        "filtering must preserve unresolved history"
+    );
+}
+
+#[test]
+fn pm_pending_wake_rechecks_subject_before_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let mut subject = gwt_agent::Session::new(&repo, "work/subject", gwt_agent::AgentId::Codex);
+    subject.status = gwt_agent::AgentStatus::Running;
+    seed_pm_session_escalation(&repo, &subject, "PENDING-SUBJECT");
+    runtime.terminal_input_events(&pm_window_id, "draft");
+    runtime.pm_periodic_wake_events_at(&repo, "2026-08-18T01:00:00Z");
+    assert!(runtime.pending_pm_wakes[&pm_window_id]
+        .delivery_prompt()
+        .contains("PENDING-SUBJECT"));
+    subject.status = gwt_agent::AgentStatus::Stopped;
+    subject
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("stop subject while held");
+    assert!(
+        !runtime.pending_pm_wakes[&pm_window_id]
+            .delivery_prompt()
+            .contains("PENDING-SUBJECT"),
+        "a held wake must render current subjects at delivery time"
+    );
+    runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    assert!(runtime.pending_pm_wakes.is_empty());
 }

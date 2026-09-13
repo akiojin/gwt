@@ -1119,6 +1119,29 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
 /// that needs no fixture, so this exercises the real dispatch path end to end
 /// rather than the classifier in isolation.
 #[test]
+fn dispatch_does_not_escalate_a_pm_pane_governance_refusal() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let home = tempfile::tempdir().expect("home");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&home.path().join("repo"));
+    fs::create_dir_all(&worktree).expect("PM worktree");
+    let mut env = TestEnv::new(worktree.clone());
+    env.stdin = r#"{"schema_version":1,"operation":"execution.adopt","params":{"reason":"crash recovery"}}"#
+        .to_string();
+
+    assert_ne!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    assert!(
+        gwt_core::coordination::load_open_escalations(&worktree)
+            .expect("read the escalation index")
+            .is_empty(),
+        "a PM refusal must not escalate back to the PM"
+    );
+}
+
+#[test]
 fn dispatch_escalates_a_governance_refusal_to_the_board() {
     let _env_lock = crate::env_test_lock()
         .lock()
