@@ -2414,10 +2414,10 @@ mod tests {
 
         generate_settings_local(dir.path()).unwrap();
 
-        let settings_path = dir.path().join(".claude/settings.local.json");
-        let content = fs::read_to_string(&settings_path).unwrap();
+        let path = dir.path().join(".claude/settings.local.json");
+        let content = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
-        let bin = managed_hook_bin_for_config_path(&settings_path);
+        let bin = managed_hook_bin_for_config_path(&path);
         for event in MANAGED_EVENT_ORDER {
             let command = value["hooks"][*event][0]["hooks"][0]["command"]
                 .as_str()
@@ -2443,15 +2443,15 @@ mod tests {
 
         generate_codex_hooks(dir.path()).unwrap();
 
-        let hooks_path = dir.path().join(".codex/hooks.json");
-        let content = fs::read_to_string(&hooks_path).unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        let content = fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
         let expected_shell = if cfg!(windows) {
             HookShell::PowerShell
         } else {
             HookShell::Posix
         };
-        let bin = managed_hook_bin_for_config_path(&hooks_path);
+        let bin = managed_hook_bin_for_config_path(&path);
         for event in MANAGED_EVENT_ORDER {
             let command = value["hooks"][*event][0]["hooks"][0]["command"]
                 .as_str()

@@ -5,10 +5,10 @@ use serde_json::{Map, Value};
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
-    memory::MemoryAddCommand, workflow::WorkflowBypassMode, ActionsCommand, CliCommand, CliEnv,
-    CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
-    IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand, SkillStateAction,
-    WorkflowCommand, WorkspaceCommand,
+    memory::MemoryAddCommand, perf::PerfCommand, workflow::WorkflowBypassMode, ActionsCommand,
+    CliCommand, CliEnv, CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand,
+    IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
+    SkillStateAction, WorkflowCommand, WorkspaceCommand,
 };
 use super::{verification_lease::VerificationLeaseCommand, BoardCommand, BoardPostCommand};
 
@@ -58,7 +58,15 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     };
     let operation = parsed.operation.clone();
     let declared_block = parsed.declared_block;
-    match super::run_collect(env, parsed.command) {
+    // SPEC #3700 FR-002 / Issue #4145 AC-1: every JSON-envelope operation
+    // funnels through here, so one timer covers the whole `op` stream. The
+    // collector is fail-open and is only installed by the `gwtd` binary, so
+    // this is a no-op in tests and in the argv path.
+    let read_only = super::hook::workflow_policy::is_read_only_json_envelope_operation(&operation);
+    let operation_started = std::time::Instant::now();
+    let outcome = super::run_collect(env, parsed.command);
+    crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
+    match outcome {
         Ok((code, output)) => {
             let mut payload = serde_json::json!({
                 "ok": code == 0,
@@ -224,6 +232,30 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 branches: optional_string_vec(params, "branches")?,
             })
         }
+        "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "dry_run",
+                    "base",
+                    "include_unmerged",
+                    "include_protected_workspaces",
+                ],
+                "worktree.gc_build_artifacts",
+            )?;
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                // Removing a build cache is recoverable but slow to undo, so
+                // an unqualified call only reports (Issue #4009 AC-1).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                include_unmerged: optional_bool(params, "include_unmerged")?.unwrap_or(false),
+                include_protected_workspaces: optional_bool(
+                    params,
+                    "include_protected_workspaces",
+                )?
+                .unwrap_or(false),
+            })
+        }
         "intake.outcome.record" | "intake.outcome-record" => {
             CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
                 kind: required_string(params, "kind")?,
@@ -252,6 +284,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "issue.spec.list" => CliCommand::Issue(IssueCommand::SpecList {
             phase: optional_string(params, "phase")?,
+            state: optional_string(params, "state")?,
+        }),
+        "issue.spec.audit" => CliCommand::Issue(IssueCommand::SpecAudit {
             state: optional_string(params, "state")?,
         }),
         "issue.spec.pull" => CliCommand::Issue(IssueCommand::SpecPull {
@@ -446,13 +481,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let Some(profiles) = params.get("profiles") else {
                 return Err(CliParseError::MissingFlag("profiles"));
             };
-            let profiles =
-                serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfile>>(profiles.clone())
-                    .map_err(|error| {
-                    CliParseError::InvalidJson(format!(
-                        "profiles must be an array of launch profiles with agent_id: {error}"
-                    ))
-                })?;
+            // Issue #4079 AC-3: keep the caller's element shape. Parsing
+            // straight into a full profile cannot tell an omitted field from
+            // one explicitly cleared, so a reorder reset the pool's settings.
+            let profiles = serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfilePatch>>(
+                profiles.clone(),
+            )
+            .map_err(|error| {
+                CliParseError::InvalidJson(format!(
+                    "profiles must be an array of launch profiles with agent_id: {error}"
+                ))
+            })?;
             let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
                 .map(|value| {
                     u8::try_from(value).map_err(|_| {
@@ -540,6 +579,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
         }),
+        // SPEC #3835 AC-15 / AC-17: the operation behind the `update-branch`
+        // default action, which `pr.list` recommended for a year without one.
+        "pr.update_branch" | "pr.update-branch" => CliCommand::Pr(PrCommand::UpdateBranch {
+            number: required_u64(params, "number")?,
+        }),
         "pr.comment" => CliCommand::Pr(PrCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -569,6 +613,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             target: actions_rerun_target(params)?,
         }),
         "index.status" => CliCommand::Index(IndexCommand::Status),
+        "index.cancel" | "index.repair" => {
+            if optional_string(params, "scope")?.is_some_and(|scope| scope != "issues") {
+                return Err(CliParseError::InvalidJson(
+                    "index recovery supports only the issues scope".to_string(),
+                ));
+            }
+            CliCommand::Index(if envelope.operation == "index.cancel" {
+                IndexCommand::Cancel
+            } else {
+                IndexCommand::Repair
+            })
+        }
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
             scope: optional_string(params, "scope")?
                 .map(|scope| index_scope(&scope))
@@ -582,6 +638,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
             hook_register_codex_trust(params)?
         }
+        "hook.register_codex_managed_project_trust"
+        | "hook.register-codex-managed-project-trust" => hook_register_codex_project_trust(params)?,
         "hook.health" => hook_health(params)?,
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
@@ -611,6 +669,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands,
                 max_wait_secs,
+                user_verification_result: optional_string(params, "user_verification_result")?,
             })
         }
         "verify.adjudicate" => {
@@ -820,6 +879,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
+        "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
@@ -1054,6 +1115,24 @@ fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, 
     }))
 }
 
+fn hook_register_codex_project_trust(
+    params: &Map<String, Value>,
+) -> Result<CliCommand, CliParseError> {
+    let mut rest = Vec::new();
+    if let Some(project_root) = optional_string(params, "project_root")? {
+        rest.push("--project-root".to_string());
+        rest.push(project_root);
+    }
+    if let Some(codex_config) = optional_string(params, "codex_config")? {
+        rest.push("--codex-config".to_string());
+        rest.push(codex_config);
+    }
+    Ok(CliCommand::Hook(HookCommand::Run {
+        name: "register-codex-managed-project-trust".to_string(),
+        rest,
+    }))
+}
+
 fn hook_health(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     Ok(CliCommand::Hook(HookCommand::Health {
         runtime_state_path: optional_path(params, "runtime_state_path")?,
@@ -1163,6 +1242,34 @@ fn errors_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
     }
     Ok(CliCommand::Diagnostics(DiagnosticsCommand::ErrorsList {
         since,
+    }))
+}
+
+/// SPEC #3700 FR-007: `perf.summary` and `perf.violations` share one filter
+/// shape, so they share one parser keyed by the operation name.
+fn perf_read(params: &Map<String, Value>, operation: &str) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["since", "stream", "target"], operation)?;
+    let since = optional_string(params, "since")?;
+    if let Some(raw) = since.as_deref() {
+        super::perf::parse_since(raw)?;
+    }
+    let stream = optional_string(params, "stream")?
+        .map(|raw| super::perf::parse_stream(&raw))
+        .transpose()?;
+    let target = optional_string(params, "target")?;
+
+    Ok(CliCommand::Perf(if operation == "perf.violations" {
+        PerfCommand::Violations {
+            since,
+            stream,
+            target,
+        }
+    } else {
+        PerfCommand::Summary {
+            since,
+            stream,
+            target,
+        }
     }))
 }
 
@@ -1613,7 +1720,7 @@ fn verification_quarantine_requests(
 mod tests {
     use super::{
         parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
-        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PrCommand,
+        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand,
         SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
@@ -1648,6 +1755,78 @@ mod tests {
         }
     }
 
+    /// SPEC #3835 AC-15: the operation behind the `update-branch` default
+    /// action, so a `BEHIND` PR has a surface that can move it.
+    #[test]
+    fn pr_update_branch_parses_under_both_spellings() {
+        use crate::cli::PrCommand;
+        for operation in ["pr.update_branch", "pr.update-branch"] {
+            assert_eq!(
+                ok(operation, json!({"number": 4139})),
+                CliCommand::Pr(PrCommand::UpdateBranch { number: 4139 })
+            );
+        }
+        assert!(matches!(
+            err("pr.update_branch", json!({})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// SPEC #3835 AC-17: every default action that names an operation names a
+    /// real one. `pr.list` reported `default_action: "update-branch"` with
+    /// `default_action_executable: true` on 21 of 25 open PRs while no such
+    /// operation existed, so its only recommended action was unrunnable.
+    ///
+    /// This test is the structural guard: `gwt-git` cannot see the operation
+    /// table, so the invariant has to be fixed from this side.
+    #[test]
+    fn every_named_pr_default_action_operation_is_callable() {
+        use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
+
+        let now = chrono::Utc::now();
+        let mut seen_update_branch = false;
+        for (mergeable, merge_state_status, ci_status, is_draft) in [
+            ("MERGEABLE", "BEHIND", "SUCCESS", true),
+            ("MERGEABLE", "BEHIND", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "SUCCESS", true),
+            ("MERGEABLE", "CLEAN", "SUCCESS", false),
+            ("CONFLICTING", "DIRTY", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "FAILURE", false),
+            ("MERGEABLE", "CLEAN", "PENDING", false),
+            ("UNKNOWN", "UNKNOWN", "UNKNOWN", false),
+        ] {
+            let fields = PrInventoryFields {
+                number: 4139,
+                title: "a PR".to_string(),
+                url: "https://example.com/pr/4139".to_string(),
+                is_draft,
+                head_ref_name: "work/issue-4131".to_string(),
+                updated_at: Some(now),
+                mergeable: mergeable.to_string(),
+                merge_state_status: merge_state_status.to_string(),
+                ci_status: ci_status.to_string(),
+                review_status: "APPROVED".to_string(),
+                body: String::new(),
+                closing_issues: Vec::new(),
+            };
+            let decision = classify_pr_lifecycle(&fields, now);
+            let Some(operation) = decision.default_action_operation else {
+                continue;
+            };
+            seen_update_branch |= operation == "pr.update_branch";
+            if let Err(error) = parse(&envelope(operation, json!({"number": 4139}))) {
+                panic!(
+                    "`{}` recommends `{operation}`, which no operation implements: {error}",
+                    decision.default_action
+                );
+            }
+        }
+        assert!(
+            seen_update_branch,
+            "a BEHIND PR must name the operation that resolves it"
+        );
+    }
+
     /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
     #[test]
     fn verify_run_parses_max_wait_secs() {
@@ -1660,6 +1839,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: Some(2),
+                user_verification_result: None,
             })
         );
         assert_eq!(
@@ -1667,6 +1847,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             })
         );
         assert!(matches!(
@@ -1676,6 +1857,41 @@ mod tests {
             ),
             CliParseError::InvalidNumber(_)
         ));
+    }
+
+    #[test]
+    fn verify_run_persists_deferred_user_verification() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4217-verification");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let deferred = "deferred (autonomous execution)";
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": deferred
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        let record = verification_record::load(&repo).unwrap().unwrap();
+        let mut serialized = serde_json::to_value(&record).unwrap();
+        assert_eq!(serialized["user_verification_result"], deferred);
+        assert!(String::from_utf8_lossy(&env.stdout).contains(deferred));
+        serialized["user_verification_result"] = json!("confirmed");
+        let tampered = serde_json::from_value(serialized).unwrap();
+        assert!(!verification_record::integrity_ok(&tampered));
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report
@@ -1919,6 +2135,58 @@ mod tests {
     fn branch_prune_merged_rejects_an_unknown_param() {
         let error = err("branch.prune_merged", json!({ "dryrun": false }));
         assert!(format!("{error}").contains("dryrun"), "{error}");
+    }
+
+    /// Issue #4009 AC-1 / AC-3: an unqualified `worktree.gc_build_artifacts`
+    /// is a dry run that keeps unmerged worktrees.
+    #[test]
+    fn worktree_gc_build_artifacts_defaults_to_a_dry_run_that_keeps_unmerged() {
+        match ok("worktree.gc_build_artifacts", json!({})) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+                include_protected_workspaces,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(!include_unmerged);
+                assert!(!include_protected_workspaces);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_accepts_apply_base_and_both_opt_ins() {
+        match ok(
+            "worktree.gc-build-artifacts",
+            json!({
+                "dry_run": false,
+                "base": "main",
+                "include_unmerged": true,
+                "include_protected_workspaces": true,
+            }),
+        ) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+                include_protected_workspaces,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("main"));
+                assert!(include_unmerged);
+                assert!(include_protected_workspaces);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_rejects_an_unknown_param() {
+        let error = err("worktree.gc_build_artifacts", json!({ "force": true }));
+        assert!(format!("{error}").contains("force"), "{error}");
     }
 
     #[test]
@@ -2323,12 +2591,29 @@ mod tests {
         assert_eq!(project_root, None);
         assert_eq!(usage_threshold_percent, Some(70));
         assert_eq!(profiles.len(), 2);
-        assert_eq!(profiles[0].agent_id, "codex");
-        assert_eq!(profiles[0].model, None);
-        assert!(profiles[0].prefer_for.is_empty());
-        assert_eq!(profiles[1].agent_id, "claude");
-        assert_eq!(profiles[1].model.as_deref(), Some("opus"));
-        assert_eq!(profiles[1].prefer_for, vec!["kind:spec".to_string()]);
+        assert_eq!(profiles[0].profile.agent_id, "codex");
+        assert_eq!(profiles[0].profile.model, None);
+        assert!(profiles[0].profile.prefer_for.is_empty());
+        assert_eq!(profiles[1].profile.agent_id, "claude");
+        assert_eq!(profiles[1].profile.model.as_deref(), Some("opus"));
+        assert_eq!(
+            profiles[1].profile.prefer_for,
+            vec!["kind:spec".to_string()]
+        );
+        // Issue #4079 AC-3: the parse keeps which keys the caller wrote, so an
+        // omitted field can inherit instead of resetting to Default.
+        assert_eq!(
+            profiles[0].provided,
+            std::collections::BTreeSet::from(["agent_id".to_string()])
+        );
+        assert_eq!(
+            profiles[1].provided,
+            std::collections::BTreeSet::from([
+                "agent_id".to_string(),
+                "model".to_string(),
+                "prefer_for".to_string(),
+            ])
+        );
 
         assert!(matches!(
             err("issue.monitor.profiles.set", json!({})),
@@ -3042,6 +3327,20 @@ mod tests {
     }
 
     #[test]
+    fn index_issue_recovery_operations_are_reachable() {
+        for operation in ["index.cancel", "index.repair"] {
+            assert!(matches!(
+                ok(operation, json!({"scope": "issues"})),
+                CliCommand::Index(_)
+            ));
+            assert!(matches!(
+                err(operation, json!({"scope": "files"})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    #[test]
     fn issue_spec_create_variants() {
         assert!(matches!(
             ok("issue.spec.create", json!({"title": "t", "body": "b"})),
@@ -3745,6 +4044,24 @@ mod tests {
             ),
             CliCommand::Hook(_)
         ));
+        assert_eq!(
+            ok(
+                "hook.register_codex_managed_project_trust",
+                json!({
+                    "project_root": "/repo",
+                    "codex_config": "/cfg",
+                })
+            ),
+            CliCommand::Hook(HookCommand::Run {
+                name: "register-codex-managed-project-trust".to_string(),
+                rest: vec![
+                    "--project-root".to_string(),
+                    "/repo".to_string(),
+                    "--codex-config".to_string(),
+                    "/cfg".to_string(),
+                ],
+            })
+        );
     }
 
     #[test]
@@ -4039,6 +4356,53 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` share one filter.
+    #[test]
+    fn perf_operations_parse_their_shared_filter() {
+        assert!(matches!(
+            ok("perf.summary", json!({})),
+            CliCommand::Perf(PerfCommand::Summary {
+                since: None,
+                stream: None,
+                target: None
+            })
+        ));
+        match ok(
+            "perf.violations",
+            json!({"since": "2026-09-08T00:00:00Z", "stream": "op", "target": "issue."}),
+        ) {
+            CliCommand::Perf(PerfCommand::Violations {
+                since,
+                stream,
+                target,
+            }) => {
+                assert_eq!(since.as_deref(), Some("2026-09-08T00:00:00Z"));
+                assert_eq!(stream.as_deref(), Some("op"));
+                assert_eq!(target.as_deref(), Some("issue."));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn perf_operations_reject_malformed_filters() {
+        match err("perf.summary", json!({"since": "yesterday"})) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "since");
+                assert!(reason.contains("RFC3339"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("perf.summary", json!({"stream": "frontend"})) {
+            CliParseError::InvalidValue { flag, .. } => assert_eq!(flag, "stream"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(matches!(
+            err("perf.violations", json!({"limit": 5})),
+            CliParseError::InvalidJson(_)
+        ));
     }
 
     #[test]

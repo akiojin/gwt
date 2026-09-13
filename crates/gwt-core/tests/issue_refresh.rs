@@ -46,8 +46,10 @@ fn write_meta(index_root: &std::path::Path, repo_hash: &str, minutes_ago: i64) {
         "schema_version": 1,
         "last_full_refresh": now.to_rfc3339(),
         "ttl_minutes": 15,
+        "document_count": 1,
     });
     std::fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+    std::fs::write(dir.join("chroma.sqlite3"), b"fixture").unwrap();
 }
 
 #[tokio::test]
@@ -166,11 +168,13 @@ fn issue_index_refreshed_since_detects_completed_duplicate() {
             "schema_version": 1,
             "last_full_refresh": now.to_rfc3339(),
             "ttl_minutes": 15,
+            "document_count": 1,
         })
         .to_string(),
     )
     .unwrap();
 
+    std::fs::write(issues_dir.join("chroma.sqlite3"), b"fixture").unwrap();
     assert!(
         issue_index_refreshed_since(
             &index_root,
@@ -239,6 +243,86 @@ fn python_runner_spawner_runs_issue_index_through_the_coordinator() {
     assert!(contents.contains("--action index-issues"), "{contents}");
     assert!(contents.contains("--qos background"), "{contents}");
     assert!(contents.contains("cafe0123cafe0123"), "{contents}");
+}
+
+/// Issue #4140 AC-5: while the issues index runner is still running, a
+/// `verify.run`-shaped claimant must get the host-wide heavy lease within a
+/// bounded time. The reported failure held it for the whole 30-minute runner,
+/// so every agent's verification was refused with `host busy`.
+#[cfg(unix)]
+#[test]
+fn coordinated_issue_index_hands_the_heavy_lease_to_a_waiting_verification_run() {
+    use gwt_core::index_coordinator::{
+        IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let coordinator_root = tmp.path().join("coordinator");
+    let started = tmp.path().join("runner-started");
+    let stop = tmp.path().join("runner-stop");
+    let python = tmp.path().join("fake-python.sh");
+    std::fs::write(
+        &python,
+        format!(
+            // Self-limiting: the arena disappears when the test ends, and a
+            // runner that only watched for the stop file would then loop
+            // forever on a path that can never appear.
+            "#!/bin/sh\ntouch \"{}\"\ni=0\nwhile [ ! -f \"{}\" ] && [ $i -lt 600 ]; do sleep 0.05; \
+             i=$((i+1)); done\nexit 0\n",
+            started.display(),
+            stop.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let spawner = PythonRunnerSpawner {
+        python_executable: python,
+        runner_script: tmp.path().join("runner.py"),
+    };
+    spawner
+        .spawn_index_issues_with_coordinator_root(
+            "cafe0123cafe0123",
+            tmp.path(),
+            false,
+            &coordinator_root,
+        )
+        .expect("spawn detaches");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the fake runner never started");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let coordinator = IndexCoordinator::open(&coordinator_root).expect("open coordinator");
+    let key = TargetKey::verification("cafe0123cafe0123", "wt-1");
+    let guard = match coordinator
+        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(10))
+        .expect("request verification job")
+    {
+        JobAdmission::Owner(guard) => guard,
+        JobAdmission::Joined(_) => panic!("the index job must not own the verification target"),
+    };
+    let lease = guard
+        .acquire_heavy_with_ttl(Duration::from_secs(20), Duration::from_secs(60))
+        .unwrap_or_else(|err| {
+            let _ = std::fs::write(&stop, b"stop");
+            panic!("the running issue index runner must yield the heavy lease: {err}")
+        });
+
+    assert!(
+        !stop.exists(),
+        "the runner must still be running — the lease was handed over, not waited out"
+    );
+
+    lease.release().expect("release verification lease");
+    guard
+        .complete(JobOutcome::Completed)
+        .expect("complete verification job");
+    std::fs::write(&stop, b"stop").expect("let the fake runner exit");
 }
 
 /// A runner failure is drained and logged without crashing the caller.

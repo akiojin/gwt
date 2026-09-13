@@ -298,6 +298,23 @@ pub struct LaunchWizardAgentSetupView {
     pub action_label: Option<String>,
 }
 
+/// Issue #4079 AC-2: what an Issue Monitor Agent Settings save will do to the
+/// candidate pool. Absent for every other wizard.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LaunchWizardIssueMonitorPoolImpactView {
+    /// `replace_head` — the save overwrites candidate index 0. Agent Settings
+    /// never appends; adding a candidate is a `profiles.set` operation.
+    pub action: String,
+    /// Provider this save writes to index 0.
+    pub agent_id: String,
+    /// Provider currently at index 0, when the save switches it out.
+    pub replaced_agent_id: Option<String>,
+    pub title: String,
+    pub detail: String,
+    /// The `launch_profile_summary` the Monitor will report after the save.
+    pub resulting_summary: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardProgressStepView {
     pub key: String,
@@ -377,6 +394,11 @@ pub struct LaunchWizardView {
     /// selected built-in (install when no `Installed` / `latest` route exists,
     /// configure when first-time setup is missing). `None` when launchable.
     pub agent_setup: Option<LaunchWizardAgentSetupView>,
+    /// Issue #4079 AC-2: filled by the app runtime when this wizard is the
+    /// Issue Monitor Agent Settings form, so the operator sees which candidate
+    /// the save writes before committing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_monitor_pool_impact: Option<LaunchWizardIssueMonitorPoolImpactView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
@@ -700,6 +722,24 @@ impl LaunchWizardLaunchRequest {
         }
     }
 
+    /// Issue #4217 (AC-2): record that the Issue Monitor started this launch.
+    ///
+    /// Unconditional on purpose. `set_autonomous_execution_context` below is
+    /// gated on the project's `autonomous_mode` preference, which answers a
+    /// different question — whether the project opted into unattended
+    /// operation — and a monitor launch made while that preference reads false
+    /// therefore looked human-driven to every gate downstream. The launch then
+    /// stalled waiting for a human who was never asked to be there (#3777,
+    /// #3697). Nobody is watching a monitor-started launch either way, so the
+    /// route is a fact about how it started, not a setting.
+    ///
+    /// A no-op for non-agent (shell) launches.
+    pub fn set_issue_monitor_launch_route(&mut self) {
+        if let LaunchWizardLaunchRequest::Agent(config) = self {
+            config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        }
+    }
+
     /// Issue #3984 (AC-1): mark an independent-review dispatch launch.
     ///
     /// SPEC-3248 P8a already keeps the reviewer out of the implementer's
@@ -766,6 +806,47 @@ mod autonomous_launch_tests {
                         .map(String::as_str),
                     Some("3478")
                 );
+            }
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    /// Issue #4217 AC-2: the Issue Monitor stamps the route it launched
+    /// through, and it does so whatever the project's `autonomous_mode`
+    /// preference says. That preference records an opt-in; it does not record
+    /// who pressed the button, and conflating the two is what let a
+    /// monitor-launched window classify itself as human-driven and stall
+    /// (#3777, #3697).
+    #[test]
+    fn an_issue_monitor_launch_records_the_autonomous_route_regardless_of_the_preference() {
+        for autonomous_mode in [true, false] {
+            let mut request = agent_request(false);
+            request.set_issue_monitor_launch_route();
+            request.set_autonomous_execution_context(autonomous_mode, 4217);
+            match request {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(
+                        config.launch_route,
+                        gwt_agent::LaunchRoute::Autonomous,
+                        "the route is a fact about the launch, not a setting \
+                         (autonomous_mode = {autonomous_mode})"
+                    );
+                    assert!(!config.launch_route.is_attended());
+                }
+                LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+            }
+        }
+    }
+
+    /// AC-7: a launch nobody stamped stays attended, so every human-driven
+    /// route keeps its visual-verification gate.
+    #[test]
+    fn an_unstamped_launch_stays_attended() {
+        let request = agent_request(false);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                assert_eq!(config.launch_route, gwt_agent::LaunchRoute::Manual);
+                assert!(config.launch_route.is_attended());
             }
             LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
         }

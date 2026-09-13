@@ -71,10 +71,17 @@ non-empty `params.reason`. Reopen requires the exact immutable derived-plan
 snapshot, fresh passing evidence that started after the block, the same
 session/owner/worktree fingerprint, and valid integrity hashes. It appends a
 recovery audit entry and returns the execution to Active; it does not claim
-completion. Completed executions remain immutable. Another session must use
-audited `execution.adopt` only while the record is Active. Blocked and
-Completed records are terminal and cannot be adopted; another session must
-use a fresh linked-owner launch.
+completion. Completed executions remain immutable.
+
+When a worktree inherits a terminal Blocked record from a Session that is gone
+— the startup reaper settles a defunct generation, and the relaunch lands in
+the same worktree — the relaunched Session takes the record over with audited
+`execution.adopt` first. Adoption transfers ownership without changing the
+lifecycle, so the record stays Blocked and the same-session route above
+(`verify.plan` `params.derive:true`, `verify.run`, `execution.reopen`) then
+applies. Adoption is refused while the previous holder Session is still
+running. Completed records are never adopted; another session must use a fresh
+linked-owner launch.
 
 Completion and Ready PR handoffs consume tool-generated verification
 evidence (SPEC-3248 P8b): run the verification matrix through JSON operation
@@ -154,18 +161,34 @@ Phase 3 delegates to `gwt-verify --mode full`. Record the selected commands and
 results in the evidence bundle. In an `interactive` launch, UI-affecting work
 requires a concrete user verification handoff and a `User Verification Result`.
 
-In an `autonomous` launch (`GWT_AUTONOMOUS_EXECUTION` set by the gwt Issue
-Monitor) the handoff is waived: nobody is watching, and calling the question
-tool parks the owner Issue instead of pausing for an answer. Record
-`User Verification Result: n/a (autonomous)` and cover UI-affecting work with
-your own automated headed run — real browser, dark and light themes, zero
-console / page errors — reported on the separate `Agent Visual Check:` line.
-Your own browser-check is never a `User Verification Result`, and the waiver is
-never written as `skipped(<reason>)`.
+Read the launch route from the launch record, not from the environment:
+`execution.status` reports `launch_route: autonomous | manual`. The legacy
+`GWT_AUTONOMOUS_EXECUTION` marker still means autonomous when present, but its
+absence proves nothing — it is written only when the project opted into
+unattended mode, so monitor launches used to misread themselves as human-driven
+and stall (#3777, #3697, #4217).
+
+In an `autonomous` launch the handoff is waived: nobody is watching, and calling
+the question tool parks the owner Issue instead of pausing for an answer. Record
+`User Verification Result: deferred (autonomous execution)` when a UI surface is
+in scope (`n/a` when none is) and cover UI-affecting work with your own
+automated headed run — real browser, dark and light themes, zero console / page
+errors — reported on the separate `Agent Visual Check:` line. Your own
+browser-check is never a `User Verification Result`, and neither autonomous
+value is ever written as `skipped(<reason>)` or `confirmed`.
+
+**Never settle an autonomous execution as blocked over a missing visual
+check.** `execution.blocked` is terminal: it defers every open obligation and
+revokes `pr.edit`, so the stall becomes a closed loop (#4214). gwt refuses that
+settlement on an autonomous route. Hand off a Draft PR and settle the execution
+normally — that is what releases the slot.
 
 PR work goes through `gwt-manage-pr`. Do not create or update a Ready PR until
 pre-PR verification passes and the `User Verification Result` is `confirmed`,
-`n/a`, or `n/a (autonomous)`.
+`n/a`, or `n/a (autonomous)`. A `deferred (autonomous execution)` result
+authorizes a **Draft** PR only, and gwt enforces that: `pr.ready` and non-draft
+`pr.create` refuse a body carrying it. The owner sweeps the deferred PRs later
+(`pr.list` with `include: ["body"]`, field `deferred_user_verification`).
 
 ## Heavy command serialization
 

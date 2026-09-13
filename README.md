@@ -351,6 +351,23 @@ in the GUI appends it to the same pool. All operations accept an optional
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
 
+Host free space is part of the same snapshot: `disk_space` in
+`issue.monitor.status` lists the volumes the worktrees and the verification
+coordinator live on and carries a `warning` once one of them falls below
+20 GiB or 5% free, so a filling host is visible before `verify.run` fails with
+`No space left on device`. The `worktree.gc_build_artifacts` operation
+reclaims the space: it removes the `target/` build cache of every worktree
+whose HEAD is merged into `origin/<base>` (`base` defaults to `develop`) and
+that has neither a running process nor a live gwt launch. An unqualified call
+is a dry run that lists the candidates with their sizes and every kept
+worktree with its reason (`active process …`, `tracked launch …`, `not
+merged …`); pass `dry_run: false` to delete, `include_unmerged: true` to
+also reclaim idle unmerged worktrees, and `include_protected_workspaces: true`
+to also reclaim the shared base-branch workspaces (`develop`, `main`), which
+are kept by default because their rebuild lands on whoever opens them next.
+Running worktrees, the main worktree, the calling worktree, and the worktree
+hosting the running `gwtd` are never touched, whatever the flags say.
+
 ### Autonomous mode (opt-in)
 
 Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →
@@ -492,6 +509,16 @@ experimental_mode = false
 gwt respects any explicit value (`true` or `false`) and does not change it. A
 config that cannot be parsed or written never blocks startup; the path and
 cause are recorded in the error ledger (`errors.list`).
+
+Codex CLIs before 0.153.0 cannot load a table under `[features]`: a single
+`[features.context_management]` table makes the whole config unreadable
+(`invalid type: map, expected a boolean`), which also stops `codex login`. The
+codex gwt launches and the `codex` on your `PATH` can be different versions, so
+gwt checks the `PATH` one (`codex --version`) at startup. When it is older than
+0.153.0, or its version cannot be read, gwt does not write the key and removes
+an existing `[features.context_management]` table so that codex keeps working.
+After you upgrade the `PATH` codex to 0.153.0 or later, the next gwt startup
+writes the key again.
 
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
@@ -935,6 +962,14 @@ switching to `develop` locally. The `bump` input is `auto` (default),
 merging to `main` then runs the release pipeline (tag, GitHub Release,
 cross‑platform binaries). The manual fallback procedure lives in
 `.claude/commands/release.md`.
+
+The Release PR body is reference-only: it lists delivered Issues as bare
+`#N` references and never carries a closing keyword, because `main` is the
+default branch and `Closes #N` there would close an Issue whose acceptance
+criteria are still open. Issues are settled when their work merges into
+`develop` (see above). After the merge, `release.yml` runs
+`scripts/release_close_guard.py`, which reopens any Issue the Release PR
+merge itself closed and leaves a marker comment.
 
 ### Release Asset Contract
 

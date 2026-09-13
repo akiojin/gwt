@@ -7,6 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use gwt_core::index_coordinator::{
+    IndexCoordinator, TargetKey, INTERACTIVE_SEARCH_ADMISSION_DEADLINE,
+};
 use serde_json::Value;
 
 use crate::{
@@ -229,6 +232,10 @@ pub(crate) fn search_project_index_attempt(
     if query.is_empty() {
         return Ok(ProjectIndexSearchOutcome::default());
     }
+    // Issue #4145 AC-1: both the GUI blocking-pool caller and the `search`
+    // JSON operation funnel through here, so one guard measures the search
+    // route end to end, early returns included.
+    let _perf_route = crate::perf::RouteTimer::start(crate::perf::PerfRoute::Search);
     // One absolute attempt budget covers runtime ensure/provisioning, its
     // cross-process lock, every health probe, repair polling, and the final
     // runner. Nested callers retain an earlier ambient deadline.
@@ -514,19 +521,26 @@ fn broken_scopes_still_unhealthy(
         return Ok(true);
     };
     let status = payload.get("status").cloned().unwrap_or(Value::Null);
-    Ok(broken.iter().any(|(scope, _)| {
-        let ready = status
-            .get(scope.as_str())
-            .map(|entry| {
-                let healthy = entry
-                    .get("healthy")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                healthy
-            })
-            .unwrap_or(false);
-        !ready
-    }))
+    Ok(broken
+        .iter()
+        .any(|(scope, _)| !scope_probe_reports_ready(status.get(scope.as_str()))))
+}
+
+/// Decide whether one `status` entry proves the scope can be searched again.
+///
+/// Issue #4132: `healthy` alone is too strict. The issues scope reports
+/// `healthy: false` as soon as the Issue cache moves ahead of the built index,
+/// which every `issue.create` / `issue.comment` on the host does — including
+/// ones that land while this repair is running. Such a store is internally
+/// consistent and search classifies it `stale` (serve it, queue a refresh), so
+/// waiting for `healthy` again would burn the whole repair deadline and return
+/// `INDEX_NOT_READY` for an index that answers queries.
+fn scope_probe_reports_ready(entry: Option<&Value>) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    let flag = |name: &str| entry.get(name).and_then(Value::as_bool).unwrap_or(false);
+    flag("healthy") || flag("source_drift")
 }
 
 fn repair_status_probe_args(
@@ -909,6 +923,36 @@ fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptErro
     })
 }
 
+/// Claim the host-wide heavy lease for one query encode (FR-417).
+///
+/// Admission shares the search attempt's absolute deadline. If the slot is
+/// unavailable, return the existing retryable error without starting model
+/// work alongside the current holder.
+fn acquire_search_heavy_lease(
+    repo_hash: &str,
+    worktree_hash: Option<&str>,
+) -> Result<gwt_core::index_coordinator::HeavyLease, IndexSearchAttemptError> {
+    let deadline = gwt_core::operation_deadline::ensure_remaining("search heavy admission")
+        .map_err(|_| search_unavailable_error("search admission deadline expired"))?;
+    let timeout = deadline.map_or(INTERACTIVE_SEARCH_ADMISSION_DEADLINE, |deadline| {
+        INTERACTIVE_SEARCH_ADMISSION_DEADLINE
+            .min(deadline.saturating_duration_since(Instant::now()))
+    });
+    let coordinator = IndexCoordinator::open_default()
+        .map_err(|_| search_unavailable_error("search coordinator unavailable"))?;
+    let key = TargetKey::search(repo_hash, worktree_hash);
+    coordinator
+        .acquire_interactive_search_heavy(&key, timeout)
+        .map_err(|error| {
+            tracing::debug!(
+                target: "gwt::index",
+                %error,
+                "search heavy admission failed"
+            );
+            search_unavailable_error("search heavy lease unavailable")
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_batch_scope_search(
     project_root: &Path,
@@ -928,6 +972,12 @@ fn run_batch_scope_search(
         limit,
         match_mode,
     );
+    // FR-417 (T-IDX-437 / AS-30): `search-multi` encodes the query with the
+    // same model a build loads, so it is an ordinary claimant of the
+    // host-wide heavy lease — not an exception to it. Registering as a
+    // pending interactive claimant is also what makes a running background
+    // build hand the lease back at its next 16-document checkpoint.
+    let _heavy = acquire_search_heavy_lease(repo_hash, worktree_hash)?;
     // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
     // shared process lifecycle boundary — captured output without terminal
     // forwarding, one hard deadline, and full process-tree termination and
@@ -2027,6 +2077,42 @@ mod tests {
                 ("files".to_string(), "missing".to_string()),
                 ("files-docs".to_string(), "corrupt".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn repaired_scope_is_ready_even_when_the_source_cache_already_moved_on() {
+        // Issue #4132: the repair wait polls `status`, whose `healthy` flag
+        // goes false the moment the Issue cache outgrows the rebuilt index —
+        // which a concurrent `issue.create` does within seconds on a busy
+        // host. The scope is searchable again (search classifies it `stale`),
+        // so the wait must end instead of burning the deadline and returning
+        // INDEX_NOT_READY for a store that answers queries.
+        assert!(
+            scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": true,
+                "reason": "count_mismatch",
+            }))),
+            "a rebuilt index that merely trails its source is ready to search"
+        );
+        assert!(
+            !scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": false,
+                "reason": "count_mismatch",
+            }))),
+            "a store that contradicts its own manifest is still unrepaired"
+        );
+        assert!(
+            scope_probe_reports_ready(Some(&json!({"healthy": true}))),
+            "a healthy scope is ready"
+        );
+        assert!(
+            !scope_probe_reports_ready(None),
+            "a scope the probe did not report has not been proven repaired"
         );
     }
 

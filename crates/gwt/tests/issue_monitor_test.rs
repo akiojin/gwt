@@ -794,6 +794,7 @@ fn blocked_claim_is_visible_in_inbox_without_queueing_launch() {
         candidate,
         "other-host/session",
         "2026-06-23T10:30:00Z",
+        None,
     ));
 
     let item = monitor.inbox_item(42).expect("inbox item");
@@ -1483,6 +1484,42 @@ fn live_migration_removes_absent_or_closed_failed_rows_without_queueing() {
     }
 }
 
+/// Issue #4087 AC-5: a cache fallback pass (GitHub unreachable, cache entry
+/// missing) is not authoritative. The last observed queued row stays until a
+/// complete live snapshot says otherwise, so a transient cache gap cannot make
+/// the queue and `priority_order` disagree.
+#[test]
+fn cache_fallback_scan_keeps_the_last_observed_queued_row_when_its_cache_entry_is_missing() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[issue(4080, &["bug", "auto-merge"])],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-09-07T03:47:00Z",
+    );
+    assert_eq!(
+        monitor.inbox_item(4080).map(|item| item.state),
+        Some(MonitorInboxState::Queued)
+    );
+
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[],
+        IssueMonitorCandidateSource::Cache,
+        repo.path(),
+        "2026-09-07T04:02:00Z",
+    );
+
+    assert_eq!(
+        monitor.inbox_item(4080).map(|item| item.state),
+        Some(MonitorInboxState::Queued),
+        "a cache gap must not erase the last observed row"
+    );
+    assert!(monitor.agent_status().queue.contains(&4080));
+}
+
 #[test]
 fn explicit_closed_candidate_removes_all_current_needs_human_state() {
     let repo = tempfile::tempdir().expect("tempdir");
@@ -2031,6 +2068,145 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
         record.issue_updated_at.as_deref(),
         Some("2026-08-04T00:00:00Z")
     );
+}
+
+/// Issue #4231: a paged list that misses one open Issue mints an absence
+/// closure whose floor is the Issue's last observed revision. An Issue nobody
+/// edits afterwards is observed Open at exactly that revision forever, so a tie
+/// must reopen it or the Issue drops out of the inbox with no reason attached.
+#[test]
+fn live_open_at_the_absence_floor_revision_returns_the_issue_to_the_inbox() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let open = issue(42, &["bug"]);
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        std::slice::from_ref(&open),
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:01:00Z",
+    );
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:02:00Z",
+    );
+    assert!(
+        monitor.inbox_item(42).is_none(),
+        "the absence closes the row"
+    );
+
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[open],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:03:00Z",
+    );
+
+    assert_eq!(
+        monitor.inbox_item(42).map(|item| item.state),
+        Some(MonitorInboxState::Queued),
+        "an Open observation at the absence floor revision refutes the absence"
+    );
+}
+
+/// Issue #4231 AC-2: an open Issue a closure record keeps out of the inbox is
+/// named in the status instead of vanishing without a row.
+#[test]
+fn status_names_open_issues_a_closure_record_holds_out_of_the_inbox() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let open = issue(42, &["bug"]);
+    for (source, observed, at) in [
+        (
+            IssueMonitorCandidateSource::Live,
+            true,
+            "2026-08-01T00:01:00Z",
+        ),
+        (
+            IssueMonitorCandidateSource::Live,
+            false,
+            "2026-08-01T00:02:00Z",
+        ),
+        (
+            IssueMonitorCandidateSource::Cache,
+            true,
+            "2026-08-01T00:03:00Z",
+        ),
+    ] {
+        let issues = if observed { vec![open.clone()] } else { vec![] };
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &issues,
+            source,
+            repo.path(),
+            at,
+        );
+    }
+
+    assert!(
+        monitor.inbox_item(42).is_none(),
+        "a cache scan cannot reopen"
+    );
+    assert_eq!(monitor.agent_status().closure_held, vec![42]);
+
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[open],
+        IssueMonitorCandidateSource::Live,
+        repo.path(),
+        "2026-08-01T00:04:00Z",
+    );
+    assert!(monitor.agent_status().closure_held.is_empty());
+}
+
+/// Issue #4231: the reopen at the floor revision must survive the cross-process
+/// rebase in both directions; the tie is decided by generation, not by state.
+#[test]
+fn rebase_keeps_a_newer_generation_reopen_at_the_absence_floor_revision() {
+    let reopened = IssueClosureRecord {
+        issue_number: 42,
+        generation: 3,
+        state: IssueClosureState::Reopened,
+        evidence: IssueClosureEvidence::ExplicitRevision,
+        issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+    };
+    let absence = IssueClosureRecord {
+        issue_number: 42,
+        generation: 2,
+        state: IssueClosureState::Closed,
+        evidence: IssueClosureEvidence::CompleteLiveAbsence,
+        issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+    };
+    for (local, disk) in [
+        (reopened.clone(), absence.clone()),
+        (absence.clone(), reopened.clone()),
+    ] {
+        let prefs = |record: IssueClosureRecord| IssueMonitorPrefs {
+            closure_records: vec![record],
+            ..IssueMonitorPrefs::default()
+        };
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs(local.clone()));
+
+        monitor.rebase_daemon_driver_prefs(&prefs(disk));
+
+        let record = monitor
+            .prefs()
+            .closure_records
+            .into_iter()
+            .find(|record| record.issue_number == 42)
+            .expect("merged closure record");
+        assert_eq!(
+            (record.state, record.generation),
+            (IssueClosureState::Reopened, 3),
+            "local {:?}",
+            local.state
+        );
+    }
 }
 
 #[test]
@@ -3093,6 +3269,7 @@ fn operator_release_of_a_claim_block_is_adopted_cross_process_and_requeues() {
         // Far in the future: the expiry sweep must not release this hold on
         // its own; only the explicit operator release may.
         "2027-01-01T00:00:00Z",
+        None,
     ));
 
     // The CLI process only sees the persisted prefs, never the daemon inbox.
@@ -3164,4 +3341,242 @@ fn a_recorded_error_does_not_hide_the_scan_stall() {
         status.scan_stall.is_some(),
         "the stall must have a field an existing error cannot occupy"
     );
+}
+
+/// Issue #4077 AC-1 / AC-5: the 02:08Z → 02:37Z incident.
+///
+/// A PM stop leaves the launch's `gwt-auto-improve-claim` comment Active on
+/// GitHub. Every following acquire is refused by that stale claim, so the issue
+/// sits `BlockedByClaim` until `claim_ttl_secs` (1800s) lapses — the 29 silent
+/// minutes reported on the Issue. The stop has to release the claim it revoked.
+#[test]
+fn stop_releases_the_confirmed_github_claim_so_the_next_scan_can_reclaim() {
+    let client = FakeIssueClient::new();
+    client.seed(github_issue_number(42, vec![]));
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_issue_monitor_candidates(&mut monitor, &[issue(42, &["bug"])], "2026-09-07T02:00:00Z");
+
+    let launches = monitor.claim_next_launch_requests_with_active_cap(
+        &client,
+        "akiojin:77083",
+        "2026-09-07T02:00:00Z",
+        1,
+    );
+    assert_eq!(launches.len(), 1, "the first scan claims and launches #42");
+    let claim_id = monitor.live_claim_id(42).expect("live claim id");
+
+    let target = gwt::IssueMonitorStopTarget {
+        issue_number: 42,
+        claim_id: Some(claim_id.clone()),
+        delivery_id: monitor.pending_launch_delivery_id(42),
+        window_id: None,
+    };
+    let stopped = monitor.stop_only(&target, "PM recovery", "2026-09-07T02:08:00Z");
+    assert!(
+        matches!(stopped, gwt::IssueMonitorStopOutcome::Stopped { .. }),
+        "stop must succeed on the exact live identity: {stopped:?}"
+    );
+
+    let planned = monitor
+        .prefs()
+        .pending_effects
+        .into_iter()
+        .find(|effect| {
+            matches!(
+                &effect.payload,
+                gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number,
+                    claim_id: released,
+                    owner,
+                } if *issue_number == 42 && released == &claim_id && owner == "akiojin:77083"
+            )
+        })
+        .expect("stop must plan the release of the claim it revoked");
+    assert_eq!(planned.state, gwt::IssueMonitorEffectState::Prepared);
+
+    // Executing the planned release is what unblocks the queue: without it the
+    // next acquire is refused by our own stale claim for the full TTL.
+    let released = gwt_github::issue_auto_claim::release_claim(
+        &client,
+        IssueNumber(42),
+        &claim_id,
+        "akiojin:77083",
+    )
+    .expect("release the planned claim");
+    assert!(matches!(
+        released,
+        gwt_github::issue_auto_claim::ClaimReleaseOutcome::Released(_)
+    ));
+
+    let mut relaunch = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..IssueMonitorConfig::default()
+    });
+    relaunch.set_gui_connected(true);
+    scan_issue_monitor_candidates(
+        &mut relaunch,
+        &[issue(42, &["bug"])],
+        "2026-09-07T02:16:00Z",
+    );
+    let relaunched = relaunch.claim_next_launch_requests_with_active_cap(
+        &client,
+        "akiojin:77083",
+        "2026-09-07T02:16:00Z",
+        1,
+    );
+    assert_eq!(
+        relaunched.len(),
+        1,
+        "the scan right after the stop must relaunch instead of waiting out the claim TTL"
+    );
+    assert_ne!(
+        relaunch.inbox_item(42).expect("inbox item").state,
+        MonitorInboxState::BlockedByClaim
+    );
+}
+
+/// Issue #4077 AC-1: a requeue reached without a preceding stop (the launch
+/// failed on its own) releases the same claim. `launched_claims` is cleared the
+/// moment the launch stops being live, so the release has to read a durable
+/// identity rather than the live-launch accounting.
+#[test]
+fn requeue_releases_the_confirmed_github_claim_of_the_failed_launch() {
+    let mut monitor = IssueMonitorState::with_prefs(
+        IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        },
+        IssueMonitorPrefs {
+            enabled: true,
+            claim_identities: vec![gwt::IssueMonitorClaimIdentity {
+                issue_number: 42,
+                claim_id: "gwt-auto-improve:df524fc5".to_string(),
+                owner: "akiojin:77083".to_string(),
+            }],
+            failed_issues: vec![IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "agent window closed without a PR".to_string(),
+                window_id: Some("tab-1::agent-dead".to_string()),
+            }],
+            ..IssueMonitorPrefs::default()
+        },
+    );
+
+    let outcome = monitor.requeue_failed_issue(42, "PM recovery", "2026-09-07T02:08:00Z");
+    assert!(matches!(
+        outcome,
+        IssueMonitorRequeueOutcome::Requeued { .. }
+    ));
+
+    assert!(
+        monitor
+            .prefs()
+            .pending_effects
+            .iter()
+            .any(|effect| matches!(
+                &effect.payload,
+                gwt::IssueMonitorEffectPayload::ReleaseClaim {
+                    issue_number,
+                    claim_id,
+                    owner,
+                } if *issue_number == 42
+                    && claim_id == "gwt-auto-improve:df524fc5"
+                    && owner == "akiojin:77083"
+            )),
+        "requeue must plan the release of the claim it released locally"
+    );
+}
+
+/// Issue #4077 AC-2: a claim-blocked row has to say until when and by whom from
+/// the same snapshot `issue.monitor.status` prints.
+#[test]
+fn status_inbox_reports_claim_expiry_and_exclusion_reason() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    let candidate = issue(42, &["bug"]);
+    monitor.record_candidate(candidate.clone());
+    assert!(monitor.record_blocked_by_claim(
+        candidate,
+        "akiojin:77083",
+        "2026-09-07T02:37:00Z",
+        Some("gwt-auto-improve:df524fc5"),
+    ));
+
+    let status = monitor.agent_status();
+    let row = status
+        .inbox
+        .iter()
+        .find(|row| row.issue_number == 42)
+        .expect("inbox row");
+
+    assert_eq!(row.state, MonitorInboxState::BlockedByClaim);
+    assert_eq!(row.blocked_by_owner.as_deref(), Some("akiojin:77083"));
+    assert_eq!(
+        row.claim_expires_at.as_deref(),
+        Some("2026-09-07T02:37:00Z"),
+        "the PM must read the deadline without opening GitHub"
+    );
+    assert_eq!(
+        row.blocked_by_claim_id.as_deref(),
+        Some("gwt-auto-improve:df524fc5")
+    );
+    assert_eq!(
+        row.exclusion_reason.as_deref(),
+        Some("blocked by claim gwt-auto-improve:df524fc5 owned by akiojin:77083 until 2026-09-07T02:37:00Z"),
+        "the reason a row is held out of the queue belongs in the status projection"
+    );
+}
+
+/// Issue #4077 AC-4: a foreign claim released before its TTL lapses must not
+/// keep starving the issue. Terminalizing a claim comment moves the Issue's
+/// `updated_at`, which every scan already reads, so the block is re-validated
+/// on the next scan instead of at `claim_ttl_secs`.
+#[test]
+fn a_claim_block_is_revalidated_once_the_issue_changed_under_it() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        ..IssueMonitorConfig::default()
+    });
+    let mut candidate = issue(42, &["bug"]);
+    candidate.updated_at = Some("2026-09-07T02:08:00Z".to_string());
+    monitor.record_candidate(candidate.clone());
+    assert!(monitor.record_blocked_by_claim(
+        candidate.clone(),
+        "akiojin:77083",
+        "2026-09-07T02:37:00Z",
+        Some("gwt-auto-improve:df524fc5"),
+    ));
+
+    // Same generation: the block stands, exactly as it does today.
+    assert!(monitor
+        .requeue_expired_claim_blocks("2026-09-07T02:10:00Z")
+        .is_empty());
+    assert_eq!(
+        monitor.inbox_item(42).expect("inbox item").state,
+        MonitorInboxState::BlockedByClaim
+    );
+
+    // The foreign monitor released its claim: the comment edit moved the Issue.
+    let mut refreshed = candidate;
+    refreshed.updated_at = Some("2026-09-07T02:12:00Z".to_string());
+    monitor.record_candidate(refreshed);
+
+    assert_eq!(
+        monitor.requeue_expired_claim_blocks("2026-09-07T02:13:00Z"),
+        vec![42],
+        "a changed Issue is fresh evidence the block may be stale"
+    );
+    let item = monitor.inbox_item(42).expect("inbox item");
+    assert_eq!(item.state, MonitorInboxState::Queued);
+    assert_eq!(item.blocked_by_claim_id, None);
+    assert_eq!(item.claim_expires_at, None);
 }

@@ -257,7 +257,10 @@ use launch::{
     codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
+    effective_host_codex_config_path, issue_monitor_trust_candidate_from_feedback,
     maybe_register_codex_managed_hook_trust_for_launch,
+    register_codex_managed_project_trust_for_resolved_launch_with_host_context,
+    validate_issue_monitor_managed_codex_worktree, HostEnvKeySemantics, IssueMonitorTrustCandidate,
 };
 pub(crate) use launch::{
     continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
@@ -754,6 +757,10 @@ impl ManualLaunchHolderIntent {
 pub struct IssueMonitorProfileSaveContext {
     pub(crate) client_id: ClientId,
     pub(crate) issue_number: Option<u64>,
+    /// Issue #4079 AC-2: the candidate pool as it was when the form opened, so
+    /// the wizard can say which candidate the save replaces without re-reading
+    /// preferences on every keystroke.
+    pub(crate) pool: Vec<gwt::IssueMonitorLaunchProfile>,
 }
 
 #[derive(Debug, Clone)]
@@ -1214,6 +1221,12 @@ pub struct AppRuntime {
     /// pending window instead of spawning a duplicate. Entries clear on
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
+    /// Issue #4145 AC-1: the navigation request id and start instant of the
+    /// project open in flight. Opening spans a synchronous reserve, a
+    /// blocking-pool prepare and an event-loop commit, and
+    /// `ProjectNavigationRequest` is cloned into the worker and compared for
+    /// identity, so the instant is parked here instead.
+    pub(crate) project_open_started: Option<(u64, std::time::Instant)>,
     /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
     /// project root whose `pm.json` must record the resulting session. The
     /// entry is consumed by `handle_launch_complete`, which writes the PM
@@ -1257,6 +1270,16 @@ pub struct AppRuntime {
     /// notification center once the frontend canvas is ready.
     pub(crate) pending_update_resume_notice: Option<(String, String)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    /// Issue #4143 (AC-3): windows spawned by an *automatic* restore (startup
+    /// auto-resume / Open Project) whose launch has not reached PTY start yet,
+    /// mapped to the restored Session id. Nobody is watching such a window, so
+    /// a pre-PTY failure would leave an empty `Launch failed before PTY
+    /// started.` pane that the next generation restores again, and the
+    /// failures pile up across generations. A restart the operator asked for
+    /// is deliberately absent: that pane is the diagnostic they are waiting
+    /// for. Consumed by [`AppRuntime::launch_error_events`] and dropped once
+    /// the PTY is live or the window closes.
+    pub(crate) restore_launch_windows: HashMap<String, Option<String>>,
     /// Legacy official-provider provenance is staged during preparation and
     /// committed only after the exact launched Session emits authenticated
     /// SessionStart. Any earlier route failure leaves the source Session bytes
@@ -1953,7 +1976,12 @@ fn commit_local_issue_monitor_effect_result(
                             .inbox_item(*issue_number)
                             .map(|item| item.issue.clone())
                         {
-                            latest.record_blocked_by_claim(issue, winner.owner, winner.expires_at);
+                            latest.record_blocked_by_claim(
+                                issue,
+                                winner.owner.clone(),
+                                winner.expires_at.clone(),
+                                Some(winner.claim_id.as_str()),
+                            );
                         }
                     }
                     1
@@ -2840,6 +2868,7 @@ impl AppRuntime {
             pending_launch_wizard_materializations: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
+            project_open_started: None,
             pending_pm_launches: HashMap::new(),
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
@@ -2862,6 +2891,7 @@ impl AppRuntime {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            restore_launch_windows: HashMap::new(),
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
@@ -3424,6 +3454,19 @@ impl AppRuntime {
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
                     .launched_window_issue(window_id)
             })
+    }
+
+    fn issue_monitor_live_issue_number_for_window(
+        &self,
+        project_root: &Path,
+        window_id: &str,
+    ) -> Option<u64> {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).ok()?;
+        prefs
+            .launched_issues
+            .iter()
+            .find_map(|launched| (launched.window_id == window_id).then_some(launched.issue_number))
     }
 
     fn publish_active_issue_monitor_control(
@@ -4009,6 +4052,7 @@ impl AppRuntime {
                     // agent must be running to be refused), and the daemon
                     // rejects it, so nothing committed.
                     Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
+                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
                             self.issue_monitor_launch_failure_committed(
@@ -4046,6 +4090,9 @@ impl AppRuntime {
                         // Issue #3616: unreachable from the launch path — the
                         // agent must be running to receive a provider refusal.
                         Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
+                            IssueMonitorFailureCommit::Rejected
+                        }
+                        Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
                             IssueMonitorFailureCommit::Rejected
                         }
                         None => {
@@ -4352,6 +4399,29 @@ impl AppRuntime {
             .get(window_id)
             .and_then(|context| context.issue_monitor_issue_number);
         let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
+        self.issue_monitor_agent_failed_events_with_failure(
+            project_root,
+            window_id,
+            message,
+            issue_number_hint,
+            failure,
+        )
+    }
+
+    pub(crate) fn issue_monitor_agent_failed_events_with_failure(
+        &mut self,
+        project_root: &Path,
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        failure: Option<gwt::IssueMonitorFailure>,
+    ) -> Vec<OutboundEvent> {
+        let message = message.trim();
+        let message = if message.is_empty() {
+            "Agent entered error state"
+        } else {
+            message
+        };
         let publication = self.publish_issue_monitor_control(
             project_root,
             Self::issue_monitor_agent_failed_payload_with_failure(
@@ -4366,7 +4436,7 @@ impl AppRuntime {
             window_id,
             message,
             issue_number_hint,
-            session_mode,
+            failure,
             publication,
         )
     }
@@ -4487,7 +4557,11 @@ impl AppRuntime {
             window_id,
             message,
             issue_number_hint,
-            self.issue_monitor_session_mode_for_window(window_id),
+            self.issue_monitor_failure_for_window(
+                window_id,
+                message,
+                self.issue_monitor_session_mode_for_window(window_id),
+            ),
             publication,
         )
     }
@@ -4498,10 +4572,9 @@ impl AppRuntime {
         window_id: &str,
         message: &str,
         issue_number_hint: Option<u64>,
-        session_mode: gwt_agent::SessionMode,
+        failure: Option<gwt::IssueMonitorFailure>,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
-        let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
         match publication {
             Ok(()) => self.finalize_issue_monitor_agent_failed_events(
                 project_root,
@@ -4593,6 +4666,22 @@ impl AppRuntime {
                                     }
                                 }
                             }
+                            Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
+                                let issue_number = issue_number_hint
+                                    .or_else(|| monitor.launched_window_issue(window_id));
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                if monitor.try_escalate_codex_directory_trust_prompt(
+                                    issue_number,
+                                    window_id,
+                                    message.to_string(),
+                                ) {
+                                    IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                } else {
+                                    IssueMonitorFailureCommit::Rejected
+                                }
+                            }
                             None => {
                                 let issue_number = if let Some(issue_number) = issue_number_hint {
                                     monitor.record_agent_issue_failed(
@@ -4647,6 +4736,14 @@ impl AppRuntime {
                         issue_number_hint,
                     ),
                 }
+            }
+            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_))
+                if matches!(
+                    failure,
+                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                ) =>
+            {
+                Vec::new()
             }
             Err(error) => self.issue_monitor_control_error_events(
                 None,
