@@ -11429,7 +11429,13 @@ fn finalize_recovery_probes(
             probe_execution_repair_for_recovery(worktree, session_id, recovery_context),
             probe_execution_adopt_for_recovery(worktree, caller, recovery_context),
             probe_execution_reopen_for_recovery(worktree, caller, recovery_context),
-            crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            workspace_update_recovery_probe(
+                worktree,
+                &snapshot,
+                session_id,
+                recovery_context,
+                crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            ),
             crate::cli::workspace::probe_workspace_ensure(worktree, &ensure_candidate),
         ]
     } else {
@@ -11467,6 +11473,73 @@ fn finalize_recovery_probes(
     snapshot.recovery_probes = probes;
     snapshot.recovery_hint = execution_recovery_hint(&snapshot);
     snapshot
+}
+
+/// The Host refuses `workspace.update` unless the caller's Session holds the
+/// *current Active* execution binding: `active_execution_binding()` is `None`
+/// for a `Prepared` or `Inspection` authority, and
+/// `validate_current_execution_binding_authority` rejects a superseded one.
+/// Both answer `ExecutionBindingMismatch`, which the bridge reports as
+/// `authority_mismatch` at HTTP 409 with no local fallback.
+///
+/// The Work-mutation probe validates Session identity, cwd, repo and Work
+/// resolution but never reads generation currency, so it reported `Available`
+/// for a caller the Host would refuse. Gate its verdict through the same
+/// predicate the Host enforces (Issue #4029 AC-2).
+///
+/// A caller with no durable binding keeps the probe's own verdict: it never
+/// reaches the bound Host path, so its `workspace.update` is not the
+/// advertisement this Issue is about.
+fn workspace_update_recovery_probe(
+    worktree: &Path,
+    snapshot: &ExecutionDiagnosisSnapshot,
+    session_id: Option<&str>,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+    probe: crate::cli::governance::RecoveryProbe,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceCause, GovernanceMetadata, RecoveryProbe};
+
+    if !probe.advertise() {
+        return probe;
+    }
+    let (Some(owner_kind), Some(owner_number)) = (snapshot.owner_kind, snapshot.owner_number)
+    else {
+        return probe;
+    };
+    let (Some(session_id), Some(Ok(recovery_context))) = (session_id, recovery_context) else {
+        return probe;
+    };
+    let Some(binding) = recovery_context.session().execution_binding.as_ref() else {
+        return probe;
+    };
+    let owner = ExecutionOwnerKey {
+        kind: owner_kind,
+        number: owner_number,
+    };
+    // Cloned up front so the refusal builder does not borrow `probe`, which the
+    // authorized arm moves.
+    let governance = probe.governance.clone();
+    let unavailable = move |cause, reason: &str| {
+        RecoveryProbe::unavailable(
+            "workspace.update",
+            GovernanceMetadata {
+                cause: Some(cause),
+                retryable: Some(false),
+                ..governance.clone()
+            },
+            reason,
+        )
+    };
+    match current_active_execution_binding_matches(worktree, owner, session_id, &binding.identity) {
+        Ok(true) => probe,
+        Ok(false) => unavailable(
+            GovernanceCause::Authority,
+            "workspace_update_execution_binding_not_current",
+        ),
+        Err(error) => unavailable(GovernanceCause::Integrity, &error.to_string()),
+    }
 }
 
 /// Probe `verify.plan` / `verify.run` through the exact authority gate the
@@ -26872,6 +26945,97 @@ exit 1
                     "`{refused}` refuses a caller that does not own the record: {status:?}"
                 );
             }
+        }
+
+        /// Issue #4029 AC-2: the Host refuses `workspace.update` unless the
+        /// caller's Session still holds the *current Active* execution binding
+        /// — `active_execution_binding()` is `None` for a `Prepared` or
+        /// `Inspection` authority, and
+        /// `validate_current_execution_binding_authority` rejects a superseded
+        /// one, both answering `ExecutionBindingMismatch` / `authority_mismatch`
+        /// at HTTP 409. The Work-mutation probe only validates Session identity,
+        /// cwd, repo and Work resolution, so `execution.status` advertised the
+        /// operation to a caller the Host would refuse. Advertisement must track
+        /// the binding predicate the Host enforces, in both directions.
+        #[test]
+        fn status_advertises_workspace_update_only_while_the_caller_holds_the_active_binding() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+
+            crate::cli::trusted_store::init_git_repo_with_origin(repo);
+            save(repo, &active_record("sess-bound")).unwrap();
+            ensure_generation_ledger(repo, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo, owner).unwrap().unwrap();
+            persist_generation_session_binding(repo, owner, "sess-bound", binding);
+            // Only `workspace.ensure` materializes the Work projection the
+            // mutation probe resolves, and it must run while the Session is
+            // still the current binding holder.
+            crate::cli::workspace::ensure_workspace_for_agent(
+                repo,
+                crate::cli::workspace::workspace_ensure_status_candidate("sess-bound"),
+            )
+            .expect("ensure the Work projection for the bound Session");
+
+            let advertised = |status: &serde_json::Value| -> bool {
+                status["available_recoveries"]
+                    .as_array()
+                    .expect("available_recoveries")
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|operation| operation == "workspace.update")
+            };
+
+            let bound = status_snapshot(repo, "sess-bound");
+            assert_eq!(bound["ecr_status"], "active", "{bound:?}");
+            assert!(
+                advertised(&bound),
+                "the Session holding the current Active binding executes \
+                 `workspace.update`, so it must stay advertised: {bound:?}"
+            );
+
+            // A foreign generation takes over the Active authority; the caller's
+            // Session file, branch and Work projection are all untouched, so
+            // every Work-mutation precondition still holds while the Host would
+            // now refuse the call.
+            replace_current_generation_authority(
+                repo,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3249,
+                },
+            );
+
+            let superseded = status_snapshot(repo, "sess-bound");
+            assert_eq!(superseded["ecr_status"], "active", "{superseded:?}");
+            assert!(
+                !advertised(&superseded),
+                "`workspace.update` is refused with `authority_mismatch` once the \
+                 caller no longer holds the Active binding, so it must not be \
+                 advertised: {superseded:?}"
+            );
+            let probe = superseded["recovery_probes"]
+                .as_array()
+                .expect("recovery_probes")
+                .iter()
+                .find(|probe| probe["operation"] == "workspace.update")
+                .expect("workspace.update probe")
+                .clone();
+            assert_eq!(probe["state"], "unavailable", "{probe:?}");
+            assert_eq!(
+                probe["governance"]["cause"], "authority",
+                "the refusal the Host answers is an authority mismatch: {probe:?}"
+            );
         }
 
         /// Issue #4154 AC-1 / AC-2: `execution.adopt` transfers a settled
