@@ -875,10 +875,11 @@ fn pane_backend_silence(context: &str, received: usize, budget: Duration) -> Str
     let budget = format!("{}ms", budget.as_millis());
     if received == 0 {
         format!(
-            "{context}: pane_backend_unresponsive — the gwt instance behind this pane WebSocket \
-             accepted the connection and then sent nothing within {budget}. It is running but not \
-             answering, which is what a saturated instance looks like from here. Nothing was \
-             changed; retry, or restart that instance."
+            "{context}: pane_backend_unresponsive — connected to the gwt instance behind this pane \
+             WebSocket, but it sent nothing within {budget}. Pane replies come from the GUI event \
+             loop, so a single long dispatch holds them; check the gwt log for \
+             `gwt.frontend.timing` \"blocked the GUI event loop\" warnings at this time. Nothing \
+             was changed; retry after the stall clears."
         )
     } else {
         format!(
@@ -3394,6 +3395,21 @@ mod tests {
             assert!(
                 error.contains("pane list"),
                 "the refusal must say which operation gave up: {error}"
+            );
+            // Issue #4257 AC-2: report what was observed, not a guessed cause.
+            // The live case behind "saturated instance" was an idle process
+            // whose GUI event loop was held by one long dispatch.
+            assert!(
+                !error.contains("saturated"),
+                "the refusal must not assert a cause it did not observe: {error}"
+            );
+            assert!(
+                error.contains("connected") && error.contains("300ms"),
+                "the refusal must state the observed facts (connection, wait): {error}"
+            );
+            assert!(
+                error.contains("gwt.frontend.timing"),
+                "the refusal must point at the event-loop stall evidence: {error}"
             );
             server.abort();
             let _ = server.await;
