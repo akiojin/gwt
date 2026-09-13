@@ -65,6 +65,10 @@ pub struct TestEnv {
     pub pr_view_call_log: Vec<u64>,
     pub pr_ready_call_log: Vec<u64>,
     pub pr_draft_call_log: Vec<u64>,
+    /// SPEC #3835 AC-15: every `pr.update_branch` target the command layer
+    /// asked for, and the outcome each one is seeded to return.
+    pub pr_update_branch_call_log: Vec<u64>,
+    pub pr_update_branch_outcomes: HashMap<u64, crate::cli::PrUpdateBranchResult>,
     pub pr_reviews_call_log: Vec<u64>,
     pub pr_review_threads_call_log: Vec<u64>,
     pub pr_reply_and_resolve_call_log: Vec<(u64, String)>,
@@ -115,6 +119,8 @@ impl TestEnv {
             pr_view_call_log: Vec::new(),
             pr_ready_call_log: Vec::new(),
             pr_draft_call_log: Vec::new(),
+            pr_update_branch_call_log: Vec::new(),
+            pr_update_branch_outcomes: HashMap::new(),
             pr_reviews_call_log: Vec::new(),
             pr_review_threads_call_log: Vec::new(),
             pr_reply_and_resolve_call_log: Vec::new(),
@@ -336,6 +342,13 @@ impl CliEnv for TestEnv {
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_draft_call_log.push(number);
         self.prs
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn update_pr_branch(&mut self, number: u64) -> io::Result<crate::cli::PrUpdateBranchResult> {
+        self.pr_update_branch_call_log.push(number);
+        self.pr_update_branch_outcomes
             .get(&number)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
