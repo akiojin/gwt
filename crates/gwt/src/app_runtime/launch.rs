@@ -1181,13 +1181,45 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                     Some((holder, evidence)) => {
                         FreshSuccessorRoute::DeadHolder(Box::new(holder), evidence)
                     }
-                    None => {
-                        return Err(existing_generation_conflict_detail(
-                            sessions_dir,
-                            owner,
-                            &ledger,
-                        ))
-                    }
+                    // Issue #4200 AC-2: before refusing forever, ask whether
+                    // the holder ever started an agent at all. A launch that
+                    // died before its agent authenticated — a directory-trust
+                    // prompt is the way it happens in production — leaves an
+                    // Active generation that every liveness reading here is
+                    // structurally unable to release, so the refusal below is
+                    // permanent and the Issue leaves autonomous circulation for
+                    // good. The holder's own lifecycle record answers it: a
+                    // Session that never delivered a hook never ran a turn, and
+                    // settling it interrupts nothing. An agent that is merely
+                    // slow to start has delivered no hook either, so the
+                    // release keeps its own start-up grace and everything less
+                    // certain than that falls through to the refusal unchanged.
+                    None => match gwt::cli::execution_state::release_unstarted_launch_generation(
+                        worktree,
+                        owner,
+                        sessions_dir,
+                        "the launch holding this generation never started an agent",
+                    ) {
+                        Ok(gwt::cli::execution_state::LaunchGenerationRelease::Released {
+                            generation_id,
+                            holder_session_id,
+                        }) => {
+                            tracing::info!(
+                                owner = owner.number,
+                                %generation_id,
+                                %holder_session_id,
+                                "released an execution generation whose launch never started an agent"
+                            );
+                            FreshSuccessorRoute::Blocked
+                        }
+                        _ => {
+                            return Err(existing_generation_conflict_detail(
+                                sessions_dir,
+                                owner,
+                                &ledger,
+                            ))
+                        }
+                    },
                 },
             };
 

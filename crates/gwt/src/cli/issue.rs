@@ -1322,7 +1322,7 @@ fn release_revoked_launch_generation(
     project_root: &std::path::Path,
     number: u64,
     reason: &str,
-) -> Result<crate::cli::execution_state::RevokedLaunchGenerationRelease, String> {
+) -> Result<crate::cli::execution_state::LaunchGenerationRelease, String> {
     let worktrees = crate::worktree_inventory::enumerate_worktrees(project_root, None)
         .map(|entries| {
             entries
@@ -1350,11 +1350,11 @@ fn release_revoked_launch_generation(
             .map_err(|error| error.to_string())?
             {
                 Some(hold) => {
-                    crate::cli::execution_state::RevokedLaunchGenerationRelease::AlreadyTerminal {
+                    crate::cli::execution_state::LaunchGenerationRelease::AlreadyTerminal {
                         generation_id: hold.generation_id,
                     }
                 }
-                None => crate::cli::execution_state::RevokedLaunchGenerationRelease::NotHeld,
+                None => crate::cli::execution_state::LaunchGenerationRelease::NotHeld,
             },
         );
     };
@@ -1368,9 +1368,9 @@ fn release_revoked_launch_generation(
 
 fn merge_generation_release(
     payload: &mut serde_json::Value,
-    release: Result<crate::cli::execution_state::RevokedLaunchGenerationRelease, String>,
+    release: Result<crate::cli::execution_state::LaunchGenerationRelease, String>,
 ) {
-    use crate::cli::execution_state::RevokedLaunchGenerationRelease as Release;
+    use crate::cli::execution_state::LaunchGenerationRelease as Release;
 
     let Some(object) = payload.as_object_mut() else {
         return;

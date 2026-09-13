@@ -1901,17 +1901,71 @@ pub fn reap_startup_defunct_active_generation(
 /// operator revoked its launch.
 const REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX: &str = "revoked-launch-release-v1:";
 
-fn revoked_launch_release_operation_id(generation_id: &str, binding_id: &str) -> String {
+/// Issue #4200 AC-2: operation-id prefix for a generation released because the
+/// launch that opened it never started an agent.
+const UNSTARTED_LAUNCH_RELEASE_OPERATION_PREFIX: &str = "unstarted-launch-release-v1:";
+
+fn launch_release_operation_id(
+    authority: LaunchGenerationReleaseAuthority,
+    generation_id: &str,
+    binding_id: &str,
+) -> String {
     let digest = sha256_hex(
-        serde_json::to_vec(&("revoked-launch-release-v1", generation_id, binding_id))
+        serde_json::to_vec(&(authority.operation_tag(), generation_id, binding_id))
             .unwrap_or_default(),
     );
-    format!("{REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX}{digest}")
+    format!("{}{digest}", authority.operation_prefix())
 }
 
-/// What [`release_revoked_launch_generation`] did to an owner's generation.
+/// Issue #4200: what makes a launch's generation this call's to settle.
+///
+/// Both authorities settle the same way and refuse the same way; they differ
+/// only in the fact that licenses them, and that fact is what the audit entry
+/// has to name. Sharing one transaction keeps a second release route from
+/// drifting away from the fail-closed checks the first one makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchGenerationReleaseAuthority {
+    /// The operator revoked the launch (AC-1 / AC-3). No liveness proof is
+    /// asked for: revoking *is* the decision that the holder must not return.
+    Revoked,
+    /// The holder never delivered a single agent lifecycle event (AC-2), so
+    /// there is no agent whose work could be interrupted by settling it.
+    Unstarted,
+}
+
+impl LaunchGenerationReleaseAuthority {
+    fn operation_prefix(self) -> &'static str {
+        match self {
+            Self::Revoked => REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX,
+            Self::Unstarted => UNSTARTED_LAUNCH_RELEASE_OPERATION_PREFIX,
+        }
+    }
+
+    fn operation_tag(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked-launch-release-v1",
+            Self::Unstarted => "unstarted-launch-release-v1",
+        }
+    }
+
+    fn missing_verification(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked launch settlement",
+            Self::Unstarted => "unstarted launch settlement",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked launch",
+            Self::Unstarted => "unstarted launch",
+        }
+    }
+}
+
+/// What a launch-generation release did to an owner's generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RevokedLaunchGenerationRelease {
+pub enum LaunchGenerationRelease {
     /// The Active generation was terminalized by this call, so the next launch
     /// takes the Blocked successor route.
     Released {
@@ -1954,12 +2008,127 @@ pub fn release_revoked_launch_generation(
     worktree: &Path,
     owner: ExecutionOwnerKey,
     reason: &str,
-) -> io::Result<RevokedLaunchGenerationRelease> {
+) -> io::Result<LaunchGenerationRelease> {
+    release_launch_generation(
+        worktree,
+        owner,
+        LaunchGenerationReleaseAuthority::Revoked,
+        reason,
+        |_, _| None,
+    )
+}
+
+/// Issue #4200 AC-2: release an owner's Active execution generation because the
+/// launch that opened it never started an agent.
+///
+/// [`release_revoked_launch_generation`] gives an operator a way out, but AC-2
+/// asks for the case to not need an operator at all. It cannot be answered with
+/// the liveness readings this module already has: a launch writes the durable
+/// Session and its runtime sidecar `Running` before the agent runs, the
+/// PTY-exit path that would correct them never runs when the agent never
+/// authenticated, and the Host named in the sidecar is the gwt process itself.
+/// Every one of those readings is byte-identical for an agent mid-turn and for
+/// one wedged at a directory-trust prompt, so no amount of looking harder at
+/// them can separate the two.
+///
+/// [`gwt_agent::Session::has_lifecycle_recovery_evidence`] can, because it is
+/// written from the other side: only a hook the agent itself delivered sets
+/// `last_hook_event_at` or `last_completed_stop_at`. A holder with neither has
+/// never reported in, which is a *positive* statement about the agent rather
+/// than a failure to prove something about the Host — and it is one the launch
+/// path cannot fake, because the launch path never writes those fields.
+///
+/// This stays fail-closed in both directions. A generation still inside
+/// [`UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES`], and a holder Session that is
+/// missing, unreadable, carries any lifecycle evidence, or has picked up a
+/// provider session id, are all refused byte-preserving, along with every
+/// generation-identity check the revoked route makes. The only launches it
+/// settles are ones that had long enough to start and demonstrably never got
+/// an agent as far as its first hook.
+pub fn release_unstarted_launch_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    sessions_dir: &Path,
+    reason: &str,
+) -> io::Result<LaunchGenerationRelease> {
+    release_launch_generation(
+        worktree,
+        owner,
+        LaunchGenerationReleaseAuthority::Unstarted,
+        reason,
+        |holder_session_id, record| {
+            unstarted_launch_refusal(sessions_dir, holder_session_id, record)
+        },
+    )
+}
+
+/// Issue #4200 AC-2: how long a generation must have been Active before the
+/// absence of a lifecycle hook is allowed to mean the agent will never send
+/// one.
+///
+/// An agent that is merely slow to come up has not delivered a hook yet either,
+/// so without this an ordinary launch could be settled out from under itself by
+/// a concurrent one. The readiness supervisor in `app_runtime::launch` bounds
+/// legitimate start-up at `CONTINUE_WORK_READY_TIMEOUT` plus `MAX_EXTENSIONS`
+/// extensions — about five and a half minutes — so this sits well past the last
+/// moment a real agent could still be arriving, and still far short of the
+/// forever the Issue is otherwise parked for.
+const UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES: i64 = 15;
+
+/// `Some(detail)` when the launch cannot be shown to have never started an
+/// agent, which is every reading other than a generation past the start-up
+/// grace whose holder Session is readable, carries no lifecycle evidence, and
+/// has no provider session id of its own.
+fn unstarted_launch_refusal(
+    sessions_dir: &Path,
+    session_id: &str,
+    record: &ExecutionControlRecord,
+) -> Option<&'static str> {
+    if Utc::now().signed_duration_since(record.launched_at)
+        < chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES)
+    {
+        return Some("the generation is still inside the launch start-up grace, so a silent holder may yet be coming up");
+    }
+    let holder_path = sessions_dir.join(format!("{session_id}.toml"));
+    let gwt_agent::SessionPathState::Present(holder) =
+        gwt_agent::inspect_session_path(&holder_path)
+    else {
+        // Absent or unreadable is not evidence of never having run. The
+        // revoked route stays available for it.
+        return Some(
+            "the holder Session could not be read, so the launch cannot be shown to be unstarted",
+        );
+    };
+    if holder.has_lifecycle_recovery_evidence() {
+        return Some(
+            "the holder Session recorded an agent lifecycle event, so its agent did start",
+        );
+    }
+    if holder.exact_resume_session_id().is_some() {
+        // A provider session id can only come from the agent's own SessionStart
+        // payload, so it outranks the absence of a hook record.
+        return Some("the holder Session carries a provider session id, so its agent did start");
+    }
+    None
+}
+
+/// The shared release transaction behind both launch-generation authorities.
+///
+/// `holder_refusal` is the authority's own extra precondition, evaluated under
+/// the release leases against the holder this generation actually names.
+fn release_launch_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    authority: LaunchGenerationReleaseAuthority,
+    reason: &str,
+    holder_refusal: impl Fn(&str, &ExecutionControlRecord) -> Option<&'static str>,
+) -> io::Result<LaunchGenerationRelease> {
     validate_owner(owner)?;
     if reason.trim().is_empty() {
-        return Err(invalid_generation_data(
-            "releasing a revoked launch generation requires a non-empty reason",
-        ));
+        return Err(invalid_generation_data(format!(
+            "releasing a {} generation requires a non-empty reason",
+            authority.noun()
+        )));
     }
     // Same reason as the startup reaper: a refused relaunch materializes the
     // worktree again and publishes nothing into it, so the strict read below
@@ -1974,30 +2143,33 @@ pub fn release_revoked_launch_generation(
                 )
             })?;
         let Some(owner_current) = owner_ledger.current_generation().cloned() else {
-            return Ok(RevokedLaunchGenerationRelease::NotHeld);
+            return Ok(LaunchGenerationRelease::NotHeld);
         };
         if owner_ledger.effective_status_for(&owner_current) != ExecutionControlStatus::Active {
-            return Ok(RevokedLaunchGenerationRelease::AlreadyTerminal {
+            return Ok(LaunchGenerationRelease::AlreadyTerminal {
                 generation_id: owner_current.identity.generation_id,
             });
         }
         let mut ledger = load_generation_ledger_from_context(context)?.ok_or_else(|| {
-            invalid_generation_data("revoked launch release lost strict generation authority")
+            invalid_generation_data(format!(
+                "{} release lost strict generation authority",
+                authority.noun()
+            ))
         })?;
         let Some(current) = ledger.current_generation().cloned() else {
-            return Ok(RevokedLaunchGenerationRelease::NotHeld);
+            return Ok(LaunchGenerationRelease::NotHeld);
         };
         if current.identity.generation_id != owner_current.identity.generation_id
             || current.identity.worktree_binding_hash != context.worktree_binding_hash
             || ledger.effective_status_for(&current) != ExecutionControlStatus::Active
         {
-            return Ok(RevokedLaunchGenerationRelease::Held {
+            return Ok(LaunchGenerationRelease::Held {
                 generation_id: current.identity.generation_id,
                 detail: "the current generation changed under the release lease",
             });
         }
         if current_generation_has_prepared_transaction(&ledger, &current.identity.generation_id) {
-            return Ok(RevokedLaunchGenerationRelease::Held {
+            return Ok(LaunchGenerationRelease::Held {
                 generation_id: current.identity.generation_id,
                 detail: "a prepared successor or takeover transaction is still in flight",
             });
@@ -2009,7 +2181,8 @@ pub fn release_revoked_launch_generation(
         .map(hydrate_recovery_envelopes)
         .map_err(|error| {
             invalid_generation_data(format!(
-                "revoked launch Active projection is malformed: {error}"
+                "{} Active projection is malformed: {error}",
+                authority.noun()
             ))
         })?;
         if !integrity_ok(&record)
@@ -2019,19 +2192,29 @@ pub fn release_revoked_launch_generation(
             || record.status != ExecutionControlStatus::Active
             || record.settled_at.is_some()
         {
-            return Ok(RevokedLaunchGenerationRelease::Held {
+            return Ok(LaunchGenerationRelease::Held {
                 generation_id: current.identity.generation_id,
                 detail: "the Active projection no longer matches this generation",
             });
         }
-        let operation_id = revoked_launch_release_operation_id(
+        // The authority's own precondition, read against the holder this
+        // generation names rather than the one a caller believed in, and
+        // against the record it just proved is the current Active one.
+        if let Some(detail) = holder_refusal(&holder_session_id, &record) {
+            return Ok(LaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail,
+            });
+        }
+        let operation_id = launch_release_operation_id(
+            authority,
             &current.identity.generation_id,
             &current.identity.session_binding_id,
         );
         let recorded_at = Utc::now();
         record.status = ExecutionControlStatus::Blocked;
         record.blocked_reason = Some(reason.to_string());
-        record.missing_verification = Some("revoked launch settlement".to_string());
+        record.missing_verification = Some(authority.missing_verification().to_string());
         record.settled_at = Some(recorded_at);
         let projection = serialized_execution_projection(&record)?;
         append_lifecycle_event(
@@ -2053,14 +2236,18 @@ pub fn release_revoked_launch_generation(
         stamp_generation_ledger(&mut ledger);
         write_activated_generation(context, &ledger, &projection)?;
         let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
-            invalid_generation_data("revoked launch release lost generation authority")
+            invalid_generation_data(format!(
+                "{} release lost generation authority",
+                authority.noun()
+            ))
         })?;
         if readback.current_effective_status() != Some(ExecutionControlStatus::Blocked) {
-            return Err(invalid_generation_data(
-                "revoked launch release readback is not Blocked",
-            ));
+            return Err(invalid_generation_data(format!(
+                "{} release readback is not Blocked",
+                authority.noun()
+            )));
         }
-        Ok(RevokedLaunchGenerationRelease::Released {
+        Ok(LaunchGenerationRelease::Released {
             generation_id: current.identity.generation_id,
             holder_session_id,
         })
@@ -15675,9 +15862,31 @@ mod tests {
         StartupActiveGenerationCandidate,
         gwt_agent::SessionExecutionIdentity,
     ) {
+        startup_reaper_active_fixture_with_status_and_age(
+            worktree,
+            owner,
+            session_id,
+            status,
+            chrono::Duration::zero(),
+        )
+    }
+
+    /// Issue #4200 AC-2: the same fixture with control over how long ago the
+    /// generation was launched, so the start-up grace can be exercised.
+    fn startup_reaper_active_fixture_with_status_and_age(
+        worktree: &Path,
+        owner: ExecutionOwnerKey,
+        session_id: &str,
+        status: gwt_agent::AgentStatus,
+        age: chrono::Duration,
+    ) -> (
+        StartupActiveGenerationCandidate,
+        gwt_agent::SessionExecutionIdentity,
+    ) {
         let mut active = active_record(session_id);
         active.owner_kind = owner.kind;
         active.owner_number = owner.number;
+        active.launched_at -= age;
         save(worktree, &active).unwrap();
         ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
         let binding = current_execution_binding(worktree, owner)
@@ -16273,7 +16482,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             released,
-            RevokedLaunchGenerationRelease::Released {
+            LaunchGenerationRelease::Released {
                 generation_id: candidate.generation_id.clone(),
                 holder_session_id: session_id.to_string(),
             }
@@ -16316,7 +16525,7 @@ mod tests {
         assert_eq!(
             release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
                 .unwrap(),
-            RevokedLaunchGenerationRelease::AlreadyTerminal {
+            LaunchGenerationRelease::AlreadyTerminal {
                 generation_id: candidate.generation_id
             }
         );
@@ -16373,7 +16582,7 @@ mod tests {
         assert_eq!(
             release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
                 .unwrap(),
-            RevokedLaunchGenerationRelease::Held {
+            LaunchGenerationRelease::Held {
                 generation_id: candidate.generation_id,
                 detail: "a prepared successor or takeover transaction is still in flight",
             }
@@ -16382,6 +16591,243 @@ mod tests {
             generation_authority_bytes(worktree.path(), owner),
             authority_before,
             "a refused release is byte-preserving"
+        );
+    }
+
+    /// Issue #4200 AC-2: a launch that never started an agent releases its own
+    /// generation, with no operator in the loop.
+    ///
+    /// The fixture is the same stranded shape the revoked route exists for — a
+    /// `Running` holder whose sidecar names a live Host — because that is the
+    /// point: every liveness reading in this module is byte-identical for an
+    /// agent mid-turn and for one that never authenticated, so AC-2 cannot be
+    /// answered by looking at the Host at all. It is answered from the agent's
+    /// side: the holder Session has no lifecycle event because no agent ever
+    /// delivered one. The second owner below is the same fixture with a single
+    /// hook recorded, and it must be refused — that one hook is the whole
+    /// difference between "nothing is running" and "something is".
+    #[test]
+    fn unstarted_launch_release_frees_a_generation_no_liveness_reading_can() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let process_started_at = crate::process::host_process_start_time(std::process::id())
+            .expect("current process start identity");
+
+        // The production shape: Active generation, holder Session written
+        // `Running` by the launch, runtime sidecar written by a Host that is
+        // still alive, and an agent that never ran a turn.
+        let unstarted_owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 922,
+        };
+        let unstarted_session = "unstarted-launch-holder";
+        let (unstarted_candidate, unstarted_identity) =
+            startup_reaper_active_fixture_with_status_and_age(
+                worktree.path(),
+                unstarted_owner,
+                unstarted_session,
+                gwt_agent::AgentStatus::Running,
+                chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
+            );
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &unstarted_identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &sessions_dir,
+            unstarted_session,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &unstarted_identity).unwrap(),
+            ExactSessionRuntimeDisposition::Live,
+            "the fixture must reproduce the reading that strands a generation"
+        );
+        assert!(
+            unreachable_current_generation_holder(&sessions_dir, worktree.path(), unstarted_owner)
+                .unwrap()
+                .is_none(),
+            "no liveness route can release this, which is why AC-2 needs another fact"
+        );
+
+        assert!(
+            release_unstarted_launch_generation(
+                worktree.path(),
+                unstarted_owner,
+                &sessions_dir,
+                "  "
+            )
+            .is_err(),
+            "a release with no stated reason leaves no usable audit entry"
+        );
+
+        assert_eq!(
+            release_unstarted_launch_generation(
+                worktree.path(),
+                unstarted_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Released {
+                generation_id: unstarted_candidate.generation_id.clone(),
+                holder_session_id: unstarted_session.to_string(),
+            }
+        );
+
+        // Terminal, so the next launch takes the Blocked successor route — the
+        // Issue is back in autonomous circulation without anyone intervening.
+        let hold = owner_generation_hold_from_ledger(
+            &sessions_dir,
+            &load_owner_generation_ledger(worktree.path(), unstarted_owner)
+                .unwrap()
+                .unwrap(),
+        )
+        .expect("the generation stays on record as audit evidence");
+        assert_eq!(hold.status, ExecutionControlStatus::Blocked);
+        assert!(
+            execution_generation_conflict_refusal(unstarted_owner, Some(&hold))
+                .contains("blocked generation"),
+        );
+
+        // The audit entry names this authority, never the operator's.
+        let event = load_owner_generation_ledger(worktree.path(), unstarted_owner)
+            .unwrap()
+            .unwrap()
+            .lifecycle_events_for(&unstarted_candidate.generation_id)
+            .max_by_key(|event| event.sequence)
+            .expect("release lifecycle event")
+            .clone();
+        assert_eq!(event.from_status, ExecutionControlStatus::Active);
+        assert_eq!(event.to_status, ExecutionControlStatus::Blocked);
+        assert!(event
+            .operation_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with(UNSTARTED_LAUNCH_RELEASE_OPERATION_PREFIX)));
+
+        // Same fixture, one delivered hook. The agent reported in, so this is
+        // a live execution and the release must keep its hands off it.
+        let started_owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 923,
+        };
+        let started_session = "started-launch-holder";
+        let (started_candidate, started_identity) =
+            startup_reaper_active_fixture_with_status_and_age(
+                worktree.path(),
+                started_owner,
+                started_session,
+                gwt_agent::AgentStatus::Running,
+                chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
+            );
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &started_identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &sessions_dir,
+            started_session,
+        ))
+        .unwrap();
+        let started_path = sessions_dir.join(format!("{started_session}.toml"));
+        let mut started = gwt_agent::Session::load(&started_path).unwrap();
+        started.record_hook_event("SessionStart");
+        started.save(&sessions_dir).unwrap();
+
+        let authority_before = generation_authority_bytes(worktree.path(), started_owner);
+        assert_eq!(
+            release_unstarted_launch_generation(
+                worktree.path(),
+                started_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: started_candidate.generation_id.clone(),
+                detail:
+                    "the holder Session recorded an agent lifecycle event, so its agent did start",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), started_owner),
+            authority_before,
+            "a refused release is byte-preserving"
+        );
+
+        // A holder that cannot be read is not a holder proven never to have
+        // run. Removing it must not turn the refusal into a release.
+        fs::remove_file(&started_path).unwrap();
+        assert_eq!(
+            release_unstarted_launch_generation(
+                worktree.path(),
+                started_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: started_candidate.generation_id,
+                detail: "the holder Session could not be read, so the launch cannot be shown to be unstarted",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), started_owner),
+            authority_before,
+            "an unreadable holder is byte-preserving too"
+        );
+
+        // An agent that is merely slow to come up has delivered no hook yet
+        // either. Inside the start-up grace the silence means nothing, and a
+        // concurrent launch must not be able to settle a generation out from
+        // under an execution that is still arriving.
+        let starting_owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 924,
+        };
+        let starting_session = "starting-launch-holder";
+        let (starting_candidate, _starting_identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            starting_owner,
+            starting_session,
+            gwt_agent::AgentStatus::Running,
+        );
+        let authority_before = generation_authority_bytes(worktree.path(), starting_owner);
+        assert_eq!(
+            release_unstarted_launch_generation(
+                worktree.path(),
+                starting_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: starting_candidate.generation_id,
+                detail: "the generation is still inside the launch start-up grace, so a silent holder may yet be coming up",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), starting_owner),
+            authority_before,
+            "a generation inside the start-up grace is byte-preserving"
         );
     }
 
