@@ -962,7 +962,7 @@ mod poll_state_tests {
     // bootstrap route keeps the exit-bearing variant.
     #[test]
     fn worker_thread_exit_paths_are_removed_from_update_front_door() {
-        let source = include_str!("update_front_door.rs");
+        let source = include_str!("update_front_door.rs").replace("\r\n", "\n");
         let production = source
             .split("#[cfg(test)]\nmod poll_state_tests")
             .next()

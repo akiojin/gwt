@@ -5503,31 +5503,19 @@ impl AppRuntime {
             operation,
             "issue monitor control outcome is rejected or uncertain; local fallback denied"
         );
-        let project_root = self.active_project_root().map(Path::to_path_buf);
-        let prefs = project_root
-            .as_deref()
-            .map(gwt::issue_monitor_prefs_path_for_repo_path)
-            .and_then(|path| gwt::load_issue_monitor_prefs(&path).ok())
-            .unwrap_or_else(gwt::IssueMonitorPrefs::recovery_default);
-        let mut monitor =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         let message = error.to_string();
-        monitor.record_control_commit_error(message.clone());
-        let mut events = self.issue_monitor_snapshot_events_without_wake(
-            client_id,
-            project_root.as_deref(),
-            monitor,
-        );
+        // A rejected or uncertain control does not describe monitor state.
+        // Keep the last authoritative snapshot; an empty reconstructed monitor
+        // would overwrite live queue/active counts with zeros (Issue #4273).
         let toast = BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message,
             issue_number,
         };
-        events.push(match client_id {
+        vec![match client_id {
             Some(client_id) => OutboundEvent::reply(client_id, toast),
             None => OutboundEvent::broadcast(toast),
-        });
-        events
+        }]
     }
 
     fn quick_register_issue_events(
@@ -5669,6 +5657,61 @@ impl AppRuntime {
         // it must not feed (or reset) the PM wake fingerprint.
         self.replace_knowledge_monitor_snapshot(project_root, &monitor.inbox);
         self.issue_monitor_snapshot_events_without_wake(client_id, Some(project_root), monitor)
+    }
+
+    fn list_issue_monitor_events_with_reader(
+        &mut self,
+        client_id: &str,
+        read_status: impl FnOnce(
+            &Path,
+        ) -> Result<
+            Option<serde_json::Value>,
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+        >,
+    ) -> Vec<OutboundEvent> {
+        if let Some(project_root) = self.active_project_root() {
+            let result = read_status(project_root).and_then(|status| {
+                status
+                    .map(serde_json::from_value::<gwt::IssueMonitorAgentStatus>)
+                    .transpose()
+                    .map_err(|error| {
+                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                            format!("invalid daemon Issue Monitor status: {error}"),
+                        )
+                    })
+            });
+            match result {
+                Ok(Some(status)) => {
+                    // A live daemon owns the projection. Older daemons omit
+                    // gui_status; their subscriber frames still supply it.
+                    return status
+                        .gui_status
+                        .map(|status| {
+                            vec![OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::IssueMonitorStatus {
+                                    status: Box::new(status),
+                                },
+                            )]
+                        })
+                        .unwrap_or_default();
+                }
+                Err(error) => {
+                    return self.issue_monitor_control_error_events(
+                        Some(client_id),
+                        error,
+                        "list",
+                        None,
+                    );
+                }
+                Ok(None) => {}
+            }
+        }
+        self.local_issue_monitor_events_with_policy(
+            Some(client_id),
+            IssueMonitorScanPolicy::Scan,
+            |_| {},
+        )
     }
 
     fn local_issue_monitor_events_with_policy(
@@ -6405,9 +6448,8 @@ impl AppRuntime {
         // SPEC-3431 T-093 (FR-012): every real local snapshot also feeds the
         // PM wake path, before the active-tab filter — the resident PM watches
         // its project regardless of which tab the user is looking at.
-        // Synthetic snapshots (the control-error fallback) must instead use
-        // [`Self::issue_monitor_snapshot_events_without_wake`]: their empty
-        // inbox would reset the wake baseline and replay old rows as news.
+        // Cache-only quick views use `issue_monitor_snapshot_events_without_wake`
+        // so display refreshes cannot reset the wake baseline.
         let mut events = Vec::new();
         if let Some(project_root) = project_root {
             self.replace_knowledge_monitor_snapshot(project_root, &monitor.inbox);
@@ -6418,6 +6460,42 @@ impl AppRuntime {
             project_root,
             monitor,
         ));
+        events
+    }
+
+    pub(crate) fn issue_monitor_daemon_status_events(
+        &self,
+        project_root: &Path,
+        status: Box<gwt::IssueMonitorStatusView>,
+    ) -> Vec<OutboundEvent> {
+        if self
+            .active_project_root()
+            .is_none_or(|active_root| !same_worktree_path(active_root, project_root))
+        {
+            return Vec::new();
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorStatus {
+            status,
+        })]
+    }
+
+    pub(crate) fn issue_monitor_daemon_inbox_events(
+        &mut self,
+        project_root: &Path,
+        items: Vec<gwt::IssueMonitorInboxItem>,
+    ) -> Vec<OutboundEvent> {
+        // Every project's knowledge and PM wake state still follows its daemon.
+        // Only the active project's inbox may update the shared frontend view.
+        self.replace_knowledge_monitor_snapshot(project_root, &items);
+        let mut events = self.pm_wake_events(project_root, &items);
+        if self
+            .active_project_root()
+            .is_some_and(|active_root| same_worktree_path(active_root, project_root))
+        {
+            events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
+                items,
+            }));
+        }
         events
     }
 
@@ -7582,10 +7660,9 @@ impl AppRuntime {
                     },
                 )
             }
-            FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events_with_policy(
-                Some(&client_id),
-                IssueMonitorScanPolicy::Scan,
-                |_| {},
+            FrontendEvent::ListIssueMonitor => self.list_issue_monitor_events_with_reader(
+                &client_id,
+                gwt::daemon_publisher::read_issue_monitor_status,
             ),
             // Internal agent-listener command. Browser-scoped requests are
             // deliberately inert; the authenticated route below owns it.

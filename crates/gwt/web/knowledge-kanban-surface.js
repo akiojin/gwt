@@ -660,6 +660,7 @@ export function createKnowledgeKanbanSurface({
             parts.push(`Total ${issueMonitorStatus.total_candidates}`);
           }
           summary.textContent = parts.join(" | ");
+          summary.title = state === "error" ? String(issueMonitorStatus.last_error || "") : "";
         }
         const settings = panel.querySelector(".knowledge-monitor-settings-copy");
         if (settings) {
