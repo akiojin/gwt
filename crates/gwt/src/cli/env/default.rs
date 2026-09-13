@@ -361,6 +361,17 @@ impl CliEnv for DefaultCliEnv {
             number,
         )
     }
+    fn update_pr_branch(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::types::PrUpdateBranchResult> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::update_pr_branch_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()> {
         crate::cli::pr::comment_on_pr_via_gh(&self.repo_path, number, body)
     }
