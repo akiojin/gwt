@@ -96,6 +96,31 @@ pub struct ProcessPolicy {
     pub cpu_limit_percent: Option<u8>,
 }
 
+/// Reported when PTY I/O is attempted after
+/// [`PtyHandle::release_descriptors`] dropped the master and writer.
+const RELEASED_DESCRIPTORS: &str = "PTY descriptors were released after the child exited";
+
+/// Issue #4142 AC-5: descriptor exhaustion is a process-wide budget failure,
+/// not a fault of the pane that happened to ask next. The bare OS message
+/// ("Too many open files") names neither how many descriptors are open nor
+/// what the ceiling is, so an operator reading `errors.list` cannot tell a
+/// leak from a limit that is simply too low. Attach both.
+fn describe_pty_creation_failure(reason: impl Into<String>) -> String {
+    let reason = reason.into();
+    if !reason_is_fd_exhaustion(&reason) {
+        return reason;
+    }
+    match gwt_core::fd_limit::describe_fd_budget() {
+        Some(budget) => format!("{reason} [{budget}]"),
+        None => reason,
+    }
+}
+
+fn reason_is_fd_exhaustion(reason: &str) -> bool {
+    let lowered = reason.to_ascii_lowercase();
+    lowered.contains("too many open files") || lowered.contains("os error 24")
+}
+
 const START_GATE_ENDPOINT_ENV: &str = "GWT_INTERNAL_PTY_GATE_ENDPOINT";
 const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
 const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
@@ -255,9 +280,15 @@ struct PtyInputState {
 }
 
 pub struct PtyHandle {
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// `None` once [`PtyHandle::release_descriptors`] has run. The master and
+    /// the writer clone `portable-pty` dups out of it are two of the three
+    /// `/dev/ptmx` descriptors a pane costs, and neither is usable after the
+    /// child exits — dropping them there is what keeps a long-lived process
+    /// from carrying a dead pane's descriptors to the `RLIMIT_NOFILE` ceiling
+    /// (Issue #4142).
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     input_state: Mutex<PtyInputState>,
     generation_active: AtomicBool,
     // Wrapped so `kill` (which takes `&self`) can synchronously terminate the
@@ -295,13 +326,13 @@ impl PtyHandle {
         }
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|error| {
             TerminalError::PtyCreationFailed {
-                reason: format!("bind PTY start gate: {error}"),
+                reason: describe_pty_creation_failure(format!("bind PTY start gate: {error}")),
             }
         })?;
         listener
             .set_nonblocking(false)
             .map_err(|error| TerminalError::PtyCreationFailed {
-                reason: format!("configure PTY start gate: {error}"),
+                reason: describe_pty_creation_failure(format!("configure PTY start gate: {error}")),
             })?;
         let endpoint = listener
             .local_addr()
@@ -435,7 +466,7 @@ impl PtyHandle {
                 pixel_height: 0,
             })
             .map_err(|e| TerminalError::PtyCreationFailed {
-                reason: e.to_string(),
+                reason: describe_pty_creation_failure(e.to_string()),
             })?;
 
         let mut cmd = CommandBuilder::new(&config.command);
@@ -470,7 +501,7 @@ impl PtyHandle {
                     "PTY spawn command failed"
                 );
                 return Err(TerminalError::PtyCreationFailed {
-                    reason: error.to_string(),
+                    reason: describe_pty_creation_failure(error.to_string()),
                 });
             }
         };
@@ -503,15 +534,15 @@ impl PtyHandle {
         let writer = pair.master.take_writer().map_err(|e| {
             child.terminate();
             TerminalError::PtyCreationFailed {
-                reason: format!("take_writer: {e}"),
+                reason: describe_pty_creation_failure(format!("take_writer: {e}")),
             }
         })?;
         let (child, process_group) = child.into_parts();
 
         Ok(Self {
-            master: Arc::new(Mutex::new(pair.master)),
+            master: Arc::new(Mutex::new(Some(pair.master))),
             child: Arc::new(Mutex::new(child)),
-            writer: Arc::new(Mutex::new(writer)),
+            writer: Arc::new(Mutex::new(Some(writer))),
             input_state: Mutex::new(PtyInputState::default()),
             generation_active: AtomicBool::new(true),
             process_group: Mutex::new(process_group),
@@ -561,7 +592,10 @@ impl PtyHandle {
         }
         drop(state);
 
-        Self::write_with_locked_writer(&mut writer, data, lock_wait_us)
+        let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
+            details: RELEASED_DESCRIPTORS.to_string(),
+        })?;
+        Self::write_with_locked_writer(&mut **writer, data, lock_wait_us)
     }
 
     /// Whether the last ordinary keystrokes left unsent prompt content in the
@@ -623,7 +657,7 @@ impl PtyHandle {
     }
 
     fn write_with_locked_writer(
-        writer: &mut Box<dyn Write + Send>,
+        writer: &mut dyn Write,
         data: &[u8],
         lock_wait_us: u64,
     ) -> Result<(), TerminalError> {
@@ -654,7 +688,14 @@ impl PtyHandle {
         Ok(())
     }
 
-    fn release_protected_input(&self, writer: &mut Box<dyn Write + Send>) {
+    fn release_protected_input(&self, writer: &mut Option<Box<dyn Write + Send>>) {
+        let Some(writer) = writer.as_mut() else {
+            if let Ok(mut state) = self.input_state.lock() {
+                state.queued.clear();
+                state.protected = false;
+            }
+            return;
+        };
         loop {
             let queued = match self.input_state.lock() {
                 Ok(mut state)
@@ -671,7 +712,7 @@ impl PtyHandle {
                 Err(_) => return,
             };
             for bytes in queued {
-                if let Err(error) = Self::write_with_locked_writer(writer, &bytes, 0) {
+                if let Err(error) = Self::write_with_locked_writer(&mut *writer, &bytes, 0) {
                     tracing::warn!(%error, "queued PTY input failed after protected submit");
                 }
             }
@@ -696,6 +737,12 @@ impl PtyHandle {
             details: format!("lock poisoned: {e}"),
         })?;
         let lock_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // A released PTY has no window left to resize. Reporting an error here
+        // would turn every routine layout pass over a finished pane into a
+        // logged failure (Issue #4142).
+        let Some(master) = master.as_ref() else {
+            return Ok(());
+        };
         let resize_started = Instant::now();
         let outcome = master.resize(PtySize {
             rows,
@@ -839,11 +886,38 @@ impl PtyHandle {
         let master = self.master.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        master
-            .try_clone_reader()
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })
+        match master.as_ref() {
+            Some(master) => master
+                .try_clone_reader()
+                .map_err(|e| TerminalError::PtyIoError {
+                    details: e.to_string(),
+                }),
+            // Issue #4142: the descriptors were released after the child was
+            // reaped, so there is no stream left to clone. An already-drained
+            // reader lets a reader thread that arrives after the release
+            // finish on EOF, exactly as it would have on the real PTY, instead
+            // of reporting the pane as errored.
+            None => Ok(Box::new(std::io::empty())),
+        }
+    }
+
+    /// Drop the master and writer descriptors while keeping the child handle
+    /// and its exit status readable.
+    ///
+    /// Called once the child has been reaped (Issue #4142). A pane that stays
+    /// on screen for recovery diagnostics keeps its vt100 screen, which lives
+    /// in `Pane`, not in these descriptors; holding them costs two `/dev/ptmx`
+    /// entries per finished pane against a soft `RLIMIT_NOFILE` that the GUI
+    /// shares with every other agent. The reader clone handed to the output
+    /// thread is unaffected and still drains to EOF.
+    pub fn release_descriptors(&self) {
+        self.revoke_input_generation();
+        if let Ok(mut writer) = self.writer.lock() {
+            drop(writer.take());
+        }
+        if let Ok(mut master) = self.master.lock() {
+            drop(master.take());
+        }
     }
 
     /// Try to wait for the child process without blocking.
@@ -878,7 +952,9 @@ fn reap_child_in_background(child: Arc<Mutex<Box<dyn portable_pty::Child + Send>
 
 fn pending_spawn_error(handle: PtyHandle, reason: String) -> TerminalError {
     let _ = handle.kill();
-    TerminalError::PtyCreationFailed { reason }
+    TerminalError::PtyCreationFailed {
+        reason: describe_pty_creation_failure(reason),
+    }
 }
 
 /// Run the trusted side of a PTY start gate configured by
@@ -1161,7 +1237,10 @@ impl PtyInputReservation {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
-        PtyHandle::write_with_locked_writer(&mut writer, data, 0)
+        let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
+            details: RELEASED_DESCRIPTORS.to_string(),
+        })?;
+        PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
     }
 
     /// Acquire the physical writer first, then let the caller linearize its
@@ -1192,8 +1271,11 @@ impl PtyInputReservation {
                     details: "PTY input generation is no longer active".to_string(),
                 });
             }
+            let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
+                details: RELEASED_DESCRIPTORS.to_string(),
+            })?;
             mark_attempted();
-            PtyHandle::write_with_locked_writer(&mut writer, data, 0)
+            PtyHandle::write_with_locked_writer(&mut **writer, data, 0)
         };
         authorize_and_commit(&mut commit)
     }
@@ -1486,6 +1568,59 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    /// Issue #4142 AC-5.
+    #[cfg(unix)]
+    #[test]
+    fn fd_exhaustion_failures_report_the_process_descriptor_budget() {
+        let described =
+            describe_pty_creation_failure("failed to openpty: Too many open files (os error 24)");
+        assert!(
+            described.contains("failed to openpty"),
+            "the original reason must survive: {described}"
+        );
+        assert!(
+            described.contains("open fds"),
+            "the failure must name how many descriptors are open: {described}"
+        );
+        assert!(
+            described.contains("soft RLIMIT_NOFILE"),
+            "the failure must name the ceiling it hit: {described}"
+        );
+    }
+
+    #[test]
+    fn failures_unrelated_to_descriptors_are_reported_verbatim() {
+        let reason = "No such file or directory (os error 2)";
+        assert_eq!(describe_pty_creation_failure(reason), reason);
+    }
+
+    /// Issue #4142: released descriptors must fail closed for I/O while the
+    /// pane keeps reporting its child's exit status.
+    #[cfg(unix)]
+    #[test]
+    fn released_descriptors_reject_io_but_keep_the_exit_status_readable() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(command_config(success_command())).expect("spawn failed");
+        for _ in 0..100 {
+            if handle.try_wait().expect("try_wait").is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        handle.release_descriptors();
+
+        assert!(handle.write_input(b"x").is_err());
+        // A reader thread that arrives after the release must see EOF, not an
+        // error that would surface as a failed pane.
+        let mut reader = handle.reader().expect("released reader");
+        let mut buffer = [0u8; 8];
+        assert_eq!(reader.read(&mut buffer).expect("released read"), 0);
+        // Resizing a finished pane is a no-op, not a failure.
+        assert!(handle.resize(100, 40).is_ok());
+        assert!(handle.try_wait().expect("try_wait").is_some());
     }
 
     #[cfg(unix)]

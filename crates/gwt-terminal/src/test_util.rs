@@ -175,9 +175,63 @@ pub fn answer_cursor_position_query(handle: &crate::pty::PtyHandle) {
     let _ = handle.write_input(b"\x1b[1;1R");
 }
 
+/// Drop every ANSI escape sequence from `data`: CSI (`ESC [ … final`), the
+/// string sequences OSC / DCS / SOS / PM / APC (terminated by BEL or ST), and
+/// plain two-byte escapes.
+///
+/// An unterminated sequence at the end of the buffer is dropped too, so a
+/// partially read sequence never counts as program output.
+fn strip_ansi_sequences(data: &[u8]) -> Vec<u8> {
+    const ESC: u8 = 0x1b;
+    const BEL: u8 = 0x07;
+
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] != ESC {
+            out.push(data[i]);
+            i += 1;
+            continue;
+        }
+        let Some(&introducer) = data.get(i + 1) else {
+            break;
+        };
+        i += 2;
+        match introducer {
+            b'[' => {
+                while i < data.len() && !(0x40..=0x7e).contains(&data[i]) {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b']' | b'P' | b'X' | b'^' | b'_' => {
+                while i < data.len() {
+                    if data[i] == BEL {
+                        i += 1;
+                        break;
+                    }
+                    if data[i] == ESC && data.get(i + 1) == Some(&b'\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether `data` holds output the spawned program actually wrote.
+///
+/// Terminal chatter must not count: the shell's cursor-position query
+/// (`ESC[6n`) and the DSR answer `answer_cursor_position_query` writes back
+/// (`ESC[1;1R`, echoed by the line discipline) are both built from printable
+/// bytes, so they have to be stripped as sequences rather than filtered as
+/// control characters (Issue #3514).
 fn has_non_status_output(data: &[u8]) -> bool {
-    String::from_utf8_lossy(data)
-        .replace("\x1b[6n", "")
+    String::from_utf8_lossy(&strip_ansi_sequences(data))
         .chars()
         .any(|ch| !ch.is_control())
 }
@@ -280,5 +334,28 @@ pub fn read_until_contains(
             "Timed out before seeing {needle:?}; last output: {}",
             String::from_utf8_lossy(&last_output)
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_non_status_output;
+
+    #[test]
+    fn echoed_cursor_position_report_is_not_program_output() {
+        // answer_cursor_position_query writes the DSR answer into the master
+        // and the line discipline echoes it right back. Its bytes are all
+        // printable, so read_with_timeout used to accept it as program output
+        // and stop reading before the child wrote anything (Issue #3514).
+        assert!(!has_non_status_output(b"\x1b[1;1R"));
+        assert!(!has_non_status_output(b"\x1b[6n\x1b[1;1R\r\n"));
+        assert!(!has_non_status_output(b"\x1b]0;window title\x07"));
+    }
+
+    #[test]
+    fn program_output_after_control_sequences_is_detected() {
+        assert!(has_non_status_output(
+            b"\x1b[1;1R\x1b]0;window title\x07/private/tmp\r\n"
+        ));
     }
 }

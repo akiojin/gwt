@@ -16,7 +16,9 @@ use gwt_core::{
         paths::gwt_index_root,
         runtime::{reconcile_repo, PythonRunnerSpawner, ReconcileOptions, RunnerSpawner},
     },
-    index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey},
+    index_coordinator::{
+        IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey, INDEX_HEAVY_LEASE_TTL,
+    },
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
@@ -1094,10 +1096,28 @@ pub(crate) fn run_coordinated_index_job<T>(
     scope_label: &str,
     worktree_hash: Option<&str>,
     priority: JobPriority,
-    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
+    build: impl FnMut() -> Result<BuildStep<T>, String>,
 ) -> Result<CoordinatedRun<T>, String> {
     let coordinator = IndexCoordinator::open_default()
         .map_err(|err| format!("index coordinator unavailable: {err}"))?;
+    run_coordinated_index_job_with_coordinator(
+        &coordinator,
+        repo_hash,
+        scope_label,
+        worktree_hash,
+        priority,
+        build,
+    )
+}
+
+fn run_coordinated_index_job_with_coordinator<T>(
+    coordinator: &IndexCoordinator,
+    repo_hash: &str,
+    scope_label: &str,
+    worktree_hash: Option<&str>,
+    priority: JobPriority,
+    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
+) -> Result<CoordinatedRun<T>, String> {
     let key = match worktree_hash {
         Some(worktree) => TargetKey::worktree(repo_hash, scope_label, worktree),
         None => TargetKey::repo_shared(repo_hash, scope_label),
@@ -1115,10 +1135,24 @@ pub(crate) fn run_coordinated_index_job<T>(
                 loop {
                     let heavy_timeout =
                         index_wait_timeout(INDEX_HEAVY_LEASE_TIMEOUT, "index heavy lease")?;
+                    // Issue #4086: index leases carry a TTL horizon so status
+                    // output never reports `expires_at_ms=unknown`.
+                    let lease_ttl = if scope_label == "issues" {
+                        gwt_core::index::runtime::ISSUE_INDEX_BUILD_TIMEOUT
+                    } else {
+                        INDEX_HEAVY_LEASE_TTL
+                    };
                     let heavy = guard
-                        .acquire_heavy(heavy_timeout)
+                        .acquire_heavy_with_ttl(heavy_timeout, lease_ttl)
                         .map_err(|err| format!("index heavy lease failed: {err}"))?;
-                    let step = build();
+                    let step = {
+                        let _deadline = (scope_label == "issues").then(|| {
+                            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                                Instant::now() + lease_ttl,
+                            )
+                        });
+                        build()
+                    };
                     drop(heavy);
                     match step {
                         Ok(BuildStep::Done(value)) => {
@@ -1284,7 +1318,7 @@ fn run_rebuild_runner_for_target(
     action: crate::cli::index::runtime::RebuildAction,
     qos: &str,
 ) -> Result<RebuildRunnerOutput, String> {
-    if gwt_core::operation_deadline::current().is_none() {
+    if action.label == "issues" || gwt_core::operation_deadline::current().is_none() {
         if rebuild_action_uses_file_index_v2(action) {
             let args = protocol_aware_rebuild_runner_args(context, action, qos);
             return gwt_core::process::hidden_command(&context.python)
@@ -2055,6 +2089,12 @@ fn execute_claimed_refresh_inner(
         )?;
     }
 
+    let file_scopes = file_rebuild_scopes(intent.target.scopes());
+    if file_scopes.is_empty() {
+        // Issue #4086 AC-3: an Issues-only intent is fully served by the
+        // Issue-cache check above.
+        return Ok(());
+    }
     let build_root = match intent.target.kind() {
         RefreshTargetKind::Base => refresh_project_root,
         RefreshTargetKind::Overlay => {
@@ -2072,14 +2112,57 @@ fn execute_claimed_refresh_inner(
     let build_hash = compute_worktree_hash(&build_root)
         .map_err(|err| format!("compute worktree hash: {err}"))?
         .to_string();
-    for scope in intent.target.scopes() {
-        let rebuild_scope = match scope {
-            RefreshScope::Files => IndexRebuildScope::Files,
-            RefreshScope::FilesDocs => IndexRebuildScope::FilesDocs,
-        };
+    for rebuild_scope in file_scopes {
         rebuild_index_target(&build_root, rebuild_scope, Some(&build_hash), priority)?;
     }
     Ok(())
+}
+
+/// File scopes of a refresh target, in build order. Non-file scopes
+/// (`Issues`) are handled by the claim's Issue-cache check, not here.
+fn file_rebuild_scopes(scopes: &[RefreshScope]) -> Vec<IndexRebuildScope> {
+    scopes
+        .iter()
+        .filter_map(|scope| match scope {
+            RefreshScope::Files => Some(IndexRebuildScope::Files),
+            RefreshScope::FilesDocs => Some(IndexRebuildScope::FilesDocs),
+            RefreshScope::Issues => None,
+        })
+        .collect()
+}
+
+/// Issue #4086 AC-3: register an Issue-index refresh intent instead of
+/// rebuilding in-process. The host drains it after the broker quiet period
+/// (`DEFAULT_REFRESH_QUIET_PERIOD`), so a burst of gwtd calls coalesces into
+/// one background build that also defers to any pending verification.
+pub fn submit_issue_index_refresh(
+    broker: &RefreshBroker,
+    repo_hash: &str,
+) -> Result<gwt_core::index::broker::RefreshTargetSnapshot, String> {
+    let desired_epoch = unix_millis_now();
+    broker
+        .submit(RefreshIntent {
+            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+            target: RefreshTarget::base(repo_hash, [RefreshScope::Issues]),
+            desired_epoch,
+            desired_snapshot: format!("epoch:{desired_epoch}"),
+            priority: JobPriority::Background,
+            reason: RefreshReason::DirtyEvent,
+            resource_class: RefreshResourceClass::Embedding,
+        })
+        .map_err(|err| format!("submit issue index refresh intent: {err}"))
+}
+
+/// gwtd entrypoint for [`submit_issue_index_refresh`]: resolves the repo hash
+/// of `repo_path` and the default broker. Repositories without an origin
+/// remote have no index and are skipped.
+pub fn queue_issue_index_refresh(repo_path: &Path) -> Result<(), String> {
+    let Some(repo_hash) = detect_repo_hash(repo_path) else {
+        return Ok(());
+    };
+    let broker = RefreshBroker::open_default()
+        .map_err(|err| format!("open project index refresh broker: {err}"))?;
+    submit_issue_index_refresh(&broker, repo_hash.as_str()).map(|_| ())
 }
 
 fn run_project_index_git_probe(
@@ -2290,6 +2373,45 @@ mod tests {
     use super::*;
 
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // Issue #4086 AC-3: gwtd issue.* calls hand the rebuild to the refresh
+    // broker's quiet window instead of running a full index in-process.
+    #[test]
+    fn issue_index_refresh_is_queued_behind_the_broker_quiet_window() {
+        use gwt_core::index::broker::{
+            RefreshBroker, RefreshTargetState, DEFAULT_REFRESH_QUIET_PERIOD,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let broker = RefreshBroker::open(tmp.path(), DEFAULT_REFRESH_QUIET_PERIOD).unwrap();
+        let before = unix_millis_now();
+        let snapshot = submit_issue_index_refresh(&broker, "99a8660247f5bc49").unwrap();
+        assert_eq!(snapshot.state(), RefreshTargetState::Quiet);
+        assert_eq!(
+            snapshot.target(),
+            &RefreshTarget::base("99a8660247f5bc49", [RefreshScope::Issues])
+        );
+        let deadline = snapshot.quiet_deadline_millis().expect("quiet deadline");
+        assert!(deadline >= before + DEFAULT_REFRESH_QUIET_PERIOD.as_millis() as u64);
+
+        // A burst of gwtd calls coalesces onto the same quiet record.
+        let again = submit_issue_index_refresh(&broker, "99a8660247f5bc49").unwrap();
+        assert_eq!(again.state(), RefreshTargetState::Quiet);
+        assert_eq!(broker.inspect().unwrap().target_count(), 1);
+    }
+
+    #[test]
+    fn issues_only_refresh_target_builds_no_file_scopes() {
+        assert!(file_rebuild_scopes(&[RefreshScope::Issues]).is_empty());
+        assert_eq!(
+            file_rebuild_scopes(&[
+                RefreshScope::Files,
+                RefreshScope::FilesDocs,
+                RefreshScope::Issues
+            ]),
+            vec![IndexRebuildScope::Files, IndexRebuildScope::FilesDocs]
+        );
+    }
 
     fn arg_pair_count(args: &[OsString], flag: &str, value: &str) -> usize {
         args.windows(2)
@@ -3780,7 +3902,11 @@ detached
 
     #[test]
     fn run_coordinated_index_job_runs_the_owner_build() {
-        let run = run_coordinated_index_job(
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
+        let run = run_coordinated_index_job_with_coordinator(
+            &coordinator,
             "ownertestrepo001",
             "files",
             Some("wt001"),
@@ -3796,7 +3922,11 @@ detached
 
     #[test]
     fn run_coordinated_index_job_propagates_build_failures() {
-        let error = run_coordinated_index_job::<()>(
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
+        let error = run_coordinated_index_job_with_coordinator::<()>(
+            &coordinator,
             "failtestrepo0001",
             "issues",
             None,
@@ -3808,9 +3938,38 @@ detached
     }
 
     #[test]
+    fn issues_build_has_a_deadline_and_bounded_heavy_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open(temp.path()).unwrap();
+        run_coordinated_index_job_with_coordinator(
+            &coordinator,
+            "issues-deadline",
+            "issues",
+            None,
+            JobPriority::Background,
+            || {
+                let deadline =
+                    gwt_core::operation_deadline::current().expect("issues build deadline");
+                assert!(
+                    deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(600)
+                );
+                let lease = coordinator.heavy_lease_status().unwrap();
+                assert!(lease.remaining_ms.unwrap() <= 600_000);
+                Ok(BuildStep::Done(()))
+            },
+        )
+        .unwrap();
+        assert!(gwt_core::operation_deadline::current().is_none());
+    }
+
+    #[test]
     fn run_coordinated_index_job_resumes_after_a_yield() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
         let mut calls = 0;
-        let run = run_coordinated_index_job(
+        let run = run_coordinated_index_job_with_coordinator(
+            &coordinator,
             "yieldtestrepo001",
             "files",
             Some("wt002"),
@@ -3832,15 +3991,17 @@ detached
     #[test]
     fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
         use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
+        let coordinator_root = tmp.path().join("coordinator");
+        let coordinator =
+            IndexCoordinator::open(&coordinator_root).expect("open isolated coordinator");
         let started = tmp.path().join("owner-started");
         let started_for_thread = started.clone();
+        let owner_coordinator_root = coordinator_root.clone();
 
         let owner = std::thread::spawn(move || {
-            let coordinator = IndexCoordinator::open_default().expect("open coordinator");
+            let coordinator =
+                IndexCoordinator::open(owner_coordinator_root).expect("open owner coordinator");
             let key = TargetKey::repo_shared("coalescetestrepo", "specs");
             let guard = match coordinator
                 .request_job(
@@ -3869,7 +4030,8 @@ detached
             assert!(Instant::now() < deadline, "owner never started");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let run = run_coordinated_index_job::<()>(
+        let run = run_coordinated_index_job_with_coordinator::<()>(
+            &coordinator,
             "coalescetestrepo",
             "specs",
             None,

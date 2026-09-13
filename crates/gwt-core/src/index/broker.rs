@@ -58,14 +58,16 @@ pub fn refresh_broker_root() -> PathBuf {
     coordinator_root().join(BROKER_DIR_NAME)
 }
 
-/// File scopes covered by a refresh target. Base and overlay targets always
+/// Scopes covered by a refresh target. Base and overlay file targets always
 /// carry both Files scopes so one View head switches them atomically
-/// (AS-23).
+/// (AS-23). `Issues` (Issue #4086 AC-3) lets gwtd hand an Issue-cache change
+/// to the broker's quiet window instead of rebuilding the index in-process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RefreshScope {
     Files,
     FilesDocs,
+    Issues,
 }
 
 impl RefreshScope {
@@ -73,6 +75,7 @@ impl RefreshScope {
         match self {
             RefreshScope::Files => "files",
             RefreshScope::FilesDocs => "files-docs",
+            RefreshScope::Issues => "issues",
         }
     }
 }

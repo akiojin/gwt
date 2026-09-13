@@ -231,7 +231,49 @@ test.describe("Issue Bridge load recovery", () => {
     await issueSurface.locator(".knowledge-monitor-max-active input").fill("4");
     await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
-    await issueSurface.locator('[data-action="monitor-autonomous"]').click();
+    // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
+    // server state only. A click sends the request and nothing moves until an
+    // issue_monitor_status confirms it; the fixture stays silent on purpose.
+    const autonomous = issueSurface.locator('[data-action="monitor-autonomous"]');
+    const autonomousState = autonomous.locator(".knowledge-monitor-switch__state");
+    const autonomousTrack = autonomous.locator(".knowledge-monitor-switch__track");
+    await expect(autonomous).toHaveAttribute("role", "switch");
+    await expect(autonomous).toHaveAttribute("aria-label", "Autonomous mode");
+    await expect(autonomous).toHaveAttribute("aria-checked", "false");
+    await expect(autonomousState).toHaveText("Off");
+    const offTrackColor = await autonomousTrack.evaluate(
+      (element) => getComputedStyle(element).backgroundColor,
+    );
+    await autonomous.click();
+    await expect(autonomous).toHaveAttribute("aria-checked", "false");
+    await expect(autonomousState).toHaveText("Off");
+    await page.evaluate(() => {
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "issue_monitor_status",
+        status: {
+          enabled: false,
+          state: "disabled",
+          queue_len: 3,
+          active_count: 1,
+          max_active_agents: 4,
+          total_candidates: 5,
+          autonomous_mode: true,
+          launch_profile_source: "saved",
+          launch_profile_summary: "codex / host",
+        },
+      });
+    });
+    await expect(autonomous).toHaveAttribute("aria-checked", "true");
+    await expect(autonomousState).toHaveText("On");
+    // The track color animates (motion-fast transition), so poll until the
+    // computed value has left the Off color instead of sampling once.
+    await expect(autonomousTrack).not.toHaveCSS("background-color", offTrackColor);
+    // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
+    // toggle and reports the effective value the backend sent.
+    const autoApply = issueSurface.locator('[data-action="monitor-auto-apply"]');
+    await expect(autoApply).toHaveText("Auto-apply updates: OFF");
+    await expect(autoApply).toHaveAttribute("data-enabled", "false");
+    await autoApply.click();
     await issueSurface.locator('[data-action="monitor-settings"]').click();
     await issueSurface.locator(".knowledge-monitor-quick-title").fill(
       "Investigate flaky release gate",
@@ -258,6 +300,10 @@ test.describe("Issue Bridge load recovery", () => {
     });
     expect(messages).toContainEqual({
       kind: "set_issue_monitor_autonomous_mode",
+      enabled: true,
+    });
+    expect(messages).toContainEqual({
+      kind: "set_issue_monitor_auto_apply_updates",
       enabled: true,
     });
     expect(messages).toContainEqual({ kind: "issue_monitor_configure_profile" });

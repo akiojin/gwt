@@ -260,6 +260,7 @@ mod related_snapshot_cache_tests {
                 phase: None,
                 has_unknown_phase: false,
                 is_spec: false,
+                parent_spec: None,
                 monitor_state: None,
                 queue_position: None,
                 exclusion_reason: None,
@@ -499,6 +500,8 @@ mod monitor_snapshot_cache_tests {
             claim_id: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            blocked_by_claim_id: None,
+            claim_block_issue_updated_at: None,
             launched_window_id: None,
             launch_plan: None,
             error_message: None,
@@ -520,6 +523,7 @@ mod monitor_snapshot_cache_tests {
             phase: None,
             has_unknown_phase: false,
             is_spec: false,
+            parent_spec: None,
             monitor_state: Some(gwt::MonitorInboxState::Launched),
             queue_position: Some(99),
             exclusion_reason: Some("stale".to_string()),
@@ -2075,7 +2079,9 @@ impl AppRuntime {
                         id: id_owned,
                         request_id,
                         issue_number,
-                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok { fresh_entry },
+                        result: gwt::protocol::KnowledgePhaseUpdateResult::Ok {
+                            fresh_entry: Box::new(fresh_entry),
+                        },
                     }
                 }
                 Err(error) => BackendEvent::KnowledgeBridgePhaseUpdated {

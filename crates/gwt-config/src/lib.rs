@@ -8,6 +8,7 @@ pub mod ai_settings;
 pub mod atomic;
 pub mod board_config;
 pub mod error;
+pub mod github_budget_config;
 pub mod locale;
 pub mod profile;
 pub mod settings;
@@ -24,6 +25,7 @@ pub use board_config::{
     DEFAULT_OAUTH_REDIRECT_PORT, PROJECT_BOARD_FILE,
 };
 pub use error::{ConfigError, Result};
+pub use github_budget_config::GitHubBudgetConfig;
 pub use locale::{
     detect_user_locale, detect_user_locale_from, detect_user_locale_from_env_and_system,
 };

@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use gwt_core::process::hidden_command;
 use tempfile::TempDir;
@@ -104,7 +105,45 @@ impl Arena {
 }
 
 const ACQUIRE_2M: &str = r#"{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":2,"reason":"round-trip test"}}"#;
+const ACQUIRE_1M: &str = r#"{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":1,"reason":"eof test"}}"#;
 const STATUS: &str = r#"{"schema_version":1,"operation":"verify.lease.status","params":{}}"#;
+
+/// Issue #4105 (AC-1 / AC-2): the detached holder must not keep the caller's
+/// stdout / stderr open. `gwtd()` reads the acquiring invocation to EOF, so a
+/// holder that inherited those pipe handles would park this call until it
+/// exits at TTL — which is exactly what happened on Windows, where
+/// `CreateProcess` copies every inheritable handle into the child.
+#[test]
+fn acquire_answers_with_eof_while_the_holder_is_still_alive() {
+    let arena = Arena::new();
+
+    let started = Instant::now();
+    let granted = arena.run(ACQUIRE_1M);
+    let elapsed = started.elapsed();
+    assert_eq!(
+        headline(&granted),
+        "verification lease: granted",
+        "an uncontended host must grant the lease:\n{granted}"
+    );
+    // The handshake itself is bounded by the 30s holder startup timeout; the
+    // TTL is 60s, so a call that only returned once the holder died shows up
+    // here as well as in the `free` status below.
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "acquire must return as soon as the lease is granted, not when the holder exits: took {elapsed:?}"
+    );
+
+    let held = arena.run(STATUS);
+    assert_eq!(
+        headline(&held),
+        "verification lease: held",
+        "the holder must still be alive after the acquiring invocation returned:\n{held}"
+    );
+    let lease_id = field(&held, "lease_id").to_string();
+    arena.run(&format!(
+        r#"{{"schema_version":1,"operation":"verify.lease.release","params":{{"lease_id":"{lease_id}"}}}}"#
+    ));
+}
 
 #[test]
 fn verification_lease_round_trips_across_gwtd_invocations() {
@@ -229,4 +268,180 @@ fn second_worktree_is_refused_while_the_lease_is_held() {
             r#"{{"schema_version":1,"operation":"verify.lease.release","params":{{"lease_id":"{second_id}"}}}}"#
         ),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4086: refusals name the holder kind and leave a reservation behind so
+// the next retry is admitted before any background index job; an index lease
+// can be arbitrated by the PM through the same release entrypoint.
+// ---------------------------------------------------------------------------
+
+fn index_coordinator(home: &Path) -> gwt_core::index_coordinator::IndexCoordinator {
+    gwt_core::index_coordinator::IndexCoordinator::open(
+        gwt_core::index_coordinator::coordinator_root_from(&home.join(".gwt")),
+    )
+    .expect("open coordinator under the test home")
+}
+
+#[test]
+fn refusal_reports_holder_kind_and_reserves_the_next_turn() {
+    use gwt_core::index_coordinator::{HeavyProgress, JobAdmission, JobPriority, TargetKey};
+    use std::time::Duration;
+
+    let arena = Arena::new();
+    let coordinator = index_coordinator(arena.home.path());
+
+    // A background index-issues job (the #4071 offender) holds the lease.
+    let index_key = TargetKey::repo_shared("99a8660247f5bc49", "issues");
+    let JobAdmission::Owner(index_guard) = coordinator
+        .request_job(&index_key, JobPriority::Background, Duration::from_secs(5))
+        .expect("request index job")
+    else {
+        panic!("index target must be free");
+    };
+    let index_lease = index_guard
+        .acquire_heavy_with_ttl(
+            Duration::from_secs(5),
+            gwt_core::index_coordinator::INDEX_HEAVY_LEASE_TTL,
+        )
+        .expect("index job takes the idle host");
+    coordinator
+        .write_heavy_progress(&HeavyProgress {
+            target: index_key.file_stem(),
+            done: 10,
+            total: 100,
+            batch_size: 16,
+            batch_ms: 2_000,
+            updated_at_ms: index_lease.ticket().acquired_at_ms,
+        })
+        .expect("publish progress");
+
+    let refused = arena.run(ACQUIRE_2M);
+    assert_eq!(headline(&refused), "verification lease: unavailable");
+    assert_eq!(field(&refused, "holder_kind"), "index", "{refused}");
+    assert_eq!(field_u64(&refused, "remaining_batches"), 6, "{refused}");
+    assert_eq!(
+        field_u64(&refused, "estimated_remaining_ms"),
+        12_000,
+        "{refused}"
+    );
+    assert!(
+        field_u64(&refused, "expires_at_ms") > 0,
+        "index leases must carry a TTL:\n{refused}"
+    );
+    assert_eq!(
+        field_u64(&refused, "pending"),
+        1,
+        "the refused claimant stays pending as a reservation:\n{refused}"
+    );
+
+    // The index job finishes; the next background job must defer to the
+    // reservation instead of taking the freed lease.
+    drop(index_lease);
+    index_guard
+        .complete(gwt_core::index_coordinator::JobOutcome::Completed)
+        .unwrap();
+    let docs_key = TargetKey::worktree("99a8660247f5bc49", "files-docs", "wt");
+    let JobAdmission::Owner(docs_guard) = coordinator
+        .request_job(&docs_key, JobPriority::Background, Duration::from_secs(5))
+        .expect("request docs job")
+    else {
+        panic!("docs target must be free");
+    };
+    assert!(
+        docs_guard
+            .acquire_heavy(Duration::from_millis(400))
+            .is_err(),
+        "a background job must defer while the verification reservation lives"
+    );
+
+    let status = arena.run(STATUS);
+    assert_eq!(field_u64(&status, "pending"), 1, "{status}");
+    // Issue #4169 AC-2: `pending: 1` alone never said who was waiting or for
+    // how long, which is what an agent needs to decide whether to keep waiting.
+    let waiter = field(&status, "queue[0]");
+    assert!(
+        waiter.contains("--verification--") && waiter.contains("priority=manual-rebuild"),
+        "the queue must name the waiting claimant:\n{status}"
+    );
+    assert!(
+        waiter.contains("queued_at_ms=") && waiter.contains("waiting_ms="),
+        "the queue must say when each claimant joined and how long it has waited:\n{status}"
+    );
+
+    let granted = arena.run(ACQUIRE_2M);
+    assert_eq!(
+        headline(&granted),
+        "verification lease: granted",
+        "{granted}"
+    );
+    assert_eq!(field(&granted, "holder_kind"), "verification", "{granted}");
+    assert_eq!(
+        field_u64(&granted, "pending"),
+        0,
+        "the grant consumes the reservation:\n{granted}"
+    );
+    let lease_id = field(&granted, "lease_id").to_string();
+    arena.run(&format!(
+        r#"{{"schema_version":1,"operation":"verify.lease.release","params":{{"lease_id":"{lease_id}"}}}}"#
+    ));
+    docs_guard
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("background resumes once verification is done");
+}
+
+#[test]
+fn releasing_an_index_lease_requests_a_yield_instead_of_failing() {
+    use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+    use std::time::Duration;
+
+    let arena = Arena::new();
+    let coordinator = index_coordinator(arena.home.path());
+    let index_key = TargetKey::repo_shared("99a8660247f5bc49", "issues");
+    let JobAdmission::Owner(index_guard) = coordinator
+        .request_job(&index_key, JobPriority::Background, Duration::from_secs(5))
+        .expect("request index job")
+    else {
+        panic!("index target must be free");
+    };
+    let index_lease = index_guard
+        .acquire_heavy_with_ttl(
+            Duration::from_secs(5),
+            gwt_core::index_coordinator::INDEX_HEAVY_LEASE_TTL,
+        )
+        .expect("index job takes the idle host");
+    let lease_id = index_lease.id().to_string();
+
+    let (ok, output) = gwtd(
+        arena.home.path(),
+        arena.worktree.path(),
+        &format!(
+            r#"{{"schema_version":1,"operation":"verify.lease.release","params":{{"lease_id":"{lease_id}","reason":"PM arbitration"}}}}"#
+        ),
+    );
+    assert!(
+        ok,
+        "arbitrating an index lease is a normal answer:\n{output}"
+    );
+    assert_eq!(
+        headline(&output),
+        "verification lease: yield requested",
+        "{output}"
+    );
+    assert_eq!(field(&output, "holder_kind"), "index", "{output}");
+    assert_eq!(
+        field_u64(&output, "pending"),
+        1,
+        "the arbitration leaves a reservation the runner yields to:\n{output}"
+    );
+    assert!(
+        coordinator
+            .pending_higher_priority(JobPriority::Background)
+            .unwrap(),
+        "the index runner must observe a higher-priority pending claimant"
+    );
+    drop(index_lease);
+    index_guard
+        .complete(gwt_core::index_coordinator::JobOutcome::Completed)
+        .unwrap();
 }

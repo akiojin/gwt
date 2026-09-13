@@ -39,11 +39,21 @@ pub struct AcceptanceCriteria {
     /// True when any criterion is tagged as targeting a visual surface
     /// (`(visual)`), so review-time judgment must include visual assessment.
     pub visual_surface: bool,
+    /// Criterion ids whose checklist box is not `[x]` (Issue #3917 AC-2).
+    /// Kept beside `ids` on purpose: [`AcceptanceSnapshot`] compares the id
+    /// set only, so ticking a box is completion evidence, never drift.
+    pub unchecked: Vec<String>,
     /// `Some` exactly when `machine_checkable` is false: what is missing.
     pub defect: Option<AcceptanceDefect>,
 }
 
 impl AcceptanceCriteria {
+    /// Whether a well-formed block exists and every criterion is checked. A
+    /// missing block is never vacuously complete (fail-closed).
+    pub fn all_checked(&self) -> bool {
+        self.machine_checkable && self.unchecked.is_empty()
+    }
+
     /// Actionable rejection reason naming the missing element (Issue #3930
     /// AC-2), or `None` when the criteria are machine-checkable.
     pub fn rejection_reason(&self) -> Option<String> {
@@ -156,8 +166,9 @@ fn split_explicit_id(rest: &str) -> (Option<String>, &str) {
 pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     let mut in_block = false;
     let mut heading_found: Option<String> = None;
-    // (explicit id, criterion text) for every checklist / explicit-id item.
-    let mut items: Vec<(Option<String>, String)> = Vec::new();
+    // (explicit id, checked, criterion text) for every checklist / explicit-id
+    // item. `checked` is Issue #3917 AC-2 completion evidence.
+    let mut items: Vec<(Option<String>, bool, String)> = Vec::new();
 
     for line in issue_body.lines() {
         if let Some((heading, written)) = heading_text(line) {
@@ -188,6 +199,7 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
         let Some(after_bullet) = after_bullet else {
             continue;
         };
+        let checked = after_bullet.starts_with("[x]") || after_bullet.starts_with("[X]");
         let checkbox = after_bullet
             .strip_prefix("[ ]")
             .or_else(|| after_bullet.strip_prefix("[x]"))
@@ -197,27 +209,35 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
         if explicit_id.is_none() && checkbox.is_none() {
             continue;
         }
-        items.push((explicit_id, text.to_string()));
+        items.push((explicit_id, checked, text.to_string()));
     }
 
-    let has_explicit_ids = items.iter().any(|(id, _)| id.is_some());
-    let accepted: Vec<(String, &str)> = if has_explicit_ids {
+    let has_explicit_ids = items.iter().any(|(id, _, _)| id.is_some());
+    let accepted: Vec<(String, bool, &str)> = if has_explicit_ids {
         items
             .iter()
-            .filter_map(|(id, text)| id.clone().map(|id| (id, text.as_str())))
+            .filter_map(|(id, checked, text)| id.clone().map(|id| (id, *checked, text.as_str())))
             .collect()
     } else {
         items
             .iter()
             .enumerate()
-            .map(|(index, (_, text))| (format!("AC-{}", index + 1), text.as_str()))
+            .map(|(index, (_, checked, text))| {
+                (format!("AC-{}", index + 1), *checked, text.as_str())
+            })
             .collect()
     };
-    let visual_surface = accepted.iter().any(|(_, text)| {
+    let visual_surface = accepted.iter().any(|(_, _, text)| {
         let text = text.to_ascii_lowercase();
         text.contains("(visual)") || text.contains("[visual]")
     });
-    let ids: Vec<String> = accepted.into_iter().map(|(id, _)| id).collect();
+    // Issue #3917 AC-2: an item without a ticked box is outstanding work.
+    let unchecked: Vec<String> = accepted
+        .iter()
+        .filter(|(_, checked, _)| !*checked)
+        .map(|(id, _, _)| id.clone())
+        .collect();
+    let ids: Vec<String> = accepted.into_iter().map(|(id, _, _)| id).collect();
     let defect = if !ids.is_empty() {
         None
     } else if let Some(heading) = heading_found {
@@ -230,6 +250,7 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
         machine_checkable: !ids.is_empty(),
         ids,
         visual_surface,
+        unchecked,
         defect,
     }
 }
@@ -519,6 +540,31 @@ mod tests {
         assert!(c.machine_checkable);
         assert_eq!(c.ids, vec!["AC-1", "AC-2"]);
         assert!(c.visual_surface, "(visual) tag marks a visual surface");
+    }
+
+    #[test]
+    fn unchecked_criteria_are_reported_by_id() {
+        // Issue #3917 AC-2: the merged-Issue close gate needs the checkbox
+        // state, which `ids` deliberately discards for snapshot comparison.
+        let body = "## Acceptance Criteria\n- [x] AC-1: done\n- [ ] AC-2: pending\n- [X] AC-3: done upper\n";
+        let c = classify_acceptance_criteria(body);
+        assert_eq!(c.ids, vec!["AC-1", "AC-2", "AC-3"]);
+        assert_eq!(c.unchecked, vec!["AC-2"]);
+        assert!(!c.all_checked());
+
+        let done = classify_acceptance_criteria("## Acceptance Criteria\n- [x] AC-1: done\n");
+        assert!(done.unchecked.is_empty());
+        assert!(done.all_checked());
+
+        let missing = classify_acceptance_criteria("no block");
+        assert!(
+            !missing.all_checked(),
+            "a missing block is never vacuously complete"
+        );
+        // A bare item without any checkbox is not evidence of completion.
+        let bare = classify_acceptance_criteria("## Acceptance Criteria\n- AC-1: no box\n");
+        assert_eq!(bare.unchecked, vec!["AC-1"]);
+        assert!(!bare.all_checked());
     }
 
     #[test]

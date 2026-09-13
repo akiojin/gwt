@@ -141,8 +141,12 @@ body cannot hold `plan` / `tasks` sections.
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the inbox rows (state, `blocked_by_owner`,
+  `blocked_by_claim_id`, `claim_expires_at`, `exclusion_reason`,
   `launched_window_id`, `error_message`), and `last_error`. That
-  snapshot is your source of truth.
+  snapshot is your source of truth. A row held out of the queue by
+  another Monitor's claim says so in `exclusion_reason` and names the
+  deadline in `claim_expires_at` — read those before concluding that a
+  queued-looking Issue is simply waiting its turn.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI
@@ -180,6 +184,13 @@ body cannot hold `plan` / `tasks` sections.
   usage threshold apply), so a held provider never stalls the queue while
   another candidate exists. Prefer adding a candidate over stopping the
   Monitor when one provider hits its limit.
+  An element that names only `agent_id` keeps the settings already saved for
+  that provider (model / reasoning / version / permissions / Docker / shell),
+  so a plain reorder changes nothing else; a provider that is new to the pool
+  inherits the saved head's `skip_permissions`, `docker_lifecycle_intent`,
+  `windows_shell` and `runtime_target`. Write a field explicitly (`"model":
+  null`, `"prefer_for": []`) to clear it. The reply's `changes` list names
+  every omitted field that was inherited or reset (Issue #4079).
 
 ## Observing the running agents
 
@@ -275,13 +286,26 @@ things:
   launch's authority, frees its slot, and holds the issue.
   It spends no retry attempt and puts nothing back in the queue.
 
-  Send the identity exactly as the snapshot reports it. Omitting a
-  component the Monitor is holding is a mismatch, not a wildcard, and a
+  Send the identity exactly as the snapshot reports it. Naming a
+  different window or delivery than the one the Monitor holds — or
+  omitting one it is holding — is a mismatch, not a wildcard, and a
   mismatch stops nothing at all. That is deliberate: a stale snapshot
   names a real issue number just as convincingly as a fresh one, and
-  killing the wrong agent cannot be undone. If you get `refused`, re-read
-  the snapshot instead of retrying — the `mismatch` field names the
-  component that disagreed.
+  killing the wrong agent cannot be undone.
+
+  The claim is the one component that tolerates silence. The durable
+  state does not always record the claim behind a bound launch, so a
+  `claim_id` you read from the Issue's claim comment — or leave out
+  entirely — refuses only when the Monitor holds a *different* one. Before
+  that, a matching `window_id` still failed `claim_mismatch` and a launch
+  whose owner had already declared `execution.blocked` kept its slot with
+  no way to return it.
+
+  If you get `refused`, read `live_launch` in the reply: it reports the
+  `claim_id`, `delivery_id`, and `window_id` the Monitor actually holds,
+  plus whether the issue still holds a slot. Build the next request from
+  that answer rather than retrying blindly; the `mismatch` field names
+  the component that disagreed.
 
   The stop does not close the pane. Close it yourself afterwards with
   `pane.close`; the launch is already revoked, so that close cannot
@@ -356,11 +380,70 @@ missed:
   exact Session (settled and terminal, nothing open), the Issue's
   durable closed record or Monitor row, and `pane.read` for a
   diagnostic. A NeedsHuman row, an Error pane, an open obligation, or
-  any fact you cannot read keeps the window.
+  any fact you cannot read keeps the window. An Error pane is never
+  fallback cleanup; it goes through *Error pane triage and disposition*
+  below.
 - Close only that exact inert window with `pane.close`, and say in the
   digest which runtime miss you are cleaning up. Never sweep panes in
   bulk, and never close a window whose Work is still open — that close
   is a failed attempt (see `pane.close` above), not cleanup.
+
+## Error pane triage and disposition
+
+An `error` pane is retained on purpose so its failure can be read
+(SPEC-3431 FR-067 / FR-138): the runtime closes settled windows and
+pre-PTY restore failures itself (Issue #3927) and leaves every pane that
+failed after its session was established to you. Diagnosing and
+reporting is not a disposition. Every cycle, take each `error` pane in
+`pane.list` (and a `stopped` pane with an open obligation) through the
+order below and finish it; a cycle with an untriaged error pane is
+never a no-change cycle (Issue #3531).
+
+1. **Identify** — identify the owning Issue and Work from the exact
+   pane: the window title, `launched_window_id` on its
+   `issue.monitor.status` row, and `execution.status` for its Session.
+   An unknown owner is a reason to keep the pane and list it as
+   `unknown` in the digest, never a reason to infer one.
+2. **Reconcile** — reconcile its delivery state against authoritative
+   evidence: the owner Issue's current state (`issue.view`), the
+   execution record, and the merge log (`pr.list` with `refresh:true`,
+   or the merged commit on `develop`). Cached `linked_prs`, a Board
+   post, or scrollback is never delivery proof on its own. The result
+   is `delivered`, `undelivered` with every obligation named (unpushed
+   commits, unresolved review threads, a SPEC or artifact update, an
+   unanswered ruling), or `unknown`, which is treated as undelivered.
+3. **Recover** — when the work is undelivered, connect it to a recovery
+   Issue or a requeue before anything else: `issue.monitor.requeue`
+   when the row is `agent_failed` / `launch_failed` and the owner
+   Issue's acceptance criteria still describe the remaining work, or
+   `issue.create` for a recovery Issue that lists every lost obligation
+   and points at the owner. Never leave undelivered work as a report.
+4. **Record** — record the failure reason and the disposition durably
+   where the next session can read them: a comment on the owner Issue
+   or a Board post naming the recovery Issue or the requeue. A recorded
+   error alone is not a disposition; the recovery is part of it.
+5. **Close** — only then close only that exact inert pane with
+   `pane.close`, after a fresh `pane.list` confirms it is the same pane
+   and no longer bound to a live launch. Wait for the receipt: a failed
+   or timed-out close is reported as a failure and re-evaluated next
+   cycle from fresh inventory, never claimed as done. Never sweep panes
+   in bulk by state.
+6. **Report** — end the cycle with a disposition digest of every error
+   pane you touched, in this shape:
+
+   | pane | owner | delivery state | disposition |
+   | --- | --- | --- | --- |
+   | `fix(pane): close receipt on timeout` | #1234 | delivered: PR #1240 merged | closed (receipt ok) |
+   | `feat(spec): Phase 25 artifacts` | #1180 | undelivered: 4 review threads on PR #1236, artifact update unpushed | recovery Issue #1301 registered; closed (receipt ok) |
+   | title unavailable | unknown | unknown | kept; owner unresolved, re-check next cycle |
+
+Keep the pane whenever a step cannot be completed: an unread or unfiled
+error, an unknown owner, evidence a `needs_human` ruling still needs, or
+a close whose receipt did not land. A kept pane reappears in the next
+cycle's inventory and digest until it is dispositioned. When several
+panes fail at once with the same error (a restore failure after a
+restart), report the shared cause once with the count, but run steps 1
+to 4 per pane: a shared cause never implies a shared delivery state.
 
 ## Steering the running agents
 
@@ -437,6 +520,17 @@ re-derives the failure from the persisted hold, so the row does not move.
 - The reply returns `stale_window_id` when the failure retained an error
   window. Close it with `pane.close`; the release already unbound it, so
   the close cannot requeue the issue again.
+- A row that still reads `launched` while nothing owns it is the same
+  state wearing a different label, and it used to be the one state with
+  no way out at all. `issue.monitor.stop` answers `unknown_issue` —
+  there is no launch left to name — and the failure gate answers
+  `not_held`, because nothing failed. Both refusals are right; the
+  combination stranded four rows for five to nine hours in the reported
+  snapshot. `issue.monitor.requeue` now covers it too: when the live
+  projection shows a `launched` row holding no active slot, the reply is
+  `released_hold: "stranded_launch"` and the issue returns to the queue.
+  The scan does the same unattended once such a row has waited eight
+  hours without the completion evidence that would have ended it.
 - Recovering a row does not fix why it failed. If the launch is refused
   for a durable reason (a stranded execution generation, a repository
   lock), the requeued issue fails the same way on its next scan. Read the
@@ -561,6 +655,11 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   *Steering the running agents*): a stalled, drifting, or
   next-action-waiting launch gets its directive in the same cycle,
   before you decide the cycle changed nothing.
+- Every cycle, take every `error` pane through *Error pane triage and
+  disposition*: identify its owner, reconcile delivery, connect
+  undelivered work to recovery, record the disposition, and only then
+  close the exact pane. An error pane that was only diagnosed and
+  reported is still open work.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
@@ -591,7 +690,31 @@ quota:
 - `github.budget` shows the primary budgets, the local estimate of the
   secondary limit, the newest refusal, and the throttle decision a
   periodic read would get right now. Read it when `throttled` appears
-  or before a burst of live reads; it is free.
+  or before a burst of live reads; it is free. `issue.monitor.status`
+  carries the same state under `github_budget` (per resource:
+  `throttled`, `backoff_until`, `retry_after_secs`,
+  `consecutive_refusals`, `calls_last_minute`, `sources_last_minute`),
+  so a rate-limited queue and the caller behind a burst are visible from
+  the snapshot you already read. A refusal window grows with every
+  refusal in a row (1 → 2 → 4 → 8 minutes, capped at 15) and no gwt
+  process issues GraphQL calls inside it; wait for `backoff_until`
+  instead of retrying.
+- `issue.monitor.status` also carries `disk_space`: the volumes the
+  worktrees and the verification coordinator live on, and a `warning`
+  once one falls below 20 GiB or 5% free. A full host stops every
+  `verify.run` on it at once (`No space left on device`), so treat the
+  warning as a fleet blocker, not a per-Issue one. Reclaim with JSON
+  operation `worktree.gc_build_artifacts`: the default call is a dry run
+  listing the `target/` caches of merged, idle worktrees with their
+  sizes and every kept worktree with its reason; rerun with
+  `dry_run:false` to delete. Never pass `include_unmerged:true` on your
+  own — an unmerged worktree is someone's uncommitted build state; ask
+  the owner first. `include_protected_workspaces:true` reclaims the
+  shared `develop` / `main` workspaces, which are the single largest
+  caches on the host; it is the right call only once the host is tight
+  enough that the rebuild the next opener pays is worth it. Running
+  worktrees are excluded by the operation itself, so it is safe to run
+  while agents are active.
 
 - Read the inventory with JSON operation `pr.list`. Do not call
   `gh pr list`.
@@ -618,17 +741,33 @@ quota:
 - `owner_issue` names the Issue a relaunch or triage would target (the
   first closing Issue, else the Issue on the head's launch ref).
 - When `default_action_executable` is false the Issue Monitor cannot
-  perform the default action and `blocker` says why:
-  `owner_relaunch_refused_unique_commits` (the PR's commits sit on the
-  owner's launch ref, so a fresh launch would be refused to preserve
-  them), `owner_unknown` (no closing Issue), or `owner_issue_closed`.
+  perform the default action and `blocker` says why: `owner_unknown`
+  (no closing Issue and no launch ref naming one) or
+  `owner_issue_closed`. A head sitting on the owner's own launch ref is
+  no longer a blocker — since #4074 a relaunch inherits that branch and
+  its commits instead of being refused, so relaunch the owner.
   Do not retry the default action. The row's `fallback` fixes the
   order you take instead: triage the CI failure or conflict yourself
   (the triage procedure is #3790's, not yours to redefine), arrange a
   rerun when it is a flake, arrange a fresh launch when it is a
   regression, and escalate to the user immediately when neither is
-  possible. You may run `gh pr update-branch` and canonical `pr.ready`
-  yourself; never bypass them with other `gh` mutations.
+  possible. You may run canonical `pr.update_branch` and `pr.ready`
+  yourself; never bypass them with `gh` mutations.
+- `default_action_operation` names the operation that performs
+  `default_action` when it needs one: `pr.update_branch` for `BEHIND`,
+  `pr.ready` for a Draft `MERGE-CANDIDATE`. A row with no
+  `default_action_operation` is advice you act on, not a call you make.
+  Never invent an operation for a row that names none.
+- **Run `pr.update_branch` one PR at a time.** Every merge into the base
+  puts every other open PR back to `BEHIND`, so a fan-out re-runs CI on
+  branches that are about to go stale again. Each cycle, pick the single
+  PR closest to promotion — `BEHIND` with no failing check, nothing in
+  progress, and no unresolved review thread — update that one, and let
+  the next cycle pick the next. Do not update a second PR in the same
+  cycle, and never update every `BEHIND` row at once.
+- `pr.update_branch` refuses a PR whose base would conflict and reports
+  `CONFLICTED` without pushing anything. That is the owner's work:
+  relaunch the owner, and never resolve a conflict yourself.
 - A cycle in which at least one open PR is `CI-RED` or `CONFLICTED` is
   never a no-change cycle. Advance at least one such PR (triage posted,
   rerun arranged, fresh launch arranged, update-branch run) or state in
@@ -652,6 +791,79 @@ quota:
   notes, and judge recovery only by a real operation succeeding on a
   later cycle — never by `gh api rate_limit`, which reports remaining
   budget while a secondary limit still refuses every call.
+
+## Unlanded branch stocktake
+
+`pr.list` also answers `unlanded_branches`: every remote `work/issue-*`
+branch with commits `origin/develop` does not have and no open PR
+carrying them. Each row names the `branch`, its `owner_issue`, how many
+commits it is `ahead`, and its `last_commit_at`. It is read from local
+refs, so it costs no GitHub budget and stays truthful even when the PR
+rows came from cache. `unlanded_branch_count` is the row count.
+
+- Read it every cycle. A row is committed work with nothing carrying it
+  to `develop` — #3551 sat unlanded for ten days because no open PR
+  mentioned it and nothing else looked.
+- Resolve each row one of two ways: relaunch the owner Issue so the work
+  reaches a PR, or rule the branch archived and say so in the digest. A
+  row that survives a cycle unaddressed is an escalation, never part of
+  a silent no-change cycle.
+- Order the triage by `last_commit_at`: the inventory already puts the
+  longest residue first.
+
+## Terminal executions never justify a successor Issue
+
+An execution generation goes terminal through four routes: the agent's
+own `execution.complete` (Completed), its `execution.blocked` (Blocked),
+the startup / scan reaper terminalizing a dead holder's Active
+generation (Blocked), and a `build.complete` that settles the Work while
+its own execution settlement fails. All four are normal end states.
+
+None of them is a reason to register a `【#N 後継】` Issue. A terminal
+record releases to a successor generation on the *same* Issue and the
+*same* `work/issue-N` branch:
+
+- Completed and Blocked predecessors both release on the next linked-
+  owner launch — `issue.monitor.requeue` the row and let the Monitor
+  launch it.
+- Since #4074 a launch ref carrying unique commits is inherited rather
+  than refused, so pushed work no longer forces `needs_human` and no
+  longer needs a new Issue number to escape it. The only refusal left is
+  a worktree still held by a live Session; steer or stop that Session
+  instead.
+- A Blocked execution that is waiting on another Issue stays held until
+  that dependency merges. Do not create the successor early — requeue
+  the same Issue once the dependency lands.
+
+Register a new Issue only when the *work* is new: a different scope, a
+follow-up the owner Issue explicitly deferred, or a defect the owner
+never covered. "The record went terminal" is not new work.
+
+## Interrupted release check
+
+`/release` bumps the version on `develop` and only then opens the
+`develop -> main` Release PR. When it stops between those two steps the
+bump sits on the branch with nothing driving it to a release, and the
+gap stays invisible until someone happens to look (Issue #3516).
+
+- Every resident cycle, run JSON operation `release.status`. It is a
+  local git read whenever no bump is pending, so it costs no GitHub
+  budget on an ordinary cycle and never needs `refresh`.
+- Act on `state`, not on your own reading of the log: `no_bump`,
+  `released` (the version is already tagged) and `pr_open` are quiet
+  states with nothing to do. Only `stalled` — bump landed, version
+  untagged, no Release PR — asks for anything.
+- On `stalled`, run `release.status` again with
+  `params.ensure_release_pr:true` in the same cycle. That opens the
+  missing Release PR with the CHANGELOG section for the bumped version
+  as its body, and reports the new PR under `release_pr_url`. Name the
+  recovered release in the digest.
+- The reconcile is idempotent: it reclassifies before it creates, so a
+  repeated call over a release that already has its PR (or its tag)
+  creates nothing and returns the quiet state. Re-running after a
+  failure is safe.
+- A `stalled` release is never a no-change cycle. Recover it or say in
+  the digest why the recovery failed.
 
 ## GitHub read budget
 
@@ -682,6 +894,14 @@ Board naming the holder. Your part:
 - A Board post from a waiting agent names the lease holder. Read
   `verify.lease.status` and arbitrate the order — tell the holder to
   release or the waiter to keep waiting — instead of relaunching either.
+- `verify.lease.status` names `holder_kind`. When it is `index` (a
+  background `chroma_index_runner` job, Issue #4086), verification
+  already outranks it: a refused agent leaves a reservation the runner
+  yields to at its next batch boundary, and `estimated_remaining_ms` /
+  `remaining_batches` say how long that is. To force the order yourself,
+  run `verify.lease.release` with the index lease's `lease_id`: it answers
+  `yield requested` and leaves the same reservation instead of failing
+  with "no control channel".
 - An agent whose `current_focus` says it is waiting for the lease, or
   whose row carries a `waiting` declaration, is waiting, not stuck. Do
   not stop it on `last_activity_at` alone.
@@ -795,6 +1015,10 @@ and urgency.
   reportable milestone or escalation under the conditional rule below.
   Only an empty stalled-item inventory may end silently; a non-empty
   inventory is not a no-change cycle.
+- Error panes you dispositioned this cycle are reported as the
+  disposition digest (see *Error pane triage and disposition*). A
+  recovery Issue registered from one is a milestone; a pane kept because
+  its owner or delivery is unknown is an escalation until resolved.
 - Fine-grained progress is answered when the user asks for it, not
   volunteered.
 - A cycle that produced no milestone and no escalation, with no open
@@ -1018,6 +1242,15 @@ mod tests {
             "starts a fresh bounded retry cycle",
             "launch_live",
             "not_held",
+            // Issue #3992: the two halves of the recovery this Issue added —
+            // the refusal that names the launch it disagreed with, and the
+            // escape from a `launched` row nothing owns. Without both in the
+            // contract the PM reads `unknown_issue` / `not_held` and concludes,
+            // correctly for the old build, that no recovery exists.
+            "`live_launch`",
+            "the one component that tolerates silence",
+            "stranded_launch",
+            "has waited eight",
             "Never repair Issue Monitor state by editing `issue-monitor.json`",
             "they re-stamp what you removed on their next commit",
             "Recovering a row does not fix why it failed",
@@ -1042,6 +1275,13 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // Issue #3531 (SPEC-3431 FR-137〜140): an error pane is triaged to
+            // a durable disposition, never only diagnosed and reported.
+            "## Error pane triage and disposition",
+            "Diagnosing and reporting is not a disposition",
+            "recovery Issue",
+            "`issue.monitor.requeue`",
+            "| pane | owner | delivery state | disposition |",
             // Issue #3776: a slow gwtd process cannot own the PM turn.
             "## gwtd execution isolation",
             "short read-only gwtd operations",
@@ -1319,6 +1559,36 @@ mod tests {
         );
     }
 
+    /// Issue #4074 AC-4 / AC-5: the PM reads the unlanded-branch stocktake
+    /// every cycle, and a terminal execution record never becomes a reason to
+    /// register a successor Issue.
+    #[test]
+    fn contract_covers_the_unlanded_stocktake_and_forbids_successor_issues() {
+        let body = body();
+        for phrase in [
+            "`unlanded_branches`",
+            "`unlanded_branch_count`",
+            "`last_commit_at`",
+            "costs no GitHub budget",
+            "relaunch the owner Issue so the work reaches a PR, or rule the branch archived",
+            "A row that survives a cycle unaddressed is an escalation",
+            "## Terminal executions never justify a successor Issue",
+            "`execution.complete` (Completed)",
+            "`execution.blocked` (Blocked)",
+            "reaper terminalizing a dead holder's Active",
+            "`build.complete` that settles the Work while",
+            "`【#N 後継】`",
+            "the *same* Issue and the",
+            "`issue.monitor.requeue` the row and let the Monitor",
+            "a launch ref carrying unique commits is inherited rather",
+            "a worktree still held by a live Session",
+            "Do not create the successor early",
+            "\"The record went terminal\" is not new work.",
+        ] {
+            assert!(body.contains(phrase), "PM contract is missing: {phrase}");
+        }
+    }
+
     /// Issue #3776 / SPEC-3431 FR-145〜148: a slow gwtd process must not own
     /// the resident PM's conversational turn. The detailed contract belongs in
     /// one section so the compact wake/Stop reminder cannot become an
@@ -1430,6 +1700,25 @@ mod tests {
     /// wake prompts took it. Both halves are pinned: silence on no change, and
     /// liveness proven outside the conversation so the PM is not tempted to
     /// emit a keepalive.
+    /// Issue #3516 AC-2 / AC-3: the resident loop carries the interrupted-
+    /// release standing check, its single actionable state, the opt-in
+    /// reconcile, and the promise that repeating the reconcile is safe.
+    #[test]
+    fn contract_carries_the_interrupted_release_standing_check() {
+        let body = body();
+        for phrase in [
+            "Every resident cycle, run JSON operation `release.status`",
+            "`no_bump`, `released` (the version is already tagged) and `pr_open` are quiet states",
+            "Only `stalled` — bump landed, version untagged, no Release PR — asks for anything",
+            "`params.ensure_release_pr:true`",
+            "`release_pr_url`",
+            "The reconcile is idempotent: it reclassifies before it creates",
+            "A `stalled` release is never a no-change cycle",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
     /// Issue #3868 AC-2 / AC-3 / AC-5 / AC-6: a row the Monitor cannot act on
     /// has a fixed fallback order, a red or conflicted PR forbids a silent
     /// cycle, and dwell / no-progress counts reach the digest with what was
@@ -1440,12 +1729,12 @@ mod tests {
         for phrase in [
             "`default_action_executable` is false",
             "`blocker`",
-            "`owner_relaunch_refused_unique_commits`",
+            "`owner_unknown`",
             "triage the CI failure or conflict yourself",
             "arrange a rerun when it is a flake",
             "arrange a fresh launch when it is a regression",
             "escalate to the user immediately when neither is possible",
-            "`gh pr update-branch`",
+            "canonical `pr.update_branch` and `pr.ready`",
             "at least one open PR is `CI-RED` or `CONFLICTED` is never a no-change cycle",
             "`dwell_hours`",
             "`stale_after_hours`",
@@ -1468,6 +1757,42 @@ mod tests {
             ),
             "the silent-cycle rule must carry the red-PR exception"
         );
+    }
+
+    /// SPEC #3835 AC-16: `update-branch` is serialized. One merge into the
+    /// base puts every other open PR back to `BEHIND`, so updating them all at
+    /// once burns CI on branches that go stale again before they land. The PM
+    /// advances the single PR closest to promotion and leaves the rest.
+    #[test]
+    fn contract_serializes_update_branch_to_the_pr_closest_to_promotion() {
+        let body = body();
+        for phrase in [
+            "Run `pr.update_branch` one PR at a time",
+            "puts every other open PR back to `BEHIND`",
+            "pick the single PR closest to promotion",
+            "Do not update a second PR in the same cycle",
+            "never update every `BEHIND` row at once",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// SPEC #3835 AC-17 / FR-007: a row says which operation performs its
+    /// default action, and a conflicting update is handed back to the owner
+    /// rather than resolved by the PM.
+    #[test]
+    fn contract_names_the_operation_behind_each_default_action() {
+        let body = body();
+        for phrase in [
+            "`default_action_operation` names the operation that performs `default_action`",
+            "`pr.update_branch` for `BEHIND`",
+            "`pr.ready` for a Draft `MERGE-CANDIDATE`",
+            "Never invent an operation for a row that names none",
+            "refuses a PR whose base would conflict and reports `CONFLICTED`",
+            "never resolve a conflict yourself",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
     }
 
     /// Issue #3868 AC-9 / AC-10 / AC-11: quota exhaustion is reported as an
@@ -1513,6 +1838,39 @@ mod tests {
             "Do not pass `refresh:true` on the periodic inventory",
             "`github.budget`",
             "counts as zero live reads",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #3928 AC-4: the budget state the queue is running on is part of
+    /// the status snapshot, so the PM can attribute a burst without a second
+    /// read.
+    #[test]
+    fn contract_points_the_pm_at_the_budget_block_in_monitor_status() {
+        let body = body();
+        for phrase in [
+            "`github_budget`",
+            "`backoff_until`",
+            "`sources_last_minute`",
+            "capped at 15",
+        ] {
+            assert!(body.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    /// Issue #4009 AC-4: the disk-space warning and the reclaim operation are
+    /// named where the PM reads the queue, so a filling host is acted on
+    /// before every `verify.run` on it fails.
+    #[test]
+    fn contract_points_the_pm_at_disk_space_and_the_reclaim_operation() {
+        let body = body();
+        for phrase in [
+            "`disk_space`",
+            "`worktree.gc_build_artifacts`",
+            "`dry_run:false`",
+            "`include_unmerged:true`",
+            "`include_protected_workspaces:true`",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
@@ -1652,6 +2010,107 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "FR-066: the close footgun is bounded in requeue_window, not by \
              taking the capability away from the PM"
         );
+    }
+
+    /// Issue #3531 AC-1 / AC-3 (SPEC-3431 FR-137〜140): an error pane is not
+    /// finished when it has been diagnosed. The contract fixes the order —
+    /// identify the owner, reconcile delivery against authoritative evidence,
+    /// connect undelivered work to a recovery Issue or a requeue, record the
+    /// disposition durably, close only the exact inert pane, and report the
+    /// disposition — because the pane may be the last trace of work that was
+    /// never delivered (PR #3520's review threads were lost this way).
+    #[test]
+    fn contract_triages_error_panes_to_recovery_before_cleanup() {
+        let triage = section("## Error pane triage and disposition");
+        let position = |phrase: &str| {
+            triage
+                .find(phrase)
+                .unwrap_or_else(|| panic!("error pane triage contract is missing: {phrase}"))
+        };
+        let identify = position("identify the owning Issue and Work");
+        let reconcile = position("reconcile its delivery state");
+        let recover = position("connect it to a recovery Issue or a requeue");
+        let durable = position("record the failure reason and the disposition durably");
+        let close = position("close only that exact inert pane");
+        let digest = position("disposition digest");
+        assert!(
+            identify < reconcile,
+            "identify the owner before reconciling delivery"
+        );
+        assert!(reconcile < recover, "reconcile delivery before recovering");
+        assert!(recover < durable, "recovery precedes the durable record");
+        assert!(durable < close, "a durable disposition precedes the close");
+        assert!(close < digest, "the digest reports what was closed");
+
+        // AC-3: undelivered work is never left as a report.
+        for phrase in [
+            "`issue.create`",
+            "`issue.monitor.requeue`",
+            "Never leave undelivered work as a report",
+            "Cached `linked_prs`",
+            "never delivery proof on its own",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane recovery contract is missing: {phrase}"
+            );
+        }
+        // Fail-closed retention (FR-138) survives the new cleanup duty.
+        for phrase in [
+            "unknown owner",
+            "keep the pane",
+            "Never sweep panes in bulk",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane retention contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3531 AC-1: "diagnosed and reported" is explicitly not an
+    /// allowed end state for an error pane, and the resident loop invokes the
+    /// triage every cycle so the duty cannot depend on session memory.
+    #[test]
+    fn contract_forbids_ending_error_pane_triage_at_a_report() {
+        let triage = section("## Error pane triage and disposition");
+        for phrase in [
+            "Diagnosing and reporting is not a disposition",
+            "never a no-change cycle",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "error pane triage contract is missing: {phrase}"
+            );
+        }
+        assert!(
+            section("## Resident loop (unattended)").contains("Error pane triage and disposition"),
+            "the resident cycle must invoke the error pane triage every cycle"
+        );
+        assert!(
+            section("## Reporting cadence").contains("disposition digest"),
+            "the disposition digest must be part of the reporting cadence"
+        );
+    }
+
+    /// Issue #3531 AC-4: the disposition report has a fixed shape (pane /
+    /// owner / delivery state / disposition) and the skill shows an example so
+    /// every PM session reports the same columns.
+    #[test]
+    fn contract_shows_the_disposition_digest_format() {
+        let triage = section("## Error pane triage and disposition");
+        for phrase in [
+            "| pane | owner | delivery state | disposition |",
+            "recovery Issue #",
+            "closed (receipt",
+            "kept",
+            "title unavailable",
+        ] {
+            assert!(
+                triage.contains(phrase),
+                "disposition digest example is missing: {phrase}"
+            );
+        }
     }
 
     #[test]

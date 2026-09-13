@@ -1,10 +1,11 @@
 //! `gwtd daemon ...` family — long-running runtime daemon (SPEC-2077).
 //!
 //! - `mod.rs` (this file): argv parsing + dispatch + status reporting.
-//! - `server.rs`: tokio-based IPC listener (Unix domain socket today;
-//!   Windows named-pipe support is a follow-up).
+//! - `server.rs`: tokio-based IPC listener.
+//! - `transport.rs`: the platform transport behind the listener (Unix
+//!   domain socket on Unix, named pipe on Windows — Issue #3526).
 //! - `subscribe_resolver.rs`: exact-first, read-only endpoint selection for
-//!   bounded Unix subscriptions from linked worktrees.
+//!   bounded subscriptions from linked worktrees.
 //!
 //! The contract layer (`gwt_core::daemon::*`) defines the on-disk endpoint
 //! file, handshake protocol, and `DaemonBootstrapAction`. `Start` honours
@@ -14,31 +15,31 @@
 //! [`gwt_core::daemon::DaemonEndpoint`], and
 //! enter the listen loop.
 
-#[cfg(unix)]
 pub(crate) mod broadcast;
-#[cfg(unix)]
 pub mod client;
-#[cfg(unix)]
 pub(crate) mod server;
-#[cfg(unix)]
 mod subscribe_resolver;
+pub(crate) mod transport;
 
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::time::Duration;
 
 use gwt_core::daemon::{
-    resolve_bootstrap_action, DaemonBootstrapAction, DaemonStatus, RuntimeScope, RuntimeTarget,
-    DAEMON_PROTOCOL_VERSION,
+    resolve_bootstrap_action, ClientFrame, DaemonBootstrapAction, DaemonEndpoint, DaemonFrame,
+    DaemonStatus, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
 };
-#[cfg(unix)]
-use gwt_core::daemon::{ClientFrame, DaemonEndpoint, DaemonFrame};
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::{CliEnv, CliParseError, DaemonCommand};
 
-#[cfg(unix)]
 const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn subscribe_deadline_from(
+    now: tokio::time::Instant,
+    timeout_seconds: u64,
+) -> Option<tokio::time::Instant> {
+    now.checked_add(Duration::from_secs(timeout_seconds))
+}
 
 pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
     match args.first().map(String::as_str) {
@@ -123,7 +124,6 @@ fn resolve_scope(env: &impl CliEnv) -> Result<RuntimeScope, SpecOpsError> {
 /// An explicit root is an authorization boundary: it must exist and be a
 /// directory, and it must never degrade to the caller's cwd. Omitting the
 /// root retains the pre-#3596 cwd-derived scope unchanged.
-#[cfg(unix)]
 fn resolve_subscribe_scope(
     env: &impl CliEnv,
     project_root: Option<&Path>,
@@ -164,7 +164,11 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
     .map_err(|err| config_error(err.to_string()))?;
 
     match action {
-        DaemonBootstrapAction::Reuse(endpoint) => {
+        // Issue #4038: the version-agnostic resolver never names a stale
+        // version here; the arm exists for exhaustiveness and reports the
+        // daemon exactly like a reusable one (its version is printed).
+        DaemonBootstrapAction::Reuse(endpoint)
+        | DaemonBootstrapAction::RetireStaleVersion { endpoint } => {
             let probe = probe_daemon_endpoint(&endpoint);
             out.push_str(&format!(
                 "running pid={pid} bind={bind} version={version} probe={probe}\n",
@@ -176,8 +180,12 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
             Ok(0)
         }
         DaemonBootstrapAction::Spawn { endpoint_path } => {
+            let state = match unregistered_daemon_evidence(&endpoint_path) {
+                Some(evidence) => format!("unregistered {evidence}"),
+                None => "stopped".to_string(),
+            };
             out.push_str(&format!(
-                "stopped scope={repo_hash}/{worktree_hash} endpoint={path}\n",
+                "{state} scope={repo_hash}/{worktree_hash} endpoint={path}\n",
                 repo_hash = scope.repo_hash,
                 worktree_hash = scope.worktree_hash,
                 path = endpoint_path.display()
@@ -187,7 +195,73 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
     }
 }
 
-#[cfg(unix)]
+/// Issue #2338 AC-B: evidence that a daemon is serving this scope even though
+/// no usable descriptor names it, or `None` when nothing is running.
+///
+/// Without this, `stopped` covers two states a reader must act on differently:
+/// no daemon at all (start one) versus a daemon that is up but undiscoverable
+/// (find out what erased or skewed its descriptor). The production incident
+/// was the second one, reported as the first for hours.
+fn unregistered_daemon_evidence(endpoint_path: &std::path::Path) -> Option<String> {
+    // A descriptor this gwtd cannot use — wrong protocol, wrong scope — but
+    // whose owner is still running. Since Issue #2338 AC-A such a descriptor
+    // is preserved rather than deleted, so it is here to be read.
+    if let Some(endpoint) = std::fs::read(endpoint_path)
+        .ok()
+        .and_then(|payload| serde_json::from_slice::<DaemonEndpoint>(&payload).ok())
+    {
+        if endpoint.has_live_owner(is_process_alive_pid) {
+            return Some(format!(
+                "pid={pid} bind={bind} reason=endpoint-unusable-for-this-client",
+                pid = endpoint.pid,
+                bind = endpoint.bind
+            ));
+        }
+        return None;
+    }
+
+    // No readable descriptor, but the scope's canonical socket still answers:
+    // exactly the shape the production machine was in.
+    let socket = gwt_core::daemon::resolve_daemon_socket_path(endpoint_path).ok()?;
+    transport::bind_is_served(&socket.path.to_string_lossy()).then(|| {
+        format!(
+            "socket={path} reason=endpoint-missing",
+            path = socket.path.display()
+        )
+    })
+}
+
+/// Issue #2338 AC-D: drop the descriptors earlier gwt generations left behind
+/// in this project's daemon directory.
+///
+/// Runs at daemon start because that is the one moment a writer legitimately
+/// owns this directory, and because the sweep only ever removes descriptors
+/// whose owner is provably gone — it cannot strand the daemon about to bind.
+/// Failures are logged, never fatal: a daemon that can serve must not refuse
+/// to start over housekeeping.
+fn sweep_past_generation_endpoints(daemon_dir: &std::path::Path) {
+    match gwt_core::daemon::sweep_dead_endpoints(
+        daemon_dir,
+        is_process_alive_pid,
+        transport::bind_is_served,
+    ) {
+        Ok(removed) if !removed.is_empty() => {
+            tracing::info!(
+                removed = removed.len(),
+                dir = %daemon_dir.display(),
+                "gwtd daemon: swept past-generation endpoint descriptors (#2338 AC-D)"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                dir = %daemon_dir.display(),
+                "gwtd daemon: endpoint descriptor sweep failed: {error}"
+            );
+        }
+    }
+}
+
 fn probe_daemon_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonStatus, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -225,14 +299,6 @@ fn probe_daemon_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonStatus, Stri
     })
 }
 
-#[cfg(not(unix))]
-fn probe_daemon_endpoint(
-    _endpoint: &gwt_core::daemon::DaemonEndpoint,
-) -> Result<DaemonStatus, String> {
-    Err("probe not implemented on this platform".to_string())
-}
-
-#[cfg(unix)]
 fn subscribe_command<E: CliEnv>(
     env: &mut E,
     project_root: Option<&Path>,
@@ -303,7 +369,7 @@ fn subscribe_command<E: CliEnv>(
         // timeout would never fire and the caller would never get its turn
         // back.
         let deadline = timeout_seconds
-            .map(|seconds| tokio::time::Instant::now() + std::time::Duration::from_secs(seconds));
+            .and_then(|seconds| subscribe_deadline_from(tokio::time::Instant::now(), seconds));
         loop {
             let frame: DaemonFrame = match deadline {
                 Some(deadline) => {
@@ -326,22 +392,6 @@ fn subscribe_command<E: CliEnv>(
     })
 }
 
-#[cfg(not(unix))]
-fn subscribe_command<E: CliEnv>(
-    _env: &mut E,
-    _project_root: Option<&Path>,
-    _channels: Vec<String>,
-    _timeout_seconds: Option<u64>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
-    out.push_str(
-        "gwtd daemon subscribe: not implemented on this platform; \
-         subscribe support requires Unix domain sockets.\n",
-    );
-    Ok(2)
-}
-
-#[cfg(unix)]
 fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
     match result {
         Ok(status) => format!(
@@ -354,18 +404,10 @@ fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
     }
 }
 
-#[cfg(not(unix))]
-fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
-    match result {
-        Ok(_) => "ok".to_string(),
-        Err(err) => format!("failed:{err}"),
-    }
-}
-
-#[cfg(unix)]
 fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsError> {
     let scope = resolve_scope(env)?;
     let gwt_home = gwt_core::paths::gwt_home();
+    sweep_past_generation_endpoints(&scope.daemon_dir(&gwt_home));
     let action = resolve_bootstrap_action(
         &gwt_home,
         &scope,
@@ -375,7 +417,11 @@ fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOps
     .map_err(|err| config_error(err.to_string()))?;
 
     match action {
-        DaemonBootstrapAction::Reuse(endpoint) => {
+        DaemonBootstrapAction::Reuse(endpoint)
+        | DaemonBootstrapAction::RetireStaleVersion { endpoint } => {
+            // `resolve_bootstrap_action` never compares versions, so the
+            // second arm is unreachable here; the GUI supervisor is the
+            // version-aware caller (Issue #4038 AC-6).
             out.push_str(&format!(
                 "daemon already running pid={pid} bind={bind}\n",
                 pid = endpoint.pid,
@@ -391,15 +437,6 @@ fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOps
             server::serve_blocking(scope, endpoint_path, env.stdout())
         }
     }
-}
-
-#[cfg(not(unix))]
-fn start_daemon<E: CliEnv>(_env: &mut E, out: &mut String) -> Result<i32, SpecOpsError> {
-    out.push_str(
-        "gwtd daemon start: long-running daemon mode is not yet implemented on this platform; \
-         use `gwt hook ...` synchronous dispatch.\n",
-    );
-    Ok(2)
 }
 
 // Liveness probe lives in `crate::process::is_process_alive` so the
@@ -580,6 +617,17 @@ mod tests {
     }
 
     #[test]
+    fn subscribe_deadline_treats_instant_overflow_as_effectively_unbounded() {
+        let now = tokio::time::Instant::now();
+
+        assert_eq!(
+            subscribe_deadline_from(now, 30),
+            now.checked_add(Duration::from_secs(30))
+        );
+        assert_eq!(subscribe_deadline_from(now, u64::MAX), None);
+    }
+
+    #[test]
     fn parse_rejects_unknown_subcommand() {
         let err = parse(&[s("foo")]).unwrap_err();
         assert!(matches!(err, CliParseError::UnknownSubcommand(_)));
@@ -591,13 +639,62 @@ mod tests {
         assert!(matches!(err, CliParseError::Usage));
     }
 
+    /// Issue #3526 AC-1 / AC-2: the daemon transport layer must compile on
+    /// every supported host. A crate-level Unix-only module gate or a
+    /// platform stub means Windows silently loses `daemon.start`,
+    /// `daemon.subscribe`, the status probe, and every daemon-backed
+    /// control publish. The needles are assembled at runtime so this test
+    /// does not match its own source text.
+    #[test]
+    fn daemon_modules_have_no_platform_gate_or_platform_stub() {
+        let sources = [
+            ("cli/daemon/mod.rs", include_str!("mod.rs")),
+            ("cli/daemon/server.rs", include_str!("server.rs")),
+            ("cli/daemon/client.rs", include_str!("client.rs")),
+            ("cli/daemon/broadcast.rs", include_str!("broadcast.rs")),
+            (
+                "cli/daemon/subscribe_resolver.rs",
+                include_str!("subscribe_resolver.rs"),
+            ),
+            (
+                "daemon_publisher.rs",
+                include_str!("../../daemon_publisher.rs"),
+            ),
+            (
+                "daemon_subscriber.rs",
+                include_str!("../../daemon_subscriber.rs"),
+            ),
+            (
+                "daemon_supervisor.rs",
+                include_str!("../../daemon_supervisor.rs"),
+            ),
+            ("cli/issue.rs", include_str!("../issue.rs")),
+            ("cli/workspace.rs", include_str!("../workspace.rs")),
+            ("lib.rs", include_str!("../../lib.rs")),
+        ];
+        let module_gate = format!("#![cfg({})]", "unix");
+        let stubs = ["not implemented", "not yet implemented", "unavailable"]
+            .map(|prefix| format!("{prefix} on this {}", "platform"));
+        for (name, source) in sources {
+            assert!(
+                !source.contains(&module_gate),
+                "{name}: daemon module must not be gated to Unix"
+            );
+            for stub in &stubs {
+                assert!(
+                    !source.contains(stub.as_str()),
+                    "{name}: daemon surface must not carry the platform stub {stub:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn format_probe_result_err_includes_message() {
         let result: Result<DaemonStatus, String> = Err("connection refused".to_string());
         assert_eq!(format_probe_result(&result), "failed:connection refused");
     }
 
-    #[cfg(unix)]
     #[test]
     fn probe_daemon_endpoint_fails_for_unreachable_bind() {
         use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
@@ -623,6 +720,82 @@ mod tests {
         assert!(result.is_err(), "expected probe to fail for missing socket");
     }
 
+    /// Issue #2338 AC-B: on the production machine the daemon process was
+    /// running and `daemon.status` still said `stopped`, because the status
+    /// path only ever asks "is there a usable descriptor". A reader cannot
+    /// tell "nobody is serving this project" from "somebody is serving it but
+    /// the descriptor is gone or unusable" — and only the second one is a bug
+    /// worth chasing.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_separates_an_unregistered_live_daemon_from_a_stopped_one() {
+        use std::os::unix::net::UnixListener;
+
+        use gwt_core::{
+            daemon::{persist_endpoint, resolve_daemon_socket_path},
+            test_support::ScopedGwtHome,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let mut env = crate::cli::TestEnv::new(project_root.clone());
+        env.repo_path = project_root.clone();
+        let scope = resolve_scope(&env).expect("scope");
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+
+        let mut stopped = String::new();
+        run(&mut env, DaemonCommand::Status, &mut stopped).expect("status with nothing running");
+        assert!(
+            stopped.starts_with("stopped "),
+            "no daemon and no socket must still read as stopped: {stopped}"
+        );
+
+        // A live owner whose descriptor this gwtd cannot use (protocol skew).
+        let mut skewed = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            temp.path().join("skewed.sock").display().to_string(),
+            "skewed-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        skewed.protocol_version = DAEMON_PROTOCOL_VERSION + 1;
+        persist_endpoint(&endpoint_path, &skewed).expect("persist skewed endpoint");
+        let mut skewed_out = String::new();
+        run(&mut env, DaemonCommand::Status, &mut skewed_out).expect("status with skewed endpoint");
+        assert!(
+            skewed_out.starts_with("unregistered "),
+            "a live owner with an unusable descriptor is not `stopped`: {skewed_out}"
+        );
+        assert!(
+            skewed_out.contains(&format!("pid={}", std::process::id())),
+            "the owner pid is the whole point of the report: {skewed_out}"
+        );
+
+        // The production shape: descriptor gone, daemon still serving.
+        std::fs::remove_file(&endpoint_path).expect("remove endpoint");
+        let socket = resolve_daemon_socket_path(&endpoint_path).expect("socket path");
+        if let Some(parent) = socket.path.parent() {
+            std::fs::create_dir_all(parent).expect("socket parent");
+        }
+        let _listener = UnixListener::bind(&socket.path).expect("bind canonical socket");
+        let mut serving_out = String::new();
+        run(&mut env, DaemonCommand::Status, &mut serving_out)
+            .expect("status with a served socket and no descriptor");
+        assert!(
+            serving_out.starts_with("unregistered "),
+            "a served socket with no descriptor is not `stopped`: {serving_out}"
+        );
+        assert!(
+            serving_out.contains(&socket.path.display().to_string()),
+            "the report must name the socket that proves it: {serving_out}"
+        );
+    }
+
     #[test]
     fn format_probe_result_ok_includes_uptime_and_channels() {
         let status = DaemonStatus {
@@ -634,10 +807,7 @@ mod tests {
             issue_monitor: None,
         };
         let formatted = format_probe_result(&Ok(status));
-        #[cfg(unix)]
         assert_eq!(formatted, "ok uptime=12s channels=2 connections=1");
-        #[cfg(not(unix))]
-        assert_eq!(formatted, "ok");
     }
 
     #[cfg(unix)]

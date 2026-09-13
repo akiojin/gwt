@@ -128,6 +128,15 @@ pub struct PmLaunchProfile {
 /// silently become the PM's.
 pub const PM_DEFAULT_AGENT: &str = "claude";
 
+/// SPEC-3431 FR-132: effective interval for PM loop settings that predate the
+/// persisted field or whose preferences file is missing.
+pub const PM_LOOP_INTERVAL_DEFAULT_SECS: u64 = 60;
+
+/// SPEC-3431 FR-132: minimum accepted/effective PM loop interval. Keeping the
+/// floor beside the persisted default gives every reader and writer one
+/// contract for preventing a runaway resident loop.
+pub const PM_LOOP_INTERVAL_MIN_SECS: u64 = 10;
+
 /// Agents that can resolve the `$gwt-pm` bootstrap prompt.
 ///
 /// Managed assets only reach agents with a skills mirror, and `pm_guidance`
@@ -152,21 +161,21 @@ pub struct PmSettings {
     /// FR-026: absent until the user chooses; see [`PmSettings::launch_profile_or_default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<PmLaunchProfile>,
-    /// FR-035 (user ruling 2026-08-08): resident-loop cycle interval in
-    /// seconds. Both the Stop-gate floor and the subscribe timeout the PM is
-    /// told to use. Clamped to at least 10s so a typo cannot spin the loop.
+    /// SPEC-3431 FR-132: resident-loop cycle interval in seconds. Both the
+    /// Stop-gate floor and the subscribe timeout the PM is told to use.
+    /// Missing values default to 60s and effective values are at least 10s.
     #[serde(default = "default_loop_interval_secs")]
     pub loop_interval_secs: u64,
 }
 
 fn default_loop_interval_secs() -> u64 {
-    60
+    PM_LOOP_INTERVAL_DEFAULT_SECS
 }
 
 impl PmSettings {
     /// The effective loop interval, with the runaway floor applied.
     pub fn loop_interval_secs_clamped(&self) -> u64 {
-        self.loop_interval_secs.max(10)
+        self.loop_interval_secs.max(PM_LOOP_INTERVAL_MIN_SECS)
     }
 }
 
@@ -3050,6 +3059,123 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
     Ok(())
 }
 
+fn tracked_pm_work_diagnosis(worktree: &Path) -> String {
+    let mut paths = std::collections::BTreeSet::new();
+    for args in [
+        vec!["diff", "--name-only", "--no-renames", "-z", "--"],
+        vec![
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "--",
+        ],
+    ] {
+        match gwt_core::process::run_git_logged(&args, Some(worktree)) {
+            Ok(output) if output.status.success() => {
+                paths.extend(
+                    output
+                        .stdout
+                        .split(|byte| *byte == 0)
+                        .filter(|path| !path.is_empty())
+                        .map(|path| String::from_utf8_lossy(path).into_owned()),
+                );
+            }
+            _ => {
+                return "user-owned changes: tracked or index changes; path inspection unavailable"
+                    .to_string()
+            }
+        }
+    }
+    let mut groups = std::collections::BTreeMap::<&str, Vec<String>>::new();
+    for path in paths {
+        let category = if gwt_skills::is_gwt_managed_skill_or_command_path(Path::new(&path)) {
+            "managed artifacts"
+        } else if path == ".gwt/work/events.jsonl" || path.starts_with(".gwt/work/events/") {
+            "Work history"
+        } else {
+            "user-owned changes"
+        };
+        groups.entry(category).or_default().push(path);
+    }
+    let groups = groups
+        .into_iter()
+        .map(|(category, paths)| {
+            let examples = paths
+                .iter()
+                .take(5)
+                .map(|path| {
+                    path.chars()
+                        .take(120)
+                        .flat_map(char::escape_default)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{category}: {} tracked/index path(s): {examples}",
+                paths.len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("PM worktree has tracked or index changes; {groups}")
+}
+
+fn repoint_and_refresh_pm_assets(
+    manager: &gwt_git::WorktreeManager,
+    worktree: &Path,
+    old_head: &str,
+    target: &str,
+) -> Result<(), (PmWorktreeRefreshFailureStage, io::Error)> {
+    let mut stage = PmWorktreeRefreshFailureStage::Repoint;
+    let result = crate::managed_assets::with_pm_repoint_transaction(worktree, target, || {
+        let refresh = (|| {
+            // A self-heal writer may have run since the initial preflight.
+            // This lock remains held until checkout and regeneration end.
+            normalize_previous_generated_hook_configs(worktree)?;
+            manager
+                .repoint_detached(worktree, target)
+                .map_err(|error| {
+                    io::Error::other(format!("managed artifacts: repoint failed: {error}"))
+                })?;
+            stage = PmWorktreeRefreshFailureStage::ManagedAssets;
+            crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
+                .map_err(|error| {
+                    io::Error::other(format!("managed artifacts: regeneration failed: {error}"))
+                })
+        })();
+        if let Err(error) = refresh {
+            // Git can advance HEAD and then report failure from post-checkout.
+            // Inspect the actual commit before restoring displaced assets.
+            let rollback = detached_worktree_head_sha(worktree).and_then(|head| {
+                if head.as_deref() == Some(old_head) {
+                    return Ok(());
+                }
+                if head.as_deref() != Some(target) {
+                    return Err(io::Error::other(
+                        "PM HEAD changed outside the refresh transaction",
+                    ));
+                }
+                normalize_previous_generated_hook_configs(worktree)?;
+                manager
+                    .repoint_detached(worktree, old_head)
+                    .map_err(|error| io::Error::other(error.to_string()))
+            });
+            let mut reason = error.to_string();
+            if let Err(rollback_error) = rollback {
+                reason.push_str(&format!(
+                    "; restoring prior PM worktree HEAD {old_head} also failed: {rollback_error}"
+                ));
+            }
+            return Err(io::Error::other(reason));
+        }
+        Ok(())
+    });
+    result.map_err(|error| (stage, error))
+}
+
 fn refresh_pm_worktree_at_locked(
     git_root: &Path,
     // Fetch and worktree administration belong to the shared main Git root,
@@ -3306,7 +3432,7 @@ fn refresh_pm_worktree_at_locked(
                 )),
                 Ok(gwt_git::worktree::DetachedRepointSafety::TrackedOrIndexChanges) => Some((
                     PmWorktreeRefreshFailureStage::LocalWork,
-                    "PM worktree has tracked or index changes".to_string(),
+                    tracked_pm_work_diagnosis(worktree),
                 )),
                 Ok(gwt_git::worktree::DetachedRepointSafety::DetachedOnlyCommit) => Some((
                     PmWorktreeRefreshFailureStage::LocalWork,
@@ -3326,19 +3452,39 @@ fn refresh_pm_worktree_at_locked(
                 return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
             }
         }
+        let mut assets_refreshed = false;
         if let Some(head) = old_head.as_deref().filter(|head| *head != target_sha) {
-            if let Err(error) = manager.repoint_detached(worktree, &target_sha) {
+            if let Err((stage, error)) =
+                repoint_and_refresh_pm_assets(&manager, worktree, head, &target_sha)
+            {
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
-                    PmWorktreeRefreshFailureStage::Repoint,
+                    stage,
                     error.to_string(),
                 );
-                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+                if stage == PmWorktreeRefreshFailureStage::ManagedAssets {
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(error);
+                }
+                // The transaction already restored its prior assets. A second
+                // materialization here would immediately overwrite them.
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                if let Some(snapshot) = generated_hook_snapshot.take() {
+                    if let Err(restore_error) = snapshot.restore() {
+                        let reason = format!("restoring prior generated PM hook configs also failed: {restore_error}");
+                        append_pm_worktree_refresh_failure_reason(project_dir, &reason)?;
+                        return Err(io::Error::other(format!("{error}; {reason}")));
+                    }
+                }
+                return Ok(PmWorktreeRefreshOutcome {
+                    worktree: worktree.to_path_buf(),
+                    freshness,
+                });
             }
-            debug_assert!(!head.is_empty());
+            assets_refreshed = true;
         } else if !existed {
             if let Some(parent) = worktree.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
@@ -3368,37 +3514,21 @@ fn refresh_pm_worktree_at_locked(
             }
         }
 
-        if let Err(error) =
-            crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
-        {
-            let mut failure_reason = error.to_string();
-            if let Some(old_head) = old_head
-                .as_deref()
-                .filter(|old_head| *old_head != target_sha)
+        if !assets_refreshed {
+            if let Err(error) =
+                crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
             {
-                let rollback = normalize_previous_generated_hook_configs(worktree)
-                    .map_err(|error| error.to_string())
-                    .and_then(|()| {
-                        manager
-                            .repoint_detached(worktree, old_head)
-                            .map_err(|error| error.to_string())
-                    });
-                if let Err(rollback_error) = rollback {
-                    failure_reason.push_str(&format!(
-                    "; restoring prior PM worktree HEAD {old_head} also failed: {rollback_error}"
-                ));
-                }
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    Some(target_sha),
+                    PmWorktreeTargetObservation::Fresh,
+                    PmWorktreeRefreshFailureStage::ManagedAssets,
+                    format!("managed artifacts: regeneration failed: {error}"),
+                );
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                return Err(error);
             }
-            let freshness = pm_refresh_failure(
-                git_root,
-                worktree,
-                Some(target_sha),
-                PmWorktreeTargetObservation::Fresh,
-                PmWorktreeRefreshFailureStage::ManagedAssets,
-                &failure_reason,
-            );
-            persist_pm_worktree_freshness(project_dir, &freshness)?;
-            return Err(io::Error::other(failure_reason));
         }
 
         let observed_head = match detached_worktree_head_sha(worktree) {
@@ -3729,9 +3859,11 @@ where
         {
             return Ok(PmWorktreeCleanupOutcome::RetainedLocalWork);
         }
-        manager
-            .remove_force_twice(&worktree)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        crate::managed_assets::cleanup_worktree_with_codex_project_trust(&worktree, || {
+            manager
+                .remove_force_twice(&worktree)
+                .map_err(|error| io::Error::other(error.to_string()))
+        })?;
         Ok(PmWorktreeCleanupOutcome::Removed)
     })
 }
@@ -3891,6 +4023,11 @@ pub struct PmLoopState {
     /// `stop_hook_active` chain that a different Stop gate started.
     #[serde(default)]
     pub pending_own_block: bool,
+    /// SPEC #4093 FR-008 (Issue #3879): fingerprint of the monitor snapshot
+    /// the previous cycle saw. A cycle that sees the same fingerprint is an
+    /// empty cycle even while launches run — nothing new to supervise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_snapshot_fingerprint: Option<String>,
     /// The last prompt injection by a wake path (delta or periodic). Both
     /// wake flavours stamp it so they cannot double-fire within one quiet
     /// window, without touching the Stop-gate floor clock.

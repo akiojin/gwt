@@ -7,7 +7,8 @@
 //!
 //! The watcher does NOT trigger ChromaDB writes itself; consumers
 //! drain `WatcherHandle::recv_batch()` and dispatch the appropriate
-//! `runner index-* --mode incremental` job per batch.
+//! index job per batch. The consumer selects incremental reuse only when the
+//! current store and manifest support it; otherwise the runner rebuilds in full.
 
 use std::{
     path::{Path, PathBuf},

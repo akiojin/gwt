@@ -222,12 +222,19 @@ JSON operation `daemon.start` を実行していない場合は multi-instance f
 無効ですが、ローカルのファイルベース state とファイル watcher は
 従来どおり動作します。
 
-Windows では現状 long-running daemon は提供されておらず、
-JSON operation `daemon.start` は "not yet implemented" で終了します。managed
-hook は同期的な `gwt hook ...` dispatch にフォールバックし、複数
-インスタンス間のイベント fan-out は Windows 対応 (named-pipe 経路)
-が完了するまで利用できません。JSON operation `daemon.status` 自体は Windows
-でも実行可能ですが、daemon が動かないため常に `stopped` を表示します。
+Windows でも daemon は同じ形で動きます。GUI の Issue Monitor がユーザー
+セッションの子プロセスとして起動・監視し、JSON operation `daemon.start` で
+手動起動もできます。通信は named pipe（`\\.\pipe\gwtd-<scope>-<hash>`、
+ローカルクライアントのみ。auth token は `~/.gwt` 配下の endpoint file が
+持つ）です。`daemon.status` / `daemon.subscribe` / Issue Monitor control /
+複数インスタンス間の fan-out は macOS / Linux と同じように動作します。
+手動起動した daemon は Ctrl-C、Ctrl-Break、コンソールを閉じることで停止し、
+ログオフとシャットダウンでも同じ cleanup が走ります。GUI が終了させた
+daemon は次回起動時の liveness 判定で回収されます。gwt は Windows Service を
+インストールしません。daemon が行うのは scan と claim までで、エージェント
+pane の生成は GUI 側が担うため、Service 化してもヘッドレス自律実行には
+ならず、ユーザー単位の `~/.gwt` state とも噛み合わないためです。ヘッドレス
+自律実行は daemon の目標には含めていません。
 
 ## Agent Workflow
 
@@ -304,6 +311,13 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
 `autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
+`review_verdict_published` / `execution_settled` / `binding_dead` /
+`stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
+前 3 種は Issue を requeue せずに解放して pane を閉じます。実行レコードが Active の
+まま idle な `stuck_unknown` だけは人の判断に残り、stuck タイムアウトの 2 倍を超えると
+判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
+または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
 `issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
 プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
 で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
@@ -313,6 +327,21 @@ settings で別 provider を保存すると同じプールに追加されます�
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
+
+ホストの空き容量も同じ snapshot に含まれます。`issue.monitor.status` の
+`disk_space` は worktree と verification coordinator が置かれた volume を列挙し、
+空きが 20 GiB または 5% を下回ると `warning` を載せるため、`verify.run` が
+`No space left on device` で落ちる前にディスク枯渇が見えます。空き容量の回収は
+`worktree.gc_build_artifacts` operation が行います。HEAD が `origin/<base>`
+（`base` の既定は `develop`）にマージ済みで、稼働中プロセスも live な gwt launch も
+無い worktree の `target/` ビルドキャッシュを削除します。引数無しの呼び出しは dry run
+で、候補とそのサイズ、および除外した worktree とその理由（`active process …` /
+`tracked launch …` / `not merged …`）を報告します。削除するには `dry_run: false`
+を、未マージの idle worktree も対象にするには `include_unmerged: true` を渡します。
+共有の base ブランチ workspace（`develop` / `main`）は、リビルド代償を次に触る人が
+負うことになるため既定で除外され、`include_protected_workspaces: true` を明示した
+場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
+実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
 ### Autonomous モード（opt-in）
 
@@ -333,6 +362,18 @@ opt-in** が必要です:
 エスカレーションし、`Autonomous` トグルは monitor が arm した auto-merge を
 能動的に解除する kill switch として機能します。ゲート設計と脅威モデルの全体は
 SPEC [#3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。
+
+work ブランチが `develop` に merge されると、monitor は delivered な Issue を
+自分で決着させます（`Closes #N` は default branch でしか発火しません）。
+受け入れ基準がすべてチェック済みか、PR 本文 / Issue コメントに残りの基準を
+別 Issue に委譲した記録（`残 AC は別 Issue に委譲`）があれば、PR 番号と merge
+SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
+`merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
+全 Phase の tasks が完了したときだけ close します。auto-close は既定で
+`Autonomous` トグルに連動し、`issue.monitor.config.set` の
+`auto_close_merged_issues=true|false` で上書きできます（off のときは
+`merge 済み・close 待ち` コメントの記録のみ）。人間が reopen した Issue を同じ
+merge で再度 close することはありません。
 
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
@@ -418,6 +459,36 @@ Board reminders、discussion/plan/build Stop checks、coordination-event summari
   （worktree ローカルの `.codex/hooks.json` と repo root 側の workspace-home
   コピー）所有します。hook health の報告と self-heal は常に同じファイル集合を
   対象にします。
+
+### Codex 推奨設定
+
+gwt は GUI 起動のたびに、ホストの Codex 設定（`$CODEX_HOME/config.toml`、
+既定は `~/.codex/config.toml`）に gwt 推奨の
+`features.context_management.experimental_mode = true` が入っていることを
+保証します。この設定は、コンテキストを単一の要約へ繰り返し圧縮する代わりに、
+メモと検索可能な履歴として蓄積された詳細を保持します。gwt が書き込むのは
+キーが未設定の場合だけで、ファイル内の他の table はすべて保持され、既に
+キーを持つ config は書き換えられません。無効化したい場合は `config.toml` に
+明示的に記述してください:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt は明示された値（`true` / `false` を問わず）を尊重し、変更しません。
+config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
+error ledger（`errors.list`）に記録されます。
+
+0.153.0 より前の Codex CLI は `[features]` 配下の table を読めません。
+`[features.context_management]` が 1 つあるだけで config 全体が読めなくなり
+（`invalid type: map, expected a boolean`）、`codex login` も起動しなくなります。
+gwt が起動する codex と `PATH` 上の `codex` は別の version であり得るため、
+gwt は起動時に `PATH` 上の codex（`codex --version`）を確認します。それが
+0.153.0 より古い、または version を読み取れない場合、gwt はキーを書き込まず、
+既存の `[features.context_management]` table を削除してその codex が動き続ける
+ようにします。`PATH` 上の codex を 0.153.0 以降に更新すると、次回の gwt 起動時に
+キーが再び書き込まれます。
 
 gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
 は local hook-forward bridge も有効にします。この bridge は、その session に
@@ -636,8 +707,10 @@ gwt が対処メッセージを表示）。
 - `Tile` で表示中のウィンドウをグリッド整列
 - `Stack` でタイトルバーを残したまま重ねて表示
 - `Align` でウィンドウサイズを変えずにグリッド整列
-- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` でフォーカス切替
-  - フォーカスされたウィンドウは中央へ寄ります
+- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で Canvas 上の Agent を
+  状態順（running/starting → waiting/idle → その他）に切り替え
+  - Agent 以外はスキップし、非表示の Agent タブは選択時に表示して、対象の
+    Agent を中央へ寄せます
 
 ## Operator デザイン言語 (SPEC-2356)
 
@@ -752,6 +825,9 @@ JSON
 cargo build -p gwt --bin gwt --bin gwtd
 ```
 
+`browser-check` スキル（この checkout の隔離 GUI 検証）は `hook.doctor` の証跡を
+読むために `jq` が `PATH` 上に必要です。gwt 自体の実行には不要です。
+
 ### 実行
 
 ```bash
@@ -843,6 +919,13 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
 ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+
+Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
+closing keyword は書きません。`main` は default branch なので、そこに
+`Closes #N` があると受け入れ基準が未消化の Issue まで閉じてしまうためです。
+Issue の決着は work ブランチが `develop` に merge された時点で行われます
+（前述）。merge 後は `release.yml` が `scripts/release_close_guard.py` を実行し、
+Release PR の merge 自体が閉じた Issue を reopen してマーカー付きコメントを残します。
 
 ### Release Asset Contract
 

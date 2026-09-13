@@ -454,6 +454,53 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(rows.first()).toHaveAttribute("data-level", "error");
     await expect(rows.last()).toContainText("#3000");
 
+    // Issue #3979 — triage rows. Resolved in the real engine so the named grid
+    // areas, the per-severity marker shapes and the color-mix tints are all
+    // exercised in whichever theme this project runs.
+    await expect(rows.first()).toHaveAttribute("data-severity", "critical");
+    const marker = rows.first().locator(".notification-center__severity");
+    await expect(marker).toHaveAttribute("data-severity", "critical");
+    await expect(marker).toHaveAttribute("aria-label", "Critical");
+    await expect(marker).toHaveText("!");
+
+    const triage = await page.evaluate(() => {
+      const markerFor = (severity: string) =>
+        document.querySelector(
+          `.notification-center__item[data-severity="${severity}"] .notification-center__severity`,
+        ) as HTMLElement;
+      const critical = markerFor("critical");
+      const row = critical.closest(".notification-center__item") as HTMLElement;
+      const title = row.querySelector(".notification-center__title") as HTMLElement;
+      const time = row.querySelector(".notification-center__time") as HTMLElement;
+      const box = (el: HTMLElement) => el.getBoundingClientRect();
+      return {
+        severities: [...document.querySelectorAll(".notification-center__item")].map(
+          (item) => (item as HTMLElement).dataset.severity,
+        ),
+        radii: ["critical", "good", "neutral"].map(
+          (severity) => getComputedStyle(markerFor(severity)).borderTopLeftRadius,
+        ),
+        glyphs: ["critical", "good", "neutral"].map(
+          (severity) => markerFor(severity).textContent?.trim(),
+        ),
+        markerLeadsTitle: box(critical).left < box(title).left,
+        timeFollowsTitle: box(time).left > box(title).left,
+        titleAndTimeShareALine: Math.abs(box(title).top - box(time).top) < box(title).height,
+        messageBelowTitle:
+          box(row.querySelector(".notification-center__message") as HTMLElement).top
+          >= box(title).bottom,
+        stripe: getComputedStyle(row).borderLeftColor,
+      };
+    });
+    expect(new Set(triage.severities)).toEqual(new Set(["critical", "good", "neutral"]));
+    expect(new Set(triage.radii).size).toBeGreaterThanOrEqual(2);
+    expect(new Set(triage.glyphs).size).toBe(3);
+    expect(triage.markerLeadsTitle).toBe(true);
+    expect(triage.timeFollowsTitle).toBe(true);
+    expect(triage.titleAndTimeShareALine).toBe(true);
+    expect(triage.messageBelowTitle).toBe(true);
+    expect(triage.stripe).not.toBe("");
+
     // The history scrolls inside the drawer body instead of growing the page.
     const scroll = await page.evaluate(() => {
       const body = document.querySelector("#notification-center .notification-center__body") as HTMLElement;

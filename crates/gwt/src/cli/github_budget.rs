@@ -42,7 +42,7 @@ fn run_with<E: CliEnv>(
     now: DateTime<Utc>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let policy = ThrottlePolicy::default();
+    let policy = ThrottlePolicy::current();
     let mut snapshot = ledger.snapshot(now);
     let mut probe_error = None;
     if refresh || github_budget::probe_is_stale(&snapshot, &policy) {

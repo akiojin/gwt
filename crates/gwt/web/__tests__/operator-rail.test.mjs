@@ -37,24 +37,30 @@ test("rail: 起動時に reveal 系 dataset 属性を一切設定しない", asy
   }
 });
 
-test("rail commands: [data-cmd] item click が op:command を dispatch する", async () => {
+test("rail commands: Intake is absent and an existing [data-cmd] item still dispatches op:command", async () => {
   const fixture = await mountFixture();
   try {
-    fixture.init();
-    const received = [];
-    fixture.document.addEventListener("op:command", (event) => {
-      received.push(event.detail?.id);
-    });
-    // SPEC-3245 Phase 3: the primary rail "start" action is the Intake session.
-    const intake = fixture.document.querySelector('.op-rail__item[data-cmd="intake-session"]');
-    assert.ok(intake, "expected Intake session rail item");
+    assert.equal(
+      fixture.document.querySelector('.op-rail__item[data-cmd="intake-session"]'),
+      null,
+      "deprecated Intake session rail item must be removed",
+    );
     assert.equal(
       fixture.document.querySelector('.op-rail__item[data-cmd="start-work"]'),
       null,
       "Start Work rail item must be removed",
     );
-    intake.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
-    assert.deepEqual(received, ["intake-session"]);
+    fixture.init();
+    const received = [];
+    fixture.document.addEventListener("op:command", (event) => {
+      received.push(event.detail?.id);
+    });
+    const stopAll = fixture.document.querySelector(
+      '.op-rail__item[data-cmd="stop-all-windows"]',
+    );
+    assert.ok(stopAll, "expected Stop all agents rail item");
+    stopAll.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+    assert.deepEqual(received, ["stop-all-windows"]);
   } finally {
     fixture.dispose();
   }

@@ -172,6 +172,20 @@ pub struct PersistedWindowState {
     pub tab_group_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// SPEC-3885 FR-011: the Issue this agent window belongs to. It is durable and
+    /// independent of `placement`, so Windowize (IssuePreview -> Canvas) keeps the
+    /// Issue header and FR-012's return-to-list knows which row to fold back into.
+    /// `None` is a session with no Issue behind it, which stays a bare terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_issue_number: Option<u64>,
+    /// SPEC-3885 T-020: wire-only moment this window's agent runtime started,
+    /// in milliseconds since the Unix epoch. The Issue row's elapsed time reads
+    /// it so a frontend reload does not restart the clock from the last state
+    /// change it happened to observe. Like `agent_color` it is recomputed per
+    /// broadcast and never read back from disk — a stored timestamp would
+    /// outlive the PTY it describes.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub runtime_started_at_ms: Option<u64>,
     /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
     /// window, recomputed per broadcast from the durable PM registration. It
     /// is never deserialized from disk — a stored flag would drift from
@@ -184,8 +198,27 @@ pub struct PersistedWindowState {
 pub struct PersistedWindowCanvasState {
     #[serde(default = "default_canvas_viewport")]
     pub viewport: CanvasViewport,
+    #[serde(deserialize_with = "deserialize_restorable_windows")]
     pub windows: Vec<PersistedWindowState>,
     pub next_z_index: u32,
+}
+
+/// Drop windows a newer gwt can no longer describe instead of failing the
+/// whole restore. A retired preset (Issue #3164's Improvement Inbox) still
+/// appears in workspaces saved while that window was open; rejecting the file
+/// would wipe every other window the user had arranged, so an unreadable entry
+/// costs only itself.
+fn deserialize_restorable_windows<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PersistedWindowState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<PersistedWindowState>(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +307,8 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             },
             PersistedWindowState {
@@ -300,6 +335,8 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             },
         ],
@@ -688,6 +725,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -714,6 +753,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],
@@ -1095,6 +1136,50 @@ mod tests {
         assert_eq!(loaded.next_z_index, 3);
     }
 
+    // Issue #3164: the Improvement Inbox preset was retired outright rather
+    // than kept as a legacy `WindowPreset` variant. A workspace saved while
+    // that window was open still names it, so an unknown preset must drop
+    // just its own window instead of failing the whole restore and wiping the
+    // user's layout.
+    #[test]
+    fn load_workspace_state_drops_windows_with_an_unknown_preset() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "improvement-1",
+      "title": "Improvement Inbox",
+      "preset": "improvement",
+      "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true
+    },
+    {
+      "id": "board-1",
+      "title": "Board",
+      "preset": "board",
+      "geometry": { "x": 40.0, "y": 60.0, "width": 520.0, "height": 480.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("retired preset workspace write");
+
+        let loaded = load_workspace_state(&path).expect("unknown preset must not fail the restore");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].id, "board-1");
+        assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
+        assert_eq!(loaded.next_z_index, 3);
+    }
+
     #[test]
     fn persisted_window_state_round_trips_tab_group_fields() {
         let mut window = default_workspace_state().windows.remove(0);
@@ -1189,6 +1274,8 @@ mod tests {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             }],
             next_z_index: 2,
@@ -1280,6 +1367,8 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -1354,6 +1443,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1380,6 +1471,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],
@@ -1594,6 +1687,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1620,6 +1715,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],

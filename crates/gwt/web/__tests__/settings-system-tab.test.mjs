@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { parseHTML } from "linkedom";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -141,17 +142,132 @@ test("settings-select uses --color-focus-ring on focus-visible", () => {
   assert.match(block[1], /var\(--color-focus-ring\)/);
 });
 
-test("renderSettingsWindow builds a tablist toolbar with System and Custom Agents tabs", () => {
+test("renderSettingsWindow builds a tablist toolbar with System, Project Manager, and Custom Agents tabs", () => {
   // The renderer must declare role="tablist" so assistive tech sees the tab
   // group, and emit both data-settings-tab values that switchSettingsTab
   // expects.
-  assert.match(settingsSource, /toolbar\.className\s*=\s*"settings-toolbar"/);
-  assert.match(settingsSource, /tabs\.setAttribute\("role",\s*"tablist"\)/);
-  assert.match(settingsSource, /buildSettingsTab\("system",\s*"System"/);
+  const renderSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
+  assert.match(renderSource, /toolbar\.className\s*=\s*"settings-toolbar"/);
+  assert.match(renderSource, /tabs\.setAttribute\("role",\s*"tablist"\)/);
+  assert.match(renderSource, /buildSettingsTab\("system",\s*"System"/);
   assert.match(
-    settingsSource,
+    renderSource,
+    /buildSettingsTab\(\s*"project-manager",\s*"Project Manager"/,
+  );
+  assert.match(
+    renderSource,
     /buildSettingsTab\("custom-agents",\s*"Custom Agents"/,
   );
+});
+
+test("Project Manager tab mounts the shared PM editor controller", () => {
+  const { document } = parseHTML('<!doctype html><body><div id="settings-body"></div></body>');
+  const settingsBody = document.getElementById("settings-body");
+  const mounted = [];
+  const pmSettingsPanel = {
+    mount(node) {
+      mounted.push(node);
+    },
+  };
+  const mountProjectManagerSettingsPanel = loadFunction(
+    "mountProjectManagerSettingsPanel",
+  );
+
+  mountProjectManagerSettingsPanel(document, settingsBody, pmSettingsPanel);
+
+  assert.equal(mounted.length, 1);
+  assert.equal(mounted[0].dataset.settingsPanel, "project-manager");
+  assert.equal(mounted[0].parentElement, settingsBody);
+
+  const renderSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
+  const mountSource = extractFunctionSource(
+    settingsSource,
+    "mountProjectManagerSettingsPanel",
+  );
+  assert.match(
+    renderSource,
+    /mountProjectManagerSettingsPanel\(\s*document,\s*bodyEl,\s*pmSettingsPanel,\s*windowData\.id,\s*\)/,
+    "renderSettingsWindow must mount the shared PM editor at its render boundary",
+  );
+  assert.doesNotMatch(
+    `${renderSource}\n${mountSource}`,
+    /set_pm_(?:auto_start|launch_profile|loop_interval)/,
+    "Settings render and mount helpers must not duplicate PM event construction",
+  );
+});
+
+test("Project Manager tab and panel expose an explicit accessible relationship", () => {
+  const { document } = parseHTML('<!doctype html><body><div id="settings-body"></div></body>');
+  const settingsBody = document.getElementById("settings-body");
+  const mountProjectManagerSettingsPanel = loadFunction(
+    "mountProjectManagerSettingsPanel",
+  );
+
+  const panel = mountProjectManagerSettingsPanel(
+    document,
+    settingsBody,
+    null,
+    "window-7",
+  );
+
+  assert.equal(panel.id, "settings-window-7-panel-project-manager");
+  assert.equal(
+    panel.getAttribute("aria-labelledby"),
+    "settings-window-7-tab-project-manager",
+  );
+
+  const tabSource = extractFunctionSource(settingsSource, "buildSettingsTab");
+  assert.match(tabSource, /btn\.id\s*=\s*settingsTabId\(windowId,\s*id\)/);
+  assert.match(
+    tabSource,
+    /btn\.setAttribute\("aria-controls",\s*settingsPanelId\(windowId,\s*id\)\)/,
+  );
+});
+
+test("settings:open routes to the Project Manager tab and frames an existing Settings window", () => {
+  const { document } = parseHTML(`<!doctype html><body>
+    <div id="settings-body">
+      <button class="settings-tab active" data-settings-tab="system" aria-selected="true"></button>
+      <button class="settings-tab" data-settings-tab="project-manager" aria-selected="false"></button>
+      <section class="settings-panel" data-settings-panel="system"></section>
+      <section class="settings-panel hidden" data-settings-panel="project-manager"></section>
+    </div>
+  </body>`);
+  const settingsBody = document.getElementById("settings-body");
+  const framed = [];
+  const installSettingsOpenHandler = loadFunctionWithDeps(
+    "installSettingsOpenHandler",
+    ["switchSettingsTab"],
+  );
+
+  installSettingsOpenHandler({
+    document,
+    settingsWindowBodies: new Set([settingsBody]),
+    focusOrSpawnPreset: (preset) => framed.push(preset),
+    setPendingTarget: () => assert.fail("an existing Settings window must not pend"),
+  });
+  document.dispatchEvent(
+    new document.defaultView.CustomEvent("settings:open", {
+      detail: { target: "project-manager" },
+    }),
+  );
+
+  assert.equal(
+    settingsBody.querySelector('[data-settings-tab="project-manager"]')
+      .getAttribute("aria-selected"),
+    "true",
+  );
+  assert.equal(
+    settingsBody.querySelector('[data-settings-panel="project-manager"]')
+      .classList.contains("hidden"),
+    false,
+  );
+  assert.equal(
+    settingsBody.querySelector('[data-settings-panel="system"]')
+      .classList.contains("hidden"),
+    true,
+  );
+  assert.deepEqual(framed, ["settings"]);
 });
 
 test("System tab Language select offers Auto / English / 日本語", () => {

@@ -2,9 +2,9 @@
 
 use gwt::cli::{
     dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli,
-    ActionsCommand, CliCommand, CliParseError, HookCommand, IssueCommand, LinkedPrSummary,
-    PrCheckItem, PrChecksSummary, PrCommand, PrCreateCall, PrEditCall, PrReview, PrReviewThread,
-    PrReviewThreadComment, TestEnv,
+    ActionsCommand, ActionsRerunTarget, CliCommand, CliParseError, HookCommand, IssueCommand,
+    LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCommand, PrCreateCall, PrEditCall, PrReview,
+    PrReviewThread, PrReviewThreadComment, TestEnv,
 };
 use gwt_git::PrStatus;
 use gwt_github::{
@@ -437,6 +437,7 @@ fn parse_pr_list() {
             escalate_after_cycles: None,
             refresh: false,
             include: None,
+            force_reason: None,
         })
     );
 }
@@ -595,6 +596,26 @@ fn red_107_parse_actions_job_logs() {
     assert_eq!(
         cmd,
         CliCommand::Actions(ActionsCommand::JobLogs { job_id: 202 })
+    );
+}
+
+/// Issue #3515: `actions.rerun` is reachable from the argv transport too.
+#[test]
+fn parse_actions_rerun_targets() {
+    assert_eq!(
+        parse_actions_args(&[s("rerun"), s("--run"), s("303"), s("--failed")]).unwrap(),
+        CliCommand::Actions(ActionsCommand::Rerun {
+            target: ActionsRerunTarget::Run {
+                run_id: 303,
+                failed_only: true
+            }
+        })
+    );
+    assert_eq!(
+        parse_actions_args(&[s("rerun"), s("--job"), s("404")]).unwrap(),
+        CliCommand::Actions(ActionsCommand::Rerun {
+            target: ActionsRerunTarget::Job { job_id: 404 }
+        })
     );
 }
 
@@ -1283,6 +1304,7 @@ fn red_108_dispatch_pr_current_is_live_first() {
     env.seed_current_pr(Some(PrStatus {
         number: 77,
         title: "Current PR".to_string(),
+        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://example.com/pr/77".to_string(),
         created_at: None,
@@ -1313,6 +1335,7 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
     env.seed_created_pr(PrStatus {
         number: 88,
         title: "Created PR".to_string(),
+        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://example.com/pr/88".to_string(),
         created_at: None,
@@ -1372,6 +1395,7 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
         PrStatus {
             number: 42,
             title: "Updated PR".to_string(),
+            head_ref_name: String::new(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://example.com/pr/42".to_string(),
             created_at: None,
@@ -1422,6 +1446,7 @@ fn red_109_dispatch_pr_view_reads_live_data() {
         PrStatus {
             number: 42,
             title: "Viewed PR".to_string(),
+            head_ref_name: String::new(),
             state: gwt_git::pr_status::PrState::Merged,
             url: "https://example.com/pr/42".to_string(),
             created_at: None,
@@ -1449,6 +1474,7 @@ fn red_109_dispatch_pr_current_surfaces_branch_behind_as_effective_merge_state()
     env.seed_current_pr(Some(PrStatus {
         number: 91,
         title: "Update branch required".to_string(),
+        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://example.com/pr/91".to_string(),
         created_at: None,

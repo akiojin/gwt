@@ -164,6 +164,17 @@ Commenting on an existing Issue with `issue.comment` is never restricted
 - add evidence, propose acceptance criteria, and share analysis freely.
 Only creating a new Issue routes through the PM.
 
+### Friction in gwt itself takes the same route
+
+Friction and capability gaps in gwt itself - a hook, launch, skill, index,
+verification, coordination, or Issue/SPEC workflow that contradicts what gwt
+told you to do - is reported the same way: post it to the Board for the PM,
+who registers it with `gwt-register-issue`. Never file an Issue upstream in
+the gwt repository yourself, and never work around it silently. Include the
+contract you were following, what you observed instead, and the primary
+evidence (command, output, file and line). gwt has no automatic capture for
+this; the Board post is the intake.
+
 ## Work (current state)
 
 The Board is history; Work is current state. Update Work with a JSON
@@ -263,9 +274,12 @@ release it afterwards:
     {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
     JSON
 
-A refused acquire names the current holder; declare the wait with
-`issue.monitor.wait` (see "Waiting is not a stall") and retry on the
-cadence the gwt-verify skill defines instead of running without it.
+A refused acquire names the current holder (`holder_kind`,
+`estimated_remaining_ms`) and reserves your turn, so background index
+jobs defer to this worktree until your retry is granted; declare the
+wait with `issue.monitor.wait` (see "Waiting is not a stall") and retry
+on the cadence the gwt-verify skill defines instead of running without
+it.
 `verify.run` admits itself: it honors a lease this worktree holds,
 otherwise claims one and waits for other worktrees' heavy processes to
 drain, and answers `deferred` when its bounded wait runs out — rerun it.
@@ -456,6 +470,16 @@ agent をブロックしているか）。PM は登録した Issue 番号を返�
 PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
 指定した Board 返信で返します。
 
+### gwt 自体の摩擦・機能ギャップも同じ経路
+
+gwt 自体の摩擦や機能ギャップ（hook、launch、skill、index、verification、
+coordination、Issue/SPEC workflow が gwt の指示と食い違う）も同じ経路で
+扱います。Board に投稿して PM へ報告し、PM が `gwt-register-issue` で
+起票します。gwt リポジトリに自分で Issue を作らないでください。黙って
+回避するのも禁止です。投稿には、従っていた契約、実際に観測した挙動、
+一次証拠（コマンド、出力、ファイルと行）を含めます。自動捕捉の仕組みは
+無く、この Board 投稿が唯一の intake です。
+
 ## Work (current state)
 
 Board が history なら Work は current state です。現在の task、
@@ -549,9 +573,12 @@ focused test でも、開始前に host 全体の lease を取り、終わった
     {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
     JSON
 
-拒否された acquire は現在の保持者を返します。lease 無しで実行せず、
-`issue.monitor.wait` で待機を申告して（「待機は停滞ではない」参照）、
-gwt-verify skill が定める間隔で再試行してください。`verify.run` は
+拒否された acquire は現在の保持者（`holder_kind`、
+`estimated_remaining_ms`）を返し、この worktree の順番を予約します。
+background index job は再試行が granted されるまでこの予約に道を譲ります。
+lease 無しで実行せず、`issue.monitor.wait` で待機を申告して
+（「待機は停滞ではない」参照）、gwt-verify skill が定める間隔で
+再試行してください。`verify.run` は
 自分で admission を取ります: この worktree が保持する lease はそのまま使い、
 無ければ取得して他 worktree の heavy プロセスが捌けるまで待ち、bounded な
 待機を使い切ると `deferred` を返します。その場合は再実行してください。

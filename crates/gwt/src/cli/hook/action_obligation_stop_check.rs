@@ -21,6 +21,28 @@ use crate::cli::action_obligation;
 /// missing or unparsable prompt arms nothing — unclassifiable input must not
 /// over-block (conservative bias).
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
+    handle_user_prompt_submit_with_context(
+        worktree,
+        input,
+        crate::issue_monitor_review::review_dispatch_session_active(),
+    );
+}
+
+pub(crate) fn handle_user_prompt_submit_with_context(
+    worktree: &Path,
+    input: &str,
+    review_dispatch_session: bool,
+) {
+    // Issue #3984 (AC-3): an independent-review dispatch session is subject to
+    // the same structural trap as the resident PM below. Its review prompt
+    // reads as a producing request ("verify AC-3 against the PR"), but every
+    // settlement path — `verify.run`, `pr.*`, `issue.spec.edit` — belongs to
+    // the implementing session and is refused in a review window, so an armed
+    // obligation could only ever be discharged by a false `execution.blocked`
+    // and would strand the finished verdict at Stop.
+    if review_dispatch_session {
+        return;
+    }
     // SPEC-3431 FR-064: the resident PM cannot settle a producing obligation.
     // Every settlement path (all-passing `verify.run`, `pr.*`) requires
     // production artifacts the PM's contract forbids it from creating, so
@@ -58,7 +80,29 @@ pub fn handle_with_input(
     input: &str,
     current_session: Option<&str>,
 ) -> HookOutput {
+    handle_with_input_with_context(
+        worktree,
+        input,
+        current_session,
+        crate::issue_monitor_review::review_dispatch_session_active(),
+    )
+}
+
+pub(crate) fn handle_with_input_with_context(
+    worktree: &Path,
+    input: &str,
+    current_session: Option<&str>,
+    review_dispatch_session: bool,
+) -> HookOutput {
     if stop_hook_active_from(input) {
+        return HookOutput::Silent;
+    }
+    // Issue #3984 (AC-3): not arming is the primary fix, but an obligation
+    // already on record for this session id (state written before this gate
+    // existed, or a session id reused after a crash) must not strand a
+    // finished verdict at Stop either — the review window has no settlement
+    // path other than a false `execution.blocked`.
+    if review_dispatch_session {
         return HookOutput::Silent;
     }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
@@ -159,6 +203,63 @@ mod tests {
             handle_with_input(&pm_worktree, "{}", Some("pm-session")),
             HookOutput::Silent,
             "the PM must not be blocked by an obligation it cannot settle"
+        );
+    }
+
+    /// Issue #3984 (AC-3): an independent-review dispatch session never arms a
+    /// producing obligation, and Stop stays open even when one is already on
+    /// record for it. Every settlement path (`verify.run`, `pr.*`,
+    /// `issue.spec.edit`) belongs to the implementing session and is refused in
+    /// a review window, so an armed obligation would strand the finished
+    /// verdict behind a false `execution.blocked`.
+    #[test]
+    fn a_review_dispatch_session_never_blocks_on_producing_obligations() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = mk_worktree();
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "review-sess");
+        // A review request reads as a producing `pr` prompt to the classifier —
+        // which is exactly the trap: the review window cannot run `pr.*`.
+        let prompt = serde_json::json!({ "prompt": "PR #4000 の AC を検証して verdict を返して" })
+            .to_string();
+
+        handle_user_prompt_submit_with_context(dir.path(), &prompt, true);
+        assert_eq!(
+            handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), true),
+            HookOutput::Silent,
+            "the review window must not arm an obligation it cannot settle"
+        );
+
+        // An obligation already persisted for this session id — state written
+        // before this gate existed, or a reused id — must not strand the
+        // verdict at Stop either.
+        action_obligation::mark_from_prompt(dir.path(), "review-sess", "実装して").unwrap();
+        assert_eq!(
+            handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), true),
+            HookOutput::Silent,
+            "a persisted obligation must not gate a review window's Stop"
+        );
+        assert!(
+            matches!(
+                handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), false),
+                HookOutput::StopBlock { .. }
+            ),
+            "the same persisted obligation still gates a producing session"
+        );
+
+        // Non-regression: the exemption is keyed on the review marker alone —
+        // the same prompt in an implementing session still arms and blocks.
+        handle_user_prompt_submit_with_context(dir.path(), &prompt, false);
+        assert!(
+            matches!(
+                handle_with_input_with_context(dir.path(), "{}", Some("review-sess"), false),
+                HookOutput::StopBlock { .. }
+            ),
+            "a producing session keeps the prompt-to-action gate"
         );
     }
 

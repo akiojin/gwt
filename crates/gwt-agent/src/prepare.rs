@@ -360,6 +360,20 @@ impl HostRunnerProbeOutcome {
         }
     }
 
+    /// Synthesized outcome for a runner that never spawned (e.g. the direct
+    /// executable is not on PATH). SPEC-3864 T-011: it carries no
+    /// `exit_code`, so the diagnostic cannot read as a real process exit.
+    pub fn unresolved(reason: &str) -> Self {
+        Self {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            error: Some(reason.to_string()),
+        }
+    }
+
     fn combined_output(&self) -> String {
         format!("{}\n{}", self.stdout, self.stderr)
     }
@@ -1241,6 +1255,21 @@ where
     if config.agent_id.builtin_descriptor().is_none() {
         return Ok(HostRunnerHealthReport::default());
     }
+    // Issue #3972: the package runner stored on the config was resolved from
+    // the gwt process PATH before the launch profile existed. Bind it to the
+    // launch environment before anything probes or spawns it, so the runner
+    // that is health-checked is the runner this launch will use.
+    if command_matches_runner(&config.command, "bunx")
+        || command_matches_runner(&config.command, "npx")
+    {
+        if let Some(rebound) = crate::launch::rebind_package_runner_to_effective_env(
+            &config.command,
+            &config.env_vars,
+            config.working_dir.as_deref(),
+        ) {
+            config.command = rebound;
+        }
+    }
     if is_targeted_windows_host_package_launch(config) && config.tool_runtime_provenance.is_some() {
         return resolve_targeted_windows_host_package_plan(
             config,
@@ -1280,7 +1309,7 @@ where
     let direct_probe_args = crate::launch::builtin_version_probe_args(&config.agent_id)
         .expect("built-in descriptor checked above");
     let direct_probe = direct_command.as_deref().map_or_else(
-        || HostRunnerProbeOutcome::failure_with_stderr("direct runner executable not resolved"),
+        || HostRunnerProbeOutcome::unresolved("direct runner executable not resolved"),
         |direct_command| {
             probe(
                 HostRunnerProbeKind::Direct,
@@ -1329,9 +1358,20 @@ where
         );
         return Ok(report);
     }
-    let Some(package) = config.agent_id.package_name() else {
+    let Some(package) = config.agent_id.npm_package() else {
+        // SPEC-3864 FR-013 / T-010: no runtime `latest` route exists, so the
+        // only recovery is a pre-install. Name the route's install command
+        // when the descriptor declares one.
+        let setup_hint = config
+            .agent_id
+            .distribution()
+            .install_shell_command()
+            .map_or_else(
+                || " Setup required: install it manually and relaunch.".to_string(),
+                |command| format!(" Setup required: install it with `{command}` and relaunch."),
+            );
         return Err(format!(
-            "{agent_name} installed runner failed its health check. {direct_diagnostic} No supported npm fallback is available."
+            "{agent_name} installed runner failed its health check. {direct_diagnostic} No runtime package route is available.{setup_hint}"
         ));
     };
 
@@ -1411,7 +1451,7 @@ where
 {
     let package = config
         .agent_id
-        .package_name()
+        .npm_package()
         .expect("targeted official provider has an npm package");
     let version_spec = host_package_runner_version_spec(config);
     let agent_args = version_spec.as_deref().map_or_else(
@@ -1857,18 +1897,6 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe.to_path_buf()
 }
 
-fn resolve_generated_hook_gwt_bin_with_lookup(
-    current_exe: &Path,
-    lookup: impl FnOnce(&str) -> Option<PathBuf>,
-) -> PathBuf {
-    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
-        if let Some(candidate) = sibling_gwtd_binary(current_exe) {
-            return candidate;
-        }
-    }
-    resolve_public_gwt_bin_with_lookup(current_exe, lookup)
-}
-
 fn sibling_gwtd_binary(path: &Path) -> Option<PathBuf> {
     if !is_named_gwt_binary(path) {
         return None;
@@ -1922,74 +1950,6 @@ fn apply_docker_runtime_to_launch_config(
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
     Ok(Some(runtime))
-}
-
-pub fn register_codex_managed_hook_trust_in_docker(
-    worktree: &Path,
-    docker_service: Option<&str>,
-    codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
-) -> Result<(), String> {
-    let worktree = normalize_child_process_path(worktree);
-    let launch = resolve_docker_launch_plan(&worktree, docker_service)?;
-    let current_exe = std::env::current_exe().map_err(|err| format!("current_exe: {err}"))?;
-    let host_gwt_bin = resolve_generated_hook_gwt_bin_with_lookup(&current_exe, |command| {
-        which::which(command).ok()
-    })
-    .into_os_string()
-    .into_string()
-    .map_err(|_| "host gwtd path is not valid UTF-8".to_string())?;
-    let args = docker_codex_hook_trust_registration_args(
-        &launch.container_cwd,
-        &host_gwt_bin,
-        codex_hook_discovery_mode,
-    );
-    let output = gwt_docker::compose_service_exec_capture_with_files(
-        &launch.compose_files,
-        &launch.service,
-        Some(&launch.container_cwd),
-        &args,
-    )
-    .map_err(|err| err.to_string())?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        format!("exit status {}", output.status)
-    };
-    Err(format!(
-        "container-local Codex hook trust registration failed for service '{}': {detail}",
-        launch.service
-    ))
-}
-
-fn docker_codex_hook_trust_registration_args(
-    container_cwd: &str,
-    host_gwt_bin_fallback: &str,
-    codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
-) -> Vec<String> {
-    let project_root_json = serde_json::to_string(container_cwd)
-        .expect("container cwd must serialize as a JSON string");
-    let discovery_json = serde_json::to_string(codex_hook_discovery_mode.as_cli_value())
-        .expect("discovery mode must serialize as a JSON string");
-    let script = format!(
-        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\ncodex_config=\"$codex_home/config.toml\"\nGWT_HOOK_BIN={} exec {} <<JSON\n{{\"schema_version\":1,\"operation\":\"hook.register_codex_managed_hook_trust\",\"params\":{{\"project_root\":{},\"codex_config\":\"$codex_config\",\"codex_hook_discovery\":{}}}}}\nJSON",
-        shell_single_quote(host_gwt_bin_fallback),
-        shell_single_quote(DOCKER_GWTD_BIN_PATH),
-        project_root_json,
-        discovery_json,
-    );
-    vec!["sh".to_string(), "-lc".to_string(), script]
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn finalize_docker_agent_launch_config_with_runtime(
@@ -2492,6 +2452,19 @@ fn probe_host_runner_bounded_with_hub(
     let spawn_id = next_agent_spawn_id();
     let label = runner_probe_trace_label(kind);
     let start = Instant::now();
+    if let Some(denial) = package_runner_probe_denial(kind, command, &args, env_vars) {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            spawn_id = spawn_id,
+            label = %label,
+            probe_kind = ?kind,
+            phase = "end",
+            success = false,
+            "package-runner probe refused by the test guard",
+        );
+        return HostRunnerProbeOutcome::failure_with_stderr(&denial);
+    }
     tracing::info!(
         target: "gwt.process.summary",
         kind = "agent",
@@ -2598,6 +2571,43 @@ fn runner_probe_trace_label(kind: HostRunnerProbeKind) -> &'static str {
         HostRunnerProbeKind::Metadata => "package metadata probe",
         HostRunnerProbeKind::Package => "exact package runner health probe",
     }
+}
+
+/// Issue #3972: probes that spawn the host package runner (`npx` / `bunx`) or
+/// query the registry through it. `Direct` is excluded — it probes the agent's
+/// own CLI, which tests already pin to a fixture executable on the launch
+/// `PATH`.
+fn is_package_runner_probe(kind: HostRunnerProbeKind) -> bool {
+    matches!(
+        kind,
+        HostRunnerProbeKind::Runner | HostRunnerProbeKind::Metadata | HostRunnerProbeKind::Package
+    )
+}
+
+/// The test guard's refusal for this probe, or `None` when it may proceed.
+///
+/// Markers are looked up in the launch environment the probe would run with
+/// before the process environment, so a test can scope the opt-in to one
+/// `LaunchConfig` instead of mutating the process-global environment
+/// (Issue #3895).
+fn package_runner_probe_denial(
+    kind: HostRunnerProbeKind,
+    command: &str,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if !is_package_runner_probe(kind) {
+        return None;
+    }
+    gwt_core::process_console::real_package_runner_probe_denial(
+        &format!("{command} {}", args.join(" ")),
+        |marker| {
+            env_vars
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case(marker))
+                || std::env::var_os(marker).is_some()
+        },
+    )
 }
 
 fn run_runner_probe_in_isolated_runtime(
@@ -3984,7 +3994,7 @@ fn resolve_docker_exec_program(
 }
 
 fn package_runner_version_spec(config: &LaunchConfig) -> Option<String> {
-    let package = config.agent_id.package_name()?;
+    let package = config.agent_id.npm_package()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
         return None;
@@ -6256,11 +6266,13 @@ mod tests {
         let worktree = temp.path().join("repo-feature");
         let sessions_dir = temp.path().join("sessions");
         fs::create_dir_all(&worktree).expect("create worktree");
-        let direct = temp.path().join("openclaw");
+        // SPEC-3864: Antigravity has no runtime package route, so a hanging
+        // direct runner cannot be rescued by a bunx/npx fallback.
+        let direct = temp.path().join("agy");
         fs::write(&direct, "#!/bin/sh\nsleep 8\nexit 1\n").expect("write hanging runner");
         fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
             .expect("chmod hanging runner");
-        let mut config = AgentLaunchBuilder::new(AgentId::OpenClaw)
+        let mut config = AgentLaunchBuilder::new(AgentId::Antigravity)
             .working_dir(&worktree)
             .build();
         config.command = direct.display().to_string();
@@ -6361,6 +6373,65 @@ mod tests {
 
         assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("package-runner probe failed"));
+    }
+
+    /// Issue #3972: `AgentLaunchBuilder::build` picks `bunx`/`npx` before the
+    /// launch profile is merged, so it resolves them from the gwt process
+    /// `PATH` and stores an absolute host executable. Health-checking that
+    /// stored command spawns the host runner no matter what the launch `PATH`
+    /// says, which is why a test that pins fixture runners still reached the
+    /// machine's real `npx` and missed the five-second probe budget on a loaded
+    /// host. The health check must re-bind the runner to the launch `PATH`
+    /// before probing it.
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_health_check_rebinds_the_command_to_the_launch_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let host_bin = temp.path().join("host-bin");
+        let launch_bin = temp.path().join("launch-bin");
+        for dir in [&host_bin, &launch_bin] {
+            fs::create_dir_all(dir).expect("create runner bin dir");
+            let runner = dir.join("npx");
+            fs::write(&runner, "#!/bin/sh\nprintf '1.2.3\\n'\n").expect("write fixture npx");
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
+                .expect("chmod fixture npx");
+        }
+        let host_npx = host_bin.join("npx").display().to_string();
+        let launch_npx = launch_bin.join("npx").display().to_string();
+
+        let mut config = sample_versioned_launch_config(temp.path());
+        config.command = host_npx.clone();
+        config.args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+        ];
+        config
+            .env_vars
+            .insert("PATH".to_string(), launch_bin.display().to_string());
+
+        let mut probed = Vec::new();
+        resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            host_npx.clone(),
+            None,
+            |kind, command, _args, _env, _remove_env, _cwd| {
+                probed.push((kind, command.to_string()));
+                HostRunnerProbeOutcome::success()
+            },
+            |_candidate| panic!("a healthy runner must not repair the npx cache"),
+        )
+        .expect("package runner health check");
+
+        assert!(
+            probed.iter().all(|(_, command)| command == &launch_npx),
+            "every probe must run the runner the launch PATH selects, got {probed:?}"
+        );
+        assert_eq!(
+            config.command, launch_npx,
+            "the launch must spawn the runner it health-checked"
+        );
     }
 
     #[cfg(unix)]
@@ -8073,7 +8144,7 @@ fi
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.docker_service = Some("app".to_string());
         config.command = "codex".to_string();
-        config.args = vec!["--no-alt-screen".to_string()];
+        config.args = crate::canonical_launch_args(&AgentId::Codex);
         config.env_vars = HashMap::from([
             (GWT_SESSION_ID_ENV.to_string(), "sess-123".to_string()),
             (
@@ -8099,57 +8170,16 @@ fi
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
-    }
-
-    #[test]
-    fn docker_codex_hook_trust_registration_uses_container_home_and_host_fallback() {
-        let args = docker_codex_hook_trust_registration_args(
-            "/workspace/app",
-            "/host/gwt/bin/gwtd",
-            gwt_skills::CodexHookDiscoveryMode::Both,
-        );
-
-        assert_eq!(args[0], "sh");
-        assert_eq!(args[1], "-lc");
-        let script = &args[2];
-        assert!(
-            script.contains(r#"codex_home="${CODEX_HOME:-${HOME:-/root}/.codex}""#),
-            "script must derive Codex home from the active container user, got: {script}"
-        );
-        assert!(
-            script.contains(r#"codex_config="$codex_home/config.toml""#)
-                && script.contains(r#""codex_config":"$codex_config""#),
-            "script must pass the derived Codex config path through JSON, got: {script}"
-        );
-        assert!(
-            script.contains(r#""operation":"hook.register_codex_managed_hook_trust""#),
-            "script must use the JSON envelope hook registration operation, got: {script}"
-        );
-        assert!(
-            script.contains(r#""codex_hook_discovery":"both""#),
-            "script must pass the resolved Codex hook discovery mode through JSON, got: {script}"
-        );
-        assert!(
-            script.contains("GWT_HOOK_BIN='/host/gwt/bin/gwtd' exec '/usr/local/bin/gwtd' <<JSON"),
-            "script must invoke container-local gwtd while matching host-generated hooks, got: {script}"
-        );
-        assert!(
-            !script.contains("/root/.codex/config.toml"),
-            "script must not hard-code root's Codex config path, got: {script}"
-        );
-    }
-
-    #[test]
-    fn docker_codex_hook_trust_fallback_matches_gui_hook_generator_sibling() {
-        let fallback = resolve_generated_hook_gwt_bin_with_lookup(
-            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
-            |_| Some(PathBuf::from("/usr/local/bin/gwtd")),
-        );
-
         assert_eq!(
-            fallback,
-            PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"),
-            "Docker trust fallback must match settings_local::gwt_hook_bin_path for GUI launches"
+            config
+                .args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1,
+            "Docker wrapping must preserve the canonical Default-mode override"
         );
     }
 
@@ -8713,6 +8743,11 @@ fi
         package_dir
     }
 
+    // Both callers are `#[cfg(not(windows))]`, so on Windows this helper is
+    // dead code and `cargo clippy --all-targets -- -D warnings` fails on it.
+    // CI only runs Clippy on Linux, so the break is local-only and permanent
+    // until the helper carries the same gate as its callers.
+    #[cfg(not(windows))]
     fn sample_exact_npx_launch_config(worktree: &Path) -> LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir(worktree)
