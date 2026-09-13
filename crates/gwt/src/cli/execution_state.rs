@@ -2045,12 +2045,12 @@ pub fn release_revoked_launch_generation(
 /// than a failure to prove something about the Host — and it is one the launch
 /// path cannot fake, because the launch path never writes those fields.
 ///
-/// This stays fail-closed in both directions. A generation still inside
-/// [`UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES`], and a holder Session that is
-/// missing, unreadable, carries any lifecycle evidence, or has picked up a
-/// provider session id, are all refused byte-preserving, along with every
-/// generation-identity check the revoked route makes. The only launches it
-/// settles are ones that had long enough to start and demonstrably never got
+/// This stays fail-closed in both directions. A generation still inside the
+/// `UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES` start-up grace, and a holder
+/// Session that is missing, unreadable, carries any lifecycle evidence, or has
+/// picked up a provider session id, are all refused byte-preserving, along with
+/// every generation-identity check the revoked route makes. The only launches
+/// it settles are ones that had long enough to start and demonstrably never got
 /// an agent as far as its first hook.
 pub fn release_unstarted_launch_generation(
     worktree: &Path,
