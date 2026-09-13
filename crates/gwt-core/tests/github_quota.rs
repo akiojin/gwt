@@ -54,7 +54,7 @@ fn rest_api_paths_are_classified_as_rest() {
             "api",
             "repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc&per_page=100&page=1",
         ],
-        vec!["api", "repos/o/r/issues?state=open&sort=updated&direction=desc&per_page=100&page=2"],
+        vec!["api", "repos/o/r/issues?state=open&sort=created&direction=desc&per_page=100&page=2"],
         vec!["api", "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1"],
         vec![
             "api",

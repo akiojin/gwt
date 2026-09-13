@@ -84,6 +84,46 @@ fn normalized_embedded_path_text(value: &str) -> String {
 }
 
 #[test]
+fn managed_hook_health_without_expected_binary_does_not_probe_git_tracking() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(worktree.path());
+    for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+        let path = worktree.path().join(artifact);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "{}").unwrap();
+    }
+    let trace_path = worktree.path().join("git-trace.jsonl");
+    let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+    let git = gwt_core::process::hidden_command("git")
+        .arg("--version")
+        .output()
+        .expect("Git is required for the tracking regression test");
+    assert!(git.status.success());
+    assert!(!fs::read_to_string(&trace_path)
+        .expect("Git Trace2 works")
+        .is_empty());
+    fs::write(&trace_path, "").unwrap();
+    let mut input = ManagedHookHealthInput::new(worktree.path());
+    input.expected_hook_bin = None;
+    input.runtime_state_path = None;
+
+    let health = read_managed_hook_health(&input);
+
+    assert!(health
+        .issues
+        .iter()
+        .any(|issue| issue.contains("SessionStart")));
+    let trace = fs::read_to_string(trace_path).expect("read Git trace");
+    assert!(
+        !trace.contains("\"ls-files\""),
+        "without a binary to compare, config tracking cannot affect health: {trace}"
+    );
+}
+
+#[test]
 fn managed_hook_health_is_ready_when_assets_and_runtime_state_are_current() {
     let _env_lock = env_test_lock()
         .lock()
@@ -1383,6 +1423,58 @@ fn tracked_canonical_hook_config_is_not_reported_as_binary_skew() {
             .any(|issue| issue.contains("binary skew")),
         "a canonical tracked hook config is the expected shape: {:?}",
         health.issues
+    );
+}
+
+#[test]
+fn managed_hook_health_snapshot_is_reused_and_refreshes_on_next_projection() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+    use gwt_core::error_ledger::{record, ErrorKind, ErrorRecord, ErrorTarget};
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = home.path().join("repo");
+    fs::create_dir(&worktree).unwrap();
+    let mut input = ManagedHookHealthInput::new(&worktree);
+    input.runtime_state_path = None;
+    input.expected_hook_bin = None;
+    let snapshot = ManagedHookFailureSnapshot::read();
+    let before = snapshot.read_health(&input);
+    let failure = record(ErrorRecord::new(
+        ErrorKind::HookFailure,
+        "test failure",
+        ErrorTarget {
+            project_root: Some(worktree.display().to_string()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        snapshot.read_health(&input),
+        before,
+        "one projection must not reread the ledger"
+    );
+    let refreshed = ManagedHookFailureSnapshot::read();
+    let health = refreshed.read_health(&input);
+    assert_eq!(health, read_managed_hook_health(&input));
+    assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+    assert!(health
+        .issues
+        .iter()
+        .any(|issue| issue.contains(&failure.id)));
+    input.worktree_root = home.path().join("other");
+    fs::create_dir(&input.worktree_root).unwrap();
+    assert!(
+        !refreshed
+            .read_health(&input)
+            .issues
+            .iter()
+            .any(|issue| issue.contains(&failure.id)),
+        "shared snapshot must preserve worktree filtering"
     );
 }
 
