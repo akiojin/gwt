@@ -149,7 +149,10 @@ pub fn fetch_issue_listing_with<F>(owner: &str, repo: &str, fetch: F) -> Result<
 where
     F: FnMut(&str) -> std::result::Result<String, String>,
 {
-    let endpoint = format!("repos/{owner}/{repo}/issues?state=open&sort=updated&direction=desc");
+    // Issue #4231: page by creation order. Sorting by `updated` moves every
+    // Issue edited mid-read to page 1, which shifts a row across a page
+    // boundary unread; the Monitor then treats that open Issue as closed.
+    let endpoint = format!("repos/{owner}/{repo}/issues?state=open&sort=created&direction=desc");
     let pages = crate::gh_rest::read_pages_with(&endpoint, fetch)
         .map_err(|e| GwtError::Git(format!("gh api issues: {e}")))?;
     Ok(IssueListing {
@@ -417,7 +420,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             calls,
-            ["repos/acme/widgets/issues?state=open&sort=updated&direction=desc&per_page=100&page=1"]
+            ["repos/acme/widgets/issues?state=open&sort=created&direction=desc&per_page=100&page=1"]
         );
         assert_eq!(issues.len(), 1, "pull requests are not issues");
         assert_eq!(issues[0].number, 42);
