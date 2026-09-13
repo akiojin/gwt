@@ -1309,6 +1309,7 @@ function createActionRegistry(doc) {
     { id: "open-board", label: "Focus Board surface", hint: "⌘B", group: "Navigate", handler: dispatch("open-board") },
     { id: "open-git", label: "Focus Work", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
     { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
+    { id: "open-recovery-center", label: "Open Recovery Center", hint: "Durable delivery", group: "Navigate", handler: dispatch("open-recovery-center") },
     { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
     // SPEC-3431 FR-026: the rail gear only appears on hover, so the palette is
     // the keyboard-reachable entry to PM settings.

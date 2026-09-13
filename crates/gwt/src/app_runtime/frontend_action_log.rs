@@ -136,6 +136,12 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
         FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::LoadRecoveryCenter { .. } => {
+            FrontendUserActionLog::new("load_recovery_center", "recovery")
+        }
+        FrontendEvent::OpenRecoveryCenterBoardEntry { .. } => {
+            FrontendUserActionLog::new("open_recovery_center_board_entry", "recovery")
+        }
         FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
             FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
                 .mode(if *enabled { "on" } else { "off" })

@@ -35,6 +35,12 @@ pub enum BoardCommand {
     /// fields such as `params.targets`, `params.mentions`, and
     /// `params.broadcast`.
     Post(Box<BoardPostCommand>),
+    /// `board.post` with an explicit stable `intent_id`. This selects the
+    /// durable exact-delivery path without changing ordinary post semantics.
+    RecoveryPost {
+        intent_id: String,
+        command: Box<BoardPostCommand>,
+    },
     /// `board.config.show` — print this repo's resolved Board routing (provider /
     /// channel / tenant) so per-project separation can be confirmed by running
     /// it in two repos and seeing two different channels (SPEC-2963 FR-026).
@@ -238,10 +244,21 @@ pub(super) fn run<E: CliEnv>(
             draft.mentions = mentions;
             draft.audience = audience;
             if let Some(session) = current_session.as_ref() {
+                // SPEC-1974 FR-063: record which *form* of worktree the post
+                // came from, so a branchless ephemeral session stays
+                // identifiable on the Board once its worktree is pruned. This
+                // is provenance only — the retired Intake / Execution action
+                // lanes are not coming back through it.
                 draft.origin = BoardOrigin::new(
                     session.branch.clone(),
                     session.id.clone(),
                     session.display_name.clone(),
+                )
+                .with_worktree_form(
+                    crate::worktree_form::board_origin_worktree_form(
+                        env.repo_path(),
+                        Some(session.branch.as_str()),
+                    ),
                 );
             }
             let entry = draft
@@ -278,6 +295,63 @@ pub(super) fn run<E: CliEnv>(
             if let Some(entry) = escalation {
                 report_escalation(env, &entry, out);
             }
+            0
+        }
+        BoardCommand::RecoveryPost { intent_id, command } => {
+            let BoardPostCommand {
+                kind,
+                body,
+                file,
+                title,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+                resolves,
+                broadcast,
+            } = *command;
+            if !resolves.is_empty() {
+                return Err(io_as_spec_ops_error(io::Error::other(
+                    "recovery posts do not support escalation resolution",
+                )));
+            }
+            let body = match (body, file) {
+                (Some(body), None) => body,
+                (None, Some(file)) => env.read_file(&file).map_err(io_as_spec_ops_error)?,
+                _ => {
+                    return Err(io_as_spec_ops_error(io::Error::other(
+                        "board post requires exactly one of --body or -f",
+                    )));
+                }
+            };
+            let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
+            let mentions = normalize_board_mentions(
+                &parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?,
+            );
+            let input = crate::recovery_delivery::RecoveryDeliveryInput {
+                kind: kind.parse().map_err(gwt_error_to_spec_ops_error)?,
+                body,
+                title,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+                workspace_audience,
+                broadcast,
+            };
+            let report = crate::recovery_delivery::deliver_board_recovery(
+                env.repo_path(),
+                &intent_id,
+                input,
+            );
+            let rendered = serde_json::to_string(&report)
+                .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
+            out.push_str(&rendered);
+            out.push('\n');
             0
         }
         BoardCommand::ConfigShow => {
@@ -600,6 +674,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut mentions = Vec::new();
     let mut resolves = Vec::new();
     let mut broadcast = false;
+    let mut intent_id: Option<String> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -684,6 +759,13 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
             "--broadcast" => {
                 broadcast = true;
             }
+            "--intent-id" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--intent-id"));
+                }
+                intent_id = Some(args[i].clone());
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -692,7 +774,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         super::validate_title_summary_work_name("--title-summary", value)?;
     }
 
-    Ok(BoardCommand::Post(Box::new(BoardPostCommand {
+    let command = Box::new(BoardPostCommand {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
         body,
         file,
@@ -705,7 +787,11 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         mentions,
         resolves,
         broadcast,
-    })))
+    });
+    Ok(match intent_id {
+        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        None => BoardCommand::Post(command),
+    })
 }
 
 fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
@@ -2886,5 +2972,60 @@ mod tests {
             !out.contains("Codex @ work/readable-board / sess-readable: Current state"),
             "body must not be collapsed into the header, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn recovery_post_rejects_escalation_resolution_before_storage() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            BoardCommand::RecoveryPost {
+                intent_id: "intent-1974".to_string(),
+                command: Box::new(BoardPostCommand {
+                    kind: "status".to_string(),
+                    body: Some("safe status".to_string()),
+                    resolves: vec!["blocked-entry-1974".to_string()],
+                    ..Default::default()
+                }),
+            },
+            &mut out,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("do not support escalation resolution"));
+        assert!(out.is_empty());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn board_family_parse_intent_id_selects_recovery_without_changing_normal_post() {
+        let normal = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("normal"),
+        ])
+        .expect("normal board post");
+        assert!(matches!(normal, BoardCommand::Post(_)));
+
+        let recovery = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("recover"),
+            s("--intent-id"),
+            s("stable-intent-1"),
+        ])
+        .expect("recovery board post");
+        let BoardCommand::RecoveryPost { intent_id, command } = recovery else {
+            panic!("--intent-id must select the recovery route");
+        };
+        assert_eq!(intent_id, "stable-intent-1");
+        assert_eq!(command.body.as_deref(), Some("recover"));
     }
 }
