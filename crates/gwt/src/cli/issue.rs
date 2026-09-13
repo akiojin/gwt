@@ -4654,6 +4654,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4701,6 +4702,7 @@ mod tests {
                 idle_kind: None,
                 idle_since: None,
                 duplicate_launch_refusal: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
@@ -4711,6 +4713,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4809,6 +4812,7 @@ mod tests {
                     idle_kind: None,
                     idle_since: None,
                     duplicate_launch_refusal: None,
+                    failure_kind: None,
                 }],
                 closure_held: Vec::new(),
                 last_error: None,
@@ -4819,6 +4823,7 @@ mod tests {
                 disk_space: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
+                failure_surge: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -4877,6 +4882,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -6530,6 +6536,7 @@ mod tests {
                 idle_since: None,
                 steering: None,
                 duplicate_launch_refusal: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: None,
@@ -6541,6 +6548,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             issue_cache: None,
         };
 

@@ -4776,6 +4776,20 @@ pub fn begin_active_session_launch_handshake(
     .map(Option::flatten)
 }
 
+/// Whether a runtime sidecar proves the process it recorded is gone.
+///
+/// Only an exact, still-resolvable pid record can prove that. A missing or
+/// partial record, or a process tree that is still alive, is never proof —
+/// those keep fencing, exactly as they do for a matching identity.
+fn exact_runtime_evidence_is_dead(runtime: &gwt_agent::SessionRuntimeState) -> bool {
+    match (runtime.child_pid, runtime.child_started_at) {
+        (Some(child_pid), Some(child_started_at)) if child_pid > 0 && child_started_at > 0 => {
+            !crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
+        }
+        _ => false,
+    }
+}
+
 fn exact_session_runtime_fences_active_launch(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
@@ -4801,9 +4815,23 @@ fn exact_session_runtime_fences_active_launch(
                 ))
             }
         };
-        if runtime.execution_identity.as_ref() != Some(expected)
-            || runtime.runtime_incarnation.is_none_or(|value| value == 0)
-        {
+        if runtime.execution_identity.as_ref() != Some(expected) {
+            // Issue #4207: a sidecar written for a *different* identity is
+            // either a launch that is still live under another generation —
+            // which must fence this one — or the remains of an incarnation
+            // that already finished. A continuation rebind moves the same
+            // Session onto a new generation and leaves the previous
+            // incarnation's sidecar behind, so failing closed on the
+            // difference alone refused every rebound relaunch of a Session
+            // that had already run. Decide it the way the rest of this loop
+            // decides: only decisive proof that the recorded process is gone
+            // lets the evidence be skipped as history.
+            if exact_runtime_evidence_is_dead(&runtime) {
+                continue;
+            }
+            return Ok(true);
+        }
+        if runtime.runtime_incarnation.is_none_or(|value| value == 0) {
             return Err(invalid_generation_data(
                 "Active launch runtime evidence does not match the exact Session identity",
             ));
