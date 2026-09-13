@@ -6055,6 +6055,121 @@ fn exact_terminal_confirmation_accepts_repaired_identity_and_unrelated_legacy_cl
 }
 
 #[test]
+fn session_bound_update_copies_matching_current_pr_metadata() {
+    assert_session_bound_pr_metadata("matching", true, true, false, true);
+}
+
+#[test]
+fn session_bound_update_does_not_copy_foreign_container_pr_metadata() {
+    assert_session_bound_pr_metadata("foreign-branch", false, true, false, false);
+    assert_session_bound_pr_metadata("foreign-path", true, false, false, false);
+}
+
+#[test]
+fn session_bound_update_preserves_existing_pr_metadata_without_current_metadata() {
+    assert_session_bound_pr_metadata("existing", true, true, true, false);
+}
+
+fn assert_session_bound_pr_metadata(
+    label: &str,
+    same_branch: bool,
+    same_path: bool,
+    existing_metadata: bool,
+    expect_copy: bool,
+) {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    current.git_details = Some(GitDetails {
+        branch: Some(if same_branch {
+            T812_TARGET_BRANCH.to_string()
+        } else {
+            "work/foreign-pr".to_string()
+        }),
+        worktree_path: Some(if same_path {
+            fixture.target.worktree_identity.clone()
+        } else {
+            temp.path().join("foreign-worktree")
+        }),
+        base_branch: None,
+        pr_number: (!existing_metadata).then_some(3697),
+        pr_url: (!existing_metadata)
+            .then(|| "https://github.com/akiojin/gwt/pull/3697".to_string()),
+        pr_state: (!existing_metadata).then(|| "OPEN".to_string()),
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: Utc::now(),
+    });
+    save_workspace_projection_to_path(&fixture.current_path, &current).expect("save PR details");
+    if existing_metadata {
+        let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+            .expect("load target")
+            .expect("target");
+        let container = &mut work_items.work_items[0].execution_containers[0];
+        container.pr_number = Some(3697);
+        container.pr_url = Some("https://github.com/akiojin/gwt/pull/3697".to_string());
+        container.pr_state = Some("OPEN".to_string());
+        save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+            .expect("save existing PR metadata");
+    }
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: Some("PR status checked".to_string()),
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("session-bound update");
+
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load updated Work")
+        .expect("updated Work");
+    let item = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work");
+    let event = item.events.last().expect("update event");
+    assert_eq!(event.kind, WorkEventKind::Update);
+    let expected = expect_copy || existing_metadata;
+    for container in [
+        event.execution_container.as_ref().expect("event container"),
+        &item.execution_containers[0],
+    ] {
+        assert_eq!(container.branch.as_deref(), Some(T812_TARGET_BRANCH));
+        assert_eq!(
+            container.worktree_path.as_deref(),
+            Some(fixture.target.worktree_identity.as_path())
+        );
+        assert_eq!(container.pr_number, expected.then_some(3697), "{label}");
+        assert_eq!(
+            container.pr_url.as_deref(),
+            expected.then_some("https://github.com/akiojin/gwt/pull/3697"),
+            "{label}"
+        );
+        assert_eq!(
+            container.pr_state.as_deref(),
+            expected.then_some("OPEN"),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn session_bound_sparse_update_does_not_inherit_foreign_shared_current_fields() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");

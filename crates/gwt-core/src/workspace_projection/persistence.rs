@@ -3095,11 +3095,25 @@ fn validate_session_bound_target_locked(
             execution_container = Some(container.clone());
         }
     }
-    let execution_container = execution_container.ok_or_else(|| {
+    let mut execution_container = execution_container.ok_or_else(|| {
         GwtError::Other(
             "Session-bound workspace target container changed before commit".to_string(),
         )
     })?;
+
+    // Shared current may belong to another Work. Only its exact container
+    // can supply PR details that have not reached the Work event stream yet.
+    if let Some(current) = workspace_execution_container_from_projection(projection) {
+        if canonical_session_bound_branch(current.branch.as_deref().unwrap_or_default())
+            == canonical_session_bound_branch(&target.branch_identity)
+            && session_bound_candidate_path_matches(
+                current.worktree_path.as_deref(),
+                &canonical_session_bound_path(&target.worktree_identity)?,
+            )?
+        {
+            super::work_items::merge_workspace_pr_metadata(&mut execution_container, &current);
+        }
+    }
 
     validate_session_bound_work_authority_uniqueness_ignoring_foreign_history(
         work_items,
