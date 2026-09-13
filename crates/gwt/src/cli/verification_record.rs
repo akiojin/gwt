@@ -3338,6 +3338,15 @@ fn verification_caller_authority_error() -> io::Error {
     )
 }
 
+/// Whether `verify.plan` / `verify.run` would accept `session_id` right now.
+///
+/// `execution.status` advertises the verification recoveries through this
+/// exact gate so the listing never names an operation the caller cannot run
+/// (Issue #4029). Read-only: it snapshots authority without mutating it.
+pub(crate) fn caller_has_verification_authority(worktree: &Path, session_id: &str) -> bool {
+    snapshot_verification_caller_authority(worktree, session_id).is_ok()
+}
+
 fn snapshot_verification_caller_authority(
     worktree: &Path,
     session_id: &str,
@@ -6533,6 +6542,100 @@ mod tests {
             artifacts_before,
             "terminal authority denial must not mutate verification evidence"
         );
+    }
+
+    // Issue #4029 AC-1 / AC-2 / AC-3: `execution.status` advertises
+    // `verify.plan` / `verify.run` through the exact gate `verify.*` enforces.
+    // The owning Session of a Blocked (terminal) record keeps them; another
+    // Session loses them but can adopt the dead holder's record (Issue #4154).
+    #[test]
+    fn execution_status_advertises_verify_recoveries_only_to_the_authorized_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("blocked status recovery repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner_session = "session-4029-owner";
+        let other_session = "session-4029-other";
+
+        let active = initialize_generation_scoped_execution(dir.path(), owner_session);
+        persist_generation_scoped_session(dir.path(), owner_session, active.clone(), 1);
+        persist_generation_scoped_session(dir.path(), other_session, active, 1);
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                owner_session,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "startup recovery found only dead Hosts".to_string(),
+                    missing_verification: Some("startup Active holder liveness".to_string()),
+                },
+            )
+            .expect("settle blocked generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let owner_status = crate::cli::execution_state::diagnose(dir.path(), Some(owner_session));
+        assert_eq!(
+            owner_status.binding_state,
+            crate::cli::execution_state::ExecutionBindingState::Terminal
+        );
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), owner_session).is_ok(),
+            "the owning Session keeps verification authority on a Blocked record"
+        );
+        for operation in ["verify.plan", "verify.run"] {
+            assert!(
+                owner_status
+                    .available_recoveries
+                    .contains(&operation.to_string()),
+                "owning Session must keep `{operation}`: {:?}",
+                owner_status.available_recoveries
+            );
+        }
+        assert_eq!(
+            owner_status.recovery_hint, None,
+            "the owning Session can still recover in place"
+        );
+
+        let other_status = crate::cli::execution_state::diagnose(dir.path(), Some(other_session));
+        assert_eq!(
+            other_status.binding_state,
+            crate::cli::execution_state::ExecutionBindingState::Terminal
+        );
+        let denial = snapshot_verification_caller_authority(dir.path(), other_session)
+            .expect_err("another Session has no verification authority")
+            .to_string();
+        assert!(
+            denial.contains("current verification authority"),
+            "denial must be the same gate `verify.*` enforces: {denial}"
+        );
+        assert_eq!(
+            other_status.available_recoveries,
+            vec!["execution.adopt"],
+            "another Session can adopt the dead holder's record, but cannot run `verify.*`"
+        );
+        assert_eq!(
+            other_status.recovery_hint, None,
+            "a Session with an available ownership transfer does not need a fresh launch"
+        );
+        for operation in ["verify.plan", "verify.run"] {
+            let probe = other_status
+                .recovery_probes
+                .iter()
+                .find(|probe| probe.operation == operation)
+                .unwrap_or_else(|| panic!("{operation} probe"));
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Unavailable
+            );
+            assert_eq!(
+                probe.governance.cause,
+                Some(crate::cli::governance::GovernanceCause::Authority)
+            );
+        }
     }
 
     #[test]
