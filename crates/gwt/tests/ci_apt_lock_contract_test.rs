@@ -250,6 +250,10 @@ mod wrapper {
             let mut command =
                 resolved_command(ProcessPlanRequest::new("bash").args(argv)).expect("resolve bash");
             command.env("GWT_APT_STATE_DIR", self.path("state"));
+            // Issue #4268: keep the acquire drop-in inside the harness. Left at
+            // its default the script would try to write /etc/apt/apt.conf.d,
+            // which on a Linux host means escalating through sudo from a test.
+            command.env("GWT_APT_CONF_DIR", self.path("apt.conf.d"));
             for (key, value) in extra_env {
                 command.env(key, value);
             }
