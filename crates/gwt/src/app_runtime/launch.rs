@@ -1185,7 +1185,39 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                                 owner.number,
                             ));
                         }
-                        FreshSuccessorRoute::Concurrent
+                        // Issue #4200 AC-2: concurrency is for a holder that is
+                        // actually producing. A launch that died before its
+                        // agent ever authenticated — a directory-trust prompt is
+                        // how it happens in production — leaves a holder that
+                        // every liveness reading here is structurally unable to
+                        // tell apart from a live one, so its generation would
+                        // otherwise stay Active forever and every later launch
+                        // would file itself beside a producer that does not
+                        // exist. The holder's own lifecycle record settles it: a
+                        // Session that never delivered a hook never ran a turn,
+                        // and terminalizing it interrupts nothing. Anything less
+                        // certain than that — including an agent still inside the
+                        // start-up grace — falls through to concurrency.
+                        match gwt::cli::execution_state::release_unstarted_launch_generation(
+                            worktree,
+                            owner,
+                            sessions_dir,
+                            "the launch holding this generation never started an agent",
+                        ) {
+                            Ok(gwt::cli::execution_state::LaunchGenerationRelease::Released {
+                                generation_id,
+                                holder_session_id,
+                            }) => {
+                                tracing::info!(
+                                    owner = owner.number,
+                                    %generation_id,
+                                    %holder_session_id,
+                                    "released an execution generation whose launch never started an agent"
+                                );
+                                FreshSuccessorRoute::Blocked
+                            }
+                            _ => FreshSuccessorRoute::Concurrent,
+                        }
                     }
                 },
             };
