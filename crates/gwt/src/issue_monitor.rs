@@ -5543,6 +5543,17 @@ impl IssueMonitorState {
                 current.issue_updated_at.as_deref(),
                 incoming.issue_updated_at.as_deref(),
             );
+            if winner.state == IssueClosureState::Closed
+                && [current, incoming].iter().any(|record| {
+                    record.evidence == IssueClosureEvidence::ExplicitRevision
+                        && Self::closure_revision_floor_order(
+                            record.issue_updated_at.as_deref(),
+                            winner.issue_updated_at.as_deref(),
+                        ) == Some(std::cmp::Ordering::Equal)
+                })
+            {
+                winner.evidence = IssueClosureEvidence::ExplicitRevision;
+            }
         }
         winner.generation = current.generation.max(incoming.generation);
         winner
@@ -5748,8 +5759,10 @@ impl IssueMonitorState {
                     issue_updated_at.as_deref(),
                 ) {
                     Some(std::cmp::Ordering::Greater) => true,
-                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => false,
-                    None => current.evidence != IssueClosureEvidence::ExplicitRevision,
+                    Some(std::cmp::Ordering::Less) => false,
+                    Some(std::cmp::Ordering::Equal) | None => {
+                        current.evidence != IssueClosureEvidence::ExplicitRevision
+                    }
                 }
             } else {
                 true
@@ -5765,7 +5778,16 @@ impl IssueMonitorState {
                         issue_number,
                         generation: current.generation.saturating_add(1),
                         state,
-                        evidence,
+                        // Absence cannot downgrade a positive Closed revision
+                        // into an inference that a same-revision Open may undo.
+                        evidence: if state == IssueClosureState::Closed
+                            && current.evidence == IssueClosureEvidence::ExplicitRevision
+                            && evidence == IssueClosureEvidence::CompleteLiveAbsence
+                        {
+                            current.evidence
+                        } else {
+                            evidence
+                        },
                         issue_updated_at: revision_floor,
                     },
                 );
@@ -13897,6 +13919,11 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    let previous_inbox = monitor
+        .inbox
+        .iter()
+        .map(|item| item.issue.number)
+        .collect::<BTreeSet<_>>();
     if monitor.legacy_git_launch_failure_migration_version
         < LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
         && source == IssueMonitorCandidateSource::Live
@@ -13956,9 +13983,31 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
         IssueMonitorScanDriverKind::Daemon
     };
     let drive_diagnosis = monitor.diagnose_scan_drive(driver, std::process::id(), now);
-    let summary = scan_issue_monitor_candidates(monitor, issues, now);
+    let mut summary = scan_issue_monitor_candidates(monitor, issues, now);
     if let Some(diagnosis) = drive_diagnosis {
         monitor.last_error = Some(diagnosis);
+    }
+    if monitor.inbox.len() < previous_inbox.len() {
+        let previous_count = previous_inbox.len();
+        let removed = previous_inbox
+            .into_iter()
+            .filter(|number| monitor.inbox_item(*number).is_none())
+            .collect::<Vec<_>>();
+        let message = format!(
+            "issue monitor inbox population shrank: {} -> {}; removed issues: {removed:?}; source: {source:?}",
+            previous_count,
+            monitor.inbox.len(),
+        );
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::DaemonFault,
+            &message,
+            gwt_core::error_ledger::ErrorTarget {
+                project_root: Some(project_root.display().to_string()),
+                ..Default::default()
+            },
+        );
+        monitor.record_scan_error(now, &message);
+        summary.errors.push(message);
     }
     summary
 }

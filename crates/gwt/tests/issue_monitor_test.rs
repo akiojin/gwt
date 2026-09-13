@@ -1948,6 +1948,61 @@ fn live_absence_preserves_a_newer_explicit_closed_revision() {
 }
 
 #[test]
+fn explicit_closed_after_absence_blocks_same_revision_live_open() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut open = issue(42, &["bug"]);
+    open.updated_at = Some("2026-09-09T12:00:00Z".to_string());
+    let mut closed = open.clone();
+    closed.state = IssueMonitorIssueState::Closed;
+    for issues in [vec![open.clone()], vec![], vec![closed], vec![open]] {
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            repo.path(),
+            "2026-09-09T13:00:00Z",
+        );
+    }
+    assert!(monitor.inbox_item(42).is_none());
+}
+
+#[test]
+fn next_live_scan_recovers_same_revision_open_after_inferred_absence() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut open = issue(42, &["bug"]);
+    open.updated_at = Some("2026-09-09T12:00:00Z".to_string());
+    for issues in [vec![open.clone()], vec![]] {
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            &issues,
+            IssueMonitorCandidateSource::Live,
+            repo.path(),
+            "2026-09-09T13:00:00Z",
+        );
+    }
+    let stale_closed = monitor.prefs();
+    assert!(monitor.inbox_item(42).is_none());
+
+    for _ in 0..2 {
+        scan_issue_monitor_candidates_with_provenance(
+            &mut monitor,
+            std::slice::from_ref(&open),
+            IssueMonitorCandidateSource::Live,
+            repo.path(),
+            "2026-09-09T14:00:00Z",
+        );
+        monitor.rebase_daemon_driver_prefs(&stale_closed);
+        assert_eq!(monitor.agent_status().inbox.len(), 1);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+    }
+}
+
+#[test]
 fn same_state_rebase_combines_generation_with_the_newest_explicit_revision_floor() {
     let repo = tempfile::tempdir().expect("tempdir");
     let mut explicit_monitor = needs_human_monitor(42);
@@ -2283,6 +2338,43 @@ fn equal_explicit_revision_conflict_prefers_closed_over_higher_generation_reopen
         .expect("merged closure record");
     assert_eq!(record.state, IssueClosureState::Closed);
     assert_eq!(record.generation, 3);
+}
+
+#[test]
+fn explicit_closed_evidence_survives_equivalent_timestamp_absence_rebase() {
+    let prefs = |generation, evidence, revision: &str| IssueMonitorPrefs {
+        closure_records: vec![IssueClosureRecord {
+            issue_number: 42,
+            generation,
+            state: IssueClosureState::Closed,
+            evidence,
+            issue_updated_at: Some(revision.to_string()),
+        }],
+        ..IssueMonitorPrefs::default()
+    };
+    let mut monitor = IssueMonitorState::with_prefs(
+        IssueMonitorConfig::default(),
+        prefs(
+            3,
+            IssueClosureEvidence::CompleteLiveAbsence,
+            "2026-09-09T12:00:00+00:00",
+        ),
+    );
+    monitor.rebase_daemon_driver_prefs(&prefs(
+        2,
+        IssueClosureEvidence::ExplicitRevision,
+        "2026-09-09T12:00:00Z",
+    ));
+    let mut open = issue(42, &["bug"]);
+    open.updated_at = Some("2026-09-09T12:00:00Z".to_string());
+    scan_issue_monitor_candidates_with_provenance(
+        &mut monitor,
+        &[open],
+        IssueMonitorCandidateSource::Live,
+        Path::new("."),
+        "2026-09-10T00:00:00Z",
+    );
+    assert!(monitor.inbox_item(42).is_none());
 }
 
 #[test]
