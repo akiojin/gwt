@@ -293,6 +293,10 @@ where
 /// The owner diagnosis is repository-scoped, so any worktree in the repository
 /// answers for every owner. An unreadable or absent record is `Unknown`, which
 /// classifies as `stuck_unknown` and is therefore never released automatically.
+///
+/// Issue #4131: `Blocked` is reported as `Interrupted` when the Host's Active
+/// reaper wrote it, because that status means the holder died rather than
+/// decided.
 pub fn read_execution_settlements(
     project_root: &Path,
     issue_numbers: &[u64],
@@ -311,9 +315,22 @@ pub fn read_execution_settlements(
                 },
             );
             let settlement = match diagnosis.ecr_status {
-                Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Active,
+                Some(ExecutionControlStatus::Active) if diagnosis.reclaimable => {
+                    IssueMonitorExecutionSettlement::Active
+                }
+                // A missing pane is not exit proof: a headless or detached
+                // exact process can still own this generation.
+                Some(ExecutionControlStatus::Active) => IssueMonitorExecutionSettlement::Unknown,
                 Some(ExecutionControlStatus::Completed) => {
                     IssueMonitorExecutionSettlement::Completed
+                }
+                // Issue #4131: the generation reaper runs earlier in this same
+                // scan, so a holder that an auto-update restart killed reaches
+                // this read already `Blocked` — written for it, not by it.
+                // Reporting that as a settlement made the idle release treat
+                // interrupted work as finished and park the Issue.
+                Some(ExecutionControlStatus::Blocked) if diagnosis.ecr_settled_by_host_reaper => {
+                    IssueMonitorExecutionSettlement::Interrupted
                 }
                 Some(ExecutionControlStatus::Blocked) => IssueMonitorExecutionSettlement::Blocked,
                 None => IssueMonitorExecutionSettlement::Unknown,
@@ -330,7 +347,8 @@ pub fn reconcile_issue_monitor_idle_windows(
     project_root: &Path,
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
-    let settlements = read_execution_settlements(project_root, &monitor.active_issue_numbers());
+    let settlements =
+        read_execution_settlements(project_root, &monitor.execution_settlement_issue_numbers());
     let outcome = monitor.reconcile_idle_windows(&settlements, now);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
         tracing::info!(
@@ -3021,6 +3039,135 @@ mod tests {
             .expect("the release is reported");
         assert_eq!(released.released, vec![42]);
         assert!(released.stranded.is_empty());
+    }
+
+    /// Issue #4131: the seam the idle release actually reads.
+    ///
+    /// The generation reaper runs earlier in the same scan, so by the time the
+    /// settlements are read, a holder that an auto-update restart killed is
+    /// already `Blocked` — written for it, not by it. Reporting that as an
+    /// ordinary settlement is what made the release treat interrupted work as
+    /// finished and leave the Issue `Launched` with no pane and no way back.
+    #[test]
+    fn a_generation_the_reaper_blocked_reads_as_interrupted_not_settled() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let session_id = "settlement-reaped-holder";
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::ensure_generation_ledger(
+            worktree.path(),
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding =
+            crate::cli::execution_state::current_execution_binding(worktree.path(), owner)
+                .unwrap()
+                .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session =
+            gwt_agent::Session::new(worktree.path(), "work/issue-42", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.linked_issue_number = Some(owner.number);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: binding,
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions_dir).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            started_at,
+            std::process::id(),
+            started_at,
+        )
+        .save(&runtime_path)
+        .unwrap();
+        assert_eq!(
+            read_execution_settlements(worktree.path(), &[owner.number])
+                .get(&owner.number)
+                .copied(),
+            Some(IssueMonitorExecutionSettlement::Unknown),
+            "an exact live process must not permit recovery even without a pane"
+        );
+        std::fs::remove_file(runtime_path).unwrap();
+
+        // What an auto-update restart leaves behind: the holder is gone and
+        // settled nothing.
+        session.update_status(gwt_agent::AgentStatus::Interrupted);
+        session.save(&sessions_dir).unwrap();
+
+        assert_eq!(
+            read_execution_settlements(worktree.path(), &[owner.number])
+                .get(&owner.number)
+                .copied(),
+            Some(IssueMonitorExecutionSettlement::Active),
+            "the record is still Active before the reaper runs"
+        );
+
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let candidate =
+            crate::cli::execution_state::inspect_startup_active_generation_ledgers(&[worktree
+                .path()
+                .to_path_buf()])
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.owner == owner)
+            .expect("active candidate");
+        assert_eq!(
+            crate::cli::execution_state::reap_startup_defunct_active_generation(
+                &candidate,
+                &sessions_dir,
+                &identity,
+                &[],
+            )
+            .unwrap(),
+            crate::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped
+        );
+
+        assert_eq!(
+            read_execution_settlements(worktree.path(), &[owner.number])
+                .get(&owner.number)
+                .copied(),
+            Some(IssueMonitorExecutionSettlement::Interrupted),
+            "the reaper blocked it on the holder's behalf; the work is unfinished"
+        );
     }
 
     #[test]

@@ -852,9 +852,9 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
 ///
 /// The recovery the incident needed was six live panes against three slots,
 /// where the fix could not be "close something": all six were working. So this
-/// only ever *adds* tracking back — it re-adopts the launches whose windows the
-/// canvas still shows, and never revokes, prunes, or closes anything. That also
-/// makes it safe without the daemon control lane: additive bindings and
+/// re-adopts the launches whose windows the canvas still shows, and never
+/// revokes or closes a live launch. Closed-Issue bindings are removed on load.
+/// Binding recovery is safe without the daemon control lane: additive bindings and
 /// launches are union-merged by every cross-process rebase, so a daemon that
 /// owns the state absorbs this commit instead of racing it.
 ///
@@ -876,7 +876,7 @@ fn run_monitor_reconcile<E: CliEnv>(
             prefs.clone(),
         );
         let readopted = monitor.readopt_live_launch_bindings(&live_window_ids);
-        if !readopted.is_empty() {
+        if !readopted.is_empty() || monitor.prefs().launch_bindings != prefs.launch_bindings {
             *prefs = monitor.prefs();
         }
         readopted
@@ -884,6 +884,10 @@ fn run_monitor_reconcile<E: CliEnv>(
     .map_err(io_as_api_error)?;
     let monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    // The driver's inbox is not persisted. Ask its next scan to recover
+    // untracked Launched rows using fresh canvas and execution evidence,
+    // rather than pretending a prefs-only mutation changed that projection.
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
     out.push_str(
         &serde_json::json!({
             "readopted": readopted,
@@ -891,11 +895,14 @@ fn run_monitor_reconcile<E: CliEnv>(
             "max_active": prefs.max_active_agents,
             "live_windows": live_window_ids.len(),
             "source": "live_canvas",
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
         })
         .to_string(),
     );
     out.push('\n');
-    Ok(0)
+    Ok(if delivery.scan_requested { 0 } else { 1 })
 }
 
 /// Issue #4084 AC-5: release the idle launched windows the live classification
@@ -945,6 +952,10 @@ fn run_monitor_release_idle<E: CliEnv>(
                 "idle_since": idle.idle_since,
                 "bound": idle.bound,
                 "releasable": idle.idle_kind != crate::IssueMonitorIdleKind::StuckUnknown,
+                // Issue #4131: releasing this row also puts its Issue back on
+                // the queue, because the execution it was launched for never
+                // settled. The operator should see that before asking.
+                "requeue_on_release": idle.requeue_on_release,
             })
         })
         .collect::<Vec<_>>();

@@ -430,9 +430,9 @@ fn fast_forward_stale_launch_ref(
 /// The id of a live Session whose worktree is `worktree`, when one exists
 /// (Issue #4074 AC-2).
 ///
-/// "Live" means a runtime sidecar under a Host PID that still answers. A
-/// Session record left behind by a crashed or replaced Host holds nothing, so
-/// it must not keep an owner Issue parked forever.
+/// Exact child process evidence decides whether a runtime still holds the
+/// worktree. Legacy sidecars without it retain the conservative Host check.
+/// A surviving GUI Host alone must not keep an exited agent's worktree held.
 fn live_session_holding_worktree(sessions_dir: &Path, worktree: &Path) -> Option<String> {
     let target = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
@@ -471,13 +471,18 @@ fn session_runtime_host_is_alive(sessions_dir: &Path, session_id: &str) -> bool 
         let Ok(runtime) = gwt_agent::SessionRuntimeState::load(&sidecar) else {
             continue;
         };
-        if matches!(
-            runtime.status,
-            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-        ) {
-            continue;
-        }
-        if gwt::process::is_host_process_alive(host_pid) {
+        let alive = match runtime.child_pid.zip(runtime.child_started_at) {
+            Some((child_pid, child_started_at)) if child_pid > 0 && child_started_at > 0 => {
+                gwt::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
+            }
+            _ => {
+                !matches!(
+                    runtime.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                ) && gwt::process::is_host_process_alive(host_pid)
+            }
+        };
+        if alive {
             return true;
         }
     }
@@ -1658,6 +1663,38 @@ mod tests {
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),
             "preserve me\n"
         );
+    }
+
+    #[test]
+    fn worktree_holder_with_dead_child_is_not_kept_alive_by_gui_host() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(temp.path(), std::process::id(), "dead-child");
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        runtime.host_started_at = gwt::process::host_process_start_time(std::process::id());
+        runtime.child_pid = Some(i32::MAX as u32);
+        runtime.child_started_at = Some(1);
+        runtime.save(&runtime_path).unwrap();
+
+        assert!(!session_runtime_host_is_alive(temp.path(), "dead-child"));
+    }
+
+    #[test]
+    fn worktree_holder_with_live_child_is_kept_despite_stopped_sidecar() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let process_id = std::process::id();
+        let process_started_at = gwt::process::host_process_start_time(process_id).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(temp.path(), process_id, "live-child");
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped);
+        runtime.host_started_at = Some(process_started_at);
+        runtime.child_pid = Some(process_id);
+        runtime.child_started_at = Some(process_started_at);
+        runtime.save(&runtime_path).unwrap();
+
+        assert!(session_runtime_host_is_alive(temp.path(), "live-child"));
     }
 
     /// Issue #4074 AC-2: inheritance stops at a worktree an agent is still
