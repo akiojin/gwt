@@ -2222,6 +2222,11 @@ fn git_is_ancestor(worktree: &Path, ancestor: &str, descendant: &str) -> Result<
 /// double- and single-quote grouping. Deliberately supports no shell
 /// features (pipes, redirects, `&&`) — verification commands run as direct
 /// process invocations so the recorded command is exactly what executed.
+///
+/// Leading `KEY=value` assignments stay in the token list here;
+/// `take_env_assignments` separates them just before the spawn, so command
+/// *validators* (quarantine requests, for one) keep seeing the command
+/// exactly as written.
 pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
     let mut args: Vec<(String, bool)> = Vec::new();
     let mut current = String::new();
@@ -2274,6 +2279,49 @@ pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(args.into_iter().map(|(arg, _)| arg).collect())
+}
+
+/// Environment overrides a verification command carries as leading
+/// `KEY=value` tokens, in the order they were written.
+type EnvAssignments = Vec<(String, String)>;
+
+/// Whether `key` is a POSIX-shaped environment variable name, so that
+/// `KEY=value` is an assignment rather than an ordinary argument that
+/// happens to contain `=`.
+fn is_env_assignment_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// Split off the leading `KEY=value` assignments a command carries, the way
+/// a shell would, and return them alongside the command that remains.
+///
+/// There is no shell here, so without this a command such as CI's rustdoc
+/// gate (`RUSTDOCFLAGS="-D warnings" cargo doc …`) would try to spawn a
+/// binary literally named `RUSTDOCFLAGS=-D warnings` (#3698). Quotes are
+/// already gone by the time [`split_command_line`] hands the tokens over, so
+/// `FOO="bar baz"` arrives as the single token `FOO=bar baz`.
+fn take_env_assignments(tokens: Vec<String>) -> Result<(EnvAssignments, Vec<String>), String> {
+    let mut env = Vec::new();
+    let mut rest = tokens.into_iter().peekable();
+    while let Some(token) = rest.peek() {
+        let Some((key, value)) = token
+            .split_once('=')
+            .filter(|(key, _)| is_env_assignment_key(key))
+        else {
+            break;
+        };
+        env.push((key.to_string(), value.to_string()));
+        rest.next();
+    }
+    let args: Vec<String> = rest.collect();
+    if args.is_empty() {
+        return Err("command is only environment assignments, with nothing to run".to_string());
+    }
+    Ok((env, args))
 }
 
 /// Execute one verification command in the worktree and return its exit code
@@ -2330,10 +2378,15 @@ fn execute_command_with_isolation(
     command: &str,
     isolated_baseline: bool,
 ) -> Result<(i32, String), String> {
-    let args = split_command_line(command)?;
+    let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
     let mut process = gwt_core::process::hidden_command(&args[0]);
     process.args(&args[1..]).current_dir(worktree);
     apply_child_environment_contract(&mut process);
+    // After the contract, so a command that names one of its variables still
+    // gets the value it asked for.
+    for (key, value) in &assignments {
+        process.env(key, value);
+    }
     if isolated_baseline {
         gwt_core::process::scrub_git_env(&mut process);
         process.env_remove("CARGO_TARGET_DIR");
@@ -4310,6 +4363,66 @@ pub(crate) mod tests {
         assert_eq!(
             split_command_line("grep ';' config.toml").unwrap(),
             vec!["grep", ";", "config.toml"]
+        );
+        // Leading assignments survive splitting; `execute_command` turns them
+        // into process environment (#3698).
+        assert_eq!(
+            split_command_line(r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace"#).unwrap(),
+            vec!["RUSTDOCFLAGS=-D warnings", "cargo", "doc", "--workspace"]
+        );
+    }
+
+    #[test]
+    fn take_env_assignments_consumes_only_leading_assignments() {
+        let (env, args) = take_env_assignments(vec![
+            "RUSTDOCFLAGS=-D warnings".into(),
+            "cargo".into(),
+            "doc".into(),
+            "RUSTFLAGS=not-env".into(),
+        ])
+        .expect("leading assignment plus a command");
+        assert_eq!(env, vec![("RUSTDOCFLAGS".into(), "-D warnings".into())]);
+        assert_eq!(args, vec!["cargo", "doc", "RUSTFLAGS=not-env"]);
+
+        // A bare command keeps every token.
+        let (env, args) =
+            take_env_assignments(vec!["cargo".into(), "doc".into()]).expect("plain command");
+        assert!(env.is_empty());
+        assert_eq!(args, vec!["cargo", "doc"]);
+
+        // Tokens that merely contain `=` are arguments, not assignments.
+        let (env, args) = take_env_assignments(vec!["=orphan".into(), "git".into()])
+            .expect("non-assignment leading token");
+        assert!(env.is_empty());
+        assert_eq!(args, vec!["=orphan", "git"]);
+
+        // Assignments with nothing to run are a command-authoring mistake.
+        assert!(take_env_assignments(vec!["RUSTDOCFLAGS=-D warnings".into()]).is_err());
+    }
+
+    // #3698: CI's rustdoc gate is a plain `cargo doc` run plus an `env:`
+    // mapping, and `cargo doc` has no `-- -D warnings` equivalent — so a
+    // runner that cannot apply a leading `KEY=value` prefix cannot execute
+    // the gate at all, which is why the derived matrix shipped without it.
+    #[test]
+    fn run_verification_applies_leading_env_assignments() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-env",
+            &[concat!(
+                r#"GIT_AUTHOR_NAME="verify env probe" "#,
+                r#"GIT_AUTHOR_EMAIL=probe@example.com "#,
+                "git var GIT_AUTHOR_IDENT"
+            )
+            .to_string()],
+        )
+        .unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert!(
+            transcript.contains("verify env probe <probe@example.com>"),
+            "leading assignments must reach the child process: {transcript}"
         );
     }
 
