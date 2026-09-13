@@ -1,32 +1,12 @@
-//! Issue #3913: host admission for `verify.run`.
+//! SPEC #3576: automatic admission for canonical `verify.run` execution.
 //!
-//! `verify.run` is the heaviest thing an agent starts, and on a shared host
-//! it used to start blind: it neither claimed the SPEC #3576 verification
-//! lease nor looked at what sibling worktrees were already compiling, so
-//! seven agent windows could run seven matrices at once (load 15–57 was
-//! measured) and every wall-clock-bound test flaked. This module makes
-//! `verify.run` its own claimant:
+//! Each run acquires its own target job and host-wide heavy lease in-process.
+//! Even runs in the same worktree must wait for each other. Dropping the
+//! admission releases both locks; there is no detached pre-acquisition.
+//! Ordinary builds and development tests do not participate in admission.
 //!
-//! 1. A lease the agent already holds for this worktree
-//!    (`verify.lease.acquire`) is honored as-is — the holder never waits.
-//! 2. Otherwise the run claims the host-wide heavy lease in-process. The
-//!    kernel lock makes the claim atomic, and while the claim is pending the
-//!    coordinator lists it under `verify.lease.status` `pending`.
-//! 3. With the lease held, the run waits for heavy processes that belong to
-//!    *other worktrees of the same repository* (`cargo`, `rustc`,
-//!    `clippy-driver`, test binaries under `target/`) to drain — those are the
-//!    raw skill runs that never took the lease.
-//! 4. The whole wait is bounded (`params.max_wait_secs`, default
-//!    `DEFAULT_MAX_WAIT_SECS`, hard cap `MAX_WAIT_SECS`). The cap stays
-//!    below the Issue Monitor's default `stuck_timeout_secs` on purpose: a
-//!    bounded wait inside one tool call can never be mistaken for a stalled
-//!    agent, and the retry an agent makes after a `deferred` answer is a
-//!    fresh tool call — a heartbeat — so the wait consumes no autonomous
-//!    attempt (#3844 / #3849).
-//!
-//! The wait is visible in three places: the coordinator's `pending` count
-//! while the lease is contended, one Board `status` post once the wait has
-//! lasted longer than a poll, and the admission line in the run output.
+//! Admission preserves the existing bounded wait, FIFO reservations, holder
+//! diagnostics, and Board notice. A deferred invocation writes no run record.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -36,7 +16,6 @@ use gwt_core::index_coordinator::{
     JobAdmission, JobOutcome, JobPriority, TargetJobGuard, VERIFICATION_RESERVATION_TTL,
 };
 use gwt_github::{client::ApiError, SpecOpsError};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::cli::board::{BoardCommand, BoardPostCommand};
 use crate::cli::verification_lease::{self, DEFAULT_TTL_MINUTES};
@@ -59,75 +38,25 @@ const NON_BLOCKING: Duration = Duration::from_millis(250);
 const LEASE_TTL: Duration = Duration::from_secs(DEFAULT_TTL_MINUTES * 60);
 /// Waits shorter than one poll are not worth a Board post.
 const BOARD_NOTICE_AFTER: Duration = POLL;
-/// How many foreign processes a refusal names before summarizing.
-const DESCRIBE_LIMIT: usize = 6;
-
-/// Process names that are compilers or compile drivers whatever they were
-/// asked to do.
-const COMPILERS: &[&str] = &[
-    "rustc",
-    "clippy-driver",
-    "rustdoc",
-    "cargo-llvm-cov",
-    "cargo-clippy",
-    "cargo-nextest",
-];
-/// `cargo` subcommands that compile or run compiled tests.
-const CARGO_HEAVY_SUBCOMMANDS: &[&str] = &[
-    "test", "t", "clippy", "build", "b", "check", "c", "llvm-cov", "nextest", "doc", "d", "bench",
-    "run", "r",
-];
-
-/// What made a process count as heavy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HeavyKind {
-    /// `rustc`, `clippy-driver`, `rustdoc`, coverage / nextest drivers.
-    Compiler,
-    /// `cargo` running a subcommand that compiles or tests.
-    CargoBuild,
-    /// An executable under `target/**/deps` or `target/**/build`.
-    TargetBinary,
-}
-
-/// A heavy process that belongs to another worktree of the same repository.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ForeignHeavyProcess {
-    pub pid: u32,
-    pub name: String,
-    pub kind: HeavyKind,
-    pub worktree: PathBuf,
-}
-
-/// Outcome of a successful admission.
-#[derive(Debug)]
-pub(crate) enum Admission {
-    /// The agent already holds the lease for this worktree.
-    PreHeld { lease_id: Option<String> },
-    /// The run claimed the lease itself; it is released on drop. Boxed: the
-    /// guard and lease carry open lock files and paths, and the enum is
-    /// passed around by value.
-    Acquired(Box<HeldLease>),
-}
-
 /// In-process lease holder; dropping releases the heavy lease and completes
 /// the target job, in the reverse of the acquisition order.
-pub(crate) struct HeldLease {
+pub(crate) struct Admission {
     guard: Option<TargetJobGuard>,
     lease: Option<HeavyLease>,
     lease_id: String,
     waited: Duration,
 }
 
-impl std::fmt::Debug for HeldLease {
+impl std::fmt::Debug for Admission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HeldLease")
+        f.debug_struct("Admission")
             .field("lease_id", &self.lease_id)
             .field("waited", &self.waited)
             .finish_non_exhaustive()
     }
 }
 
-impl HeldLease {
+impl Admission {
     fn settle(&mut self, outcome: JobOutcome) {
         if let Some(lease) = self.lease.take() {
             let _ = lease.release();
@@ -138,43 +67,30 @@ impl HeldLease {
     }
 }
 
-impl Drop for HeldLease {
+impl Drop for Admission {
     fn drop(&mut self) {
         self.settle(JobOutcome::Completed);
     }
 }
 
 impl Admission {
-    /// One line for the `verify.run` output, so the wait travels with the
-    /// evidence.
+    /// The admitted lease identity travels with the command output.
     pub(crate) fn summary(&self) -> String {
-        match self {
-            Admission::PreHeld { lease_id } => format!(
-                "verify: host admission — lease {} already held by this worktree; started without waiting",
-                lease_id.as_deref().unwrap_or("?")
-            ),
-            Admission::Acquired(held) => format!(
-                "verify: host admission — lease {} acquired (waited {}s)",
-                held.lease_id,
-                held.waited.as_secs()
-            ),
-        }
+        format!(
+            "verify: host admission — lease {} acquired (waited {}s)",
+            self.lease_id,
+            self.waited.as_secs(),
+        )
     }
 
     #[cfg(test)]
     pub(crate) fn lease_id(&self) -> Option<&str> {
-        match self {
-            Admission::PreHeld { lease_id } => lease_id.as_deref(),
-            Admission::Acquired(held) => Some(held.lease_id.as_str()),
-        }
+        Some(&self.lease_id)
     }
 
     #[cfg(test)]
     pub(crate) fn waited(&self) -> Duration {
-        match self {
-            Admission::PreHeld { .. } => Duration::ZERO,
-            Admission::Acquired(held) => held.waited,
-        }
+        self.waited
     }
 }
 
@@ -194,75 +110,6 @@ pub(crate) fn resolve_max_wait(requested: Option<u64>) -> Result<Duration, SpecO
     Ok(Duration::from_secs(secs))
 }
 
-fn file_stem_of(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::to_string)
-}
-
-/// Pure classification of one host process.
-pub(crate) fn classify_heavy(name: &str, cmd: &[String], exe: Option<&Path>) -> Option<HeavyKind> {
-    // The reported name may be truncated by the kernel; the executable path
-    // and argv[0] are more reliable when present.
-    let base = exe
-        .and_then(file_stem_of)
-        .or_else(|| cmd.first().and_then(|first| file_stem_of(Path::new(first))))
-        .unwrap_or_else(|| name.to_string());
-    if COMPILERS.contains(&base.as_str()) {
-        return Some(HeavyKind::Compiler);
-    }
-    if base == "cargo" {
-        let subcommand = cmd
-            .iter()
-            .skip(1)
-            .map(String::as_str)
-            .find(|arg| !arg.starts_with('-') && !arg.starts_with('+'));
-        return subcommand
-            .filter(|sub| CARGO_HEAVY_SUBCOMMANDS.contains(sub))
-            .map(|_| HeavyKind::CargoBuild);
-    }
-    exe.filter(|exe| is_target_artifact(exe))
-        .map(|_| HeavyKind::TargetBinary)
-}
-
-/// `target/**/deps/*` and `target/**/build/*` are test binaries and build
-/// scripts; `target/debug/<tool>` is a built tool such as `gwtd` itself.
-fn is_target_artifact(exe: &Path) -> bool {
-    let parts: Vec<&str> = exe
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect();
-    let dirs = &parts[..parts.len().saturating_sub(1)];
-    match dirs.iter().position(|part| *part == "target") {
-        Some(index) => dirs[index + 1..]
-            .iter()
-            .any(|part| *part == "deps" || *part == "build"),
-        None => false,
-    }
-}
-
-/// Parse `git worktree list --porcelain`, dropping bare entries and `own`.
-pub(crate) fn sibling_worktrees_from_porcelain(stdout: &str, own: &Path) -> Vec<PathBuf> {
-    let mut siblings = Vec::new();
-    for block in stdout.split("\n\n") {
-        let mut path = None;
-        let mut bare = false;
-        for line in block.lines() {
-            if let Some(rest) = line.strip_prefix("worktree ") {
-                path = Some(PathBuf::from(rest.trim()));
-            } else if line.trim() == "bare" {
-                bare = true;
-            }
-        }
-        if let Some(path) = path {
-            if !bare && path != own {
-                siblings.push(path);
-            }
-        }
-    }
-    siblings
-}
-
 /// Which of `roots` a process belongs to, judged by its cwd first and its
 /// executable path second.
 pub(crate) fn attribute_worktree<'a>(
@@ -276,109 +123,6 @@ pub(crate) fn attribute_worktree<'a>(
             .find(|root| path.starts_with(root))
             .map(PathBuf::as_path)
     })
-}
-
-/// Enumerate the sibling worktrees of `own` (same repository, other paths),
-/// canonicalized so kernel-reported process paths compare directly.
-pub(crate) fn sibling_worktrees(own: &Path) -> Vec<PathBuf> {
-    if !gwt_core::paths::git_repository_discovery_possible(own) {
-        return Vec::new();
-    }
-    let own = dunce::canonicalize(own).unwrap_or_else(|_| own.to_path_buf());
-    let mut command = gwt_core::process::hidden_command("git");
-    command
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(&own);
-    gwt_core::process::scrub_git_env(&mut command);
-    let Ok(output) = command.output() else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    sibling_worktrees_from_porcelain(&String::from_utf8_lossy(&output.stdout), &own)
-        .into_iter()
-        .filter_map(|path| dunce::canonicalize(&path).ok())
-        .filter(|path| path != &own)
-        .collect()
-}
-
-/// Heavy processes on this host that belong to one of `siblings`. Anything
-/// rooted in `own` is this worktree's business and never counts.
-pub(crate) fn scan_foreign_heavy(own: &Path, siblings: &[PathBuf]) -> Vec<ForeignHeavyProcess> {
-    if siblings.is_empty() {
-        return Vec::new();
-    }
-    let own = dunce::canonicalize(own).unwrap_or_else(|_| own.to_path_buf());
-    let own_pid = std::process::id();
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing()
-            .with_cmd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always)
-            .with_cwd(UpdateKind::Always),
-    );
-    let mut found: Vec<ForeignHeavyProcess> = system
-        .processes()
-        .iter()
-        .filter_map(|(pid, process)| {
-            let pid = pid.as_u32();
-            if pid == own_pid {
-                return None;
-            }
-            let cmd: Vec<String> = process
-                .cmd()
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect();
-            let exe = process.exe();
-            let cwd = process.cwd();
-            // The kernel truncates reported names (16 bytes on macOS); the
-            // executable's file name is the one humans can match.
-            let name = exe
-                .and_then(Path::file_name)
-                .map(|file| file.to_string_lossy().into_owned())
-                .unwrap_or_else(|| process.name().to_string_lossy().into_owned());
-            let kind = classify_heavy(&name, &cmd, exe)?;
-            if [cwd, exe]
-                .into_iter()
-                .flatten()
-                .any(|path| path.starts_with(&own))
-            {
-                return None;
-            }
-            let worktree = attribute_worktree(cwd, exe, siblings)?;
-            Some(ForeignHeavyProcess {
-                pid,
-                name,
-                kind,
-                worktree: worktree.to_path_buf(),
-            })
-        })
-        .collect();
-    found.sort_by_key(|process| process.pid);
-    found
-}
-
-fn describe_foreign(list: &[ForeignHeavyProcess]) -> String {
-    let mut parts: Vec<String> = list
-        .iter()
-        .take(DESCRIBE_LIMIT)
-        .map(|process| {
-            format!(
-                "{} (pid {}) in {}",
-                process.name,
-                process.pid,
-                process.worktree.display()
-            )
-        })
-        .collect();
-    if list.len() > DESCRIBE_LIMIT {
-        parts.push(format!("and {} more", list.len() - DESCRIBE_LIMIT));
-    }
-    parts.join(", ")
 }
 
 /// What the current holder is, and when it is worth coming back
@@ -462,8 +206,7 @@ fn describe_holder(coordinator: &IndexCoordinator) -> HolderNotice {
 }
 
 /// A refusal must always leave the caller with a next step: an ETA when the
-/// holder published one, and otherwise the trigger to watch for plus the
-/// queue entry point that needs no execution authority (Issue #4140 AC-3).
+/// holder published one, and otherwise a canonical retry trigger.
 fn deferred(
     started: Instant,
     max_wait: Duration,
@@ -475,9 +218,7 @@ fn deferred(
             "rerun `verify.run` in about {}s, when the current holder's lease lapses",
             retry_after.as_secs()
         ),
-        None => "rerun `verify.run` once the host quiets down, or claim the next turn with \
-                 `verify.lease.acquire`"
-            .to_string(),
+        None => "rerun `verify.run` after the current lease holder finishes".to_string(),
     };
     unexpected(format!(
         "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — the wait counts \
@@ -537,27 +278,17 @@ impl BoardNotice {
 /// admission through `Admission::summary`.
 pub(crate) fn admit<E: CliEnv>(
     env: &mut E,
-    worktree: &Path,
+    _worktree: &Path,
     max_wait: Duration,
 ) -> Result<Admission, SpecOpsError> {
     let key = verification_lease::verification_key(env)?;
     let coordinator = verification_lease::open_coordinator()?;
     let started = Instant::now();
     let deadline = started + max_wait;
-    let own = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     let mut notice = BoardNotice::default();
 
-    // Phase 1: the host-wide lease. A lease this worktree already holds is
-    // the agent's, taken through `verify.lease.acquire`; honor it and leave
-    // it alone.
-    let status = coordinator
-        .heavy_lease_status()
-        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
-    if status.held && status.target.as_deref() == Some(key.file_stem().as_str()) {
-        return Ok(Admission::PreHeld {
-            lease_id: status.lease_id,
-        });
-    }
+    // Every invocation owns its locks; matching the worktree is not proof
+    // that another run's lease belongs to this invocation.
     let guard = loop {
         match coordinator
             .request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING)
@@ -565,8 +296,8 @@ pub(crate) fn admit<E: CliEnv>(
         {
             JobAdmission::Owner(guard) => break guard,
             JobAdmission::Joined(waiter) => {
-                // A concurrent claimant in this same worktree (another
-                // verify.run, or a lease acquire still handshaking).
+                // A concurrent canonical run in this same worktree owns
+                // the target job until its command matrix finishes.
                 drop(waiter);
                 if Instant::now() >= deadline {
                     return Err(deferred(
@@ -626,37 +357,14 @@ pub(crate) fn admit<E: CliEnv>(
             }
         }
     };
-    let mut held = HeldLease {
+    let admission = Admission {
         guard: Some(guard),
         lease_id: lease.id().to_string(),
         lease: Some(lease),
-        waited: Duration::ZERO,
+        waited: started.elapsed(),
     };
 
-    // Phase 2: with the lease held, wait for raw heavy runs of sibling
-    // worktrees to drain. Holding the lease first reserves this run's turn;
-    // lease-respecting claimants queue behind it instead of racing.
-    let siblings = sibling_worktrees(&own);
-    loop {
-        let foreign = scan_foreign_heavy(&own, &siblings);
-        if foreign.is_empty() {
-            break;
-        }
-        let detail = format!(
-            "heavy processes of other worktrees still running: {}",
-            describe_foreign(&foreign)
-        );
-        if Instant::now() >= deadline {
-            held.settle(JobOutcome::Failed {
-                message: "host admission deferred".to_string(),
-            });
-            return Err(deferred(started, max_wait, &detail, None));
-        }
-        notice.maybe_post(env, started, max_wait, &detail);
-        sleep_until(deadline);
-    }
-    held.waited = started.elapsed();
-    Ok(Admission::Acquired(Box::new(held)))
+    Ok(admission)
 }
 
 #[cfg(test)]
@@ -666,94 +374,6 @@ mod tests {
         HeavyLeaseStatus, IndexCoordinator, JobAdmission, JobPriority, TargetKey,
     };
     use gwt_core::test_support::ScopedGwtHome;
-
-    fn strings(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|part| part.to_string()).collect()
-    }
-
-    #[test]
-    fn classify_heavy_recognizes_compilers_cargo_subcommands_and_target_binaries() {
-        assert_eq!(
-            classify_heavy("rustc", &strings(&["rustc", "--crate-name", "gwt"]), None),
-            Some(HeavyKind::Compiler)
-        );
-        assert_eq!(
-            classify_heavy("clippy-driver", &strings(&["clippy-driver"]), None),
-            Some(HeavyKind::Compiler)
-        );
-        assert_eq!(
-            classify_heavy(
-                "cargo",
-                &strings(&["/toolchain/bin/cargo", "test", "-p", "gwt"]),
-                Some(Path::new("/toolchain/bin/cargo"))
-            ),
-            Some(HeavyKind::CargoBuild)
-        );
-        assert_eq!(
-            classify_heavy(
-                "cargo",
-                &strings(&["cargo", "+stable", "clippy", "--all-targets"]),
-                None
-            ),
-            Some(HeavyKind::CargoBuild)
-        );
-        assert_eq!(
-            classify_heavy("cargo", &strings(&["cargo", "build", "-p", "gwt"]), None),
-            Some(HeavyKind::CargoBuild)
-        );
-        assert_eq!(
-            classify_heavy(
-                "gwt_core-923d7088e882f577",
-                &strings(&["/wt/target/debug/deps/gwt_core-923d7088e882f577"]),
-                Some(Path::new("/wt/target/debug/deps/gwt_core-923d7088e882f577"))
-            ),
-            Some(HeavyKind::TargetBinary)
-        );
-        assert_eq!(
-            classify_heavy(
-                "build-script-build",
-                &strings(&["/wt/target/debug/build/ring-abc/build-script-build"]),
-                Some(Path::new(
-                    "/wt/target/debug/build/ring-abc/build-script-build"
-                ))
-            ),
-            Some(HeavyKind::TargetBinary)
-        );
-    }
-
-    #[test]
-    fn classify_heavy_ignores_light_processes() {
-        assert_eq!(
-            classify_heavy("git", &strings(&["git", "status"]), None),
-            None
-        );
-        assert_eq!(
-            classify_heavy("cargo", &strings(&["cargo", "metadata"]), None),
-            None
-        );
-        assert_eq!(
-            classify_heavy("cargo", &strings(&["cargo", "fmt"]), None),
-            None
-        );
-        assert_eq!(
-            classify_heavy(
-                "gwtd",
-                &strings(&["/wt/target/debug/gwtd"]),
-                Some(Path::new("/wt/target/debug/gwtd"))
-            ),
-            None,
-            "a built binary outside deps/build is a tool, not a compile"
-        );
-    }
-
-    #[test]
-    fn sibling_worktrees_from_porcelain_excludes_bare_and_own() {
-        let porcelain = "worktree /repo/gwt.git\nbare\n\n\
-                         worktree /repo/work/issue-1\nHEAD abc\nbranch refs/heads/work/issue-1\n\n\
-                         worktree /repo/work/issue-2\nHEAD def\nbranch refs/heads/work/issue-2\n\n";
-        let siblings = sibling_worktrees_from_porcelain(porcelain, Path::new("/repo/work/issue-1"));
-        assert_eq!(siblings, vec![PathBuf::from("/repo/work/issue-2")]);
-    }
 
     #[test]
     fn attribute_worktree_prefers_cwd_then_exe_and_ignores_unrelated() {
@@ -864,14 +484,14 @@ mod tests {
         let without_eta = deferred(
             Instant::now(),
             Duration::from_secs(300),
-            "heavy processes of other worktrees still running",
+            "another canonical verification is still running",
             None,
         )
         .to_string();
         assert!(without_eta.contains("verify.run"), "{without_eta}");
         assert!(
-            without_eta.contains("verify.lease.acquire"),
-            "a refusal with no ETA must still name the queue entry point: {without_eta}"
+            !without_eta.contains("verify.lease.acquire"),
+            "canonical admission must not recommend detached manual acquisition: {without_eta}"
         );
     }
 
@@ -879,16 +499,6 @@ mod tests {
     /// treated as broken. Sized for a fork/exec window on a saturated CI
     /// runner, not for a lease that was never released (Issue #3937).
     const RELEASE_OBSERVATION_BUDGET: Duration = Duration::from_secs(5);
-
-    /// How long a freshly spawned sibling may stay invisible to
-    /// [`scan_foreign_heavy`] before the scan is treated as broken. A spawned
-    /// test binary is not scannable the instant `spawn` returns: the OS still
-    /// has to publish the process and resolve its working directory, and under
-    /// Windows default parallelism on a shared runner that window is not
-    /// bounded by any small constant (Issue #3404). This is a deadlock guard,
-    /// not the contract — the contract is that the scan eventually reports the
-    /// sibling, which the convergence loop below asserts.
-    const FOREIGN_SCAN_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
 
     /// Issue #3937: one test's private verification-lease root, plus the
     /// diagnosis a failure owes its reader.
@@ -1077,14 +687,6 @@ mod tests {
                 )
             });
 
-        // A lease this run merely found would satisfy every assertion below
-        // except the release, and would then fail as an unexplained "still
-        // held" (Issue #3937).
-        assert!(
-            matches!(admission, Admission::Acquired(_)),
-            "admit must take the lease itself here — {}",
-            lease_root.describe()
-        );
         let status = lease_root.assert_held("admission must hold the host-wide lease");
         assert_eq!(
             status.target.as_deref(),
@@ -1114,52 +716,22 @@ mod tests {
     }
 
     #[test]
-    fn admit_honors_a_lease_already_held_by_this_worktree() {
+    fn canonical_runs_in_the_same_worktree_do_not_share_admission() {
         let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
-        let key = verification_key_for(worktree.path());
-        let JobAdmission::Owner(guard) = lease_root
-            .coordinator
-            .request_job(&key, JobPriority::ManualRebuild, Duration::from_millis(250))
-            .unwrap()
-        else {
-            panic!(
-                "a private lease root must admit the owner — {}",
-                lease_root.describe()
-            );
-        };
-        let lease = guard
-            .acquire_heavy_with_ttl(Duration::from_millis(250), Duration::from_secs(60))
-            .unwrap();
-
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let admission = admit(&mut env, worktree.path(), Duration::ZERO).unwrap_or_else(|err| {
-            panic!(
-                "a lease this worktree already holds must be honored: {err} — {}",
-                lease_root.describe()
-            )
-        });
-
+        let first = admit(&mut env, worktree.path(), Duration::ZERO).unwrap();
+        let second = admit(&mut env, worktree.path(), Duration::ZERO);
         assert!(
-            matches!(admission, Admission::PreHeld { .. }),
-            "{}",
-            lease_root.describe()
+            second.is_err(),
+            "a second canonical run must not borrow the first run's lease: {second:?}"
         );
-        assert_eq!(
-            admission.lease_id(),
-            Some(lease.id()),
-            "{}",
-            lease_root.describe()
-        );
-        assert!(
-            admission.summary().contains("already held"),
-            "{}",
-            admission.summary()
-        );
-        drop(admission);
-        lease_root.assert_held("a pre-held lease belongs to the agent and must survive the run");
-        drop(lease);
-        drop(guard);
+        assert!(second.unwrap_err().to_string().contains("deferred"));
+        drop(first);
+        lease_root.assert_free("the first run releases its own lease");
+        let next = admit(&mut env, worktree.path(), Duration::ZERO).unwrap();
+        drop(next);
+        lease_root.assert_free("the next run releases its own lease");
     }
 
     #[test]
@@ -1207,84 +779,6 @@ mod tests {
         assert_eq!(
             lease_root.coordinator.heavy_lease_status().unwrap().pending,
             1
-        );
-    }
-
-    /// Self-exec target: parks the way a running test binary does. Platform
-    /// binaries such as `/bin/sleep` cannot stand in for it — a copy placed
-    /// under `target/` is killed by the kernel right after exec on macOS.
-    #[test]
-    #[ignore = "spawned by scan_foreign_heavy_finds_a_target_binary_running_in_a_sibling"]
-    fn fake_heavy_process_parks() {
-        std::thread::sleep(Duration::from_secs(60));
-    }
-
-    /// The worktree root above this binary's `target/.../deps` directory.
-    fn worktree_root_of(exe: &Path) -> PathBuf {
-        let mut root = exe.to_path_buf();
-        while root.file_name().is_some_and(|name| name != "target") {
-            assert!(
-                root.pop(),
-                "a test binary must live under a worktree's target directory: {}",
-                exe.display()
-            );
-        }
-        root.pop();
-        root
-    }
-
-    #[test]
-    fn scan_foreign_heavy_finds_a_target_binary_running_in_a_sibling() {
-        let own = tempfile::tempdir().unwrap();
-        // Production attributes a sibling's heavy work through the binary's own
-        // path under `<worktree>/target/.../deps`. Standing the sibling up as a
-        // bare tempdir and only pointing `current_dir` at it makes the working
-        // directory the single attribution signal, and Windows cannot supply
-        // one: sysinfo reads another process's cwd out of its PEB, so the scan
-        // came back empty there while Linux passed on the same SHA (Issue
-        // #3404). This binary already sits under a worktree's target
-        // directory, which is the production shape on every platform.
-        let exe = dunce::canonicalize(std::env::current_exe().unwrap()).unwrap();
-        let sibling = worktree_root_of(&exe);
-        let mut child = gwt_core::process::hidden_command(&exe)
-            .args([
-                "--ignored",
-                "--exact",
-                "cli::verification_lease::admission::tests::fake_heavy_process_parks",
-            ])
-            .current_dir(&sibling)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-
-        let siblings = vec![sibling];
-        let deadline = Instant::now() + FOREIGN_SCAN_OBSERVATION_BUDGET;
-        let (found, hit) = loop {
-            let found = scan_foreign_heavy(own.path(), &siblings);
-            if let Some(index) = found.iter().position(|process| process.pid == child.id()) {
-                break (found, index);
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!(
-                    "the parked test binary (pid {}) must be reported within {:?}: {found:?}",
-                    child.id(),
-                    FOREIGN_SCAN_OBSERVATION_BUDGET
-                );
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        let _ = child.kill();
-        let _ = child.wait();
-
-        let hit = &found[hit];
-        assert_eq!(hit.kind, HeavyKind::TargetBinary);
-        assert_eq!(hit.worktree, siblings[0]);
-        assert!(
-            scan_foreign_heavy(own.path(), &[]).is_empty(),
-            "no siblings means nothing can be foreign"
         );
     }
 }

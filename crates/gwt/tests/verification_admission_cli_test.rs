@@ -1,25 +1,23 @@
-//! Issue #3913: `verify.run` host admission across real `gwtd` invocations.
+//! SPEC #3576: canonical verification admission across real `gwtd` invocations.
 //!
-//! The scenario behind the Issue is several agent worktrees of one repository
-//! compiling at once, so every test here builds a real repository with a
-//! sibling worktree and runs the real binary against it. Heavy load is
-//! simulated by re-executing this test binary — which lives under
-//! `target/debug/deps/`, exactly like a running test binary of the sibling —
-//! parked on an ignored test with the sibling as its working directory.
+//! Canonical runs serialize in the same or different worktrees, release their
+//! locks after success or failure, and leave ordinary development tests alone.
+//! Self-exec command fixtures use readiness/release handshakes so assertions
+//! observe active commands rather than relying on a guessed sleep duration.
 
 #![cfg(unix)]
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gwt_core::process::hidden_command;
 use tempfile::TempDir;
 
 const SESSION: &str = "session-admission-test";
 
-fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
+fn spawn_gwtd(home: &Path, cwd: &Path, envelope: &str, extra_env: &[(&str, &Path)]) -> Child {
     let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     for key in [
         "GWT_BIN_PATH",
@@ -32,6 +30,9 @@ fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
         "GWT_WORKTREE_HASH",
     ] {
         command.env_remove(key);
+    }
+    for (key, value) in extra_env {
+        command.env(key, value);
     }
     let mut child = command
         .env("HOME", home)
@@ -49,6 +50,14 @@ fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
         .expect("gwtd stdin")
         .write_all(envelope.as_bytes())
         .expect("write envelope");
+    child
+}
+
+fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
+    collect_gwtd(spawn_gwtd(home, cwd, envelope, &[]))
+}
+
+fn collect_gwtd(child: Child) -> (bool, String) {
     let output = child.wait_with_output().expect("await gwtd");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -121,152 +130,191 @@ impl Arena {
 
     /// Spawn a process that looks like a test binary of the sibling worktree.
     fn spawn_sibling_heavy(&self) -> Child {
-        hidden_command(std::env::current_exe().expect("test binary path"))
+        let ready = self.home.path().join("development-ready");
+        let mut child = hidden_command(std::env::current_exe().expect("test binary path"))
             .args(["--ignored", "--exact", "fake_heavy_process_parks"])
+            .env("ADMISSION_DEVELOPMENT_READY", &ready)
             .current_dir(&self.sibling)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn fake heavy process")
+            .expect("spawn fake heavy process");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ready.exists() {
+            if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                kill(child);
+                panic!("development test command did not become ready");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child
     }
 }
 
+fn verify_command(command: &str, max_wait_secs: u64) -> String {
+    serde_json::json!({
+        "schema_version": 1,
+        "operation": "verify.run",
+        "params": {"commands": [command], "max_wait_secs": max_wait_secs}
+    })
+    .to_string()
+}
+
 fn verify_run(max_wait_secs: u64) -> String {
-    format!(
-        r#"{{"schema_version":1,"operation":"verify.run","params":{{"commands":["git --version"],"max_wait_secs":{max_wait_secs}}}}}"#
-    )
+    verify_command("git --version", max_wait_secs)
 }
 
 const STATUS: &str = r#"{"schema_version":1,"operation":"verify.lease.status","params":{}}"#;
-const ACQUIRE_2M: &str = r#"{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":2,"reason":"admission test"}}"#;
-
-fn field<'a>(output: &'a str, key: &str) -> &'a str {
-    output
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(&format!("{key}: ")))
-        .unwrap_or_else(|| panic!("output has no `{key}` field:\n{output}"))
-}
 
 fn kill(mut child: Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
 
-/// Self-exec target for `spawn_sibling_heavy`.
+/// A real canonical run whose command remains active until the test releases it.
+struct CanonicalRun {
+    child: Option<Child>,
+    release: PathBuf,
+}
+
+impl CanonicalRun {
+    fn start(arena: &Arena, cwd: &Path) -> Self {
+        let ready = arena.home.path().join("canonical-ready");
+        let release = arena.home.path().join("canonical-release");
+        let exe = std::env::current_exe().unwrap();
+        let command = format!(
+            "\"{}\" --ignored --exact canonical_command_parks",
+            exe.display()
+        );
+        let child = spawn_gwtd(
+            arena.home.path(),
+            cwd,
+            &verify_command(&command, 0),
+            &[("ADMISSION_READY", &ready), ("ADMISSION_RELEASE", &release)],
+        );
+        let mut run = Self {
+            child: Some(child),
+            release,
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ready.exists() {
+            if run.child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                let (_, output) = collect_gwtd(run.child.take().unwrap());
+                panic!("canonical run exited before its command started: {output}");
+            }
+            assert!(Instant::now() < deadline, "canonical command did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        run
+    }
+
+    fn finish(mut self) -> (bool, String) {
+        std::fs::write(&self.release, "release").unwrap();
+        collect_gwtd(self.child.take().unwrap())
+    }
+}
+
+impl Drop for CanonicalRun {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.release, "release");
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
+    }
+}
+
 #[test]
-#[ignore = "spawned as the sibling worktree's fake test binary"]
+#[ignore = "spawned as the canonical verification command"]
+fn canonical_command_parks() {
+    let ready = std::env::var_os("ADMISSION_READY").unwrap();
+    let release = PathBuf::from(std::env::var_os("ADMISSION_RELEASE").unwrap());
+    std::fs::write(ready, "ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !release.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "canonical test command was not released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[ignore = "spawned as the sibling worktree's development test binary"]
 fn fake_heavy_process_parks() {
+    std::fs::write(
+        std::env::var_os("ADMISSION_DEVELOPMENT_READY").unwrap(),
+        "ready",
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_secs(120));
 }
 
 #[test]
-fn verify_run_waits_for_a_sibling_worktree_heavy_process_then_runs() {
+fn verify_run_does_not_wait_for_sibling_development_tests() {
     let arena = Arena::new();
-    let heavy = arena.spawn_sibling_heavy();
-    let drain = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(3));
-        kill(heavy);
-    });
-
-    let (ok, output) = arena.run_in(&arena.repo, &verify_run(60));
-    drain.join().unwrap();
-
-    assert!(ok, "the run must start once the sibling drains:\n{output}");
-    assert!(output.contains("verify: PASS"), "{output}");
-    assert!(
-        output.contains("host admission")
-            && output.contains("waited")
-            && !output.contains("waited 0s"),
-        "the admission summary must report a real wait:\n{output}"
-    );
-    let (_, status) = arena.run_in(&arena.repo, STATUS);
-    assert!(
-        status.starts_with("verification lease: free"),
-        "the in-process lease must be released after the run:\n{status}"
-    );
-}
-
-#[test]
-fn verify_run_defers_when_sibling_heavy_processes_outlast_the_wait_budget() {
-    let arena = Arena::new();
-    let heavy = arena.spawn_sibling_heavy();
-
-    let (ok, output) = arena.run_in(&arena.repo, &verify_run(1));
+    let mut heavy = arena.spawn_sibling_heavy();
+    let (ok, output) = arena.run_in(&arena.repo, &verify_run(0));
+    let still_running = heavy.try_wait().unwrap().is_none();
     let (_, status) = arena.run_in(&arena.repo, STATUS);
     kill(heavy);
 
-    assert!(!ok, "a busy host must defer the run:\n{output}");
-    assert!(output.contains("deferred"), "{output}");
-    assert!(output.contains("rerun `verify.run`"), "{output}");
     assert!(
-        output.contains("verification_admission_cli_test"),
-        "the refusal must name the foreign process:\n{output}"
+        still_running,
+        "the ordinary development test must remain running"
     );
+    assert!(
+        ok,
+        "ordinary development work must not defer canonical verification:\n{output}"
+    );
+    assert!(output.contains("verify: PASS"), "{output}");
+    assert!(status.starts_with("verification lease: free"), "{status}");
+}
+
+fn assert_canonical_runs_are_serialized(same_worktree: bool) {
+    let arena = Arena::new();
+    let first = CanonicalRun::start(&arena, &arena.repo);
+    let contender = if same_worktree {
+        &arena.repo
+    } else {
+        &arena.sibling
+    };
+    let (ok, output) = arena.run_in(contender, &verify_run(0));
+    assert!(!ok, "a concurrent canonical run must defer:\n{output}");
+    assert!(output.contains("deferred"), "{output}");
     assert!(
         !output.contains("verify: PASS") && !output.contains("verify: FAIL"),
-        "a deferred run must not produce a record:\n{output}"
+        "{output}"
     );
-    assert!(
-        status.starts_with("verification lease: free"),
-        "a deferred run must not keep the lease:\n{status}"
-    );
+    let (_, status) = arena.run_in(contender, STATUS);
+    assert!(status.starts_with("verification lease: held"), "{status}");
+    let (ok, output) = first.finish();
+    assert!(ok && output.contains("verify: PASS"), "{output}");
+    let (ok, output) = arena.run_in(contender, &verify_run(0));
+    assert!(ok && output.contains("verify: PASS"), "{output}");
+    let (_, status) = arena.run_in(contender, STATUS);
+    assert!(status.starts_with("verification lease: free"), "{status}");
 }
 
 #[test]
-fn verify_run_honors_a_lease_already_held_by_this_worktree() {
-    let arena = Arena::new();
-    let (ok, granted) = arena.run_in(&arena.repo, ACQUIRE_2M);
-    assert!(
-        ok && granted.starts_with("verification lease: granted"),
-        "{granted}"
-    );
-    let lease_id = field(&granted, "lease_id").to_string();
-    let heavy = arena.spawn_sibling_heavy();
-
-    let (ok, output) = arena.run_in(&arena.repo, &verify_run(1));
-    kill(heavy);
-
-    assert!(ok, "the lease holder never waits:\n{output}");
-    assert!(output.contains("verify: PASS"), "{output}");
-    assert!(output.contains("already held"), "{output}");
-    let (_, status) = arena.run_in(&arena.repo, STATUS);
-    assert!(
-        status.starts_with("verification lease: held") && status.contains(&lease_id),
-        "the agent's own lease must survive the run:\n{status}"
-    );
-    let release = format!(
-        r#"{{"schema_version":1,"operation":"verify.lease.release","params":{{"lease_id":"{lease_id}"}}}}"#
-    );
-    let (ok, released) = arena.run_in(&arena.repo, &release);
-    assert!(ok, "{released}");
+fn canonical_runs_in_the_same_worktree_are_serialized() {
+    assert_canonical_runs_are_serialized(true);
 }
 
 #[test]
-fn verify_run_defers_while_another_worktree_holds_the_lease() {
-    let arena = Arena::new();
-    let (ok, granted) = arena.run_in(&arena.sibling, ACQUIRE_2M);
-    assert!(
-        ok && granted.starts_with("verification lease: granted"),
-        "{granted}"
-    );
-    let lease_id = field(&granted, "lease_id").to_string();
-    let holder_target = field(&granted, "target").to_string();
+fn canonical_runs_in_different_worktrees_are_serialized() {
+    assert_canonical_runs_are_serialized(false);
+}
 
-    let (ok, output) = arena.run_in(&arena.repo, &verify_run(1));
-
-    assert!(
-        !ok,
-        "another worktree's lease must defer the run:\n{output}"
-    );
-    assert!(output.contains("deferred"), "{output}");
-    assert!(
-        output.contains(&holder_target),
-        "the refusal must name the holder:\n{output}"
-    );
-    let release = format!(
-        r#"{{"schema_version":1,"operation":"verify.lease.release","params":{{"lease_id":"{lease_id}"}}}}"#
-    );
-    let (ok, released) = arena.run_in(&arena.sibling, &release);
-    assert!(ok, "{released}");
+#[test]
+fn failed_canonical_commands_release_the_lease() {
+    for command in ["sh -c 'exit 7'", "gwt-missing-verification-command-3576"] {
+        let arena = Arena::new();
+        let (ok, output) = arena.run_in(&arena.repo, &verify_command(command, 0));
+        assert!(!ok && output.contains("verify: FAIL"), "{output}");
+        let (_, status) = arena.run_in(&arena.repo, STATUS);
+        assert!(status.starts_with("verification lease: free"), "{status}");
+        let (ok, output) = arena.run_in(&arena.sibling, &verify_run(0));
+        assert!(ok && output.contains("verify: PASS"), "{output}");
+    }
 }

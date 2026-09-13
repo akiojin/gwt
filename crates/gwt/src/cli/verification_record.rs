@@ -3316,15 +3316,15 @@ struct VerificationCallerAuthority {
 /// Render the `verify.*` entry refusal.
 ///
 /// A window without execution authority cannot register a plan or a record,
-/// and saying only that leaves it with nothing to try — the window in Issue
-/// #4140 concluded it was completely stuck. The host verification queue is
-/// reachable without any execution authority, so the refusal names it.
+/// but development checks still run directly without a verification lease.
+/// Never direct an unauthorized window to reserve an idle detached holder.
 fn verification_entry_refusal(err: &io::Error) -> String {
     if err.kind() == ErrorKind::PermissionDenied {
         format!(
             "{err}. This window cannot register a verification plan or record, but it can still \
-             take its turn in the host verification queue: `verify.lease.status` and \
-             `verify.lease.acquire` need no execution authority."
+             run development builds, tests, and lint directly without a lease. \
+             `verify.lease.status` remains available to inspect canonical verification. \
+             Restore the owning Session authority before retrying `verify.run`."
         )
     } else {
         format!("failed to resolve verification authority: {err}")
@@ -3866,8 +3866,8 @@ pub(super) fn run<E: CliEnv>(
             max_wait_secs,
             user_verification_result,
         } => {
-            // Issue #3913: claim host admission (the SPEC #3576 lease plus a
-            // quiet host) before anything heavy starts. A budget overrun
+            // SPEC #3576: the canonical runner owns its in-process lease.
+            // Ordinary development processes do not delay admission. A budget overrun
             // answers `deferred` without writing a record.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
@@ -4013,21 +4013,20 @@ pub(crate) mod tests {
         }
     }
 
-    /// Issue #4140 AC-4: a window without execution authority is told both why
-    /// `verify.*` refused it and how it can still take its turn in the host
-    /// verification queue. Without that, the only observable outcome is a
-    /// permission error with no path forward, which is how the reported
-    /// window ended up with nothing left to try.
+    /// An authority refusal must explain how ordinary development can proceed
+    /// without reserving a detached holder that has no canonical work to run.
     #[test]
-    fn verification_entry_refusal_points_at_the_authority_free_queue() {
+    fn verification_entry_refusal_points_at_direct_development_checks() {
         let refused = verification_entry_refusal(&verification_caller_authority_error());
         assert!(
             refused.contains("verification authority"),
             "the refusal must keep naming its cause: {refused}"
         );
         assert!(
-            refused.contains("verify.lease.acquire") && refused.contains("verify.lease.status"),
-            "the refusal must name the queue entry points that need no authority: {refused}"
+            !refused.contains("verify.lease.acquire")
+                && refused.contains("verify.lease.status")
+                && refused.contains("directly"),
+            "the refusal must allow development checks without reserving an idle lease: {refused}"
         );
 
         let other = verification_entry_refusal(&io::Error::other("disk on fire"));
