@@ -34191,52 +34191,58 @@ fn startup_reaper_reclaims_a_durably_running_holder_with_no_runtime() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    init_git_clone_with_origin(&repo);
-    let worktree = temp.path().join("worktrees").join("running-owner");
-    run_git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "work/running-owner",
-            worktree.to_str().expect("worktree path"),
-        ],
-    );
-    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        number: 3964,
-    };
-    let session_id = "startup-running-holder-without-runtime";
-    let worktrees = seed_defunct_active_owner(
-        &runtime.sessions_dir,
-        &repo,
-        &worktree,
-        "work/running-owner",
-        owner,
-        session_id,
+    for status in [
         gwt_agent::AgentStatus::Running,
-    );
+        gwt_agent::AgentStatus::WaitingInput,
+        gwt_agent::AgentStatus::Unknown,
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("running-owner");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/running-owner",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3964,
+        };
+        let session_id = "startup-running-holder-without-runtime";
+        let worktrees = seed_defunct_active_owner(
+            &runtime.sessions_dir,
+            &repo,
+            &worktree,
+            "work/running-owner",
+            owner,
+            session_id,
+            status,
+        );
 
-    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+        let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
 
-    assert_eq!(
-        summary.reaped, 1,
-        "a Running holder with no runtime anywhere is not running: {summary:?}"
-    );
-    assert_eq!(
-        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
-            .expect("load ledger")
-            .expect("ledger")
-            .current_effective_status(),
-        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
-    );
+        assert_eq!(
+            summary.reaped, 1,
+            "a {status:?} holder with no runtime anywhere is not running: {summary:?}"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+                .expect("load ledger")
+                .expect("ledger")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+        );
+    }
 }
 
 /// Issue #3964 AC-1: a refused relaunch materializes the worktree again but
@@ -53212,13 +53218,120 @@ fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0")),
         Some(CodexHookDiscoveryMode::WorkspaceHome)
     );
+    // Issue #3481 AC-1: `latest` is an alias, not a capability. It must defer
+    // to the probe evidence for the executable that will actually be spawned,
+    // exactly like `installed` does.
     assert_eq!(
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("latest")),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        None
     );
     assert_eq!(
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("installed")),
         None
+    );
+}
+
+/// Issue #3481 AC-1/AC-2/AC-4: the `codex@latest` matrix. The launch-argument
+/// snapshot (`bunx --yes @openai/codex@latest`) and the resume-readiness
+/// decision both read the same runner-probe evidence, and only an absent
+/// snapshot falls back to a diagnosable superset.
+#[test]
+fn codex_latest_hook_discovery_mode_follows_runner_probe_evidence() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+
+    let old = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.130.0".to_string()),
+        ..Default::default()
+    };
+    let current = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.133.0".to_string()),
+        ..Default::default()
+    };
+    let unparseable = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("unexpected output".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&old)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
+        CodexHookDiscoveryMode::WorkspaceHome,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unparseable)),
+        CodexHookDiscoveryMode::Both,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, None),
+        CodexHookDiscoveryMode::Both,
+    );
+}
+
+/// Issue #3481 AC-2: measured evidence outranks the "we switched to the latest
+/// package, so it must be new" heuristic. A fallback that probed an old Codex
+/// still has to materialize the hooks where that Codex looks for them.
+#[test]
+fn codex_latest_fallback_evidence_outranks_the_fallback_heuristic() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+    let report = gwt_agent::HostRunnerHealthReport {
+        switched_to_fallback: true,
+        version_output: Some("codex-cli 0.130.0".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+}
+
+/// Issue #3481 AC-4/AC-5: an explicitly pinned version is already the exact
+/// identity of the package that will be materialized, so it stays
+/// selector-derived and never depends on a probe; non-Codex agents keep their
+/// unconditional mode.
+#[test]
+fn codex_explicit_version_and_other_agents_keep_their_existing_modes() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let pinned = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("0.130.0")
+        .build();
+    let stale_evidence = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.133.0".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&pinned, Some(&stale_evidence)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+
+    let claude = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&claude, None),
+        CodexHookDiscoveryMode::WorkspaceHome,
     );
 }
 
@@ -64154,6 +64267,100 @@ fn periodic_wake_rearms_a_quiet_pm_with_standing_work() {
             .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:10Z")
             .is_none(),
         "one quiet window gets at most one injected prompt"
+    );
+}
+
+/// SPEC #4320 AC-3/AC-7: an unresolved Concern is standing supervision work
+/// even after the Monitor owner queue and active-launch inventory are empty.
+#[test]
+fn periodic_wake_rearms_a_quiet_pm_with_an_unresolved_concern() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+
+    gwt_core::concern::ConcernStore::for_repo(&repo)
+        .create(
+            serde_json::from_value(serde_json::json!({
+                "summary": "restored windows remain visible",
+                "symptom_measurement": {
+                    "kind": "shell_command",
+                    "command": "printf '{\"count\":1}'"
+                },
+                "baseline": {"count": 1},
+                "verification_predicate": {
+                    "pointer": "/count",
+                    "op": "eq",
+                    "expected": 0
+                },
+                "owner_issues": [42]
+            }))
+            .expect("valid NewConcern fixture"),
+        )
+        .expect("create unresolved Concern");
+    assert!(
+        gwt_core::concern::has_unresolved_concerns(&repo).expect("read valid Concern store"),
+        "fixture must exercise the readable unresolved-Concern path"
+    );
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop");
+
+    let decision = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .expect("an unresolved Concern must periodically wake a quiet PM");
+    assert_eq!(decision.window_id, pm_window_id);
+}
+
+/// A transient Concern-store read failure must retain supervision eligibility;
+/// treating it as an empty store could park the only process that can repair or
+/// report the unobservable Concern state.
+#[test]
+fn periodic_wake_remains_eligible_when_the_concern_store_is_unreadable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+
+    let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+    let concerns_path = gwt_core::paths::gwt_project_dir(&repo_hash)
+        .join("project-state")
+        .join("concerns.json");
+    fs::create_dir_all(concerns_path.parent().expect("project-state directory"))
+        .expect("create project-state directory");
+    fs::write(&concerns_path, b"{ malformed concern store")
+        .expect("write malformed Concern fixture");
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop");
+
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_some(),
+        "an unreadable Concern store must keep periodic supervision eligible"
     );
 }
 
