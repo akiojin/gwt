@@ -933,12 +933,11 @@ mod tests {
                 "params.derive:true",
                 "execution.repair",
                 "execution.status",
-                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
-                // the host-wide lease, and verify.run's own admission is
-                // documented where the loop is defined.
-                "verify.lease.acquire",
-                "verify.lease.release",
-                "issue.monitor.wait",
+                // SPEC #3576 AC-C6: bootstrap and TDD remain independent
+                // from canonical verification admission.
+                "Only canonical `verify.run` acquires the host-wide lease",
+                "cargo build -p gwt --bin gwtd",
+                "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
             ] {
@@ -953,8 +952,7 @@ mod tests {
             );
         }
 
-        // Issue #3913 AC-2: the verification skill's serialization section
-        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        // SPEC #3576 AC-C6: verification admission belongs to verify.run.
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
@@ -965,8 +963,8 @@ mod tests {
                 "## Heavy verification serialization",
                 "`cargo test`",
                 "`cargo clippy`",
-                "verify.lease.acquire",
-                "issue.monitor.wait",
+                "Only canonical `verify.run` acquires the host-wide lease",
+                "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
             ] {
