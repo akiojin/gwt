@@ -3482,9 +3482,8 @@ mod tests {
         assert_eq!(criteria.ids, want);
     }
 
-    /// Fake `gh` whose `issue list` answers with the given plain Issues. The
-    /// scan-owned full refresh only lists (no SPEC views), so nothing else is
-    /// needed.
+    /// Fake `gh` with one Issue on a short first page and the remaining
+    /// Issues behind its Link header. Both lists contain only plain Issues.
     fn write_fake_gh_listing(dir: &Path, numbers: &[u64]) -> PathBuf {
         let rows = numbers
             .iter()
@@ -3493,14 +3492,37 @@ mod tests {
                     r#"{{"number":{number},"title":"Issue {number}","body":"Body {number}","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/{number}","updatedAt":"2026-09-07T03:34:02Z"}}"#
                 )
             })
-            .collect::<Vec<_>>()
-            .join(",");
+            .collect::<Vec<_>>();
+        let next = "https://api.github.com/repositories/1/issues?per_page=2&page=2";
+        for (index, page_rows) in [&rows[..1], &rows[1..]].into_iter().enumerate() {
+            let body = format!("[{}]", page_rows.join(","));
+            let headers = if index == 0 {
+                format!("Link: <{next}>; rel=\"next\"\r\n")
+            } else {
+                String::new()
+            };
+            std::fs::write(dir.join(format!("gh-page-{}.json", index + 1)), &body)
+                .expect("write page body");
+            std::fs::write(
+                dir.join(format!("gh-page-{}.http", index + 1)),
+                format!("HTTP/2.0 200 OK\nContent-Type: application/json\r\n{headers}\r\n{body}"),
+            )
+            .expect("write page response");
+        }
         #[cfg(windows)]
         {
             let fake_gh = dir.join("gh.cmd");
             std::fs::write(
                 &fake_gh,
-                format!("@echo off\r\necho [{rows}]\r\nexit /b 0\r\n"),
+                "@echo off\r\n\
+                 set \"page=1\"\r\n\
+                 set \"suffix=json\"\r\n\
+                 echo %* | findstr /C:\"page=2\" >nul\r\n\
+                 if not errorlevel 1 set \"page=2\"\r\n\
+                 echo %* | findstr /C:\"--include\" >nul\r\n\
+                 if not errorlevel 1 set \"suffix=http\"\r\n\
+                 type \"%~dp0gh-page-%page%.%suffix%\"\r\n\
+                 exit /b 0\r\n",
             )
             .expect("write fake gh");
             fake_gh
@@ -3511,7 +3533,12 @@ mod tests {
             let fake_gh = dir.join("gh");
             std::fs::write(
                 &fake_gh,
-                format!("#!/bin/sh\nprintf '%s\\n' '[{rows}]'\nexit 0\n"),
+                "#!/bin/sh\n\
+                 page=1\n\
+                 suffix=json\n\
+                 case \"$*\" in *page=2*) page=2 ;; esac\n\
+                 case \"$*\" in *--include*) suffix=http ;; esac\n\
+                 cat \"$(dirname \"$0\")/gh-page-$page.$suffix\"\n",
             )
             .expect("write fake gh");
             std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
@@ -3552,6 +3579,8 @@ mod tests {
     /// Issue #4087 AC-4: an Issue created on GitHub (never seen by gwtd) reaches
     /// the cache and the inbox through the scan-owned full refresh once the
     /// cache TTL has expired; a second pass inside the TTL costs no list call.
+    /// Issue #4184: short pages with a next link must retain NeedsHuman and
+    /// Launched rows through consecutive complete Live scans.
     #[test]
     fn externally_created_issue_reaches_cache_and_inbox_through_the_scan_full_refresh() {
         let _env_lock = crate::env_test_lock()
@@ -3565,7 +3594,7 @@ mod tests {
         let repo_path = temp.path().join("repo");
         let cache_root = temp.path().join("cache");
         std::fs::create_dir_all(&repo_path).expect("create repo path");
-        let fake_gh = write_fake_gh_listing(temp.path(), &[7, 4080]);
+        let fake_gh = write_fake_gh_listing(temp.path(), &[4080, 7, 8]);
         let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
 
         // The cache knows only #7 and its last full refresh is 50 minutes past
@@ -3594,6 +3623,11 @@ mod tests {
             candidates.iter().any(|candidate| candidate.number == 4080),
             "the externally created Issue is in the cache: {candidates:?}"
         );
+        assert_eq!(
+            candidates.len(),
+            3,
+            "full refresh follows the short page's Link"
+        );
         let mut monitor = crate::IssueMonitorState::new(IssueMonitorConfig::default());
         crate::issue_monitor::scan_issue_monitor_candidates(
             &mut monitor,
@@ -3610,22 +3644,52 @@ mod tests {
             crate::NeedsHumanKind::UserChoiceRequired,
             "operator decision required",
         );
+        monitor.complete_active_launch(8, "window-8");
         for _ in 0..2 {
             crate::issue_cache::sync_issue_cache_from_remote(&repo_path, &cache_root)
                 .expect("full refresh");
-            let candidates = load_cached_issue_monitor_candidates(&cache_root).unwrap();
-            crate::issue_monitor::scan_issue_monitor_candidates(
+            let listing = gwt_git::issue::fetch_issue_listing_with("example", "repo", |path| {
+                let output = gwt_core::process::hidden_command(&fake_gh)
+                    .args(["api", path, "--include"])
+                    .current_dir(&repo_path)
+                    .output()
+                    .map_err(|error| error.to_string())?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+                }
+                String::from_utf8(output.stdout).map_err(|error| error.to_string())
+            })
+            .expect("live listing through the fake gh executable");
+            let candidates = listing
+                .issues
+                .into_iter()
+                .map(|issue| issue_monitor_candidate(issue, IssueMonitorReadiness::NotApplicable))
+                .collect();
+            let loaded = resolve_loaded_issue_monitor_candidates(
+                Ok((candidates, listing.capped)),
+                std::iter::empty(),
+            )
+            .expect("live provenance");
+            assert_eq!(loaded.source, IssueMonitorCandidateSource::Live);
+            crate::issue_monitor::scan_issue_monitor_candidates_with_provenance(
                 &mut monitor,
-                &candidates,
+                &loaded.issues,
+                loaded.source,
+                &repo_path,
                 "2026-09-10T00:00:00Z",
             );
-            assert_eq!(monitor.agent_status().inbox.len(), 2);
+            assert_eq!(monitor.agent_status().inbox.len(), 3);
             let held = monitor.inbox_item(7).unwrap();
             assert_eq!(held.state, MonitorInboxState::NeedsHuman);
             assert_eq!(
                 held.error_message.as_deref(),
                 Some("operator decision required")
             );
+            let launched = monitor.inbox_item(8).unwrap();
+            assert_eq!(launched.state, MonitorInboxState::Launched);
+            assert_eq!(launched.launched_window_id.as_deref(), Some("window-8"));
+            assert_eq!(monitor.launched_window_issue("window-8"), Some(8));
+            assert_eq!(monitor.active_issue_numbers(), vec![8]);
         }
 
         let within_ttl = refresh_issue_cache_for_scan_if_stale(&repo_path, &cache_root)

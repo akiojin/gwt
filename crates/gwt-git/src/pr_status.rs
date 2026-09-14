@@ -2178,7 +2178,8 @@ where
     // SPEC #4093 FR-002: the inventory is a paged REST read (`core` budget,
     // one request per 100 rows), never `gh pr list` (GraphQL).
     let pages = crate::gh_rest::read_pages_with("repos/{owner}/{repo}/pulls?state=open", |path| {
-        let output = run_gh(repo_path, &["api", path]).map_err(|error| error.to_string())?;
+        let output =
+            run_gh(repo_path, &["api", path, "--include"]).map_err(|error| error.to_string())?;
         if output.success {
             Ok(output.stdout)
         } else {
@@ -2714,7 +2715,7 @@ mod tests {
             calls.push(args.iter().map(|arg| arg.to_string()).collect());
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"[{"number":7,"head":{"ref":"work/issue-43"}},{"number":9,"head":{"ref":"work/issue-43"}},{"number":8,"head":{"ref":"work/issue-44"}},{"number":10,"head":{"ref":""}}]"#.to_string(),
+                stdout: "HTTP/2.0 200 OK\n\r\n".to_owned() + r#"[{"number":7,"head":{"ref":"work/issue-43"}},{"number":9,"head":{"ref":"work/issue-43"}},{"number":8,"head":{"ref":"work/issue-44"}},{"number":10,"head":{"ref":""}}]"#,
                 stderr: String::new(),
             })
         })
@@ -2725,7 +2726,8 @@ mod tests {
             calls[0],
             [
                 "api",
-                "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1"
+                "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1",
+                "--include"
             ]
         );
         assert_eq!(
