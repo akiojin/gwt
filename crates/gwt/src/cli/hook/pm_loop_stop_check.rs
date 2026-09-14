@@ -19,10 +19,9 @@ use std::{io, path::Path};
 use super::HookOutput;
 use crate::pm_registry::{self, PmLoopState};
 
-// The floor between continuations and the subscribe timeout both come from
-// `PmSettings::loop_interval_secs` (FR-035, default 60s): one knob, because a
-// floor shorter than the wait would never fire and a longer one would skip
-// cycles.
+// The floor between continuations comes from `PmSettings::loop_interval_secs`
+// (FR-035, default 60s). Per-operation budgets are deliberately independent:
+// a scheduling cadence must never become foreground waiting time (FR-156).
 
 /// Consecutive continuations without user contact before the PM parks.
 /// At the default 60s `loop_interval_secs` this is ~12 minutes of unattended
@@ -284,11 +283,11 @@ fn handle_at(
         ""
     };
     HookOutput::stop_block(format!(
-        "Resident PM loop: run one cycle before stopping. Try JSON operation `daemon.subscribe` \
-         on the `issue_monitor` channel with `params.timeout_seconds:{interval_secs}`; if the \
-         subscribe fails (e.g. no daemon endpoint), continue the same cycle in degraded polling \
-         mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
-         `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
+        "Resident PM loop: run one cycle before stopping. {execution_clause} \
+         If a background task is unavailable or the subscribe fails (e.g. no daemon endpoint), \
+         skip it and continue the same cycle in degraded polling mode instead of treating it as a \
+         failure (FR-109). Either way, use the `issue.monitor.status` snapshot: triage new issues, \
+         re-evaluate order, and check the \
          running agents' `last_activity_at`. Inventory open PRs with `pr.list` and act on each \
          row's `lifecycle` and `default_action`; a row with `default_action_executable` false \
          follows its `fallback` (triage → rerun a flake → fresh-launch a regression → escalate); \
@@ -306,7 +305,7 @@ fn handle_at(
          unavailable`; do not promote a pane or window ID to the primary identity. For a decision \
          include the question, your recommendation and rationale, and a copy-paste answer \
          example. Only an empty stalled-item inventory may end silently. \
-         {steering_clause} {execution_clause} {clause} \
+         {steering_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
          after repeated empty cycles (a cycle whose monitor snapshot changed — new launches, \
          escalations, or undigested failures — does not count as empty; an unchanged snapshot \
@@ -610,6 +609,31 @@ mod tests {
         };
         assert!(reason.contains("daemon.subscribe"));
         assert!(reason.contains("issue.monitor.status"));
+        assert_eq!(
+            reason.matches("`daemon.subscribe`").count(),
+            1,
+            "the shared clause must be the single subscribe command authority; got: {reason}"
+        );
+        let subscribe_timeout_secs = reason
+            .split_once("`params.timeout_seconds:")
+            .and_then(|(_, tail)| tail.split_once('`').map(|(value, _)| value))
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("the shared subscribe command must carry a numeric timeout");
+        assert!(
+            subscribe_timeout_secs <= 5,
+            "one resident subscribe may block for at most five seconds; got: {reason}"
+        );
+        assert!(
+            reason.contains("`params.timeout_seconds:5`"),
+            "the default 60-second loop cadence must not become the subscribe budget; got: {reason}"
+        );
+        assert!(
+            !reason.contains("`params.timeout_seconds:60`"),
+            "the loop cadence leaked into the per-operation timeout; got: {reason}"
+        );
+        assert!(reason.contains("background task"));
+        assert!(reason.contains("do not wait for it"));
+        assert!(reason.contains("immediately reconcile a fresh `issue.monitor.status` snapshot"));
     }
 
     /// Issue #3632 AC-1/AC-6: the forced continuation is the highest-frequency
@@ -1159,6 +1183,9 @@ mod tests {
         ));
     }
 
+    /// Issue #3825 AC-1 / AC-4: `loop_interval_secs` is the Stop-gate floor and
+    /// nothing else. The cycle it opens must never carry that cadence as a
+    /// subscribe budget, so the floor is observed through the floor itself.
     #[test]
     fn next_stop_cycle_reloads_the_updated_loop_interval() {
         let (_env_lock, home, _repo, worktree) = pm_fixture();
@@ -1173,7 +1200,24 @@ mod tests {
         let HookOutput::StopBlock { reason } = first else {
             panic!("expected initial cycle, got {first:?}");
         };
-        assert!(reason.contains("timeout_seconds:60"));
+        assert!(
+            !reason.contains("timeout_seconds:60"),
+            "the 60-second cadence must never become the subscribe budget; got: {reason}"
+        );
+        assert!(reason.contains("`params.timeout_seconds:5`"));
+
+        // The default 60s floor is in force: ten seconds later is still too
+        // soon for the next cycle.
+        assert_eq!(
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:10Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
+            HookOutput::Silent,
+            "the unmodified 60-second floor must park a cycle ten seconds in"
+        );
 
         let prefs_path = pm_registry::pm_loop_state_path_for_pm_worktree(&worktree)
             .expect("loop state path")
@@ -1185,16 +1229,18 @@ mod tests {
         })
         .expect("update loop interval");
 
+        // Twenty seconds in, only the reloaded 10-second floor can open a
+        // cycle — the 60-second one would still park.
         let next = handle_at(
             &worktree,
-            "2026-08-08T00:00:10Z",
-            true,
+            "2026-08-08T00:00:20Z",
+            false,
             Some(FIXTURE_PM_SESSION),
         );
         let HookOutput::StopBlock { reason } = next else {
             panic!("updated interval must apply to the next Stop cycle, got {next:?}");
         };
-        assert!(reason.contains("timeout_seconds:10"));
+        assert!(reason.contains("`params.timeout_seconds:5`"));
     }
 
     /// Monitor off = parked project; and no other worktree is ever driven.

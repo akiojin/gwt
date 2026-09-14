@@ -318,6 +318,12 @@ pub enum PrCommand {
     Draft {
         number: u64,
     },
+    /// SPEC #3835 AC-15: merge the base branch into the PR head so a `BEHIND`
+    /// PR can reach `MERGEABLE`. The PM's only way out of `BEHIND`; a conflict
+    /// refuses instead of resolving anything.
+    UpdateBranch {
+        number: u64,
+    },
     Comment {
         number: u64,
         file: String,

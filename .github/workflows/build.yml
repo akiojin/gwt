@@ -5,6 +5,18 @@ on:
     branches: [develop, main]
 
 jobs:
+  # Issue #4134 AC-3: this job is redundant on Linux. `cargo test --workspace
+  # --all-features` in test.yml compiles the same crates with the same features
+  # and links the `gwt` binaries too, because the integration tests reach them
+  # through CARGO_BIN_EXE_*. (The Issue proposed clippy as the job that
+  # subsumes it; that is not right — `cargo clippy --all-targets` type-checks
+  # but never links, so it cannot stand in for a build.) Removing the job is
+  # therefore safe for coverage but not for merges: `Build` is a required
+  # status check on develop, so deleting it leaves every pull request waiting
+  # for a context that no longer reports. Dropping the context is a branch
+  # protection change and stays the repository owner's call; until then the
+  # ~131s duplicate is deliberate. The duplication costs runner minutes and
+  # queue slots (#4119), not wall clock — build.yml runs beside test.yml.
   build:
     name: Build
     runs-on: ubuntu-latest
