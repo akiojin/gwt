@@ -663,8 +663,54 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   undelivered work to recovery, record the disposition, and only then
   close the exact pane. An error pane that was only diagnosed and
   reported is still open work.
-- Track what you have already handled in your own session notes; gwt
-  keeps no dedupe state for the PM.
+- Track transient cycle work you have already handled in your own session
+  notes. Durable Concern deduplication is provided by `concern.list` and the
+  project-state Concern store described below.
+
+## Concern supervision
+
+Every resident cycle supervises durable Concerns independently of whether the
+Issue Monitor queue changed or became empty:
+
+- Begin with `concern.list` and read its summary so the unresolved count and
+  oldest unresolved `raised_at` are visible before deciding that the cycle is
+  empty. Measure both `open` and `fix_landed` records; owner Issue closure is
+  never proof that the reported symptom disappeared.
+- Execute each record's `symptom_measurement` exactly as stored, whether it is
+  `{"kind":"shell_command","command":"..."}` or
+  `{"kind":"gwtd_operation","operation":"...","params":{...}}`. Create a
+  record with that definition, the measured `baseline`, and a predicate such as
+  `{"pointer":"/count","op":"eq","expected":0}`. Submit each structured
+  measurement result with `concern.measure`, a unique `cycle_id`, and one
+  `owner_progress` entry per owner shaped as `{"number":4059,"state":"open",
+  "queue_position":3,"status":"active","pull_requests":[{"number":4321,
+  "lifecycle":"IN-PROGRESS"}]}`. This captures queue position, Monitor status,
+  and pull request lifecycle. Reusing the same `cycle_id` must not count a cycle
+  twice.
+- Use the returned `previous_measurement`, `last_measurement`,
+  `measurement_changed`, `owner_progress_changed`, `stagnant_cycles`, and
+  `escalation_due` fields as the authority. A measurement change or owner
+  progress change is a reportable milestone under the shared conditional
+  reporting clause. A Concern with `escalation_due` after its configured
+  threshold — the default threshold of 10 unchanged owner cycles — is a
+  reportable escalation: propose a priority change, scope split, or user
+  decision instead of letting it sink silently.
+- When all owner Issues are closed, keep the Concern in `fix_landed`, execute
+  its measurement, then call `concern.resolve` with `state:"verified"`. The
+  operation evaluates the stored verification predicate against the evidence;
+  if it returns `predicate_passed:false`, the Concern is `open` again and the
+  surviving symptom is an escalation. Never infer verification from an Issue
+  or pull request lifecycle.
+- Before `concern.create`, query by the same executable `symptom_measurement`
+  definition, including terminal records. Reuse a match instead of creating a
+  second Concern. If the match is `withdrawn`, first call `concern.resolve`
+  with `state:"open"`. Re-execute the existing definition, submit
+  `concern.measure`, and report its previous/current measurement and owner
+  progress for the new report. A duplicate create returns `reused:true`; its
+  fresh supplied baseline becomes `last_measurement` while the original id and
+  baseline stay intact. Use `concern.update` when the summary, measurement
+  definition, predicate, owners, or threshold changes; a definition change
+  invalidates old verification evidence.
 
 ## Open PR inventory
 
@@ -1022,8 +1068,9 @@ and urgency.
   disposition digest (see *Error pane triage and disposition*). A
   recovery Issue registered from one is a milestone; a pane kept because
   its owner or delivery is unknown is an escalation until resolved.
-- Fine-grained progress is answered when the user asks for it, not
-  volunteered.
+- Ordinary fine-grained progress is answered when the user asks for it. The
+  Concern milestones and escalations required above are volunteered when they
+  change.
 - A cycle that produced no milestone and no escalation, with no open
   PR in `CI-RED`, `CONFLICTED`, or `escalation_due`, ends with no
   user-facing output at all — provided every running launch passed
@@ -1278,6 +1325,22 @@ mod tests {
             "Keep the backlog honest",
             // FR-012: the loop watches the agents, not only the queue.
             "check the agents that are running",
+            // SPEC #4320 FR-003〜008: durable Concerns are measured and
+            // supervised every cycle, independently of the Monitor queue.
+            "## Concern supervision",
+            "`concern.list`",
+            "both `open` and `fix_landed`",
+            "same executable `symptom_measurement` definition",
+            "including terminal records",
+            "If the match is `withdrawn`, first call `concern.resolve` with `state:\"open\"`",
+            "`concern.measure`",
+            "structured measurement result",
+            "queue position, Monitor status, and pull request lifecycle",
+            "`measurement_changed`",
+            "`owner_progress_changed`",
+            "default threshold of 10 unchanged owner cycles",
+            "`escalation_due`",
+            "reportable milestone",
             // Issue #3531 (SPEC-3431 FR-137〜140): an error pane is triaged to
             // a durable disposition, never only diagnosed and reported.
             "## Error pane triage and disposition",
@@ -2039,6 +2102,41 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "FR-066: the close footgun is bounded in requeue_window, not by \
              taking the capability away from the PM"
         );
+        assert!(
+            !body.contains("gwt keeps no dedupe state for the PM"),
+            "SPEC #4320 persists Concern dedupe state in project-state"
+        );
+        assert!(
+            !body.contains("Fine-grained progress is answered when the user asks for it"),
+            "SPEC #4320 requires changed owner progress to be reported proactively"
+        );
+    }
+
+    /// SPEC #4320 AC-3/AC-5/AC-6: a Concern remains active PM work until its
+    /// executable predicate verifies it. Measurement and owner progress are
+    /// submitted as structured evidence, while changes and prolonged
+    /// stagnation become milestones without waiting for another user prompt.
+    #[test]
+    fn contract_supervises_concerns_every_cycle() {
+        let concern = section("## Concern supervision");
+        for phrase in [
+            "Every resident cycle",
+            "both `open` and `fix_landed`",
+            "If the match is `withdrawn`, first call `concern.resolve` with `state:\"open\"`",
+            "`concern.measure`",
+            "structured measurement result",
+            "queue position, Monitor status, and pull request lifecycle",
+            "`measurement_changed`",
+            "`owner_progress_changed`",
+            "default threshold of 10 unchanged owner cycles",
+            "`escalation_due`",
+            "reportable milestone",
+        ] {
+            assert!(
+                concern.contains(phrase),
+                "Concern supervision contract is missing: {phrase}"
+            );
+        }
     }
 
     /// Issue #3531 AC-1 / AC-3 (SPEC-3431 FR-137〜140): an error pane is not
