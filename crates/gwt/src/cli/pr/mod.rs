@@ -1072,19 +1072,23 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
     // Issue #4074 FR-005: branches whose commits have nowhere to land ride
     // along with the PR rows, so one PM read covers both the PRs in flight and
     // the work that never got one.
-    let unlanded: Vec<serde_json::Value> = read
+    let (bookkeeping_only, unlanded): (Vec<_>, Vec<_>) = read
         .unlanded_branches
         .iter()
-        .map(|branch| {
-            serde_json::json!({
-                "branch": branch.branch,
-                "owner_issue": branch.owner_issue,
-                "ahead": branch.ahead,
-                "last_commit_at": branch.last_commit_at,
-                "has_open_pr": branch.has_open_pr,
-            })
+        .partition(|branch| branch.has_non_gwt_changes == Some(false));
+    let render_branch = |branch: &gwt_git::UnlandedBranch| {
+        serde_json::json!({
+            "branch": branch.branch,
+            "owner_issue": branch.owner_issue,
+            "ahead": branch.ahead,
+            "last_commit_at": branch.last_commit_at,
+            "has_open_pr": branch.has_open_pr,
+            "has_non_gwt_changes": branch.has_non_gwt_changes,
         })
-        .collect();
+    };
+    let unlanded: Vec<serde_json::Value> = unlanded.into_iter().map(render_branch).collect();
+    let bookkeeping_only: Vec<serde_json::Value> =
+        bookkeeping_only.into_iter().map(render_branch).collect();
     // Issue #3891: provenance and cost of the read travel with the rows so a
     // cached or throttled inventory is never mistaken for a live one.
     let payload = serde_json::json!({
@@ -1097,6 +1101,8 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         "pull_requests": rows,
         "unlanded_branch_count": unlanded.len(),
         "unlanded_branches": unlanded,
+        "bookkeeping_only_branch_count": bookkeeping_only.len(),
+        "bookkeeping_only_branches": bookkeeping_only,
     });
     match serde_json::to_string_pretty(&payload) {
         Ok(rendered) => {
@@ -2441,13 +2447,32 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr_inventory(vec![seeded_inventory_item()]);
-        env.pr_unlanded_branches = vec![gwt_git::UnlandedBranch {
-            branch: "work/issue-3551".to_string(),
-            owner_issue: Some(3551),
-            ahead: 3,
-            last_commit_at: Some("2026-08-27T04:00:00Z".parse().expect("commit date")),
-            has_open_pr: false,
-        }];
+        env.pr_unlanded_branches = vec![
+            gwt_git::UnlandedBranch {
+                branch: "work/issue-3551".to_string(),
+                owner_issue: Some(3551),
+                ahead: 3,
+                last_commit_at: Some("2026-08-27T04:00:00Z".parse().expect("commit date")),
+                has_open_pr: false,
+                has_non_gwt_changes: Some(true),
+            },
+            gwt_git::UnlandedBranch {
+                branch: "work/issue-3552".to_string(),
+                owner_issue: Some(3552),
+                ahead: 2,
+                last_commit_at: Some("2026-08-28T04:00:00Z".parse().expect("commit date")),
+                has_open_pr: false,
+                has_non_gwt_changes: Some(false),
+            },
+            gwt_git::UnlandedBranch {
+                branch: "work/issue-3553".to_string(),
+                owner_issue: Some(3553),
+                ahead: 1,
+                last_commit_at: Some("2026-08-29T04:00:00Z".parse().expect("commit date")),
+                has_open_pr: false,
+                has_non_gwt_changes: None,
+            },
+        ];
 
         let mut out = String::new();
         let code = run(
@@ -2465,15 +2490,31 @@ mod tests {
 
         assert_eq!(code, 0);
         for field in [
-            "\"unlanded_branch_count\": 1",
+            "\"unlanded_branch_count\": 2",
             "\"branch\": \"work/issue-3551\"",
             "\"owner_issue\": 3551",
             "\"ahead\": 3",
             "\"last_commit_at\": \"2026-08-27T04:00:00Z\"",
             "\"has_open_pr\": false",
+            "\"has_non_gwt_changes\": true",
+            "\"bookkeeping_only_branch_count\": 1",
+            "\"branch\": \"work/issue-3552\"",
         ] {
             assert!(out.contains(field), "missing {field}: {out}");
         }
+        let payload: serde_json::Value = serde_json::from_str(&out).expect("inventory JSON");
+        assert_eq!(payload["unlanded_branch_count"], 2);
+        assert_eq!(payload["unlanded_branches"][0]["branch"], "work/issue-3551");
+        assert_eq!(payload["unlanded_branches"][1]["branch"], "work/issue-3553");
+        assert_eq!(
+            payload["unlanded_branches"][1]["has_non_gwt_changes"],
+            serde_json::Value::Null
+        );
+        assert_eq!(payload["bookkeeping_only_branch_count"], 1);
+        assert_eq!(
+            payload["bookkeeping_only_branches"][0]["branch"],
+            "work/issue-3552"
+        );
     }
 
     #[test]
