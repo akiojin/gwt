@@ -63599,6 +63599,159 @@ fn pm_wake_suppression_during_active_loop_retries_on_the_next_snapshot() {
     );
 }
 
+/// Issue #4258 AC-1/AC-2/AC-3: a quiet loop clock is not enough — a PM pane
+/// that is mid-turn (Running) or at a prompt (Waiting) holds the delta wake,
+/// and the held signals fire together once the pane is Idle.
+#[test]
+fn pm_wake_holds_the_delta_while_the_pm_pane_is_busy_and_fires_once_idle() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            last_continued_at: Some("2026-08-08T01:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop state");
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &[], "2026-08-08T01:01:30Z")
+        .is_none());
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Running);
+    let first = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &first, "2026-08-08T01:02:00Z")
+            .is_none(),
+        "a Running PM pane must not be interrupted by a delta wake"
+    );
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Waiting);
+    let second = [
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+        pm_wake_inbox_item(43, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &second, "2026-08-08T01:02:30Z")
+            .is_none(),
+        "a Waiting PM pane would read the wake as its prompt answer"
+    );
+    assert!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("loop state")
+            .last_wake_at
+            .is_none(),
+        "a held wake must not stamp the wake clock"
+    );
+
+    runtime.window_hook_states.remove(&pm_window_id);
+    let decision = runtime
+        .pm_wake_decision_at(&repo, &second, "2026-08-08T01:02:40Z")
+        .expect("the held delta fires once the PM pane is Idle");
+    assert_eq!(decision.window_id, pm_window_id);
+    assert!(
+        decision.prompt.contains("needs_human:42") && decision.prompt.contains("needs_human:43"),
+        "signals held across the busy period arrive as one prompt: {}",
+        decision.prompt
+    );
+}
+
+/// Issue #4258 AC-1/AC-3: the periodic wake is held by a busy PM pane the
+/// same way, and fires on the first tick after the pane is Idle.
+#[test]
+fn periodic_wake_holds_while_the_pm_pane_is_busy_and_fires_once_idle() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    // Quiet for the 60s interval, but well inside the busy-deferral bound.
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            last_continued_at: Some("2026-08-10T00:58:30Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed recently quiet loop");
+
+    for busy in [WindowProcessStatus::Running, WindowProcessStatus::Waiting] {
+        runtime
+            .window_hook_states
+            .insert(pm_window_id.clone(), busy);
+        assert!(
+            runtime
+                .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+                .is_none(),
+            "a {busy:?} PM pane must not receive the scheduled tick"
+        );
+    }
+    assert!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("loop state")
+            .last_wake_at
+            .is_none(),
+        "a held tick must not stamp the wake clock"
+    );
+
+    runtime.window_hook_states.remove(&pm_window_id);
+    let decision = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:10Z")
+        .expect("the first tick after the pane is Idle wakes the PM");
+    assert_eq!(decision.window_id, pm_window_id);
+}
+
+/// Issue #4258 AC-4: a pane stuck on Running (a missed Stop hook, #3809)
+/// cannot hold wakes forever — past the bound the wake fires anyway. A
+/// Waiting pane never gets that override: the injected text would answer
+/// its prompt.
+#[test]
+fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    // Last loop activity an hour ago: far past the deferral bound.
+    seed_quiet_standing_supervision(&repo);
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Waiting);
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_none(),
+        "a Waiting PM pane is never overridden"
+    );
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Running);
+    let decision = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .expect("a Running pane past the deferral bound is woken anyway");
+    assert_eq!(decision.window_id, pm_window_id);
+}
+
 #[test]
 fn pm_wake_next_decision_reloads_updated_loop_interval() {
     let _env_lock = env_test_lock()
