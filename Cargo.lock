@@ -1402,10 +1402,12 @@ version = "9.96.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "core-foundation",
  "dirs 7.0.0",
  "dunce",
  "flate2",
  "fs2",
+ "fsevent-sys",
  "gwt-config",
  "hex",
  "ignore",
