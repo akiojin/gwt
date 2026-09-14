@@ -855,6 +855,38 @@ JSON
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### macOS filesystem activity and Spotlight
+
+The per-worktree index watcher excludes the root `target/` directory's
+descendants from its own macOS FSEvents stream, including when `target/` is
+created after watching starts. A change to the directory entry itself can
+still arrive from its parent and is filtered by the index path policy.
+This controls only that gwt stream; it does not disable system-wide FSEvents
+or other applications' subscriptions. The index watcher currently has no
+production startup caller, so this exclusion alone does not establish the
+cause of high `fseventsd` CPU usage.
+
+For an existing worktree, open **System Settings → Spotlight → Search Privacy**
+and add its `target` directory. For a new worktree, add `target` after the
+first build creates it. Follow Apple's
+[Spotlight privacy instructions](https://support.apple.com/en-gb/guide/mac-help/mchl1bb43b84/mac)
+for your macOS version. gwt does not change Spotlight settings automatically.
+
+To inspect host CPU alongside gwt diagnostics:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"diagnostics.cpu","params":{}}
+JSON
+```
+
+The `host_cpu` result includes the latest `fseventsd` process sample and the
+sampling count and interval. On macOS, it samples three times one second apart
+and warns when the same process exceeds 100% CPU in all three samples. Missing
+processes or unavailable samples do not imply low CPU usage. A warning is an
+observation, not proof that a particular worktree caused the load; inspect
+active filesystem consumers and Spotlight privacy settings before attributing it.
+
 ## Development
 
 ### Build
