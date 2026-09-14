@@ -411,7 +411,7 @@ fn semantic_observation_preserves_existing_block_bash_decisions() {
 
     let merge = "gh pr merge 1949";
     assert_eq!(classify(merge).effect, GovernanceEffect::Protected);
-    allow(merge);
+    block(merge);
 
     let destructive = "git worktree remove ../old-work";
     assert_eq!(classify(destructive).effect, GovernanceEffect::Protected);
