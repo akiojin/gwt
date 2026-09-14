@@ -314,7 +314,9 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
 `review_verdict_published` / `execution_settled` / `binding_dead` /
 `stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
-前 3 種は Issue を requeue せずに解放して pane を閉じます。実行レコードが Active の
+前 3 種は解放して pane を閉じます。解放された Issue は通常 queue に戻りませんが、
+エージェントが実行を settle する前に窓が失われた場合（アプリ再起動が pane ごと落とした
+場合など）は requeue され、次の scan が既存ブランチのまま再 launch します。実行レコードが Active の
 まま idle な `stuck_unknown` だけは人の判断に残り、stuck タイムアウトの 2 倍を超えると
 判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
 または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
