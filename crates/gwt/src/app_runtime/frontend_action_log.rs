@@ -224,6 +224,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CloseWindow { id, .. } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }
+        FrontendEvent::RecoverRestoredWindow { id, .. } => {
+            FrontendUserActionLog::new("recover_restored_window", "window").window(id)
+        }
         FrontendEvent::StopWindow { id } => {
             FrontendUserActionLog::new("stop_window", "window").window(id)
         }

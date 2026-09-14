@@ -93,7 +93,7 @@ pub use session::{
     with_session_lease_wait, with_session_path_lease, with_session_path_lease_wait,
     AgentSessionHistoryEntry, DockerRuntimeBinding, ExecutionBindingIdentity,
     PendingDiscussionResume, Session, SessionActiveLaunchHandshake, SessionActiveLaunchPhase,
-    SessionExecutionBinding, SessionExecutionIdentity, SessionExitReceipt,
+    SessionExecutionBinding, SessionExecutionIdentity, SessionExitReceipt, SessionLaunchOrigin,
     SessionManualHandoffFence, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
     ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
     EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,

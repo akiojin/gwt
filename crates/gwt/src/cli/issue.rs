@@ -521,8 +521,23 @@ fn run_monitor_status<E: CliEnv>(
     attach_github_budget(&mut status);
     attach_disk_space(&project_root, &mut status);
     attach_issue_cache_status(&project_root, &mut status);
+    // Keep the existing owner slots and add physical observations without
+    // changing the meaning of active_launches or feeding admission.
+    let inventory = crate::session_inventory::observe_sessions(
+        &project_root,
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let mut output =
+        serde_json::to_value(&status).map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    output["active_session_count"] = serde_json::json!(inventory.sessions.len());
+    output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
+    output["session_observation"] = serde_json::json!({
+        "complete": inventory.uncertainties.is_empty(),
+        "uncertainties": inventory.uncertainties,
+    });
+    output["active_sessions"] = serde_json::json!(inventory.sessions);
     out.push_str(
-        &serde_json::to_string(&status)
+        &serde_json::to_string(&output)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
     );
     out.push('\n');
@@ -5009,6 +5024,13 @@ mod tests {
             serde_json::json!({
                 "queue": [2, 1],
                 "active_launches": [9],
+                "active_sessions": [],
+                "active_session_count": 0,
+                "worktree_sessions": [],
+                "session_observation": {
+                    "complete": true,
+                    "uncertainties": [],
+                },
                 "max_active": 3,
                 "enabled": true,
                 "autonomous_mode": false,

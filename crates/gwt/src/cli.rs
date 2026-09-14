@@ -282,6 +282,12 @@ pub enum PaneCommand {
     Read { id: String, lines: usize },
     /// `pane.close` / `pane.stop`.
     Close { id: String },
+    /// Preview or recover automatic restores in an explicit start-time interval.
+    Recover {
+        started_after: String,
+        started_before: String,
+        apply: bool,
+    },
     /// `pane.send` (SPEC-3050: self-only injection
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },

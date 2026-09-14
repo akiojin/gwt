@@ -853,6 +853,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.close" | "pane.stop" => CliCommand::Pane(PaneCommand::Close {
             id: required_string(params, "id")?,
         }),
+        "pane.recover" => {
+            reject_unknown_params(
+                params,
+                &["started_after", "started_before", "apply"],
+                "pane.recover",
+            )?;
+            let started_after = required_string(params, "started_after")?;
+            let started_before = required_string(params, "started_before")?;
+            super::pane::parse_recovery_bounds(&started_after, &started_before)
+                .map_err(CliParseError::InvalidJson)?;
+            CliCommand::Pane(PaneCommand::Recover {
+                started_after,
+                started_before,
+                apply: optional_bool(params, "apply")?.unwrap_or(false),
+            })
+        }
         "pane.send" => CliCommand::Pane(PaneCommand::Send {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
@@ -4215,6 +4231,20 @@ mod tests {
         assert!(matches!(
             ok("build.start", json!({"spec": 1})),
             CliCommand::Build(SkillStateAction::Start { spec: 1 })
+        ));
+    }
+
+    #[test]
+    fn pane_recover_accepts_a_bounded_restore_burst() {
+        assert!(matches!(
+            ok(
+                "pane.recover",
+                json!({
+                    "started_after": "2026-09-14T05:00:00Z",
+                    "started_before": "2026-09-14T05:05:00Z"
+                })
+            ),
+            CliCommand::Pane(_)
         ));
     }
 

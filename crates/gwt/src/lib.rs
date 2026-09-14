@@ -50,6 +50,7 @@ pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
 pub mod runtime_daemon_events;
+pub mod session_inventory;
 pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
