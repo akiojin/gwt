@@ -314,7 +314,9 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
 `review_verdict_published` / `execution_settled` / `binding_dead` /
 `stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
-前 3 種は Issue を requeue せずに解放して pane を閉じます。実行レコードが Active の
+前 3 種は解放して pane を閉じます。解放された Issue は通常 queue に戻りませんが、
+エージェントが実行を settle する前に窓が失われた場合（アプリ再起動が pane ごと落とした
+場合など）は requeue され、次の scan が既存ブランチのまま再 launch します。実行レコードが Active の
 まま idle な `stuck_unknown` だけは人の判断に残り、stuck タイムアウトの 2 倍を超えると
 判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
 または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
@@ -816,6 +818,35 @@ JSON
   `~/.gwt/session.json`
 - プロジェクト単位のワークスペース状態:
   `~/.gwt/projects/<repo-hash>/workspace.json`
+
+### macOS のファイルシステム負荷と Spotlight
+
+worktree の index watcher は、自身の macOS FSEvents stream から直下の
+`target/` の子孫を除外します。監視開始後に `target/` が作られる場合にも適用されます。
+親から `target` ディレクトリエントリ自体の変更通知が届く場合は、index path policy
+で除外します。保証範囲はこの gwt stream であり、OS 全体の FSEvents や他アプリの
+購読は停止しません。現在、この index watcher を production で起動する呼出元は
+存在しないため、この除外だけで `fseventsd` 高負荷の原因を特定したとは扱いません。
+
+既存 worktree は、**システム設定 → Spotlight → 検索のプライバシー**を開いて
+その `target` ディレクトリを追加してください。新規 worktree は、最初のビルドで
+`target` が作られた後に追加してください。macOS のバージョンごとの操作は
+[Apple の Spotlight プライバシー設定ガイド](https://support.apple.com/en-gb/guide/mac-help/mchl1bb43b84/mac)
+を参照してください。gwt が Spotlight 設定を自動変更することはありません。
+
+gwt の診断と併せてホストの CPU 状況を確認できます。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"diagnostics.cpu","params":{}}
+JSON
+```
+
+`host_cpu` には最新の `fseventsd` プロセス標本と、標本数・採取間隔を表示します。
+macOS では1秒間隔で3回採取し、同じプロセスが全標本で CPU 100% を超えた場合に
+警告します。プロセスや標本を取得できなかった場合は低負荷と断定しません。
+警告は観測結果であり、特定 worktree が原因である証明ではありません。
+稼働中のファイル監視利用者と Spotlight のプライバシー設定を確認してください。
 
 ## 開発
 
