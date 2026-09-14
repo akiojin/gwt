@@ -5043,7 +5043,7 @@ pub fn acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
             return Ok(false);
         }
         if complete_launch {
-            monitor.complete_active_launch(observed_target.issue_number, target.window_id);
+            monitor.complete_active_launch_at(observed_target.issue_number, target.window_id, now);
         }
         monitor.autonomous_handoffs[index].delivered_at = Some(now.to_string());
         monitor.autonomous_handoffs[index].delivery = AutonomousHandoffDeliveryState::Delivered {
@@ -10048,6 +10048,71 @@ impl IssueMonitorState {
         expired
     }
 
+    /// Issue #4328 AC-2: a claim comment this Monitor wrote itself is evidence
+    /// of its own launch, never a foreign hold.
+    ///
+    /// `acquire_claim` mints a fresh `claim_id` on every scan, so the claim the
+    /// Monitor confirmed minutes earlier no longer matches the one it is
+    /// requesting and comes back as the winning — therefore blocking — claim.
+    /// Recording that as `blocked_by_claim` drops the Issue out of slot
+    /// accounting while its agent keeps running, and the freed slot admits
+    /// another launch over the cap (the reported 5 panes against `max_active`
+    /// 3). The recorded claim identity (#4077) is the proof of authorship: the
+    /// blocking claim is ours when it is the exact claim we confirmed, or when
+    /// it carries the same `<user>:<pid>` owner label we stamp.
+    ///
+    /// Recognition alone is not repair. The binding ledger (#3883) survives the
+    /// lost slot projection, so the window that Issue is running in is restored
+    /// from it and the row goes back to `Launched` with its
+    /// `launched_window_id`. Without a ledger window there is nothing to repair
+    /// from and the block is recorded as before — a claim of ours whose window
+    /// is gone is a stale claim, not a running launch.
+    fn reconcile_own_claim_binding(
+        &mut self,
+        issue_number: u64,
+        blocking_claim_id: Option<&str>,
+        blocking_owner: &str,
+    ) -> bool {
+        let own_claim = self
+            .claim_identities
+            .get(&issue_number)
+            .is_some_and(|identity| {
+                blocking_claim_id == Some(identity.claim_id.as_str())
+                    || identity.owner == blocking_owner
+            });
+        if !own_claim {
+            return false;
+        }
+        if self.active_launches.contains(&issue_number) {
+            // Already accounted for; never demote a live launch to a block.
+            return true;
+        }
+        // The last ACK names the window this Issue is actually running in; the
+        // ledger can still carry a superseded one alongside it (#4041).
+        let Some(window_id) = self
+            .launch_confirmations
+            .get(&issue_number)
+            .map(|ack| ack.window_id.clone())
+            .filter(|window_id| self.launch_bindings.get(window_id) == Some(&issue_number))
+            .or_else(|| {
+                self.launch_bindings
+                    .iter()
+                    .find(|(_, bound_issue)| **bound_issue == issue_number)
+                    .map(|(window_id, _)| window_id.clone())
+            })
+        else {
+            return false;
+        };
+        tracing::warn!(
+            issue_number,
+            window_id,
+            blocking_owner,
+            "issue monitor readopted its own claim instead of reporting a foreign block"
+        );
+        self.readopt_live_launch(issue_number, &window_id);
+        true
+    }
+
     pub fn record_blocked_by_claim(
         &mut self,
         issue: IssueMonitorIssue,
@@ -10055,6 +10120,10 @@ impl IssueMonitorState {
         expires_at: impl Into<String>,
         blocking_claim_id: Option<&str>,
     ) -> bool {
+        let owner = owner.into();
+        if self.reconcile_own_claim_binding(issue.number, blocking_claim_id, &owner) {
+            return false;
+        }
         self.queue.retain(|queued| *queued != issue.number);
         if !self
             .inbox_item(issue.number)
@@ -10062,7 +10131,6 @@ impl IssueMonitorState {
         {
             return false;
         }
-        let owner = owner.into();
         let expires_at = expires_at.into();
         let claim_block_issue_updated_at = issue.updated_at.clone();
         // Issue #4077 AC-2: the reason a row left the queue belongs in the same
@@ -10829,7 +10897,7 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.complete_active_launch_with_claim(issue_number, window_id, launched_claim_id);
+        self.complete_active_launch_with_claim(issue_number, window_id, launched_claim_id, None);
         true
     }
 
@@ -10919,7 +10987,28 @@ impl IssueMonitorState {
     }
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
-        self.complete_active_launch_with_claim(issue_number, window_id.into(), None);
+        self.complete_active_launch_with_claim(issue_number, window_id.into(), None, None);
+    }
+
+    /// Issue #4328: acknowledge a launch against the caller's clock.
+    ///
+    /// The ACK's instant is the boundary every canvas observation is ordered
+    /// against ([`Self::window_observation_covers_launch`]), so it has to come
+    /// from the same clock the observations do. A caller that already carries
+    /// the scan's `now` passes it here; the process clock is only the fallback
+    /// for the paths that carry no timestamp at all.
+    pub fn complete_active_launch_at(
+        &mut self,
+        issue_number: u64,
+        window_id: impl Into<String>,
+        confirmed_at: &str,
+    ) {
+        self.complete_active_launch_with_claim(
+            issue_number,
+            window_id.into(),
+            None,
+            Some(confirmed_at),
+        );
     }
 
     fn invalidate_idle_launch_observation(&mut self, issue_number: u64, window_id: &str) {
@@ -10935,6 +11024,7 @@ impl IssueMonitorState {
         issue_number: u64,
         window_id: String,
         claim_id: Option<String>,
+        confirmed_at: Option<&str>,
     ) {
         let repeated_ack = self.active_launches.contains(&issue_number)
             && self.launched_windows.get(&issue_number) == Some(&window_id)
@@ -10949,8 +11039,9 @@ impl IssueMonitorState {
                 IssueMonitorLaunchConfirmation {
                     window_id: window_id.clone(),
                     claim_id: claim_id.clone(),
-                    confirmed_at: chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                    confirmed_at: confirmed_at.map(str::to_string).unwrap_or_else(|| {
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                    }),
                 },
             );
             // A cached idle verdict belongs to the predecessor, not this ACK.
@@ -14823,12 +14914,7 @@ mod tests {
             std::slice::from_ref(&candidate),
             "2026-06-26T00:00:00Z",
         );
-        monitor.complete_active_launch(number, window_id);
-        monitor
-            .launch_confirmations
-            .get_mut(&number)
-            .expect("launch ACK")
-            .confirmed_at = "2026-06-26T00:00:00Z".to_string();
+        monitor.complete_active_launch_at(number, window_id, "2026-06-26T00:00:00Z");
         assert_eq!(monitor.active_count(), 1);
         monitor
     }
@@ -18332,12 +18418,7 @@ mod tests {
         );
         scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-09-01T22:43:45Z");
         for (issue_number, window_id) in bindings {
-            monitor.complete_active_launch(*issue_number, *window_id);
-            monitor
-                .launch_confirmations
-                .get_mut(issue_number)
-                .expect("launch ACK")
-                .confirmed_at = "2026-09-01T22:43:45Z".to_string();
+            monitor.complete_active_launch_at(*issue_number, *window_id, "2026-09-01T22:43:45Z");
         }
         assert_eq!(monitor.active_count(), bindings.len());
         monitor
@@ -20164,6 +20245,7 @@ mod tests {
             4140,
             "tab-1::agent-1038".to_string(),
             Some("gwt-auto-improve:f0000000-original".to_string()),
+            None,
         );
         monitor.complete_active_launch(4009, "tab-1::agent-1039");
         assert_eq!(monitor.active_count(), 2);
@@ -27993,6 +28075,149 @@ mod tests {
         );
     }
 
+    /// Issue #4328 AC-1/AC-2/AC-3/AC-4: the reported timeline, end to end.
+    ///
+    /// Two settled windows are closed by hand, two queued Issues launch into
+    /// the window ids that were just freed, the canvas captured *before* those
+    /// launches arrives late, and the next scan re-reads the claim comments
+    /// this Monitor posted itself. Nothing may be released, nothing may be
+    /// reported as a foreign block, and the cap must stay honoured: the pair of
+    /// live agents is what produced 5 panes against `max_active` 3.
+    #[test]
+    fn issue_4328_reused_window_ids_survive_a_late_close_and_the_monitors_own_claim() {
+        const OWNER: &str = "AkioJinsenji:35272";
+        let launched_at = "2026-09-14T10:07:15Z";
+        // The canvas the close handler carried: captured while agent-348 and
+        // agent-349 still held their previous, already settled occupants.
+        let stale_canvas_at = "2026-09-14T10:06:58Z";
+        let next_scan_at = "2026-09-14T10:10:09Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        let candidates = [issue(4306), issue(4258), issue(4210)];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, launched_at);
+        for (issue_number, claim_id, window_id) in [
+            (4306_u64, "gwt-auto-improve:561b063f", "tab-1::agent-348"),
+            (4258, "gwt-auto-improve:0e3c39d9", "tab-1::agent-349"),
+        ] {
+            assert!(monitor.apply_confirmed_claim(
+                issue_number,
+                claim_id,
+                OWNER,
+                &format!("synchronous-claim:{claim_id}"),
+                launched_at,
+            ));
+            monitor.complete_active_launch_at(issue_number, window_id, launched_at);
+        }
+        assert_eq!(monitor.active_count(), 2);
+
+        // AC-1: the late close names window ids that now belong to the new
+        // launches, so its canvas cannot retire either of them.
+        monitor.record_window_snapshot(idle_snapshot(stale_canvas_at, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[
+                (4306, IssueMonitorExecutionSettlement::Active),
+                (4258, IssueMonitorExecutionSettlement::Active),
+            ]),
+            next_scan_at,
+        );
+        assert!(
+            outcome.released.is_empty() && outcome.requeued.is_empty(),
+            "a canvas captured before both launches cannot release them: {outcome:?}"
+        );
+        assert_eq!(monitor.active_count(), 2);
+
+        // The second half of the incident: the close of the *previous*
+        // occupant of `agent-348` is handled anyway and releases the new
+        // launch's local binding, so the next scan finds #4306 queued while
+        // its agent keeps running. The durable ledger still attributes the
+        // window to the Issue (#3883).
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-348", next_scan_at),
+            Some(4306)
+        );
+        assert_eq!(
+            monitor.inbox_item(4306).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        // AC-2: acquiring the claim again returns the comment this Monitor
+        // wrote at 10:07:34 as the winner. It is not a foreign hold.
+        assert!(
+            !monitor.record_blocked_by_claim(
+                issue(4306),
+                OWNER,
+                "2026-09-14T10:37:15Z",
+                Some("gwt-auto-improve:561b063f"),
+            ),
+            "the Monitor's own claim may never park its own launch"
+        );
+        let repaired = monitor.inbox_item(4306).unwrap();
+        assert_eq!(repaired.state, MonitorInboxState::Launched);
+        assert_eq!(
+            repaired.launched_window_id.as_deref(),
+            Some("tab-1::agent-348"),
+            "the row is repaired from the binding ledger, not dropped"
+        );
+        assert_eq!(repaired.blocked_by_owner, None);
+        assert_eq!(repaired.claim_expires_at, None);
+
+        // AC-3: both agents are alive, so the cap is full and #4210 waits.
+        assert_eq!(monitor.active_count(), 2);
+        assert!(
+            monitor.next_launch_request(next_scan_at).is_none(),
+            "a repaired launch still holds its slot against max_active"
+        );
+    }
+
+    /// Issue #4328 AC-2: a genuinely foreign claim is still a block. The
+    /// recorded claim identity is what separates the two, so a claim the
+    /// Monitor never confirmed parks the row exactly as before.
+    #[test]
+    fn issue_4328_a_foreign_claim_on_a_bound_window_still_blocks() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(4306)], "2026-09-14T10:07:15Z");
+        assert!(monitor.apply_confirmed_claim(
+            4306,
+            "gwt-auto-improve:561b063f",
+            "AkioJinsenji:35272",
+            "synchronous-claim:gwt-auto-improve:561b063f",
+            "2026-09-14T10:07:15Z",
+        ));
+        monitor.complete_active_launch_at(4306, "tab-1::agent-348", "2026-09-14T10:07:15Z");
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-348", "2026-09-14T10:10:09Z"),
+            Some(4306)
+        );
+
+        assert!(monitor.record_blocked_by_claim(
+            issue(4306),
+            "other-host:99",
+            "2026-09-14T10:40:09Z",
+            Some("gwt-auto-improve:foreign"),
+        ));
+        assert_eq!(
+            monitor.inbox_item(4306).unwrap().state,
+            MonitorInboxState::BlockedByClaim
+        );
+        assert_eq!(monitor.active_count(), 0);
+    }
+
     #[test]
     fn issue_4328_fresh_running_snapshot_readopts_a_queued_launch_before_admission() {
         let mut prefs = launched_cohort(&[(4308, "tab-1::agent-353")]).prefs();
@@ -28045,21 +28270,21 @@ mod tests {
 
     #[test]
     fn issue_4328_fresh_snapshot_before_launch_ack_cannot_release_the_new_binding() {
-        let observed_at = (chrono::Utc::now() - chrono::Duration::seconds(1))
-            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let observed_at = "2026-09-14T10:06:58Z";
+        let launched_at = "2026-09-14T10:06:59Z";
+        let now = "2026-09-14T10:07:15Z";
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
         monitor.record_candidate(issue(4258));
-        monitor.complete_active_launch(4258, "tab-1::agent-354");
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        monitor.record_window_snapshot(idle_snapshot(&observed_at, Vec::new()));
+        monitor.complete_active_launch_at(4258, "tab-1::agent-354", launched_at);
+        monitor.record_window_snapshot(idle_snapshot(observed_at, Vec::new()));
         assert!(
-            monitor.fresh_window_snapshot(&now).is_some(),
+            monitor.fresh_window_snapshot(now).is_some(),
             "the snapshot is recent enough; only its ordering before the ACK makes it unsafe"
         );
 
         let outcome = monitor.reconcile_idle_windows(
             &settlements(&[(4258, IssueMonitorExecutionSettlement::Active)]),
-            &now,
+            now,
         );
 
         assert!(
@@ -28079,14 +28304,14 @@ mod tests {
     fn issue_4328_legacy_same_window_relaunch_rejects_an_observation_between_launches() {
         let mut monitor = launched_monitor(4258, "tab-1::agent-354");
         monitor.clear_active_tracking(4258);
-        let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        monitor.complete_active_launch(4258, "tab-1::agent-354");
-        monitor.record_window_snapshot(idle_snapshot(&observed_at, Vec::new()));
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let observed_at = "2026-06-26T00:01:00Z";
+        let now = "2026-06-26T00:03:00Z";
+        monitor.complete_active_launch_at(4258, "tab-1::agent-354", "2026-06-26T00:02:00Z");
+        monitor.record_window_snapshot(idle_snapshot(observed_at, Vec::new()));
 
         let outcome = monitor.reconcile_idle_windows(
             &settlements(&[(4258, IssueMonitorExecutionSettlement::Active)]),
-            &now,
+            now,
         );
 
         assert!(
@@ -28107,10 +28332,11 @@ mod tests {
             4258,
             "tab-1::agent-354".to_string(),
             Some("predecessor-claim".to_string()),
+            Some("2026-06-26T00:01:00Z"),
         );
-        let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let observed_at = "2026-06-26T00:02:00Z";
         monitor.record_window_snapshot(idle_snapshot(
-            &observed_at,
+            observed_at,
             vec![idle_observation(
                 "tab-1::agent-354",
                 Some(4258),
@@ -28120,7 +28346,7 @@ mod tests {
         ));
         monitor.reconcile_idle_windows(
             &settlements(&[(4258, IssueMonitorExecutionSettlement::Completed)]),
-            &observed_at,
+            observed_at,
         );
         assert_eq!(
             idle_kind_of(&monitor, "tab-1::agent-354"),
@@ -28132,12 +28358,13 @@ mod tests {
             4258,
             "tab-1::agent-354".to_string(),
             Some("successor-claim".to_string()),
+            Some("2026-06-26T00:03:00Z"),
         );
         monitor.rebase_daemon_driver_prefs(&successor.prefs());
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let now = "2026-06-26T00:04:00Z";
         // A new snapshot alone does not reclassify the old cached verdict.
         monitor.record_window_snapshot(idle_snapshot(
-            &now,
+            now,
             vec![idle_observation(
                 "tab-1::agent-354",
                 Some(4258),
@@ -28146,7 +28373,7 @@ mod tests {
             )],
         ));
 
-        let outcome = monitor.release_idle_windows(Some(4258), "release observed idle work", &now);
+        let outcome = monitor.release_idle_windows(Some(4258), "release observed idle work", now);
 
         assert!(
             outcome.released.is_empty(),
