@@ -540,7 +540,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn claude_switch_invalidates_cache_during_http_cooldown() {
-        let _env = gwt_core::test_support::env_lock().lock().unwrap();
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", home.path());
         std::fs::write(
