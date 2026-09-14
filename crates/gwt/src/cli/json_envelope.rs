@@ -171,6 +171,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     }
     let params = params_object(&envelope.params)?;
     let command = match envelope.operation.as_str() {
+        "concern.create" | "concern.update" | "concern.list" | "concern.measure"
+        | "concern.resolve" => CliCommand::Concern(Box::new(super::concern::parse(
+            &envelope.operation,
+            params,
+        )?)),
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
@@ -1753,6 +1758,272 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    fn concern_call(env: &mut TestEnv, operation: &str, params: Value) -> Value {
+        env.stdout.clear();
+        env.stderr.clear();
+        env.stdin = envelope(operation, params);
+        let code = super::dispatch(env, "gwtd");
+        assert_eq!(
+            code,
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&env.stdout),
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+        serde_json::from_str(response["output"].as_str().unwrap()).unwrap()
+    }
+
+    fn concern_create_params() -> Value {
+        json!({
+            "summary": "Unnecessary windows are restored",
+            "symptom_measurement": {"kind": "shell_command", "command": "printf '{\"count\":3}'"},
+            "baseline": {"count": 3},
+            "verification_predicate": {"pointer": "/count", "op": "eq", "expected": 0},
+            "owner_issues": [4059]
+        })
+    }
+
+    #[test]
+    fn concern_list_is_read_only_but_measurements_and_resolutions_are_mutations() {
+        use crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation;
+        assert!(is_read_only_json_envelope_operation("concern.list"));
+        for operation in [
+            "concern.create",
+            "concern.update",
+            "concern.measure",
+            "concern.resolve",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+    }
+
+    fn concern_owner_progress(state: &str) -> Value {
+        json!([{"number":4059,"state":state,"queue_position":3,"status":"queued","pull_requests":[]}])
+    }
+
+    #[test]
+    fn concern_roundtrip_requires_measurement_evidence_despite_closed_owners() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        assert_eq!(created["concern"]["state"], "open");
+        assert!(created["concern"]["raised_at"].is_string());
+        assert!(gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
+            .join("project-state/concerns.json")
+            .is_file());
+
+        // A new environment reads the record from disk, not process-local state.
+        let mut env = TestEnv::new(repo);
+        let listed = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(listed["concerns"][0]["id"], id);
+        assert_eq!(listed["summary"]["open_count"], 1);
+        assert_eq!(
+            listed["summary"]["oldest_raised_at"],
+            created["concern"]["raised_at"]
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({"id":id,"summary":"Restoration regression"}),
+        );
+        assert_eq!(updated["concern"]["summary"], "Restoration regression");
+
+        let measured = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":2},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(measured["concern"]["state"], "fix_landed");
+        assert_eq!(
+            measured["concern"]["previous_measurement"],
+            json!({"count":3})
+        );
+        assert_eq!(measured["concern"]["last_measurement"], json!({"count":2}));
+        assert_eq!(measured["concern"]["measurement_changed"], true);
+        let unresolved = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(unresolved["summary"]["unresolved_count"], 1);
+
+        let failed = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(failed["predicate_passed"], false);
+        assert_eq!(failed["concern"]["state"], "open");
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-2","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        let verified = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(verified["predicate_passed"], true);
+        assert_eq!(verified["concern"]["state"], "verified");
+        let recurrence = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-3","measurement":{"count":1},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(recurrence["concern"]["state"], "open");
+        let withdrawn = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"withdrawn"}),
+        );
+        assert_eq!(withdrawn["concern"]["state"], "withdrawn");
+    }
+
+    #[test]
+    fn concern_duplicate_report_returns_remeasurement_and_preserves_baseline() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let mut report = concern_create_params();
+        report["baseline"] = json!({"count":1});
+        let repeated = concern_call(&mut env, "concern.create", report.clone());
+        assert_eq!(repeated["reused"], true);
+        assert_eq!(repeated["concern"]["id"], created["concern"]["id"]);
+        assert_eq!(repeated["concern"]["baseline"], json!({"count":3}));
+        assert_eq!(repeated["concern"]["last_measurement"], json!({"count":1}));
+        let listed = concern_call(
+            &mut env,
+            "concern.list",
+            json!({"symptom_measurement":report["symptom_measurement"]}),
+        );
+        assert_eq!(listed["concerns"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concern_escalates_after_ten_cycles_without_owner_progress() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        for cycle in 1..=10 {
+            let result = concern_call(
+                &mut env,
+                "concern.measure",
+                json!({
+                    "id":id,"cycle_id":format!("cycle-{cycle}"),"measurement":{"count":cycle},
+                    "owner_progress":concern_owner_progress("open")
+                }),
+            );
+            assert_eq!(result["concern"]["stagnant_cycles"], cycle);
+            assert_eq!(result["concern"]["escalation_due"], cycle == 10);
+        }
+        let repeated = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-10","measurement":{"count":10},
+                "owner_progress":concern_owner_progress("open")
+            }),
+        );
+        assert_eq!(repeated["concern"]["stagnant_cycles"], 10);
+        assert_eq!(
+            repeated["concern"]["previous_measurement"],
+            json!({"count":9})
+        );
+        assert_eq!(repeated["concern"]["measurement_changed"], true);
+        let mut progress = concern_owner_progress("open");
+        progress[0]["status"] = json!("active");
+        let advanced = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(advanced["concern"]["stagnant_cycles"], 0);
+        assert_eq!(advanced["concern"]["escalation_due"], false);
+        assert_eq!(advanced["concern"]["owner_progress_changed"], true);
+        let retried = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(retried, advanced);
+    }
+
+    #[test]
+    fn concern_definition_update_cannot_reuse_previous_verification() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({
+                "id":id,"symptom_measurement":{"kind":"gwtd_operation","operation":"workspace.projection_list","params":{}}
+            }),
+        );
+        assert_eq!(updated["concern"]["state"], "open");
+        env.stdout.clear();
+        env.stdin = envelope("concern.resolve", json!({"id":id,"state":"verified"}));
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(String::from_utf8_lossy(&env.stdout).contains("measurement"));
+        assert!(matches!(
+            err("concern.update", json!({"id":id,"state":"verified"})),
+            CliParseError::InvalidJson(_)
+        ));
     }
 
     /// SPEC #3835 AC-15: the operation behind the `update-branch` default
