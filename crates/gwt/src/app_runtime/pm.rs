@@ -788,7 +788,17 @@ impl AppRuntime {
             && status.needs_human.is_empty()
             && !has_open_board_escalations(project_root)
         {
-            return None;
+            match gwt_core::concern::has_unresolved_concerns(project_root) {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        project_root = %project_root.display(),
+                        "PM periodic wake retained after Concern store read failure"
+                    );
+                }
+            }
         }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
