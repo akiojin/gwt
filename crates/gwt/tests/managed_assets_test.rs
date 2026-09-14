@@ -848,6 +848,45 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
     );
 }
 
+/// Issue #3825 AC-5: both generated mirrors must be the canonical
+/// `pm_guidance` source verbatim, and both must carry the nonblocking resident
+/// loop. `.codex` was only ever asserted to exist, so a Codex PM could have
+/// been handed a mirror that disagreed with the Claude one about how long a
+/// cycle may block.
+#[test]
+fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
+    let canonical = gwt_skills::pm_guidance::render_skill_md();
+
+    for (agent, mirror) in [
+        (AgentId::ClaudeCode, ".claude/skills/gwt-pm/SKILL.md"),
+        (AgentId::Codex, ".codex/skills/gwt-pm/SKILL.md"),
+    ] {
+        let home = tempdir().expect("tempdir");
+        let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
+        let rendered = std::fs::read_to_string(worktree.join(mirror))
+            .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
+        assert_eq!(
+            rendered, canonical,
+            "{mirror} must be the canonical pm_guidance source verbatim"
+        );
+        for phrase in [
+            "`params.timeout_seconds:5`",
+            "as a background task",
+            "Do not await or synchronously poll it",
+            "outer wall-clock deadline of 5 seconds",
+        ] {
+            assert!(
+                rendered.contains(phrase),
+                "{mirror} must carry the nonblocking resident loop: {phrase}"
+            );
+        }
+        assert!(
+            !rendered.contains("`params.timeout_seconds:60`"),
+            "{mirror} must not restore the 60-second blocking subscribe"
+        );
+    }
+}
+
 /// Per-target isolation holds for gwt-pm exactly as it does for
 /// gwt-coordination: a Codex PM gets the Codex mirror only.
 #[test]
