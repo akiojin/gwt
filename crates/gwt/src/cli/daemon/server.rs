@@ -14920,6 +14920,7 @@ exit 1
 
     #[test]
     fn scan_commit_adopts_newer_disk_authority_before_retrying() {
+        let _clock = ScopedOperationClock::set(Instant::now());
         // A launch-profile save is intentionally a direct prefs transaction.
         // The daemon must absorb its newer authority generation after rejecting
         // the stale scan; otherwise every retry captures the same old epoch and
@@ -18345,6 +18346,7 @@ exit 1
 
     #[test]
     fn persist_daemon_state_keeps_equal_marker_new_failure_and_never_decreases_marker() {
+        let _clock = ScopedOperationClock::set(Instant::now());
         let temp = TempDir::new().expect("tempdir");
         let equal_path = temp.path().join("equal.json");
         crate::save_issue_monitor_prefs(&equal_path, &crate::IssueMonitorPrefs::default())
