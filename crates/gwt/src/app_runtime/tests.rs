@@ -7620,7 +7620,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: true,
+        fast_mode: true,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -47064,7 +47064,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -47081,7 +47081,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -47505,7 +47505,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -49257,7 +49257,7 @@ fn app_runtime_issue_monitor_status_reports_last_settings_source() {
     );
     assert_eq!(
         status.launch_profile_summary,
-        "codex / gpt-5.5 / high / host"
+        "codex / gpt-5.5 / high / host / fast:off"
     );
 }
 
@@ -49407,7 +49407,7 @@ fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
         version: None,
         session_mode: Default::default(),
         skip_permissions: false,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: Default::default(),
         docker_service: None,
         docker_lifecycle_intent: Default::default(),
