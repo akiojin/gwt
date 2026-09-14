@@ -11032,12 +11032,12 @@ fn autonomous_verification_block_refusal(
         "execution: blocked refused — this is an autonomous launch \
          (launch_route: autonomous), so a missing user or visual verification \
          is not a blocker: nobody is watching by design. Record \
-         `{label} {deferred}` in the PR body, hand off a Draft PR, and settle \
-         this execution normally; the owner sweeps the deferred PRs later. If \
+         `{label} n/a (autonomous)` in the PR body. Run the required automated \
+         verification, including headed E2E for UI changes, hand off a Ready PR \
+         for CI auto-merge, and settle this execution normally. If \
          something else is genuinely blocking you, restate params.reason \
          without the verification clause.\n",
         label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
-        deferred = gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
     ))
 }
 
@@ -21662,7 +21662,8 @@ exit 1
 
             assert_eq!(code, 2, "{out}");
             assert!(out.contains("launch_route: autonomous"), "{out}");
-            assert!(out.contains("deferred (autonomous execution)"), "{out}");
+            assert!(out.contains("n/a (autonomous)"), "{out}");
+            assert!(out.contains("Ready PR"), "{out}");
             assert_eq!(
                 load(repo.path())
                     .expect("load execution record")
@@ -25197,6 +25198,7 @@ exit 1
                     CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                         commands: Vec::new(),
                         max_wait_secs: None,
+                        headed_e2e_commands: Vec::new(),
                         user_verification_result: None,
                     }),
                 )
@@ -27005,6 +27007,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 }),
             )
@@ -27154,6 +27157,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 }),
             )

@@ -29,13 +29,14 @@ preceded by a fresh `gwt-verify --mode pre-pr` PASS with a satisfied
 `User Verification Result`*. Deliver does not override that rule — it enforces
 it on every drive iteration.
 
-## Entry contract (opt-in only)
+## Entry contract
 
-- Deliver runs **only** on explicit user intent: "deliver", "drive to merge",
-  "merge it", "land the PR", "ship it", or an equivalent direct request to take
-  the PR to merged.
-- Deliver is **never auto-routed**. The Mode Auto-Detection 2x2 matrix must not
-  select Deliver on its own.
+- For `execution.status` reporting `launch_route: autonomous`, continue
+  through a verified Ready PR and the existing CI auto-merge path until merged.
+  Human visual confirmation is not a prerequisite.
+- For manual launches, Deliver runs only on explicit user intent: "deliver",
+  "drive to merge", "merge it", "land the PR", "ship it", or an equivalent
+  direct request. Manual auto-detection does not select Deliver.
 - If no open PR exists for the current branch, fall back to Create mode first
   (Ready PR Gate applies). If Create can only produce a **Draft** (the Ready PR
   Gate is not satisfied), **stop with NO ACTION** — do not enter the drive loop
@@ -51,7 +52,12 @@ last human checkpoint:
 - `User Verification Result` is `confirmed` (user visually verified), `n/a`
   (the change has no user-visible surface, so visual verification does not
   apply), or `n/a (autonomous)` (an unattended gwt Issue Monitor launch, where
-  the handoff is waived and `Agent Visual Check: pass` carries any UI surface).
+  the handoff is waived). UI work requires `Agent Visual Check: pass` and
+  actual passing headed Chromium results for dark and light themes in the same
+  fresh `verify.run` record, selected with `params.headed_e2e_commands`.
+- Existing autonomous PRs may retain the legacy
+  `deferred (autonomous execution)` body value and pass with fresh evidence;
+  no body rewrite or human confirmation is required.
 - The PR is a releaseable slice with no known blockers in its scope.
 - The PR is **not** a Draft (auto-merge cannot be armed on a Draft PR, and a
   Draft is by definition unfinished).
@@ -68,10 +74,6 @@ Refuse to arm auto-merge when any of these hold:
   Session (`execution.status` → `launch_route: autonomous`; the legacy
   `GWT_AUTONOMOUS_EXECUTION` marker still counts when present, but its absence
   proves nothing), not from the agent finding the check inconvenient.
-- `User Verification Result` is `deferred (autonomous execution)`. That value
-  says the owner's visual check has not happened yet, so the PR stays Draft by
-  design and gwt refuses to mark it Ready. It reaches auto-merge only after the
-  owner sweeps it and the result becomes `confirmed`.
 - `gwt-verify --mode pre-pr` returns `Overall: FAIL` or `failed: tooling-missing`.
 
 On gate failure, stop. Do not run `gh pr merge --auto`. Route the failure for
@@ -308,7 +310,7 @@ Report using the skill's Final Report Contract. When the PR reached the
 | Keep auto-merge armed across a code-changing push | Disable, re-gate, re-arm per push (Core invariant / Step 6) |
 | Arm `--auto` while a blocker still exists | Resolve all blockers first, arm from a clear snapshot (Step 5) |
 | Rely on `--auto` to block on threads on an unprotected repo | Prefer poll-then-merge; arm `--auto` only on protected repos (Step 5) |
-| Auto-route into Deliver without an explicit request | Deliver is opt-in only |
+| Auto-route a manual launch into Deliver without an explicit request | Manual Deliver is opt-in; autonomous delivery follows its launch contract |
 | Report "delivered" after enabling auto-merge | Report Delivered only when `pr.view` shows `[MERGED]` (`merged_at` set) |
 | Blindly `gh run rerun` a test/build timeout or compile/test failure | Classify infra-transient vs code (Step 7) |
 | Hardcode `--squash` | Use the repo's `viewerDefaultMergeMethod` (Step 4) |

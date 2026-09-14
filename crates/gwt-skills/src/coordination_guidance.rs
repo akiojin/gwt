@@ -259,6 +259,29 @@ gwtd binary:
 
 There is no standalone `gwt-search` executable.
 
+## Autonomous delivery
+
+Read the launch route from `execution.status`. With `launch_route: autonomous`,
+record `User Verification Result: n/a (autonomous)` and continue verified work
+through a Ready PR and the existing CI auto-merge path until merged. Do not
+request human visual confirmation, send a verification URL, or stop at a Draft
+PR merely because nobody performed a human check. Manual launches retain their
+user-verification contract and require an explicit request to drive to merge.
+
+Automated test / headed E2E / CI failures, known blockers, and all other Ready
+Gate conditions still require repair. For UI work, use the project's isolated
+headed E2E setup and record `Agent Visual Check: pass` separately from the user
+result (`n/a (no UI surface)` otherwise). Select Playwright commands already in
+`verify.run`'s `params.commands` with `params.headed_e2e_commands`; the same fresh
+record must contain actual passing headed Chromium results for dark and light
+themes. The E2E suite must check console/page errors and the changed behavior.
+The agent's own check is never human `confirmed`.
+
+Existing autonomous PRs may retain the legacy `deferred (autonomous execution)`
+body value. Fresh passing evidence permits Ready without rewriting that body or
+obtaining human confirmation. Do not call terminal `execution.blocked` merely
+because human visual confirmation is absent.
+
 ## Heavy commands
 
 `cargo test`, `cargo clippy`, `cargo build`, coverage, and headed browser
