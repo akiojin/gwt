@@ -31173,7 +31173,9 @@ fn unbound_agent_pty_publishes_process_identity_for_session_observation() {
 
 #[test]
 fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
-    let _env = env_test_lock().lock().expect("env lock");
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
