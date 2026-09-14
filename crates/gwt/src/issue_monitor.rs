@@ -10993,7 +10993,7 @@ impl IssueMonitorState {
     /// Issue #4328: acknowledge a launch against the caller's clock.
     ///
     /// The ACK's instant is the boundary every canvas observation is ordered
-    /// against ([`Self::window_observation_covers_launch`]), so it has to come
+    /// against (`window_observation_covers_launch`), so it has to come
     /// from the same clock the observations do. A caller that already carries
     /// the scan's `now` passes it here; the process clock is only the fallback
     /// for the paths that carry no timestamp at all.
