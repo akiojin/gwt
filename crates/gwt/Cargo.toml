@@ -93,8 +93,8 @@ objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2
 winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-registry = "0.6"
-windows-result = "0.4"
+windows-registry = "0.100"
+windows-result = "0.100"
 
 [features]
 # Issue #3675 AC-2: arms the unsandboxed-gh spawn guard at process start (see
