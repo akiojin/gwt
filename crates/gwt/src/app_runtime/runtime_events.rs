@@ -618,6 +618,9 @@ impl AppRuntime {
         let Some(composed) = self.recompute_window_state(window_id) else {
             return Vec::new();
         };
+        if composed == WindowProcessStatus::Idle {
+            self.flush_pending_pm_wake(window_id);
+        }
         if force_status || before != Some(composed) {
             Self::status_events(window_id.to_string(), composed, None)
         } else {
@@ -851,6 +854,9 @@ impl AppRuntime {
         }
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
+        if composed_status == WindowProcessStatus::Idle {
+            self.flush_pending_pm_wake(&id);
+        }
         if matches!(
             status,
             WindowProcessStatus::Stopped | WindowProcessStatus::Error
@@ -1412,6 +1418,9 @@ impl AppRuntime {
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             if approval_wait_cleared {
                 if let Some(composed) = self.recompute_window_state(&window_id) {
+                    if composed == WindowProcessStatus::Idle {
+                        self.flush_pending_pm_wake(&window_id);
+                    }
                     if effective_before != Some(composed) {
                         events.extend(Self::status_events(window_id, composed, None));
                     }
@@ -1437,6 +1446,9 @@ impl AppRuntime {
         let Some(composed_state) = self.recompute_window_state(&window_id) else {
             return events;
         };
+        if composed_state == WindowProcessStatus::Idle {
+            self.flush_pending_pm_wake(&window_id);
+        }
         let hook_detail = event
             .message
             .as_deref()

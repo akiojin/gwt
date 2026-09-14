@@ -122,6 +122,8 @@ pub(super) const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 pub(crate) struct PmWakeDecision {
     pub(crate) window_id: String,
     pub(crate) prompt: String,
+    // A busy delta is consumed only when its coalesced prompt is delivered.
+    signals: Option<std::collections::BTreeSet<String>>,
 }
 
 /// Outcome of attempting to type a wake prompt into the PM pane.
@@ -232,10 +234,8 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
         && instant_is_quiet(state.last_wake_at.as_deref())
 }
 
-/// Issue #4258: how many loop intervals a Running PM pane may hold a wake.
-/// The newest loop clock marks when the current turn began, so a pane still
-/// Running past this bound has most likely missed its Stop hook (#3809) and
-/// would otherwise never be woken again.
+/// Issue #4258: report a long-held wake after this many quiet loop intervals.
+/// Loop clocks do not measure pane activity and never authorize an interrupt.
 const PM_WAKE_BUSY_DEFER_MAX_INTERVALS: u64 = 3;
 
 /// Who asked for the PM.
@@ -707,32 +707,16 @@ impl AppRuntime {
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
-        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
-            || self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now)
-        {
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
             // Actively looping or mid-turn: its own next cycle reconciles
             // this. Keep the delta so a floor-stopped loop is revived by the
             // next snapshot.
             return None;
         }
-        self.pm_wake_seen
-            .insert(project_root.to_path_buf(), signals);
-        // Re-arm the budget and stamp the wake clock: new actionable work is
-        // exactly what the park was waiting for, and the stamp keeps the
-        // periodic wake from stacking a second prompt in the same window.
-        if let Err(error) = pm_registry::save_pm_loop_state(
-            &loop_path,
-            &pm_registry::PmLoopState {
-                last_wake_at: Some(now.to_string()),
-                ..pm_registry::PmLoopState::default()
-            },
-        ) {
-            tracing::warn!(%error, "PM wake could not re-arm the loop budget");
-        }
         let mut reasons = fresh;
         reasons.truncate(5);
-        Some(PmWakeDecision {
-            window_id,
+        let decision = PmWakeDecision {
+            window_id: window_id.clone(),
             prompt: format!(
                 "[gwt] Monitor activity while the PM was idle ({}). Reconcile now: fresh \
                  `issue.monitor.status`, triage new items, inventory PRs with `pr.list` \
@@ -742,7 +726,25 @@ impl AppRuntime {
                 reasons.join(", "),
                 escalations = open_escalation_prompt_section(project_root),
             ),
-        })
+            signals: Some(signals.clone()),
+        };
+        if self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now) {
+            self.pending_pm_wakes.insert(window_id, decision);
+            return None;
+        }
+        self.pm_wake_seen
+            .insert(project_root.to_path_buf(), signals);
+        // Reserve this quiet interval; actual delivery refreshes the stamp.
+        if let Err(error) = pm_registry::save_pm_loop_state(
+            &loop_path,
+            &pm_registry::PmLoopState {
+                last_wake_at: Some(now.to_string()),
+                ..pm_registry::PmLoopState::default()
+            },
+        ) {
+            tracing::warn!(%error, "PM wake could not re-arm the loop budget");
+        }
+        Some(decision)
     }
 
     /// FR-108(b) (T-201, Issue #3505): the periodic wake — re-arm a quiet
@@ -797,9 +799,29 @@ impl AppRuntime {
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
-        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
-            || self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now)
-        {
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
+            return None;
+        }
+        let decision = PmWakeDecision {
+            window_id: window_id.clone(),
+            prompt: format!(
+                "[gwt] Scheduled supervision tick: reconcile now — read a fresh \
+                 `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
+                 (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never \
+                 auto-close). {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_WAKE_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                escalations = open_escalation_prompt_section(project_root),
+            ),
+            signals: None,
+        };
+        // A scheduled tick must not replace a held delta's accumulated reasons.
+        let decision = self
+            .pending_pm_wakes
+            .get(&window_id)
+            .cloned()
+            .unwrap_or(decision);
+        if self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now) {
+            self.pending_pm_wakes.insert(window_id, decision);
             return None;
         }
         if let Err(error) = pm_registry::save_pm_loop_state(
@@ -811,17 +833,7 @@ impl AppRuntime {
         ) {
             tracing::warn!(%error, "PM periodic wake could not re-arm the loop budget");
         }
-        Some(PmWakeDecision {
-            window_id,
-            prompt: format!(
-                "[gwt] Scheduled supervision tick: reconcile now — read a fresh \
-                 `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
-                 (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never \
-                 auto-close). {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_WAKE_CLAUSE} \
-                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
-                escalations = open_escalation_prompt_section(project_root),
-            ),
-        })
+        Some(decision)
     }
 
     pub(crate) fn pm_periodic_wake_events_for_monitor_at(
@@ -1554,24 +1566,44 @@ impl AppRuntime {
             .lock()
             .map(|pane| pane.has_unsent_user_input())
             .unwrap_or(false);
-        if unsent {
+        if unsent || self.window_status(&decision.window_id) != Some(WindowProcessStatus::Idle) {
             self.pending_pm_wakes
                 .insert(decision.window_id.clone(), decision.clone());
             return Ok(PmWakeWrite::Deferred);
         }
         self.pending_pm_wakes.remove(&decision.window_id);
         super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)?;
+        if let Some(project_root) = self.issue_monitor_project_root_for_window(&decision.window_id)
+        {
+            if let Some(signals) = &decision.signals {
+                self.pm_wake_seen
+                    .insert(project_root.clone(), signals.clone());
+            }
+            let loop_path = pm_registry::pm_loop_state_path_for_repo_path(&project_root);
+            if let Err(error) = pm_registry::save_pm_loop_state(
+                &loop_path,
+                &pm_registry::PmLoopState {
+                    last_wake_at: Some(
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    ),
+                    ..pm_registry::PmLoopState::default()
+                },
+            ) {
+                tracing::warn!(%error, "delivered PM wake could not stamp the loop clock");
+            }
+        }
         Ok(PmWakeWrite::Injected)
     }
 
-    /// Issue #3702 AC-2: deliver a held wake once the composer is submitted
-    /// or cleared. Missing pending entries are a no-op so every pane submit
-    /// can call this cheaply.
+    /// Deliver a held wake once the PM is Idle and its composer is empty.
+    /// Missing pending entries are a no-op for other panes' state changes.
     pub(crate) fn flush_pending_pm_wake(&mut self, window_id: &str) {
         let Some(decision) = self.pending_pm_wakes.get(window_id).cloned() else {
             return;
         };
-        if self.pane_has_unsent_user_input(window_id) {
+        if self.window_status(window_id) != Some(WindowProcessStatus::Idle)
+            || self.pane_has_unsent_user_input(window_id)
+        {
             return;
         }
         match self.write_pm_wake_prompt(&decision) {
@@ -1625,8 +1657,7 @@ impl AppRuntime {
     /// Issue #4258: whether the live PM pane is mid-turn (Running) or at a
     /// prompt (Waiting), where an injected wake would splice into the turn or
     /// be read as the prompt's answer. Both wake paths hold — never drop —
-    /// their wake while this is true. A pane Running past the deferral bound
-    /// is treated as stuck and woken; a Waiting one is only reported.
+    /// their wake while this is true. Long holds are reported, never overridden.
     fn pm_wake_pane_is_busy(
         &self,
         window_id: &str,
@@ -1635,10 +1666,7 @@ impl AppRuntime {
         now: &str,
     ) -> bool {
         let status = self.window_status(window_id);
-        if !matches!(
-            status,
-            Some(WindowProcessStatus::Running | WindowProcessStatus::Waiting)
-        ) {
+        if status == Some(WindowProcessStatus::Idle) {
             return false;
         }
         let past_bound = pm_wake_loop_is_quiet(
@@ -1649,18 +1677,12 @@ impl AppRuntime {
         if !past_bound {
             return true;
         }
-        if status == Some(WindowProcessStatus::Waiting) {
-            tracing::warn!(
-                window_id,
-                "PM wake still held: the PM pane has waited on a prompt past the deferral bound"
-            );
-            return true;
-        }
         tracing::warn!(
             window_id,
-            "PM pane has been Running past the wake deferral bound; waking it anyway"
+            ?status,
+            "PM wake still held: the pane is not Idle past the wake deferral bound"
         );
-        false
+        true
     }
 
     /// Issue #3607 AC-1: window id of a live PM registered by *another* project

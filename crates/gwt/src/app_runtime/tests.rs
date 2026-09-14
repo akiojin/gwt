@@ -63714,7 +63714,8 @@ fn pm_wake_suppression_during_active_loop_retries_on_the_next_snapshot() {
 
 /// Issue #4258 AC-1/AC-2/AC-3: a quiet loop clock is not enough — a PM pane
 /// that is mid-turn (Running) or at a prompt (Waiting) holds the delta wake,
-/// and the held signals fire together once the pane is Idle.
+/// even after many loop intervals, and the held signals fire together once
+/// the pane is Idle.
 #[test]
 fn pm_wake_holds_the_delta_while_the_pm_pane_is_busy_and_fires_once_idle() {
     let _env_lock = env_test_lock()
@@ -63724,6 +63725,7 @@ fn pm_wake_holds_the_delta_while_the_pm_pane_is_busy_and_fires_once_idle() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
     let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
     gwt::pm_registry::save_pm_loop_state(
         &loop_path,
@@ -63743,9 +63745,9 @@ fn pm_wake_holds_the_delta_while_the_pm_pane_is_busy_and_fires_once_idle() {
     let first = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
     assert!(
         runtime
-            .pm_wake_decision_at(&repo, &first, "2026-08-08T01:02:00Z")
+            .pm_wake_decision_at(&repo, &first, "2026-08-08T02:00:00Z")
             .is_none(),
-        "a Running PM pane must not be interrupted by a delta wake"
+        "an hour-old loop clock must not interrupt a Running PM pane"
     );
 
     runtime
@@ -63757,7 +63759,7 @@ fn pm_wake_holds_the_delta_while_the_pm_pane_is_busy_and_fires_once_idle() {
     ];
     assert!(
         runtime
-            .pm_wake_decision_at(&repo, &second, "2026-08-08T01:02:30Z")
+            .pm_wake_decision_at(&repo, &second, "2026-08-08T02:00:30Z")
             .is_none(),
         "a Waiting PM pane would read the wake as its prompt answer"
     );
@@ -63769,15 +63771,27 @@ fn pm_wake_holds_the_delta_while_the_pm_pane_is_busy_and_fires_once_idle() {
         "a held wake must not stamp the wake clock"
     );
 
-    runtime.window_hook_states.remove(&pm_window_id);
     let decision = runtime
-        .pm_wake_decision_at(&repo, &second, "2026-08-08T01:02:40Z")
-        .expect("the held delta fires once the PM pane is Idle");
+        .pending_pm_wakes
+        .get(&pm_window_id)
+        .expect("the delta is held for the next Idle hook");
     assert_eq!(decision.window_id, pm_window_id);
     assert!(
         decision.prompt.contains("needs_human:42") && decision.prompt.contains("needs_human:43"),
         "signals held across the busy period arrive as one prompt: {}",
         decision.prompt
+    );
+    runtime.handle_daemon_runtime_hook_event(runtime_hook_state("Idle", "pm-session-live"));
+    assert!(runtime.pending_pm_wakes.is_empty());
+    assert!(gwt::pm_registry::load_pm_loop_state(&loop_path)
+        .expect("delivered delta")
+        .last_wake_at
+        .is_some());
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &second, "2026-09-20T00:00:00Z")
+            .is_none(),
+        "delivered signals must not be replayed"
     );
 }
 
@@ -63830,12 +63844,10 @@ fn periodic_wake_holds_while_the_pm_pane_is_busy_and_fires_once_idle() {
     assert_eq!(decision.window_id, pm_window_id);
 }
 
-/// Issue #4258 AC-4: a pane stuck on Running (a missed Stop hook, #3809)
-/// cannot hold wakes forever — past the bound the wake fires anyway. A
-/// Waiting pane never gets that override: the injected text would answer
-/// its prompt.
+/// Issue #4258: an old loop clock does not prove a Running pane is stuck.
+/// Running and Waiting panes retain the scheduled wake until they are Idle.
 #[test]
-fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
+fn pm_wake_busy_deferral_waits_for_idle_regardless_of_loop_age() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -63843,26 +63855,47 @@ fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    // Last loop activity an hour ago: far past the deferral bound.
+    // Last loop activity an hour ago: far past the former three-interval bound.
     seed_quiet_standing_supervision(&repo);
+    attach_live_pm_pane(&mut runtime, &pm_window_id);
 
-    runtime
-        .window_hook_states
-        .insert(pm_window_id.clone(), WindowProcessStatus::Waiting);
-    assert!(
+    for busy in [WindowProcessStatus::Running, WindowProcessStatus::Waiting] {
         runtime
-            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
-            .is_none(),
-        "a Waiting PM pane is never overridden"
-    );
+            .window_hook_states
+            .insert(pm_window_id.clone(), busy);
+        if busy == WindowProcessStatus::Running {
+            runtime.handle_runtime_output(
+                pm_window_id.clone(),
+                b"The PM is still processing its current turn.\r\n".to_vec(),
+            );
+        }
+        assert_eq!(runtime.window_status(&pm_window_id), Some(busy));
+        assert!(
+            runtime
+                .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+                .is_none(),
+            "an hour-old loop clock must not override a {busy:?} PM pane"
+        );
+        assert_eq!(runtime.pending_pm_wakes.len(), 1, "busy ticks coalesce");
+        assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+    }
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    assert!(gwt::pm_registry::load_pm_loop_state(&loop_path)
+        .expect("loop state")
+        .last_wake_at
+        .is_none());
 
-    runtime
-        .window_hook_states
-        .insert(pm_window_id.clone(), WindowProcessStatus::Running);
-    let decision = runtime
-        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
-        .expect("a Running pane past the deferral bound is woken anyway");
-    assert_eq!(decision.window_id, pm_window_id);
+    let mut idle = runtime_hook_state("Idle", "pm-session-live");
+    idle.project_root = Some(repo.to_string_lossy().into_owned());
+    runtime.handle_runtime_hook_event(idle);
+    assert!(
+        runtime.pending_pm_wakes.is_empty(),
+        "the Idle hook must deliver the held tick without another monitor snapshot"
+    );
+    assert!(gwt::pm_registry::load_pm_loop_state(&loop_path)
+        .expect("loop state after delivery")
+        .last_wake_at
+        .is_some());
 }
 
 #[test]
@@ -64807,6 +64840,24 @@ fn issue_monitor_activity_wake_does_not_inject_while_pm_pane_has_unsent_input() 
     ];
     let _ = runtime.pm_wake_events(&repo, &escalated);
     assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+
+    runtime.handle_daemon_runtime_hook_event(runtime_hook_state_for_event(
+        "Waiting",
+        "PermissionRequest",
+        "pm-session-live",
+    ));
+    let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1, "Waiting holds the delta");
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(&loop_path, &Default::default())
+        .expect("simulate missing wake stamp");
+    runtime.handle_daemon_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    assert!(runtime.pending_pm_wakes.is_empty());
+    assert!(gwt::pm_registry::load_pm_loop_state(&loop_path)
+        .expect("delivery state")
+        .last_wake_at
+        .is_some());
 }
 
 /// Issue #3702 AC-4: an idle composer still receives the tick immediately.
@@ -64842,9 +64893,10 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
     }
 }
 
-/// Issue #3702 AC-2: a held tick is delivered once (coalesced) after submit.
+/// Issue #4258: submitting the composer cannot release a held tick into a
+/// Running turn; the next Idle hook delivers it once and stamps delivery time.
 #[test]
-fn held_supervision_tick_is_delivered_after_the_composer_submits() {
+fn held_supervision_tick_waits_for_idle_after_the_composer_submits() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -64880,10 +64932,30 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:05:00Z");
     assert_eq!(runtime.pending_pm_wakes.len(), 1, "ticks must coalesce");
 
+    runtime.handle_daemon_runtime_hook_event(runtime_hook_state_for_event(
+        "running",
+        "UserPromptSubmit",
+        "pm-session-live",
+    ));
     let _ = runtime.terminal_input_events(&pm_window_id, "ますか？\r");
+    assert_eq!(runtime.pending_pm_wakes.len(), 1);
+    assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
+
+    let delivered_after = chrono::Utc::now().timestamp();
+    runtime.handle_daemon_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
     assert!(
         runtime.pending_pm_wakes.is_empty(),
-        "submit must deliver and clear the held tick"
+        "the Idle hook must deliver and clear the held tick"
+    );
+    let delivered = gwt::pm_registry::load_pm_loop_state(&loop_path)
+        .expect("delivery state")
+        .last_wake_at
+        .expect("delivered tick must stamp its clock");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&delivered)
+            .expect("timestamp")
+            .timestamp()
+            >= delivered_after
     );
     let pty = runtime
         .runtimes
@@ -64894,7 +64966,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
         .expect("pane lock")
         .shared_pty();
     match pty.reserve_input_transaction() {
-        Ok(_) => panic!("the held tick must inject after submit"),
+        Ok(_) => panic!("the held tick must inject after Idle"),
         Err(error) => assert!(
             error
                 .to_string()
