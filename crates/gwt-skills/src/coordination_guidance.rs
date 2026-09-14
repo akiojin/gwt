@@ -275,6 +275,21 @@ reserving a lease. Use `verify.lease.status` to inspect contention;
 when admission times out. Inspect the reported holder before retrying;
 there is no manual acquire loop or fixed retry schedule.
 
+### gwtd bootstrap order
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
+
 ## Persisted Work files
 
 The tracked `.gwt/work/` directory is the persistent Work core
@@ -567,6 +582,21 @@ canonical な検証記録は `verify.plan` → `verify.run` で生成します�
 `deferred` を返します。報告された holder を確認してから再試行してください。
 手動 acquire のループや固定の再試行間隔はありません。
 
+### gwtd bootstrap order
+
+gwtd をソースから build する checkout（gwt リポジトリ自身）では、初回の
+`cargo build -p gwt --bin gwtd` は lease 不要の bootstrap step であり、heavy な
+検証コマンドではありません。順序は build → `verify.plan` → `verify.run` です。
+lease を保持・待機せずに checkout binary を build し、その後にはじめて
+canonical 検証をその binary で実行します。
+
+先に checkout binary が必要かを判断します。必要なのは checkout のコードを
+実行する operation だけです: `execution.*`、`workspace.*`、`build.*`、
+`verify.*`、および checkout で追加した operation。読み取りの `issue.*`、
+`pr.*`、`board.*`、`search` は解決済みの installed gwtd（`GWT_BIN_PATH` /
+PATH）で実行します。Issue / PR / Board の状態を知るためだけに build や
+lease を待たないでください。
+
 ## Persisted Work files
 
 追跡対象の `.gwt/work/` ディレクトリは Work の永続コアです
@@ -771,6 +801,52 @@ mod tests {
             assert!(!body.contains("even a single focused test"));
         }
         assert!(SKILL_BODY_JA.contains("canonical `verify.run` だけ"));
+    }
+
+    /// Issue #4352 AC-1 / AC-3: the gwtd bootstrap order is defined once in
+    /// the canonical source, names which operations need the checkout
+    /// binary, and reaches both generated mirrors byte-identically.
+    #[test]
+    fn bootstrap_build_is_a_lease_free_step_that_precedes_canonical_verification() {
+        for phrase in [
+            "### gwtd bootstrap order",
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`search`",
+            "`GWT_BIN_PATH`",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+        assert!(SKILL_BODY_EN.contains("lease-free bootstrap step"));
+        assert!(SKILL_BODY_JA.contains("lease \u{4e0d}\u{8981}\u{306e} bootstrap step"));
+
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        let claude =
+            std::fs::read_to_string(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        let codex =
+            std::fs::read_to_string(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        assert_eq!(
+            claude, codex,
+            "both mirrors must carry the same bootstrap contract"
+        );
+        assert!(claude.contains("lease-free bootstrap step"));
     }
 
     #[test]
