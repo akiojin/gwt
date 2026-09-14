@@ -18,6 +18,107 @@ use gwt_skills::CodexHookDiscoveryMode;
 use serde_json::Value;
 use tempfile::tempdir;
 
+#[test]
+fn gwt_repo_missing_custom_git_hooks_reports_launch_error() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(
+        dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    );
+    run_git(dir.path(), &["config", "core.hooksPath", ".custom-hooks"]);
+
+    let error = refresh_existing_managed_gwt_assets_for_worktree(dir.path())
+        .expect_err("a configured but empty Git hook directory must not pass launch setup");
+    let message = error.to_string();
+    assert!(message.contains("core.hooksPath"), "{message}");
+    assert!(message.contains(".custom-hooks"), "{message}");
+    assert!(message.contains("commit-msg"), "{message}");
+    assert!(
+        message.contains("bunx"),
+        "diagnostic must include recovery: {message}"
+    );
+    assert!(!dir.path().join(".husky/_").exists());
+}
+
+#[test]
+fn unrelated_repo_missing_git_hooks_does_not_install_packages() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(
+        dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ],
+    );
+    run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]);
+
+    refresh_existing_managed_gwt_assets_for_worktree(dir.path())
+        .expect("unrelated project hook installation is outside gwt ownership");
+    assert!(!dir.path().join(".husky").exists());
+}
+
+/// Explicit integration smoke: ordinary test runs never download packages.
+#[test]
+#[ignore = "requires Bun and access to the Husky package; run explicitly with --ignored"]
+fn gwt_repo_materializes_real_husky_and_preserves_git_hook_exit_status() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    std::fs::create_dir(dir.path().join(".husky")).unwrap();
+    for hook in ["pre-commit", "pre-push"] {
+        std::fs::write(dir.path().join(".husky").join(hook), "#!/bin/sh\nexit 0\n").unwrap();
+    }
+    std::fs::write(
+        dir.path().join(".husky/commit-msg"),
+        "#!/bin/sh\n[ \"$1\" = \"argument with spaces\" ] && exit 17\nexit 19\n",
+    )
+    .unwrap();
+    run_git(dir.path(), &["add", ".husky"]);
+    run_git(dir.path(), &["commit", "-qm", "fixture"]);
+    run_git(
+        dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/akiojin/gwt.git",
+        ],
+    );
+    run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]);
+
+    refresh_existing_managed_gwt_assets_for_worktree(dir.path()).unwrap();
+    for hook in ["pre-commit", "pre-push", "commit-msg", "h"] {
+        assert!(dir.path().join(".husky/_").join(hook).is_file(), "{hook}");
+    }
+    let output = hidden_command("git")
+        .current_dir(dir.path())
+        .args(["hook", "run", "commit-msg", "--", "argument with spaces"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(17));
+    let status = hidden_command("git")
+        .current_dir(dir.path())
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(
+        status.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
 /// SPEC #3245 FR-004 / AC-1: the coordination guidance no longer branches by
 /// session kind. Every materialization gets the single guidance including the
 /// `workspace.update` Work-state instruction; the curation framing that told

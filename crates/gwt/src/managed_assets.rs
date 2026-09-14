@@ -1288,6 +1288,153 @@ fn worktree_is_ephemeral(worktree: &Path) -> bool {
     crate::worktree_form::is_ephemeral_worktree_path(worktree)
 }
 
+const REQUIRED_GWT_GIT_HOOKS: [&str; 3] = ["pre-commit", "pre-push", "commit-msg"];
+
+fn ensure_gwt_git_hooks(worktree: &Path) -> io::Result<()> {
+    ensure_gwt_git_hooks_with(worktree, |worktree| {
+        use gwt_core::process_console::{spawn_logged_blocking, ProcessKind, SpawnOptions};
+
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + std::time::Duration::from_secs(90),
+        );
+        let mut options =
+            SpawnOptions::new("bun x --bun --package husky husky").current_dir(worktree);
+        // A refresh can originate in a Git hook. The installer's git config
+        // must address this worktree, not the hook's inherited repository.
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_PREFIX",
+            "GIT_NAMESPACE",
+            "GIT_COMMON_DIR",
+        ] {
+            options = options.env_remove(name);
+        }
+        let output = spawn_logged_blocking(
+            &gwt_core::process_console::global(),
+            ProcessKind::AgentBootstrap,
+            "bun",
+            &["x", "--bun", "--package", "husky", "husky"],
+            options,
+        )?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "Husky installer failed ({:?}): {} {}",
+                output.exit_code,
+                output.stdout.trim(),
+                output.stderr.trim()
+            )));
+        }
+        Ok(())
+    })
+}
+
+fn ensure_gwt_git_hooks_with(
+    worktree: &Path,
+    install: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    // This is the gwt repository's development policy, not permission to run
+    // a package installer in arbitrary projects that happen to use Husky.
+    if gwt_core::repo_hash::detect_repo_hash(worktree)
+        != Some(gwt_core::repo_hash::compute_repo_hash(
+            "https://github.com/akiojin/gwt.git",
+        ))
+    {
+        return Ok(());
+    }
+    let mut command = gwt_core::process::hidden_command("git");
+    let output = gwt_core::process::scrub_git_env(&mut command)
+        .current_dir(worktree)
+        .args(["config", "--path", "--get", "core.hooksPath"])
+        .output()?;
+    if output.status.code() == Some(1) {
+        return Ok(()); // No inherited hooksPath to materialize.
+    }
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "cannot inspect core.hooksPath: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let configured = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let hooks = worktree.join(&configured);
+    let husky = Path::new(&configured) == Path::new(".husky/_");
+    let missing = missing_gwt_git_hooks(&hooks, husky);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let diagnostic = format!(
+        "gwt Git hooks at {}: core.hooksPath={configured:?}; missing or unusable: {}. \
+         Restore the configured hooks, or run bunx --bun --package husky husky in this worktree \
+         to use .husky/_ (ensure HUSKY is not 0)",
+        worktree.display(),
+        missing.join(", ")
+    );
+    tracing::warn!(worktree = %worktree.display(), "{diagnostic}");
+    if !husky {
+        return Err(io::Error::other(diagnostic));
+    }
+    for hook in REQUIRED_GWT_GIT_HOOKS {
+        if !worktree.join(".husky").join(hook).is_file() {
+            return Err(io::Error::other(format!(
+                "{diagnostic}; tracked source .husky/{hook} is missing"
+            )));
+        }
+    }
+    install(worktree).map_err(|error| io::Error::other(format!("{diagnostic}; {error}")))?;
+    // Husky's installer can exit zero after a skipped or unsuccessful install.
+    // Its mode argument also does not chmod existing non-executable wrappers.
+    #[cfg(unix)]
+    for hook in REQUIRED_GWT_GIT_HOOKS {
+        use std::os::unix::fs::PermissionsExt;
+        let path = hooks.join(hook);
+        if let Ok(metadata) = fs::metadata(&path) {
+            if metadata.is_file() {
+                fs::set_permissions(
+                    &path,
+                    fs::Permissions::from_mode(metadata.permissions().mode() | 0o111),
+                )?;
+            }
+        }
+    }
+    let remaining = missing_gwt_git_hooks(&hooks, true);
+    if !remaining.is_empty() {
+        return Err(io::Error::other(format!(
+            "{diagnostic}; installer did not restore: {}",
+            remaining.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn missing_gwt_git_hooks(directory: &Path, husky: bool) -> Vec<String> {
+    REQUIRED_GWT_GIT_HOOKS
+        .into_iter()
+        .chain(husky.then_some("h"))
+        .filter(|name| {
+            let Ok(metadata) = fs::metadata(directory.join(name)) else {
+                return true;
+            };
+            if !metadata.is_file() || metadata.len() == 0 {
+                return true;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // h is sourced by the executable wrappers, not executed.
+                if *name != "h" && metadata.permissions().mode() & 0o111 == 0 {
+                    return true;
+                }
+            }
+            false
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// Materialize managed assets, returning the fallback binary the regenerated
 /// hook commands were pinned to (`None` when no hook config was generated).
 fn materialize_managed_gwt_assets_for_targets(
@@ -1312,6 +1459,7 @@ fn materialize_managed_gwt_assets_for_targets(
             ),
         ));
     }
+    ensure_gwt_git_hooks(worktree)?;
     // #3374: an ephemeral worktree refreshes tracked gwt-* assets from the
     // embedded bundle — its tracked copies are a stale base-ref snapshot, not
     // user content. Persistent worktrees keep the preserve-tracked default.
@@ -1734,6 +1882,121 @@ mod tests {
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn git_hook_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        repoint_git(dir.path(), &["init", "-q"]);
+        repoint_git(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/akiojin/gwt.git",
+            ],
+        );
+        std::fs::create_dir(dir.path().join(".husky")).unwrap();
+        for hook in ["pre-commit", "pre-push", "commit-msg"] {
+            std::fs::write(dir.path().join(".husky").join(hook), "#!/bin/sh\nexit 0\n").unwrap();
+        }
+        repoint_git(dir.path(), &["add", ".husky"]);
+        repoint_git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        repoint_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]);
+        dir
+    }
+
+    fn fake_husky_install(worktree: &Path) -> std::io::Result<()> {
+        let target = worktree.join(".husky/_");
+        std::fs::create_dir_all(&target)?;
+        std::fs::write(target.join(".gitignore"), "*\n")?;
+        std::fs::write(target.join("h"), "# sourced Husky helper\n")?;
+        for hook in ["pre-commit", "pre-push", "commit-msg"] {
+            let path = target.join(hook);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gwt_git_hooks_materialize_and_repair_existing_worktree_without_tracked_changes() {
+        let repo = git_hook_fixture();
+        let worktree = repo.path().join("linked");
+        repoint_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let before = repoint_git(&worktree, &["status", "--porcelain"]);
+        assert!(!worktree.join(".husky/_/commit-msg").exists());
+        super::ensure_gwt_git_hooks_with(&worktree, fake_husky_install).unwrap();
+        for hook in ["pre-commit", "pre-push", "commit-msg", "h"] {
+            assert!(worktree.join(".husky/_").join(hook).is_file(), "{hook}");
+        }
+        assert_eq!(before, repoint_git(&worktree, &["status", "--porcelain"]));
+        super::ensure_gwt_git_hooks_with(&worktree, |_| panic!("already healthy")).unwrap();
+
+        std::fs::remove_file(worktree.join(".husky/_/commit-msg")).unwrap();
+        super::ensure_gwt_git_hooks_with(&worktree, fake_husky_install).unwrap();
+        assert!(worktree.join(".husky/_/commit-msg").is_file());
+        assert_eq!(before, repoint_git(&worktree, &["status", "--porcelain"]));
+    }
+
+    #[test]
+    fn gwt_git_hooks_verify_installer_output_and_report_recovery() {
+        let repo = git_hook_fixture();
+        let error = super::ensure_gwt_git_hooks_with(repo.path(), |_| Ok(()))
+            .expect_err("Husky can exit zero without installing hooks");
+        assert!(error.to_string().contains("commit-msg"), "{error}");
+        assert!(error.to_string().contains("bunx"), "{error}");
+
+        let error = super::ensure_gwt_git_hooks_with(repo.path(), |_| {
+            Err(std::io::Error::other("installer unavailable"))
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("installer unavailable"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("core.hooksPath"), "{error}");
+    }
+
+    #[test]
+    fn gwt_git_hooks_preserve_healthy_custom_path() {
+        let repo = git_hook_fixture();
+        fake_husky_install(repo.path()).unwrap();
+        std::fs::rename(
+            repo.path().join(".husky/_"),
+            repo.path().join(".custom-hooks"),
+        )
+        .unwrap();
+        repoint_git(repo.path(), &["config", "core.hooksPath", ".custom-hooks"]);
+        super::ensure_gwt_git_hooks_with(repo.path(), |_| panic!("healthy custom path")).unwrap();
+        assert_eq!(
+            repoint_git(repo.path(), &["config", "--get", "core.hooksPath"]),
+            ".custom-hooks"
+        );
+    }
 
     fn repoint_git(root: &Path, args: &[&str]) -> String {
         let output = gwt_core::process::run_git_logged(args, Some(root)).unwrap();
