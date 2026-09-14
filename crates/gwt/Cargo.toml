@@ -93,7 +93,7 @@ objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2
 winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-registry = "0.6"
+windows-registry = "0.100"
 windows-result = "0.4"
 
 [features]
