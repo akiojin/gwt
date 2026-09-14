@@ -11312,8 +11312,8 @@ impl IssueMonitorState {
         issue_number: u64,
         message: String,
         window_id: String,
+        now: &str,
     ) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let attempts = self
             .duplicate_launch_refusals
             .get(&issue_number)
@@ -11345,7 +11345,7 @@ impl IssueMonitorState {
             IssueMonitorDuplicateLaunchRefusal {
                 issue_number,
                 attempts,
-                last_refused_at: now,
+                last_refused_at: now.to_string(),
                 message,
                 launched_window_id: Some(window_id),
             },
@@ -11353,6 +11353,16 @@ impl IssueMonitorState {
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_launch_failed_at(issue_number, message, &now);
+    }
+
+    fn record_launch_failed_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        now: &str,
+    ) {
         let message = message.into();
         // Issue #4150: the guard refused the new attempt, not the launch that
         // is already running. Failing the row here dropped a live agent out of
@@ -11360,10 +11370,10 @@ impl IssueMonitorState {
         // so the ledger counted fewer agents than were running and the monitor
         // admitted another one over `max_active`.
         if let Some(window_id) = self.duplicate_launch_refusal_window(issue_number, &message) {
-            self.record_duplicate_launch_refusal(issue_number, message, window_id);
+            self.record_duplicate_launch_refusal(issue_number, message, window_id, now);
             return;
         }
-        self.record_failed_issue(issue_number, message, MonitorInboxState::LaunchFailed);
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::LaunchFailed, now);
     }
 
     pub fn record_launch_failed_delivery(
@@ -11372,6 +11382,24 @@ impl IssueMonitorState {
         message: impl Into<String>,
         delivery_id: Option<&str>,
         materializer_id: Option<&str>,
+    ) -> bool {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_launch_failed_delivery_at(
+            issue_number,
+            message,
+            delivery_id,
+            materializer_id,
+            &now,
+        )
+    }
+
+    pub(crate) fn record_launch_failed_delivery_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+        now: &str,
     ) -> bool {
         if delivery_id.is_none()
             && self
@@ -11399,7 +11427,7 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.record_launch_failed(issue_number, message);
+        self.record_launch_failed_at(issue_number, message, now);
         true
     }
 
@@ -11407,6 +11435,16 @@ impl IssueMonitorState {
         &mut self,
         window_id: &str,
         message: impl Into<String>,
+    ) -> Option<u64> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_agent_window_failed_at(window_id, message, &now)
+    }
+
+    pub(crate) fn record_agent_window_failed_at(
+        &mut self,
+        window_id: &str,
+        message: impl Into<String>,
+        now: &str,
     ) -> Option<u64> {
         let issue_number = self
             .launched_windows
@@ -11425,12 +11463,22 @@ impl IssueMonitorState {
                         .map(|_| item.issue.number)
                 })
             })?;
-        self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::AgentFailed, now);
         Some(issue_number)
     }
 
     pub fn record_agent_issue_failed(&mut self, issue_number: u64, message: impl Into<String>) {
-        self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_agent_issue_failed_at(issue_number, message, &now);
+    }
+
+    pub(crate) fn record_agent_issue_failed_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        now: &str,
+    ) {
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::AgentFailed, now);
     }
 
     /// Issue #3627: launched agent windows that the owning project tab no
@@ -12786,7 +12834,7 @@ impl IssueMonitorState {
         reason: &str,
         now: &str,
     ) -> IssueMonitorRequeueOutcome {
-        // Fail closed on anything a launch still owns. `record_failed_issue`
+        // Fail closed on anything a launch still owns. `record_failed_issue_at`
         // clears active tracking, so a genuinely failed row never trips this;
         // a row that does trip it is live, and killing a running agent is the
         // one mistake no later compensation can undo.
@@ -13008,7 +13056,7 @@ impl IssueMonitorState {
 
     /// Issue #4042 AC-2: keep a failed row held but replace what it says.
     ///
-    /// Unlike [`Self::record_failed_issue`] this never re-enters the failure
+    /// Unlike [`Self::record_failed_issue_at`] this never re-enters the failure
     /// lifecycle (attempt accounting, autonomous retry, window bookkeeping):
     /// the row already failed, only its explanation changes. Returns whether
     /// the message actually changed, so a repeated scan stays silent.
@@ -14252,11 +14300,12 @@ impl IssueMonitorState {
         Some(issue_number)
     }
 
-    fn record_failed_issue(
+    fn record_failed_issue_at(
         &mut self,
         issue_number: u64,
         message: impl Into<String>,
         state: MonitorInboxState,
+        now: &str,
     ) {
         let message = message.into();
         // Issue #3941 AC-3: a launch aborted by transient infrastructure (exact
@@ -14264,8 +14313,7 @@ impl IssueMonitorState {
         // race between concurrent fetches) is neither an agent failure nor an
         // attempt: it is requeued behind a short backoff in every mode.
         if gwt_agent::is_transient_launch_failure(&message) {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            self.record_transient_launch_retry(issue_number, message, &now);
+            self.record_transient_launch_retry(issue_number, message, now);
             return;
         }
         // SPEC #3200 (review follow-up): a failure for an in-flight autonomous
@@ -14276,8 +14324,7 @@ impl IssueMonitorState {
         // never arrive. The plain human-gated `LaunchFailed`/`AgentFailed` path
         // below is preserved for every non-autonomous issue.
         if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            self.record_autonomous_failure(issue_number, message, &now);
+            self.record_autonomous_failure(issue_number, message, now);
             return;
         }
         self.active_launches
