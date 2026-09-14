@@ -67,7 +67,7 @@ pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use pr::types::{
     LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
-    PrReviewThread, PrReviewThreadComment,
+    PrReviewThread, PrReviewThreadComment, PrUpdateBranchOutcome, PrUpdateBranchResult,
 };
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;

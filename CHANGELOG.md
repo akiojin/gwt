@@ -1,6 +1,39 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.96.0] - 2026-09-13
+
+### Bug Fixes
+
+- **launch:** 同一 Session の再起動は並行世代ではなく Continue work へ案内する
+- **issue-monitor:** Live launch を持たない行の回収経路を PM に返す
+- **pm:** 管理対象ファイルとの衝突を保全して再配置する
+- **index:** 非 ASCII パス配下で HNSW が永続化されず再構築ループになるのを止める
+- **pr:** Rustdoc の壊れた intra-doc link で Lint job が落ちるのを直す
+
+### Features
+
+- **launch:** 生存中の Active holder に対する起動拒否を撤去して並行世代を許可する
+- **pr:** PM が BEHIND を解消できる pr.update_branch を追加する
+- **pr:** Head branch と owner Issue の導出元を返す
+
+### Miscellaneous Tasks
+
+- **work:** Work event shard を記録する
+- **work:** Work event shard を記録する
+- **work:** アプリ更新前に作業記録を退避
+- **work:** Issue #3992 の作業イベントを記録
+- **work:** Issue #3992 の作業イベントを追記
+- **work:** Issue #3992 の終端 Work イベントを記録
+- **work:** Issue 3572 の既存作業履歴を保全する
+- **work:** Issue 3572 の再開履歴を記録する
+- **work:** #4205 の Work イベントシャードを記録する
+- **work:** SPEC #3835 の Work receipt shard を記録する
+
+### Testing
+
+- **pm:** 復元テストのHOME隔離をテスト本体で保持する
+
 ## [9.95.1] - 2026-09-11
 
 ### Bug Fixes

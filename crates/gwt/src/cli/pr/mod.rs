@@ -24,7 +24,8 @@ pub(super) use gh::{
     parse_available_fields, parse_pr_checks_items_json, parse_pr_checks_items_response,
     parse_pr_number_from_url, probe_github_rate_limit_via_gh,
     reply_and_resolve_pr_review_threads_via_gh, review_thread_has_comment_body,
-    should_reply_to_review_thread, should_resolve_review_thread,
+    should_reply_to_review_thread, should_resolve_review_thread, update_branch_failure_is_conflict,
+    update_pr_branch_via_gh,
 };
 
 use gwt_git::PrStatus;
@@ -71,6 +72,11 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Draft { number })
+        }
+        Some("update-branch") => {
+            let number = super::parse_required_number(it.next())?;
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::UpdateBranch { number })
         }
         Some("comment") => {
             let number = super::parse_required_number(it.next())?;
@@ -638,6 +644,34 @@ pub(super) fn run<E: CliEnv>(
             render_pr(out, &pr);
             0
         }
+        // SPEC #3835 AC-15: the way out of `BEHIND`. Deliberately not a
+        // "PR mutation" in the Ready-gate sense — it changes no PR content and
+        // claims no verification, so the PM can run it on any owner's PR
+        // without holding that owner's execution binding.
+        PrCommand::UpdateBranch { number } => {
+            let result = env
+                .update_pr_branch(number)
+                .map_err(super::io_as_api_error)?;
+            match result.outcome {
+                crate::cli::PrUpdateBranchOutcome::Updated => {
+                    out.push_str(&format!(
+                        "updated pull request #{number} branch with its base\n"
+                    ));
+                    0
+                }
+                crate::cli::PrUpdateBranchOutcome::Conflicted => {
+                    out.push_str(&format!(
+                        "update-branch refused: PR #{number} is CONFLICTED — merging the base \
+                         would conflict, so nothing was pushed. Resolving the conflict is the \
+                         owner's work; relaunch the owner instead of retrying.\n"
+                    ));
+                    if !result.detail.is_empty() {
+                        out.push_str(&format!("detail: {}\n", result.detail));
+                    }
+                    2
+                }
+            }
+        }
         PrCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             env.comment_on_pr(number, &body)
@@ -1019,8 +1053,10 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
                 "dwell_hours": item.dwell_hours,
                 "owner_issue_closed": item.owner_issue_closed,
                 "owner_issue": item.owner_issue,
+                "owner_issue_source": item.owner_issue_source,
                 "default_action": item.default_action,
                 "default_action_executable": item.default_action_executable,
+                "default_action_operation": item.default_action_operation,
                 "blocker": item.blocker,
                 "fallback": item.fallback,
                 "unchanged_cycles": item.unchanged_cycles,
@@ -1074,6 +1110,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
 pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
     out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
+    out.push_str(&format!("head_ref_name: {}\n", pr.head_ref_name));
     out.push_str(&format!("ci: {}\n", pr.ci_status));
     out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
     out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
@@ -1187,10 +1224,12 @@ mod tests {
             stale: false,
             owner_issue_closed: false,
             owner_issue: Some(7),
+            owner_issue_source: Some("head_branch".to_string()),
             default_action: "propose merge".to_string(),
             dwell_hours: Some(5),
             stale_after_hours: 72,
             default_action_executable: false,
+            default_action_operation: None,
             blocker: Some("owner_issue_closed".to_string()),
             fallback: Some(gwt_git::PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string()),
             unchanged_cycles: 2,
@@ -1202,6 +1241,7 @@ mod tests {
 
     fn seeded_pr() -> gwt_git::PrStatus {
         gwt_git::PrStatus {
+            head_ref_name: String::new(),
             number: 7,
             title: "CLI family split".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -2492,6 +2532,11 @@ mod tests {
 
         assert_eq!(code, 0);
         assert_eq!(env.pr_list_call_count, 1);
+        let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            payload["pull_requests"][0]["owner_issue_source"],
+            "head_branch"
+        );
         assert!(out.contains("\"lifecycle\": \"MERGE-CANDIDATE\""), "{out}");
         assert!(
             out.contains("\"default_action\": \"propose merge\""),
@@ -2532,6 +2577,16 @@ mod tests {
             env.pr_list_options,
             Some(gwt_git::PrInventoryOptions::default())
         );
+    }
+
+    #[test]
+    fn pr_view_renders_the_head_branch() {
+        let mut value = serde_json::to_value(seeded_pr()).unwrap();
+        value["head_ref_name"] = serde_json::json!("work/issue-3835");
+        let pr = serde_json::from_value(value).unwrap();
+        let mut out = String::new();
+        render_pr(&mut out, &pr);
+        assert!(out.contains("head_ref_name: work/issue-3835\n"), "{out}");
     }
 
     #[test]
@@ -2612,6 +2667,60 @@ mod tests {
                 escalate_after_cycles: 2,
                 ..gwt_git::PrInventoryOptions::default()
             })
+        );
+    }
+
+    /// SPEC #3835 AC-15: `update-branch` is the PM's only way out of `BEHIND`,
+    /// and until now it had no operation behind it — 15 fully green PRs sat
+    /// waiting on a step no surface could take (Issue #3835, 2026-09-11).
+    #[test]
+    fn update_branch_merges_the_base_into_a_behind_pr() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.pr_update_branch_outcomes.insert(
+            7,
+            crate::cli::PrUpdateBranchResult {
+                number: 7,
+                outcome: crate::cli::PrUpdateBranchOutcome::Updated,
+                detail: String::new(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::UpdateBranch { number: 7 }, &mut out)
+            .expect("run pr update-branch");
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_update_branch_call_log, vec![7]);
+        assert!(out.contains("updated pull request #7 branch"), "{out}");
+    }
+
+    /// SPEC #3835 AC-15 / FR-007: a conflicting update is refused, not
+    /// resolved. The PM reports `CONFLICTED` and hands the work back to the
+    /// owner; conflict resolution is never a PM automatic action.
+    #[test]
+    fn update_branch_refuses_a_conflicting_pr_as_conflicted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.pr_update_branch_outcomes.insert(
+            7,
+            crate::cli::PrUpdateBranchResult {
+                number: 7,
+                outcome: crate::cli::PrUpdateBranchOutcome::Conflicted,
+                detail: "merge conflict between base and head".to_string(),
+            },
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::UpdateBranch { number: 7 }, &mut out)
+            .expect("run pr update-branch");
+
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("CONFLICTED"), "{out}");
+        assert!(out.contains("owner"), "{out}");
+        assert!(
+            out.contains("merge conflict between base and head"),
+            "GitHub's own wording has to survive to the PM: {out}"
         );
     }
 
@@ -2778,6 +2887,7 @@ mod tests {
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
             number: 2538,
+            head_ref_name: String::new(),
             title: "Active Work title".to_string(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://github.com/akiojin/gwt/pull/2538".to_string(),
@@ -2841,6 +2951,7 @@ mod tests {
         env.files.insert("body.md".to_string(), "Body".to_string());
         env.seed_created_pr(gwt_git::PrStatus {
             number: 2540,
+            head_ref_name: String::new(),
             title: "Other branch PR".to_string(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://github.com/akiojin/gwt/pull/2540".to_string(),
@@ -3183,6 +3294,7 @@ mod tests {
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
             number: 9999,
+            head_ref_name: String::new(),
             title: "Auto-done PR".to_string(),
             state: gwt_git::pr_status::PrState::Merged,
             url: "https://github.com/akiojin/gwt/pull/9999".to_string(),
