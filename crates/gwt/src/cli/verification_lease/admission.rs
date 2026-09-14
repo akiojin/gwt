@@ -598,13 +598,25 @@ pub(crate) fn admit<E: CliEnv>(
                     });
                     // Issue #4086 AC-1: the rerun must be admitted before any
                     // background index job that queues in the meantime.
-                    let _ = coordinator.reserve_heavy(
+                    let reserved = coordinator.reserve_heavy(
                         &key,
                         JobPriority::ManualRebuild,
                         VERIFICATION_RESERVATION_TTL,
                         Some("verify.run deferred"),
                     );
                     let mut detail = holder.detail;
+                    // Issue #4337 AC-3: name the reservation outcome outright.
+                    // `queue_position` below only ever appears on success, so
+                    // on its own it leaves the rerun unable to tell a failed
+                    // reservation from a failed status read — and the two call
+                    // for opposite expectations: a reserved turn is kept for
+                    // the rerun, an unreserved one rejoins at the back.
+                    match &reserved {
+                        Ok(_) => detail.push_str("; next_turn_reserved: yes"),
+                        Err(err) => {
+                            detail.push_str(&format!("; next_turn_reserved: no ({err})"));
+                        }
+                    }
                     if let Ok(status) = coordinator.heavy_lease_status() {
                         if let Some(position) = status.queue.iter().position(|entry| {
                             entry.target.as_deref() == Some(key.file_stem().as_str())
@@ -1195,6 +1207,14 @@ mod tests {
         assert!(
             message.contains(&other.file_stem()),
             "the refusal must name the holder: {message}"
+        );
+        // Issue #4337 AC-3: the refusal states the reservation outcome
+        // outright. `queue_position` alone only ever appears on success, so
+        // its absence reads the same whether the reservation failed or the
+        // status read did — and the rerun's outlook differs entirely.
+        assert!(
+            message.contains("next_turn_reserved: yes"),
+            "the refusal must say the next turn is reserved: {message}"
         );
         // Issue #4086: a deferred run leaves its turn reserved so the rerun
         // is admitted before any background index job.
