@@ -18,107 +18,6 @@ use gwt_skills::CodexHookDiscoveryMode;
 use serde_json::Value;
 use tempfile::tempdir;
 
-#[test]
-fn gwt_repo_missing_custom_git_hooks_reports_launch_error() {
-    let dir = tempdir().expect("tempdir");
-    run_git(dir.path(), &["init", "-q"]);
-    run_git(
-        dir.path(),
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/akiojin/gwt.git",
-        ],
-    );
-    run_git(dir.path(), &["config", "core.hooksPath", ".custom-hooks"]);
-
-    let error = refresh_existing_managed_gwt_assets_for_worktree(dir.path())
-        .expect_err("a configured but empty Git hook directory must not pass launch setup");
-    let message = error.to_string();
-    assert!(message.contains("core.hooksPath"), "{message}");
-    assert!(message.contains(".custom-hooks"), "{message}");
-    assert!(message.contains("commit-msg"), "{message}");
-    assert!(
-        message.contains("bunx"),
-        "diagnostic must include recovery: {message}"
-    );
-    assert!(!dir.path().join(".husky/_").exists());
-}
-
-#[test]
-fn unrelated_repo_missing_git_hooks_does_not_install_packages() {
-    let dir = tempdir().expect("tempdir");
-    run_git(dir.path(), &["init", "-q"]);
-    run_git(
-        dir.path(),
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/example/project.git",
-        ],
-    );
-    run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]);
-
-    refresh_existing_managed_gwt_assets_for_worktree(dir.path())
-        .expect("unrelated project hook installation is outside gwt ownership");
-    assert!(!dir.path().join(".husky").exists());
-}
-
-/// Explicit integration smoke: ordinary test runs never download packages.
-#[test]
-#[ignore = "requires Bun and access to the Husky package; run explicitly with --ignored"]
-fn gwt_repo_materializes_real_husky_and_preserves_git_hook_exit_status() {
-    let dir = tempdir().expect("tempdir");
-    run_git(dir.path(), &["init", "-q"]);
-    run_git(dir.path(), &["config", "user.name", "Test"]);
-    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
-    std::fs::create_dir(dir.path().join(".husky")).unwrap();
-    for hook in ["pre-commit", "pre-push"] {
-        std::fs::write(dir.path().join(".husky").join(hook), "#!/bin/sh\nexit 0\n").unwrap();
-    }
-    std::fs::write(
-        dir.path().join(".husky/commit-msg"),
-        "#!/bin/sh\n[ \"$1\" = \"argument with spaces\" ] && exit 17\nexit 19\n",
-    )
-    .unwrap();
-    run_git(dir.path(), &["add", ".husky"]);
-    run_git(dir.path(), &["commit", "-qm", "fixture"]);
-    run_git(
-        dir.path(),
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/akiojin/gwt.git",
-        ],
-    );
-    run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]);
-
-    refresh_existing_managed_gwt_assets_for_worktree(dir.path()).unwrap();
-    for hook in ["pre-commit", "pre-push", "commit-msg", "h"] {
-        assert!(dir.path().join(".husky/_").join(hook).is_file(), "{hook}");
-    }
-    let output = hidden_command("git")
-        .current_dir(dir.path())
-        .args(["hook", "run", "commit-msg", "--", "argument with spaces"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(17));
-    let status = hidden_command("git")
-        .current_dir(dir.path())
-        .args(["status", "--porcelain"])
-        .output()
-        .unwrap();
-    assert!(status.status.success());
-    assert!(
-        status.stdout.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&status.stdout)
-    );
-}
-
 /// SPEC #3245 FR-004 / AC-1: the coordination guidance no longer branches by
 /// session kind. Every materialization gets the single guidance including the
 /// `workspace.update` Work-state instruction; the curation framing that told
@@ -418,6 +317,56 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     assert!(exclude.contains(".claude/skills/gwt-*"));
     assert!(exclude.contains(".claude/commands/gwt-*"));
     assert!(exclude.contains(".codex/skills/gwt-*"));
+}
+
+/// Issue #4339 AC-1 / AC-3: a worktree inherits `core.hooksPath` through git
+/// config while the directory it names arrives empty, so worktree
+/// materialization has to make the required hooks real — without adding a
+/// tracked diff.
+#[test]
+fn refresh_managed_gwt_assets_materializes_the_configured_git_hook_directory() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    run_git(root, &["init", "-q"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "core.hooksPath", ".husky/_"]);
+    std::fs::create_dir_all(root.join(".husky")).expect("create .husky");
+    std::fs::write(
+        root.join(".husky/commit-msg"),
+        "#!/usr/bin/env sh\nexit 0\n",
+    )
+    .expect("write commit-msg source");
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-q", "-m", "feat: seed"]);
+    let cli_bin = root.join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+    assert!(
+        !root.join(".husky/_/commit-msg").exists(),
+        "the configured hook directory must start out empty"
+    );
+
+    refresh_managed_gwt_assets_for_worktree(root).expect("refresh managed assets");
+
+    assert!(
+        root.join(".husky/_/commit-msg").is_file(),
+        "materialization must create the hook core.hooksPath points at"
+    );
+    let status = hidden_command("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git status");
+    assert!(
+        String::from_utf8_lossy(&status.stdout)
+            .lines()
+            .all(|line| !line.contains(".husky")),
+        "materialized hooks must stay out of the tracked diff: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
 }
 
 #[cfg(unix)]
