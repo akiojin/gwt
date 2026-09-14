@@ -620,6 +620,83 @@ mod idle_windows {
         );
     }
 
+    /// Issue #4131: the auto-update-restart shape as production actually
+    /// presents it. The restart kills the pane before the holder can settle
+    /// anything, and the generation reaper — which runs earlier in the same
+    /// scan — records `Blocked` on its behalf, so the classifier sees
+    /// `Interrupted`, never `Active`. The slot must come back *and* the
+    /// interrupted Issue must become a launch candidate again — without a PM
+    /// `issue.monitor.stop` and without passing through `needs_human`.
+    #[test]
+    fn a_restart_killed_pane_frees_its_slot_and_requeues_its_own_issue() {
+        let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
+            NOW,
+        );
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
+        assert_eq!(monitor.active_count(), 0, "the slot is free");
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "the interrupted Issue is queued, never parked for a human"
+        );
+        assert!(monitor.queued_issue_numbers().contains(&43));
+        assert!(
+            monitor.next_launch_request(NOW).is_some(),
+            "the freed slot admits a launch in the same scan"
+        );
+    }
+
+    /// Issue #4131: the same recovery on an attended host. `autonomous_mode` is
+    /// off, so the kinds that end a live pane stay gated — but a binding whose
+    /// pane is already gone is still released, because leaving it held is how
+    /// an auto-update restart used to leak every slot it took.
+    #[test]
+    fn a_dead_binding_frees_its_slot_with_autonomous_mode_off() {
+        let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
+        monitor.set_autonomous_mode(false);
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
+            NOW,
+        );
+        assert_eq!(outcome.released, vec![43]);
+        assert_eq!(outcome.requeued, vec![43]);
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.queued_issue_numbers().contains(&43));
+    }
+
+    /// Issue #4131 (PR #4139 review): the recovery above runs precisely when
+    /// `autonomous_mode` is off, so reporting it through the mode-gated notice
+    /// queue drops every message it produces. An operator who never asked for
+    /// autonomous mode still has to learn that the Monitor took a slot back and
+    /// requeued the Issue behind their back.
+    #[test]
+    fn a_dead_binding_recovery_reports_itself_with_autonomous_mode_off() {
+        let mut monitor = launched_with_queue(43, 53, "tab-1::dead-43");
+        monitor.set_autonomous_mode(false);
+        monitor.record_window_snapshot(snapshot(Vec::new()));
+        monitor.reconcile_idle_windows(
+            &BTreeMap::from([(43, IssueMonitorExecutionSettlement::Interrupted)]),
+            NOW,
+        );
+        let notices = monitor.take_autonomous_notices();
+        assert!(
+            notices.iter().any(|notice| notice.issue_number == 43
+                && notice.message.contains("released idle window")),
+            "the released slot is reported: {notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.issue_number == 43 && notice.message.contains("requeued")),
+            "the requeue is reported: {notices:?}"
+        );
+    }
+
     #[test]
     fn active_record_with_idle_pane_keeps_its_slot() {
         let mut monitor = launched_with_queue(44, 54, "tab-1::stuck-44");

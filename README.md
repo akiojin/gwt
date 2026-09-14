@@ -333,8 +333,11 @@ an explicit action in the GUI. Idle agent windows free their slot on
 their own: each scan classifies every launched window as
 `review_verdict_published`, `execution_settled`, `binding_dead`, or
 `stuck_unknown` (visible per row and in `idle_windows` in
-`issue.monitor.status`), releases the first three without requeueing the Issue,
-and closes their panes. Only `stuck_unknown` — a window that is idle while its
+`issue.monitor.status`), releases the first three and closes their panes. A
+released Issue stays out of the queue, except when its window died before the
+agent settled its execution — an app restart that took the pane with it, for
+example — in which case the Issue is requeued so the next scan relaunches it
+on its existing branch. Only `stuck_unknown` — a window that is idle while its
 execution record is still active — stays for a human, and it asks for a
 decision once it has been idle for twice the stuck timeout.
 `issue.monitor.release_idle` runs the same release by hand for one Issue or
@@ -854,6 +857,38 @@ JSON
   `~/.gwt/session.json`
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
+
+### macOS filesystem activity and Spotlight
+
+The per-worktree index watcher excludes the root `target/` directory's
+descendants from its own macOS FSEvents stream, including when `target/` is
+created after watching starts. A change to the directory entry itself can
+still arrive from its parent and is filtered by the index path policy.
+This controls only that gwt stream; it does not disable system-wide FSEvents
+or other applications' subscriptions. The index watcher currently has no
+production startup caller, so this exclusion alone does not establish the
+cause of high `fseventsd` CPU usage.
+
+For an existing worktree, open **System Settings → Spotlight → Search Privacy**
+and add its `target` directory. For a new worktree, add `target` after the
+first build creates it. Follow Apple's
+[Spotlight privacy instructions](https://support.apple.com/en-gb/guide/mac-help/mchl1bb43b84/mac)
+for your macOS version. gwt does not change Spotlight settings automatically.
+
+To inspect host CPU alongside gwt diagnostics:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"diagnostics.cpu","params":{}}
+JSON
+```
+
+The `host_cpu` result includes the latest `fseventsd` process sample and the
+sampling count and interval. On macOS, it samples three times one second apart
+and warns when the same process exceeds 100% CPU in all three samples. Missing
+processes or unavailable samples do not imply low CPU usage. A warning is an
+observation, not proof that a particular worktree caused the load; inspect
+active filesystem consumers and Spotlight privacy settings before attributing it.
 
 ## Development
 
