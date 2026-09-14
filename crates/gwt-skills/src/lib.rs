@@ -7,6 +7,7 @@ pub mod codex_managed_config;
 pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
+pub mod git_hooks;
 pub mod hooks;
 pub mod pm_guidance;
 pub mod provider_hooks;
@@ -43,6 +44,10 @@ pub use distribute::{
     ManagedAssetTarget, TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
+pub use git_hooks::{
+    materialize_managed_git_hooks, missing_managed_git_hooks, plan_managed_git_hooks, GitHookPlan,
+    GitHookPlanEntry,
+};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
