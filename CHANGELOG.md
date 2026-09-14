@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.96.1] - 2026-09-14
+
+### Bug Fixes
+
+- **issue-monitor:** 全open母集団の復帰と縮小診断を修正
+- **pm:** 常駐 subscribe の待機を5秒に制限する
+- **pm:** PM pane が Running / Waiting の間は自動 wake を保留する
+
+### Miscellaneous Tasks
+
+- **work:** #4184の受け入れ条件再監査を記録
+- **work:** #4184の再開時監査を記録
+- **work:** Issue 3825 の作業イベントを記帳する
+- **work:** Issue 3825 の作業イベントを記帳する
+- **work:** #4258 の終端 Work イベントを記録する
+
 ## [9.96.0] - 2026-09-13
 
 ### Bug Fixes
