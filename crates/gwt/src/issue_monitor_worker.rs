@@ -793,6 +793,32 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    // Reconcile local credentials before this scan plans claims. No network
+    // request is made here; Claude credential access remains opt-in.
+    let usage_config = gwt_config::Settings::load().unwrap_or_default().usage;
+    if usage_config.codex_enabled {
+        if let Some(home) = gwt_core::usage::codex::codex_home() {
+            if let Some(identity) = gwt_core::usage::codex::read_auth_account_identity(&home) {
+                monitor.reconcile_provider_account("codex", &identity, now);
+            }
+            if let Ok(at) = chrono::DateTime::parse_from_rfc3339(now) {
+                monitor.reconcile_provider_usage(
+                    &gwt_core::usage::codex::read_codex_account(
+                        &home,
+                        at.with_timezone(&chrono::Utc),
+                    ),
+                    now,
+                );
+            }
+        }
+    }
+    if usage_config.claude_account_enabled {
+        if let Some(account_id) = gwt_core::usage::claude::claude_home()
+            .and_then(|home| gwt_core::usage::claude::read_auth_account_identity(&home))
+        {
+            monitor.reconcile_provider_account("claude", &account_id, now);
+        }
+    }
     let summary =
         crate::issue_monitor::scan_issue_monitor_candidates_for_project_tab_with_provenance(
             monitor,

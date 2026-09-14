@@ -7547,6 +7547,8 @@ mod tests {
                         issue_number: Some(42),
                         window_id: Some("tab-1::agent-42".to_string()),
                         screen_text: Some("You've hit your usage limit".to_string()),
+                        account_id: None,
+                        poller_observed_at: None,
                         poller_state: Some("ok".to_string()),
                         poller_limit_reached: Some(false),
                         poller_windows: vec![crate::IssueMonitorProviderQuotaPollerWindow {
