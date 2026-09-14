@@ -64154,8 +64154,30 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
     );
     assert!(
-        prompt.contains(gwt::pm_registry::PM_GWTD_EXECUTION_CLAUSE),
+        prompt.contains(gwt::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE),
         "{label} must carry the canonical gwtd execution-isolation clause verbatim; got: {prompt}"
+    );
+    assert!(
+        !prompt.contains("contract's 10-second outer deadline"),
+        "{label} must not retain the superseded ten-second ceiling; got: {prompt}"
+    );
+    // Issue #3825 AC-1 / AC-4: the supervision tick must not hand the PM a
+    // subscribe that blocks for the whole loop interval. Five seconds is the
+    // ceiling for one call, and the tick never waits on it at all.
+    for phrase in [
+        "contract's 5-second outer deadline",
+        "`params.timeout_seconds:5`",
+        "background task",
+        "do not wait for it",
+    ] {
+        assert!(
+            prompt.contains(phrase),
+            "{label} must carry the nonblocking subscribe contract `{phrase}`; got: {prompt}"
+        );
+    }
+    assert!(
+        !prompt.contains("`params.timeout_seconds:60`"),
+        "{label} must not restore the 60-second blocking subscribe (#3825); got: {prompt}"
     );
     assert!(
         prompt.contains("`pr.list`"),
