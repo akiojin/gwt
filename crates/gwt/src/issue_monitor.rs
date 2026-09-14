@@ -1540,7 +1540,28 @@ pub struct IssueMonitorGenerationReclaimSummary {
     /// instead of releasing again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_detected: Vec<u64>,
+    /// Issue #4207 AC-3: how many times each Issue has been released from a
+    /// held generation without a launch surviving in between.
+    ///
+    /// `released_generations` only catches a cycle that repeats one generation
+    /// id, and the Blocked/Completed route this reclaim depends on is exactly
+    /// the route that mints a *successor*. A release whose launch dies and
+    /// leaves a fresh generation therefore reads as a new fact every minute,
+    /// forever, and the guard never fires. Counting the releases sees the cycle
+    /// the generation id cannot. Cleared for an Issue as soon as one of its
+    /// launches reaches a window, because that proves there was no cycle.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub release_counts: BTreeMap<u64, usize>,
 }
+
+/// Issue #4207 AC-3: how many times the Issue Monitor returns one Issue to the
+/// queue from a held execution generation before it stops and says so.
+///
+/// Each release is a bet that the next launch will get past the generation
+/// that refused the last one. Three losing bets in a row is no longer a
+/// transient disagreement between two readings of the ledger — it is a cycle,
+/// and continuing to release only reproduces it once a minute.
+pub const MAX_GENERATION_RECLAIM_RELEASES: usize = 3;
 
 /// Issue #4150 AC-3: a duplicate launch the execution generation guard refused
 /// while the Issue's original launch was still running.
@@ -1589,7 +1610,72 @@ pub struct IssueMonitorReleasedFailure {
 /// without bound while the Monitor runs unattended.
 const REQUEUE_AUDIT_CAP: usize = 100;
 
+/// Issue #4228: how a persisted launch profile is decoded.
+///
+/// Before #4228 the pool wrote one `codex_fast_mode` bit whose meaning depended
+/// on which agent the profile named: [`IssueMonitorLaunchProfile::from`] folded
+/// `LaunchConfig::fast_mode` (any agent) together with `codex_fast_mode`
+/// (Codex-only) using `||`. A profile that names Claude therefore cannot be
+/// trusted to mean "Claude opted into Fast Mode" — the bit may be Codex residue
+/// the fold carried across the agent boundary.
+///
+/// The migration is deliberately one-directional: a legacy bit is honored only
+/// on a Codex profile, where it is unambiguous. On any other agent it is
+/// dropped, because silently applying Fast Mode is the failure this issue is
+/// about and losing an opt-in is recoverable from the (now visible) UI.
+#[derive(Deserialize)]
+struct IssueMonitorLaunchProfileRepr {
+    agent_id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    session_mode: gwt_agent::SessionMode,
+    #[serde(default)]
+    skip_permissions: bool,
+    #[serde(default)]
+    fast_mode: bool,
+    /// Pre-#4228 key. Read-only migration input, never written back.
+    #[serde(default)]
+    codex_fast_mode: bool,
+    #[serde(default)]
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    #[serde(default)]
+    docker_service: Option<String>,
+    #[serde(default)]
+    docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    #[serde(default)]
+    windows_shell: Option<gwt_agent::WindowsShellKind>,
+    #[serde(default)]
+    prefer_for: Vec<String>,
+}
+
+impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
+    fn from(repr: IssueMonitorLaunchProfileRepr) -> Self {
+        let legacy_fast_mode = repr.codex_fast_mode
+            && normalize_issue_monitor_provider(&repr.agent_id).as_deref() == Some("codex");
+        Self {
+            agent_id: repr.agent_id,
+            model: repr.model,
+            reasoning: repr.reasoning,
+            version: repr.version,
+            session_mode: repr.session_mode,
+            skip_permissions: repr.skip_permissions,
+            fast_mode: repr.fast_mode || legacy_fast_mode,
+            runtime_target: repr.runtime_target,
+            docker_service: repr.docker_service,
+            docker_lifecycle_intent: repr.docker_lifecycle_intent,
+            windows_shell: repr.windows_shell,
+            prefer_for: repr.prefer_for,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "IssueMonitorLaunchProfileRepr")]
 pub struct IssueMonitorLaunchProfile {
     pub agent_id: String,
     #[serde(default)]
@@ -1602,8 +1688,11 @@ pub struct IssueMonitorLaunchProfile {
     pub session_mode: gwt_agent::SessionMode,
     #[serde(default)]
     pub skip_permissions: bool,
+    /// Issue #4228: Fast Mode for the agent this profile names. Claude's and
+    /// Codex's Fast Mode live in their own pool candidates, so neither can
+    /// decide the other's launch.
     #[serde(default)]
-    pub codex_fast_mode: bool,
+    pub fast_mode: bool,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -1627,7 +1716,11 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             version: config.tool_version.clone(),
             session_mode: config.session_mode,
             skip_permissions: config.skip_permissions,
-            codex_fast_mode: config.fast_mode || config.codex_fast_mode,
+            // Issue #4228: `LaunchConfig::fast_mode` is already scoped to the
+            // agent that was launched. `codex_fast_mode` is a Codex-only
+            // derived value, and folding it in here is what let a Codex bit
+            // decide a Claude profile's Fast Mode.
+            fast_mode: config.fast_mode,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
@@ -1646,7 +1739,7 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             version: profile.version,
             session_mode: profile.session_mode,
             skip_permissions: profile.skip_permissions,
-            codex_fast_mode: profile.codex_fast_mode,
+            fast_mode: profile.fast_mode,
             runtime_target: profile.runtime_target,
             docker_service: profile.docker_service,
             docker_lifecycle_intent: profile.docker_lifecycle_intent,
@@ -1698,7 +1791,15 @@ impl Serialize for IssueMonitorLaunchProfilePatch {
 impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
-        let provided = object.keys().cloned().collect();
+        // Issue #4228: a caller still writing the pre-#4228 key has provided
+        // the Fast Mode field, whatever the migration then makes of its value.
+        let provided = object
+            .keys()
+            .map(|key| match key.as_str() {
+                "codex_fast_mode" => "fast_mode".to_string(),
+                _ => key.clone(),
+            })
+            .collect();
         let profile =
             IssueMonitorLaunchProfile::deserialize(serde_json::Value::Object(object.clone()))
                 .map_err(serde::de::Error::custom)?;
@@ -1714,7 +1815,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 11] = [
     "version",
     "session_mode",
     "skip_permissions",
-    "codex_fast_mode",
+    "fast_mode",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -1858,12 +1959,21 @@ impl IssueMonitorLaunchProfileSource {
 pub fn issue_monitor_launch_profile_summary(profile: &LaunchWizardPreviousProfile) -> String {
     let model = profile.model.as_deref().unwrap_or("default");
     let reasoning = profile.reasoning.as_deref().unwrap_or("auto");
+    // Issue #4228 AC-3: both states are spelled out. Showing the segment only
+    // when Fast Mode is on is what made a stuck bit indistinguishable from an
+    // older gwt that had no Fast Mode at all.
+    let fast_mode = if profile.fast_mode {
+        "fast:on"
+    } else {
+        "fast:off"
+    };
     format!(
-        "{} / {} / {} / {}",
+        "{} / {} / {} / {} / {}",
         profile.agent_id,
         model,
         reasoning,
-        issue_monitor_runtime_label(profile.runtime_target)
+        issue_monitor_runtime_label(profile.runtime_target),
+        fast_mode
     )
 }
 
@@ -2045,6 +2155,72 @@ impl MonitorInboxState {
                 | MonitorInboxState::AgentFailed
                 | MonitorInboxState::NeedsHuman
         )
+    }
+}
+
+/// Issue #4207 AC-4: which mechanism failed a row.
+///
+/// `launch_failed` and `agent_failed` say *when* a launch died, never *why*.
+/// In the incident this Issue was filed for, four different mechanisms —
+/// a continuation whose authority label had gone stale, a live generation
+/// refusing every relaunch, the reclaim loop holding a row it had already
+/// released, and a launcher process that exited outright — were all reported
+/// under those two states, and telling them apart meant reading nine free-form
+/// `error_message` strings by hand.
+///
+/// The message is the only signal the recorder has, so this is the one place
+/// that interprets its shape. Everything else reads the typed answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorFailureKind {
+    /// The launch carried a continuation binding the owner ledger no longer
+    /// recognised in the shape the install expected.
+    ContinuationMismatch,
+    /// A live execution generation refused the launch.
+    GenerationConflict,
+    /// The Issue Monitor released a generation and was refused on it again, so
+    /// it is holding the row instead of releasing in a loop.
+    ReclaimLoop,
+    /// The launched process exited before it could report anything useful.
+    LaunchProcessExit,
+    /// Nothing recognisable. Read `error_message`.
+    Unclassified,
+}
+
+impl MonitorFailureKind {
+    /// Classify a durable failure message.
+    #[must_use]
+    pub fn classify(message: &str) -> Self {
+        if message.contains("reclaim loop detected") {
+            return Self::ReclaimLoop;
+        }
+        if crate::cli::execution_state::is_execution_generation_conflict(message) {
+            return Self::GenerationConflict;
+        }
+        if message.contains("continuation no longer matches")
+            || message.contains("continuation Session binding changed")
+            || message.contains("continuation owner kind is not canonical")
+            || message.contains("continuation cannot enter the genesis execution launch path")
+            || message.contains("continuation lost the exact Active launch handshake race")
+        {
+            return Self::ContinuationMismatch;
+        }
+        if message.contains("Process exited with status") {
+            return Self::LaunchProcessExit;
+        }
+        Self::Unclassified
+    }
+
+    /// The stable machine-readable name, matching the serialized form.
+    #[must_use]
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::ContinuationMismatch => "continuation_mismatch",
+            Self::GenerationConflict => "generation_conflict",
+            Self::ReclaimLoop => "reclaim_loop",
+            Self::LaunchProcessExit => "launch_process_exit",
+            Self::Unclassified => "unclassified",
+        }
     }
 }
 
@@ -2707,6 +2883,10 @@ pub struct IssueMonitorLaunchProfileCandidate {
     pub index: usize,
     pub agent_id: String,
     pub summary: String,
+    /// Issue #4228 AC-3: this candidate's own Fast Mode, so a stuck bit is
+    /// readable as a field and not only as a substring of `summary`.
+    #[serde(default)]
+    pub fast_mode: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefer_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2833,6 +3013,49 @@ pub struct IssueMonitorAgentStatus {
     /// `max_active` slot beside the implementation launch it reviews.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_windows: Vec<IssueMonitorReviewWindow>,
+    /// Issue #4207 AC-5: the inbox has stopped being N independent failures.
+    ///
+    /// Present only while the share of failed rows is past
+    /// [`FAILURE_SURGE_MIN_ROWS`] and a third of the inbox — the state the
+    /// incident reached at nine failed rows out of sixteen while `needs_human`
+    /// still read empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_surge: Option<IssueMonitorFailureSurge>,
+}
+
+/// Issue #4207 AC-5: how many rows are failing, and by which mechanism.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorFailureSurge {
+    /// Rows in `launch_failed` or `agent_failed`.
+    pub failed: usize,
+    /// Rows in the inbox, failed or not.
+    pub inbox: usize,
+    /// The row count this surge had to reach.
+    pub threshold: usize,
+    /// The failed Issues, so the reader does not have to filter the inbox.
+    pub issues: Vec<u64>,
+    /// Issue #4207 AC-4: the same rows counted by
+    /// [`MonitorFailureKind::slug`], so one read answers "is one mechanism
+    /// taking the fleet down, or are these unrelated?".
+    pub by_kind: BTreeMap<String, usize>,
+}
+
+/// Issue #4207 AC-5: the fewest failed rows that can be a fleet problem.
+///
+/// Below this the share test is noise — one failure in a two-row inbox is not
+/// a surge — so both gates have to be met.
+pub const FAILURE_SURGE_MIN_ROWS: usize = 4;
+
+/// Issue #4207: the two states that mean "this row's launch did not survive".
+///
+/// `NeedsHuman` is deliberately not one of them: it is already in front of a
+/// person, so counting it would inflate the surge with rows that are being
+/// handled.
+const fn failed_inbox_state(state: MonitorInboxState) -> bool {
+    matches!(
+        state,
+        MonitorInboxState::LaunchFailed | MonitorInboxState::AgentFailed
+    )
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -3291,6 +3514,13 @@ pub struct IssueMonitorInboxSummary {
     /// refused duplicate apart from a launch that died.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_launch_refusal: Option<IssueMonitorDuplicateLaunchRefusal>,
+    /// Issue #4207 AC-4: which mechanism failed this row.
+    ///
+    /// Present only for a row that actually failed. `error_message` still
+    /// carries the exact text; this is what makes nine failures readable
+    /// without opening nine of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<MonitorFailureKind>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -7769,7 +7999,7 @@ impl IssueMonitorState {
             profile.version = None;
             // Fast mode is an explicit per-provider opt-in (the wizard maps it
             // onto each CLI's own flag), so a switch must not carry it over.
-            profile.codex_fast_mode = false;
+            profile.fast_mode = false;
         }
         let profile = profile.clone();
         self.launch_profiles =
@@ -8631,6 +8861,7 @@ impl IssueMonitorState {
                 summary: issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(
                     profile.clone(),
                 )),
+                fast_mode: profile.fast_mode,
                 prefer_for: profile.prefer_for.clone(),
                 held_until: now.and_then(|now| {
                     let provider = normalize_issue_monitor_provider(&profile.agent_id)?;
@@ -8856,8 +9087,37 @@ impl IssueMonitorState {
         counts
     }
 
+    /// Issue #4207 AC-5: the failed share of the inbox, once it is past both
+    /// gates.
+    fn failure_surge(&self) -> Option<IssueMonitorFailureSurge> {
+        let failed = self
+            .inbox
+            .iter()
+            .filter(|item| failed_inbox_state(item.state))
+            .collect::<Vec<_>>();
+        if failed.len() < FAILURE_SURGE_MIN_ROWS || failed.len() * 3 < self.inbox.len() {
+            return None;
+        }
+        let mut by_kind = BTreeMap::<String, usize>::new();
+        for item in &failed {
+            let kind = item.error_message.as_deref().map_or(
+                MonitorFailureKind::Unclassified,
+                MonitorFailureKind::classify,
+            );
+            *by_kind.entry(kind.slug().to_string()).or_default() += 1;
+        }
+        Some(IssueMonitorFailureSurge {
+            failed: failed.len(),
+            inbox: self.inbox.len(),
+            threshold: FAILURE_SURGE_MIN_ROWS,
+            issues: failed.iter().map(|item| item.issue.number).collect(),
+            by_kind,
+        })
+    }
+
     fn agent_status_without_scan_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
+        let failure_surge = self.failure_surge();
         IssueMonitorAgentStatus {
             queue: self.queued_issue_numbers(),
             active_launches: self.active_issue_numbers(),
@@ -8871,11 +9131,23 @@ impl IssueMonitorState {
             launch_profile_candidates: status.launch_profile_candidates.clone(),
             usage_threshold_percent: status.usage_threshold_percent,
             provider_quota_holds: self.active_provider_quota_holds_at(now),
+            // Issue #4207 AC-5: while a surge is in force the failed rows are
+            // listed here too. This is projection only — nothing is parked,
+            // no phase changes, and the retry path is untouched — but a reader
+            // can no longer see nine failures beside an empty `needs_human`
+            // and conclude that nothing needs them.
             needs_human: status
                 .autonomous_issues
                 .iter()
                 .filter(|summary| summary.needs_human)
                 .map(|summary| summary.issue_number)
+                .chain(
+                    failure_surge
+                        .iter()
+                        .flat_map(|surge| surge.issues.iter().copied()),
+                )
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect(),
             inbox: self
                 .inbox
@@ -8947,6 +9219,13 @@ impl IssueMonitorState {
                             .duplicate_launch_refusals
                             .get(&item.issue.number)
                             .cloned(),
+                        failure_kind: failed_inbox_state(item.state)
+                            .then(|| {
+                                item.error_message
+                                    .as_deref()
+                                    .map(MonitorFailureKind::classify)
+                            })
+                            .flatten(),
                     }
                 })
                 .collect(),
@@ -8961,6 +9240,7 @@ impl IssueMonitorState {
             idle_windows: self.idle_windows(),
             idle_window_counts: self.idle_window_counts(),
             disk_space: None,
+            failure_surge,
         }
     }
 
@@ -10940,6 +11220,14 @@ impl IssueMonitorState {
         // banner has said what it needed to say and stops crowding out the
         // per-issue errors it outranks.
         self.last_prefs_reset = None;
+        // Issue #4207 AC-3: a launch that reached a window is the proof that
+        // this Issue's earlier reclaim releases were recovery rather than a
+        // cycle. Forget them, or a long-lived Monitor would eventually hold a
+        // healthy Issue on history alone.
+        if let Some(reclaim) = self.generation_reclaim.as_mut() {
+            reclaim.release_counts.remove(&issue_number);
+            reclaim.released_generations.remove(&issue_number);
+        }
         match claim_id {
             Some(claim_id) => {
                 self.launched_claims.insert(issue_number, claim_id);
@@ -11024,8 +11312,8 @@ impl IssueMonitorState {
         issue_number: u64,
         message: String,
         window_id: String,
+        now: &str,
     ) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let attempts = self
             .duplicate_launch_refusals
             .get(&issue_number)
@@ -11057,7 +11345,7 @@ impl IssueMonitorState {
             IssueMonitorDuplicateLaunchRefusal {
                 issue_number,
                 attempts,
-                last_refused_at: now,
+                last_refused_at: now.to_string(),
                 message,
                 launched_window_id: Some(window_id),
             },
@@ -11065,6 +11353,16 @@ impl IssueMonitorState {
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_launch_failed_at(issue_number, message, &now);
+    }
+
+    fn record_launch_failed_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        now: &str,
+    ) {
         let message = message.into();
         // Issue #4150: the guard refused the new attempt, not the launch that
         // is already running. Failing the row here dropped a live agent out of
@@ -11072,10 +11370,10 @@ impl IssueMonitorState {
         // so the ledger counted fewer agents than were running and the monitor
         // admitted another one over `max_active`.
         if let Some(window_id) = self.duplicate_launch_refusal_window(issue_number, &message) {
-            self.record_duplicate_launch_refusal(issue_number, message, window_id);
+            self.record_duplicate_launch_refusal(issue_number, message, window_id, now);
             return;
         }
-        self.record_failed_issue(issue_number, message, MonitorInboxState::LaunchFailed);
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::LaunchFailed, now);
     }
 
     pub fn record_launch_failed_delivery(
@@ -11084,6 +11382,24 @@ impl IssueMonitorState {
         message: impl Into<String>,
         delivery_id: Option<&str>,
         materializer_id: Option<&str>,
+    ) -> bool {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_launch_failed_delivery_at(
+            issue_number,
+            message,
+            delivery_id,
+            materializer_id,
+            &now,
+        )
+    }
+
+    pub(crate) fn record_launch_failed_delivery_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+        now: &str,
     ) -> bool {
         if delivery_id.is_none()
             && self
@@ -11111,7 +11427,7 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.record_launch_failed(issue_number, message);
+        self.record_launch_failed_at(issue_number, message, now);
         true
     }
 
@@ -11119,6 +11435,16 @@ impl IssueMonitorState {
         &mut self,
         window_id: &str,
         message: impl Into<String>,
+    ) -> Option<u64> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_agent_window_failed_at(window_id, message, &now)
+    }
+
+    pub(crate) fn record_agent_window_failed_at(
+        &mut self,
+        window_id: &str,
+        message: impl Into<String>,
+        now: &str,
     ) -> Option<u64> {
         let issue_number = self
             .launched_windows
@@ -11137,12 +11463,22 @@ impl IssueMonitorState {
                         .map(|_| item.issue.number)
                 })
             })?;
-        self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::AgentFailed, now);
         Some(issue_number)
     }
 
     pub fn record_agent_issue_failed(&mut self, issue_number: u64, message: impl Into<String>) {
-        self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_agent_issue_failed_at(issue_number, message, &now);
+    }
+
+    pub(crate) fn record_agent_issue_failed_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        now: &str,
+    ) {
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::AgentFailed, now);
     }
 
     /// Issue #3627: launched agent windows that the owning project tab no
@@ -12498,7 +12834,7 @@ impl IssueMonitorState {
         reason: &str,
         now: &str,
     ) -> IssueMonitorRequeueOutcome {
-        // Fail closed on anything a launch still owns. `record_failed_issue`
+        // Fail closed on anything a launch still owns. `record_failed_issue_at`
         // clears active tracking, so a genuinely failed row never trips this;
         // a row that does trip it is live, and killing a running agent is the
         // one mistake no later compensation can undo.
@@ -12599,6 +12935,7 @@ impl IssueMonitorState {
             summary.released_by_holder_state = previous.released_by_holder_state.clone();
             summary.released_at = previous.released_at.clone();
             summary.released_generations = previous.released_generations.clone();
+            summary.release_counts = previous.release_counts.clone();
         }
         let mut released = Vec::new();
         let mut released_by_holder_state = BTreeMap::<String, usize>::new();
@@ -12645,6 +12982,32 @@ impl IssueMonitorState {
                         summary.loop_detected.push(issue_number);
                         continue;
                     }
+                    // Issue #4207 AC-3: the same cycle, one generation wider.
+                    // A release over a Blocked or Completed predecessor mints a
+                    // successor, so a launch that dies leaves a *different*
+                    // generation behind and the check above reads it as a fresh
+                    // fact every time. Releasing an Issue that has already come
+                    // back this often is not recovery — it is the loop.
+                    let releases = summary
+                        .release_counts
+                        .get(&issue_number)
+                        .copied()
+                        .unwrap_or_default();
+                    if releases >= MAX_GENERATION_RECLAIM_RELEASES {
+                        let reason = format!(
+                            "reclaim loop detected: the Issue Monitor has released issue #{issue_number} from a held execution generation {releases} times and every launch since was refused again (now generation {}, holder Session {} {holder_state}); holding the row instead of releasing it back into the same cycle. Run the execution.status JSON operation for the exact recovery route",
+                            hold.generation_id, hold.holder_session_id
+                        );
+                        if self.replace_failed_issue_message(issue_number, &reason) {
+                            self.push_autonomous_notice(
+                                "warn",
+                                issue_number,
+                                format!("Issue #{issue_number} held: {reason}"),
+                            );
+                        }
+                        summary.loop_detected.push(issue_number);
+                        continue;
+                    }
                     let reason = format!(
                         "stranded execution generation {} released (holder Session {holder_state}); returned to the queue by the Issue Monitor",
                         hold.generation_id
@@ -12663,6 +13026,7 @@ impl IssueMonitorState {
                         summary
                             .released_generations
                             .insert(issue_number, hold.generation_id);
+                        *summary.release_counts.entry(issue_number).or_default() += 1;
                     }
                 }
                 Some(_) | None => {
@@ -12692,7 +13056,7 @@ impl IssueMonitorState {
 
     /// Issue #4042 AC-2: keep a failed row held but replace what it says.
     ///
-    /// Unlike [`Self::record_failed_issue`] this never re-enters the failure
+    /// Unlike [`Self::record_failed_issue_at`] this never re-enters the failure
     /// lifecycle (attempt accounting, autonomous retry, window bookkeeping):
     /// the row already failed, only its explanation changes. Returns whether
     /// the message actually changed, so a repeated scan stays silent.
@@ -13936,11 +14300,12 @@ impl IssueMonitorState {
         Some(issue_number)
     }
 
-    fn record_failed_issue(
+    fn record_failed_issue_at(
         &mut self,
         issue_number: u64,
         message: impl Into<String>,
         state: MonitorInboxState,
+        now: &str,
     ) {
         let message = message.into();
         // Issue #3941 AC-3: a launch aborted by transient infrastructure (exact
@@ -13948,8 +14313,7 @@ impl IssueMonitorState {
         // race between concurrent fetches) is neither an agent failure nor an
         // attempt: it is requeued behind a short backoff in every mode.
         if gwt_agent::is_transient_launch_failure(&message) {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            self.record_transient_launch_retry(issue_number, message, &now);
+            self.record_transient_launch_retry(issue_number, message, now);
             return;
         }
         // SPEC #3200 (review follow-up): a failure for an in-flight autonomous
@@ -13960,8 +14324,7 @@ impl IssueMonitorState {
         // never arrive. The plain human-gated `LaunchFailed`/`AgentFailed` path
         // below is preserved for every non-autonomous issue.
         if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            self.record_autonomous_failure(issue_number, message, &now);
+            self.record_autonomous_failure(issue_number, message, now);
             return;
         }
         self.active_launches
@@ -14478,6 +14841,7 @@ mod tests {
                     idle_kind: None,
                     idle_since: None,
                     duplicate_launch_refusal: None,
+                    failure_kind: None,
                 }],
                 closure_held: Vec::new(),
                 last_error: None,
@@ -14492,6 +14856,7 @@ mod tests {
                 idle_windows: Vec::new(),
                 idle_window_counts: BTreeMap::new(),
                 review_windows: Vec::new(),
+                failure_surge: None,
             }
         );
     }
@@ -14719,7 +15084,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -15297,7 +15662,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -15774,7 +16139,7 @@ mod tests {
                 version: None,
                 session_mode: Default::default(),
                 skip_permissions: false,
-                codex_fast_mode: false,
+                fast_mode: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -19980,6 +20345,144 @@ mod tests {
         )
     }
 
+    /// Issue #4207 AC-4 / AC-5: the incident snapshot — nine failed rows in a
+    /// sixteen-row inbox, produced by four different mechanisms, while
+    /// `needs_human` read empty.
+    ///
+    /// Both readings that were missing are asserted here: each failed row says
+    /// which mechanism failed it, and the fleet-level share is reported instead
+    /// of leaving a reader to count the inbox by hand and conclude from an
+    /// empty `needs_human` that nothing needs them.
+    #[test]
+    fn a_failed_inbox_share_is_classified_and_never_reads_as_needing_nobody() {
+        let now = "2026-09-10T02:40:00Z";
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 16,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        let candidates = (4190..4206).map(issue).collect::<Vec<_>>();
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+        assert_eq!(monitor.agent_status_at(now).inbox.len(), 16);
+
+        let continuation_mismatch =
+            "Prepared continuation no longer matches its owner generation attempt";
+        let reclaim_loop = "reclaim loop detected: the Issue Monitor released generation gen-3885 of issue #4192 (holder Session holder-42 Stopped) and the next launch was refused on the same generation; holding the row instead of requeueing again. Run the execution.status JSON operation for the exact recovery route";
+        let process_exit = "Process exited with status 1";
+
+        for number in [4199, 4196, 4191, 4190] {
+            monitor.complete_active_launch(number, format!("tab-1::agent-{number}"));
+            monitor.record_agent_issue_failed(number, continuation_mismatch);
+        }
+        for number in [4192, 4193] {
+            monitor.complete_active_launch(number, format!("tab-1::agent-{number}"));
+            monitor.record_agent_issue_failed(number, reclaim_loop);
+        }
+        for number in [4197, 4198] {
+            monitor.complete_active_launch(number, format!("tab-1::agent-{number}"));
+            monitor.record_agent_issue_failed(number, generation_conflict_refusal(number));
+        }
+        monitor.complete_active_launch(4200, "tab-1::agent-4200");
+        monitor.record_agent_issue_failed(4200, process_exit);
+
+        let status = monitor.agent_status_at(now);
+        let kind_of = |number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .expect("the failed row is in the inbox")
+                .failure_kind
+        };
+        // AC-4: four mechanisms, four answers, without reading a message.
+        assert_eq!(
+            kind_of(4199),
+            Some(MonitorFailureKind::ContinuationMismatch)
+        );
+        assert_eq!(kind_of(4192), Some(MonitorFailureKind::ReclaimLoop));
+        assert_eq!(kind_of(4197), Some(MonitorFailureKind::GenerationConflict));
+        assert_eq!(kind_of(4200), Some(MonitorFailureKind::LaunchProcessExit));
+        assert_eq!(
+            kind_of(4205),
+            None,
+            "a row that did not fail carries no failure kind"
+        );
+
+        // AC-5: nine of sixteen is a fleet problem, and it is reported as one.
+        let surge = status.failure_surge.expect("nine of sixteen is a surge");
+        assert_eq!(surge.failed, 9);
+        assert_eq!(surge.inbox, 16);
+        assert_eq!(
+            surge.by_kind,
+            BTreeMap::from([
+                ("continuation_mismatch".to_string(), 4),
+                ("reclaim_loop".to_string(), 2),
+                ("generation_conflict".to_string(), 2),
+                ("launch_process_exit".to_string(), 1),
+            ])
+        );
+        assert_eq!(
+            status.needs_human,
+            vec![4190, 4191, 4192, 4193, 4196, 4197, 4198, 4199, 4200],
+            "the failed rows are visible to a human instead of an empty list"
+        );
+        // The surge is a reading, not a park: nothing left the retry path.
+        for number in surge.issues.iter().copied() {
+            assert!(
+                monitor
+                    .autonomous_record(number)
+                    .is_none_or(|record| record.phase != AutonomousPhase::NeedsHuman),
+                "issue #{number} must not be parked by a surge reading"
+            );
+            assert_eq!(
+                monitor.inbox_item(number).map(|item| item.state),
+                Some(MonitorInboxState::AgentFailed),
+                "issue #{number} keeps the state that describes what happened"
+            );
+        }
+    }
+
+    /// Issue #4207 AC-5: a handful of failures in a busy inbox is not a surge.
+    ///
+    /// The morning of the incident had three failed rows and was ordinary. Both
+    /// gates exist so that neither a small absolute count nor a small share can
+    /// raise the alarm on its own — a reader who is warned constantly stops
+    /// reading.
+    #[test]
+    fn a_small_failed_share_is_not_reported_as_a_surge() {
+        let now = "2026-09-10T02:40:00Z";
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 16,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        let candidates = (4190..4206).map(issue).collect::<Vec<_>>();
+        scan_issue_monitor_candidates(&mut monitor, &candidates, now);
+
+        for number in [4190, 4191, 4192] {
+            monitor.complete_active_launch(number, format!("tab-1::agent-{number}"));
+            monitor.record_agent_issue_failed(number, "Process exited with status 1");
+        }
+
+        let status = monitor.agent_status_at(now);
+        assert!(
+            status.failure_surge.is_none(),
+            "three failed rows out of sixteen is below the row threshold"
+        );
+        assert!(status.needs_human.is_empty());
+        assert_eq!(
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 4190)
+                .and_then(|row| row.failure_kind),
+            Some(MonitorFailureKind::LaunchProcessExit),
+            "classification does not depend on the surge"
+        );
+    }
+
     /// Issue #4150 AC-1 / AC-2 / AC-3 / AC-4 / AC-5: the generation guard
     /// refuses the *new* attempt, not the launch that is already running.
     ///
@@ -20416,6 +20919,88 @@ mod tests {
             BTreeMap::from([(42, "gen-successor".to_string())])
         );
         assert!(monitor.queued_issue_numbers().contains(&42));
+    }
+
+    /// Issue #4207 AC-3: the same loop, one generation wider.
+    ///
+    /// #4042 stops a cycle that repeats one generation id. But the Blocked /
+    /// Completed route this reclaim depends on is the route that mints a
+    /// *successor*, so a launch that dies leaves a different generation behind
+    /// and every refusal reads as a fresh fact — which is how a row with a
+    /// `Stopped` holder was released once a minute without the guard ever
+    /// firing. Counting the releases catches it; a launch that reaches a window
+    /// clears the count, because that proves it was recovery.
+    #[test]
+    fn release_stranded_generation_failures_stops_after_repeated_successor_releases() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-09-10T02:00:00Z");
+        let successor_probe = |generation: &'static str| {
+            move |_: u64| {
+                Some(crate::cli::execution_state::OwnerGenerationHold {
+                    status: crate::cli::execution_state::ExecutionControlStatus::Blocked,
+                    generation_id: generation.to_string(),
+                    holder_session_id: "holder-42".to_string(),
+                    holder_session_state: "Stopped".to_string(),
+                })
+            }
+        };
+
+        // Every scan refuses on a brand new generation, so #4042's exact-id
+        // guard never sees a repeat.
+        for (index, generation) in ["gen-1", "gen-2", "gen-3"].into_iter().enumerate() {
+            monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+            let summary = monitor.release_stranded_generation_failures(
+                &format!("2026-09-10T02:0{}:00Z", index + 1),
+                successor_probe(generation),
+            );
+            assert_eq!(
+                summary.released,
+                vec![42],
+                "release {} must happen",
+                index + 1
+            );
+            assert!(summary.loop_detected.is_empty());
+            assert_eq!(summary.release_counts.get(&42), Some(&(index + 1)));
+        }
+
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let held = monitor
+            .release_stranded_generation_failures("2026-09-10T02:04:00Z", successor_probe("gen-4"));
+        assert_eq!(held.loop_detected, vec![42]);
+        assert!(
+            !monitor.queued_issue_numbers().contains(&42),
+            "the fourth release would only reproduce the cycle"
+        );
+        let message = monitor
+            .prefs()
+            .failed_issues
+            .into_iter()
+            .find(|failed| failed.issue_number == 42)
+            .map(|failed| failed.message)
+            .expect("the row stays held");
+        assert!(
+            message.contains("reclaim loop detected")
+                && message.contains("3 times")
+                && message.contains("gen-4"),
+            "unexpected hold message: {message}"
+        );
+        assert!(
+            !crate::cli::execution_state::is_execution_generation_conflict(&message),
+            "the hold must not read as a fresh generation conflict"
+        );
+
+        // A launch that reaches a window proves the releases were recovery.
+        monitor.requeue_failed_issue(42, "operator recovery", "2026-09-10T02:05:00Z");
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        monitor.record_agent_issue_failed(42, generation_conflict_message(42, "Running"));
+        let after_success = monitor
+            .release_stranded_generation_failures("2026-09-10T02:06:00Z", successor_probe("gen-5"));
+        assert_eq!(
+            after_success.released,
+            vec![42],
+            "a surviving launch clears the release budget"
+        );
+        assert_eq!(after_success.release_counts.get(&42), Some(&1));
     }
 
     /// Issue #4042 AC-3: the audit is bounded by content, not only by count.
@@ -24448,7 +25033,7 @@ mod tests {
         assert_eq!(profile.version.as_deref(), Some("0.121.0"));
         assert_eq!(profile.session_mode, gwt_agent::SessionMode::Resume);
         assert!(profile.skip_permissions);
-        assert!(profile.codex_fast_mode);
+        assert!(profile.fast_mode);
         assert_eq!(
             profile.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -24470,7 +25055,7 @@ mod tests {
         assert_eq!(previous.version.as_deref(), Some("0.121.0"));
         assert_eq!(previous.session_mode, gwt_agent::SessionMode::Resume);
         assert!(previous.skip_permissions);
-        assert!(previous.codex_fast_mode);
+        assert!(previous.fast_mode);
         assert_eq!(
             previous.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -24484,6 +25069,177 @@ mod tests {
             previous.windows_shell,
             Some(gwt_agent::WindowsShellKind::PowerShell7)
         );
+    }
+
+    /// Issue #4228 AC-1: the persisted profile keeps the Fast Mode of the
+    /// agent it names. `LaunchConfig::codex_fast_mode` is a Codex-only derived
+    /// value, so folding it in with `||` let a Codex bit decide a Claude
+    /// profile's Fast Mode.
+    #[test]
+    fn launch_profile_does_not_fold_codex_fast_mode_into_the_stored_bit() {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+        config.fast_mode = false;
+        config.codex_fast_mode = true;
+
+        let profile = IssueMonitorLaunchProfile::from(&config);
+        assert_eq!(profile.agent_id, "claude");
+        assert!(
+            !profile.fast_mode,
+            "a Codex-only derived bit must not enable a Claude profile's Fast Mode"
+        );
+    }
+
+    /// Issue #4228 AC-1: a Claude launch that really did opt into Fast Mode is
+    /// still stored, under the agent-neutral key.
+    #[test]
+    fn launch_profile_stores_claude_fast_mode_under_the_agent_neutral_key() {
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+            .fast_mode(true)
+            .build();
+
+        let profile = IssueMonitorLaunchProfile::from(&config);
+        assert!(profile.fast_mode);
+
+        let value = serde_json::to_value(&profile).expect("serialize profile");
+        assert_eq!(value["fast_mode"], serde_json::json!(true));
+        assert!(
+            value.get("codex_fast_mode").is_none(),
+            "the ambiguous legacy key must not be written back: {value}"
+        );
+    }
+
+    /// Issue #4228 AC-5: a pre-#4228 file wrote one `codex_fast_mode` bit whose
+    /// meaning depended on which agent the profile named. The migration honors
+    /// it only for a Codex profile; on any other agent the bit is residue from
+    /// the fold and is dropped rather than silently applied.
+    #[test]
+    fn legacy_codex_fast_mode_migrates_only_for_codex_profiles() {
+        let codex: IssueMonitorLaunchProfile =
+            serde_json::from_str(r#"{"agent_id":"codex","codex_fast_mode":true}"#)
+                .expect("decode codex profile");
+        assert!(codex.fast_mode);
+
+        let claude: IssueMonitorLaunchProfile =
+            serde_json::from_str(r#"{"agent_id":"claude","codex_fast_mode":true}"#)
+                .expect("decode claude profile");
+        assert!(
+            !claude.fast_mode,
+            "a legacy Codex bit must not survive onto a Claude profile"
+        );
+
+        let claude_explicit: IssueMonitorLaunchProfile =
+            serde_json::from_str(r#"{"agent_id":"claude","fast_mode":true}"#)
+                .expect("decode claude profile");
+        assert!(
+            claude_explicit.fast_mode,
+            "the post-#4228 key is agent-neutral and always honored"
+        );
+    }
+
+    /// Issue #4228 AC-5: the migration runs on the real prefs load path, so an
+    /// existing `issue-monitor.json` with the stuck bit is normalized without
+    /// the user editing the file.
+    #[test]
+    fn loading_legacy_prefs_normalizes_the_stuck_fast_mode_bit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let mut value =
+            serde_json::to_value(IssueMonitorPrefs::default()).expect("serialize defaults");
+        value["launch_profile"] = serde_json::json!({"agent_id":"claude","codex_fast_mode":true});
+        value["launch_profiles"] = serde_json::json!([
+            {"agent_id":"claude","codex_fast_mode":true},
+            {"agent_id":"codex","codex_fast_mode":true}
+        ]);
+        std::fs::write(&path, value.to_string()).expect("write legacy prefs");
+
+        let loaded = load_issue_monitor_prefs(&path).expect("load");
+        assert!(!loaded.launch_profile.expect("head profile").fast_mode);
+        assert!(!loaded.launch_profiles[0].fast_mode);
+        assert!(loaded.launch_profiles[1].fast_mode);
+    }
+
+    /// Issue #4228 AC-3: `issue.monitor.status` has to say whether Fast Mode is
+    /// on. Before this the summary stopped at the runtime label, so a stuck bit
+    /// was invisible between saving a profile and launching with it.
+    #[test]
+    fn launch_profile_summary_reports_fast_mode_state() {
+        let mut profile = IssueMonitorLaunchProfile::from(
+            &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build(),
+        );
+        assert!(
+            issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(
+                profile.clone()
+            ))
+            .contains("fast:off"),
+            "a disabled Fast Mode must still be visible"
+        );
+
+        profile.fast_mode = true;
+        assert!(
+            issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(profile))
+                .contains("fast:on")
+        );
+    }
+
+    /// Issue #4228 AC-5 (relaunch comment): the operator can turn a stuck Fast
+    /// Mode off through `issue.monitor.profiles.set` — the pre-#4228 key is
+    /// still accepted, and an omitted key still inherits.
+    #[test]
+    fn profiles_set_can_clear_a_stuck_fast_mode() {
+        let codex = IssueMonitorLaunchProfile {
+            fast_mode: true,
+            ..IssueMonitorLaunchProfile::from(
+                &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build(),
+            )
+        };
+        let pool = vec![codex];
+
+        for key in ["fast_mode", "codex_fast_mode"] {
+            let patches: Vec<IssueMonitorLaunchProfilePatch> =
+                serde_json::from_value(serde_json::json!([{"agent_id": "codex", key: false}]))
+                    .expect("parse patches");
+            let (merged, _) = merge_issue_monitor_profiles_set(&pool, pool.first(), &patches);
+            assert!(!merged[0].fast_mode, "{key} must clear the stuck bit");
+        }
+
+        let patches: Vec<IssueMonitorLaunchProfilePatch> =
+            serde_json::from_value(serde_json::json!([{"agent_id": "codex"}]))
+                .expect("parse patches");
+        let (merged, _) = merge_issue_monitor_profiles_set(&pool, pool.first(), &patches);
+        assert!(
+            merged[0].fast_mode,
+            "an omitted key still inherits the saved value"
+        );
+    }
+
+    /// Issue #4228 AC-3: every pool candidate carries the same information, so
+    /// a stuck bit on a non-head candidate is visible too.
+    #[test]
+    fn launch_profile_candidates_report_fast_mode_state() {
+        let codex = IssueMonitorLaunchProfile {
+            fast_mode: true,
+            ..IssueMonitorLaunchProfile::from(
+                &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build(),
+            )
+        };
+        let claude = IssueMonitorLaunchProfile::from(
+            &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build(),
+        );
+        let prefs = IssueMonitorPrefs {
+            launch_profiles: vec![codex, claude],
+            ..IssueMonitorPrefs::default()
+        };
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let status = monitor.status_view();
+
+        assert!(status.launch_profile_candidates[0].fast_mode);
+        assert!(status.launch_profile_candidates[0]
+            .summary
+            .contains("fast:on"));
+        assert!(!status.launch_profile_candidates[1].fast_mode);
+        assert!(status.launch_profile_candidates[1]
+            .summary
+            .contains("fast:off"));
     }
 
     #[test]
@@ -27162,7 +27918,7 @@ mod tests {
                     reasoning: Some("high".to_string()),
                     version: Some("0.153.2".to_string()),
                     skip_permissions: true,
-                    codex_fast_mode: true,
+                    fast_mode: true,
                     runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                     docker_service: Some("dev".to_string()),
                     ..test_launch_profile("codex")
@@ -27189,7 +27945,7 @@ mod tests {
         assert_eq!(switched.reasoning, None);
         assert_eq!(switched.version, None);
         assert!(
-            !switched.codex_fast_mode,
+            !switched.fast_mode,
             "fast mode is a per-provider opt-in and must not carry over"
         );
         assert!(switched.skip_permissions);

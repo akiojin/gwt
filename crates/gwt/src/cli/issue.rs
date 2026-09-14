@@ -4665,6 +4665,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4712,6 +4713,7 @@ mod tests {
                 idle_kind: None,
                 idle_since: None,
                 duplicate_launch_refusal: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
@@ -4722,6 +4724,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4820,6 +4823,7 @@ mod tests {
                     idle_kind: None,
                     idle_since: None,
                     duplicate_launch_refusal: None,
+                    failure_kind: None,
                 }],
                 closure_held: Vec::new(),
                 last_error: None,
@@ -4830,6 +4834,7 @@ mod tests {
                 disk_space: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
+                failure_surge: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -4888,6 +4893,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -5771,7 +5777,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -6541,6 +6547,7 @@ mod tests {
                 idle_since: None,
                 steering: None,
                 duplicate_launch_refusal: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: None,
@@ -6552,6 +6559,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             issue_cache: None,
         };
 
@@ -7476,7 +7484,7 @@ mod tests {
                     version: None,
                     session_mode: Default::default(),
                     skip_permissions: true,
-                    codex_fast_mode: false,
+                    fast_mode: false,
                     runtime_target: Default::default(),
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),
@@ -7506,7 +7514,10 @@ mod tests {
         .expect("config set");
         assert_eq!(code, 0, "output: {out}");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
-        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        assert_eq!(
+            result["launch_profile"],
+            "claude / default / auto / host / fast:off"
+        );
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         let profile = prefs.launch_profile.expect("profile survives");
         assert_eq!(profile.agent_id, "claude");
