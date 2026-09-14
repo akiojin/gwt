@@ -665,13 +665,11 @@ fn predicate_passes(predicate: &VerificationPredicate, measurement: Option<&Valu
 }
 
 fn numeric_lte(actual: &Value, expected: &Value) -> bool {
-    match (actual.as_i64(), expected.as_i64()) {
-        (Some(actual), Some(expected)) => return actual <= expected,
-        _ => {}
+    if let (Some(actual), Some(expected)) = (actual.as_i64(), expected.as_i64()) {
+        return actual <= expected;
     }
-    match (actual.as_u64(), expected.as_u64()) {
-        (Some(actual), Some(expected)) => return actual <= expected,
-        _ => {}
+    if let (Some(actual), Some(expected)) = (actual.as_u64(), expected.as_u64()) {
+        return actual <= expected;
     }
     match (actual.as_f64(), expected.as_f64()) {
         (Some(actual), Some(expected)) => actual <= expected,
