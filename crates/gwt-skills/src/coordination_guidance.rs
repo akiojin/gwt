@@ -259,30 +259,21 @@ gwtd binary:
 
 There is no standalone `gwt-search` executable.
 
-## Heavy commands
+## Canonical verification admission
 
-`cargo test`, `cargo clippy`, `cargo build`, coverage, and headed browser
-runs compile on a host shared with every other agent worktree. Take the
-host-wide lease before any of them, even a single focused test, and
-release it afterwards:
+Only canonical `verify.run` acquires the host-wide lease, in-process for
+its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+`cargo clippy`, `cargo build`, coverage, direct headed browser checks, and
+pre-push checks do not require a verification lease. Run them directly.
 
-    gwtd <<'JSON'
-    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
-    JSON
-
-    gwtd <<'JSON'
-    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
-    JSON
-
-A refused acquire names the current holder (`holder_kind`,
-`estimated_remaining_ms`) and reserves your turn, so background index
-jobs defer to this worktree until your retry is granted; declare the
-wait with `issue.monitor.wait` (see "Waiting is not a stall") and retry
-on the cadence the gwt-verify skill defines instead of running without
-it.
-`verify.run` admits itself: it honors a lease this worktree holds,
-otherwise claims one and waits for other worktrees' heavy processes to
-drain, and answers `deferred` when its bounded wait runs out — rerun it.
+Use `verify.plan` followed by `verify.run` for canonical verification
+records. Manual `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` are retired and return an error without acquiring or
+reserving a lease. Use `verify.lease.status` to inspect contention;
+`verify.lease.release` remains available to drain a legacy holder.
+`verify.run` waits up to `params.max_wait_secs` and returns `deferred`
+when admission times out. Inspect the reported holder before retrying;
+there is no manual acquire loop or fixed retry schedule.
 
 ## Persisted Work files
 
@@ -559,29 +550,22 @@ binary の `search` JSON operation で実行します:
 
 `gwt-search` という単体の実行ファイルは存在しません。
 
-## Heavy commands
+## Canonical verification admission
 
-`cargo test`、`cargo clippy`、`cargo build`、coverage、headed browser 実行は、
-他のすべての agent worktree と共有する host 上でコンパイルします。単発の
-focused test でも、開始前に host 全体の lease を取り、終わったら解放します:
+host 全体の lease を取得するのは canonical `verify.run` だけです。
+各 run がプロセス内で取得・管理します。初回の
+`cargo build -p gwt --bin gwtd`、通常の `cargo test`、`cargo clippy`、
+`cargo build`、coverage、直接の headed browser 確認、pre-push 確認には
+verification lease は不要です。そのまま実行してください。
 
-    gwtd <<'JSON'
-    {"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45,"reason":"Issue 3913 RED run"}}
-    JSON
-
-    gwtd <<'JSON'
-    {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease_id>"}}
-    JSON
-
-拒否された acquire は現在の保持者（`holder_kind`、
-`estimated_remaining_ms`）を返し、この worktree の順番を予約します。
-background index job は再試行が granted されるまでこの予約に道を譲ります。
-lease 無しで実行せず、`issue.monitor.wait` で待機を申告して
-（「待機は停滞ではない」参照）、gwt-verify skill が定める間隔で
-再試行してください。`verify.run` は
-自分で admission を取ります: この worktree が保持する lease はそのまま使い、
-無ければ取得して他 worktree の heavy プロセスが捌けるまで待ち、bounded な
-待機を使い切ると `deferred` を返します。その場合は再実行してください。
+canonical な検証記録は `verify.plan` → `verify.run` で生成します。
+手動の `verify.lease.acquire`、`verify.lease.hold`、`verify.lease.extend`
+は廃止され、lease の取得や予約をせずエラーを返します。
+`verify.lease.status` で競合を確認でき、旧 holder の解放には
+`verify.lease.release` を引き続き使えます。
+`verify.run` は `params.max_wait_secs` まで待機し、時間切れなら
+`deferred` を返します。報告された holder を確認してから再試行してください。
+手動 acquire のループや固定の再試行間隔はありません。
 
 ## Persisted Work files
 
@@ -770,31 +754,23 @@ mod tests {
         }
     }
 
-    /// Issue #3913 AC-2: the hook-delivered guidance tells every agent that
-    /// raw `cargo test` / `cargo clippy` runs take the host-wide lease, in
-    /// both languages and in the generated file.
+    /// SPEC #3576 AC-C6: only canonical verification uses host admission.
     #[test]
-    fn heavy_command_serialization_is_in_both_bodies_and_the_generated_file() {
-        for phrase in [
-            "## Heavy commands",
-            "verify.lease.acquire",
-            "verify.lease.release",
-            "`cargo test`",
-            "`cargo clippy`",
-            "verify.run",
-            "deferred",
-            "issue.monitor.wait",
+    fn canonical_verification_guidance_is_materialized_without_manual_admission() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        for relative in [
+            ".claude/skills/gwt-coordination/SKILL.md",
+            ".codex/skills/gwt-coordination/SKILL.md",
         ] {
-            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
-            assert!(
-                SKILL_BODY_JA.contains(phrase),
-                "Japanese guidance: {phrase}"
-            );
-            assert!(
-                render_skill_md().contains(phrase),
-                "generated guidance: {phrase}"
-            );
+            let body = std::fs::read_to_string(tmp.path().join(relative)).unwrap();
+            assert!(body.contains("Only canonical `verify.run` acquires the host-wide lease"));
+            assert!(body.contains("cargo build -p gwt --bin gwtd"));
+            assert!(body.contains("do not require a verification lease"));
+            assert!(!body.contains("\"operation\":\"verify.lease.acquire\""));
+            assert!(!body.contains("even a single focused test"));
         }
+        assert!(SKILL_BODY_JA.contains("canonical `verify.run` だけ"));
     }
 
     #[test]
