@@ -5839,7 +5839,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -7678,7 +7678,7 @@ mod tests {
                     version: None,
                     session_mode: Default::default(),
                     skip_permissions: true,
-                    codex_fast_mode: false,
+                    fast_mode: false,
                     runtime_target: Default::default(),
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),
@@ -7708,7 +7708,10 @@ mod tests {
         .expect("config set");
         assert_eq!(code, 0, "output: {out}");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
-        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        assert_eq!(
+            result["launch_profile"],
+            "claude / default / auto / host / fast:off"
+        );
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         let profile = prefs.launch_profile.expect("profile survives");
         assert_eq!(profile.agent_id, "claude");

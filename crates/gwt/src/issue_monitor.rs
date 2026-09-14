@@ -1610,7 +1610,72 @@ pub struct IssueMonitorReleasedFailure {
 /// without bound while the Monitor runs unattended.
 const REQUEUE_AUDIT_CAP: usize = 100;
 
+/// Issue #4228: how a persisted launch profile is decoded.
+///
+/// Before #4228 the pool wrote one `codex_fast_mode` bit whose meaning depended
+/// on which agent the profile named: [`IssueMonitorLaunchProfile::from`] folded
+/// `LaunchConfig::fast_mode` (any agent) together with `codex_fast_mode`
+/// (Codex-only) using `||`. A profile that names Claude therefore cannot be
+/// trusted to mean "Claude opted into Fast Mode" — the bit may be Codex residue
+/// the fold carried across the agent boundary.
+///
+/// The migration is deliberately one-directional: a legacy bit is honored only
+/// on a Codex profile, where it is unambiguous. On any other agent it is
+/// dropped, because silently applying Fast Mode is the failure this issue is
+/// about and losing an opt-in is recoverable from the (now visible) UI.
+#[derive(Deserialize)]
+struct IssueMonitorLaunchProfileRepr {
+    agent_id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    session_mode: gwt_agent::SessionMode,
+    #[serde(default)]
+    skip_permissions: bool,
+    #[serde(default)]
+    fast_mode: bool,
+    /// Pre-#4228 key. Read-only migration input, never written back.
+    #[serde(default)]
+    codex_fast_mode: bool,
+    #[serde(default)]
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    #[serde(default)]
+    docker_service: Option<String>,
+    #[serde(default)]
+    docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    #[serde(default)]
+    windows_shell: Option<gwt_agent::WindowsShellKind>,
+    #[serde(default)]
+    prefer_for: Vec<String>,
+}
+
+impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
+    fn from(repr: IssueMonitorLaunchProfileRepr) -> Self {
+        let legacy_fast_mode = repr.codex_fast_mode
+            && normalize_issue_monitor_provider(&repr.agent_id).as_deref() == Some("codex");
+        Self {
+            agent_id: repr.agent_id,
+            model: repr.model,
+            reasoning: repr.reasoning,
+            version: repr.version,
+            session_mode: repr.session_mode,
+            skip_permissions: repr.skip_permissions,
+            fast_mode: repr.fast_mode || legacy_fast_mode,
+            runtime_target: repr.runtime_target,
+            docker_service: repr.docker_service,
+            docker_lifecycle_intent: repr.docker_lifecycle_intent,
+            windows_shell: repr.windows_shell,
+            prefer_for: repr.prefer_for,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "IssueMonitorLaunchProfileRepr")]
 pub struct IssueMonitorLaunchProfile {
     pub agent_id: String,
     #[serde(default)]
@@ -1623,8 +1688,11 @@ pub struct IssueMonitorLaunchProfile {
     pub session_mode: gwt_agent::SessionMode,
     #[serde(default)]
     pub skip_permissions: bool,
+    /// Issue #4228: Fast Mode for the agent this profile names. Claude's and
+    /// Codex's Fast Mode live in their own pool candidates, so neither can
+    /// decide the other's launch.
     #[serde(default)]
-    pub codex_fast_mode: bool,
+    pub fast_mode: bool,
     #[serde(default)]
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     #[serde(default)]
@@ -1648,7 +1716,11 @@ impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
             version: config.tool_version.clone(),
             session_mode: config.session_mode,
             skip_permissions: config.skip_permissions,
-            codex_fast_mode: config.fast_mode || config.codex_fast_mode,
+            // Issue #4228: `LaunchConfig::fast_mode` is already scoped to the
+            // agent that was launched. `codex_fast_mode` is a Codex-only
+            // derived value, and folding it in here is what let a Codex bit
+            // decide a Claude profile's Fast Mode.
+            fast_mode: config.fast_mode,
             runtime_target: config.runtime_target,
             docker_service: config.docker_service.clone(),
             docker_lifecycle_intent: config.docker_lifecycle_intent,
@@ -1667,7 +1739,7 @@ impl From<IssueMonitorLaunchProfile> for LaunchWizardPreviousProfile {
             version: profile.version,
             session_mode: profile.session_mode,
             skip_permissions: profile.skip_permissions,
-            codex_fast_mode: profile.codex_fast_mode,
+            fast_mode: profile.fast_mode,
             runtime_target: profile.runtime_target,
             docker_service: profile.docker_service,
             docker_lifecycle_intent: profile.docker_lifecycle_intent,
@@ -1719,7 +1791,15 @@ impl Serialize for IssueMonitorLaunchProfilePatch {
 impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
-        let provided = object.keys().cloned().collect();
+        // Issue #4228: a caller still writing the pre-#4228 key has provided
+        // the Fast Mode field, whatever the migration then makes of its value.
+        let provided = object
+            .keys()
+            .map(|key| match key.as_str() {
+                "codex_fast_mode" => "fast_mode".to_string(),
+                _ => key.clone(),
+            })
+            .collect();
         let profile =
             IssueMonitorLaunchProfile::deserialize(serde_json::Value::Object(object.clone()))
                 .map_err(serde::de::Error::custom)?;
@@ -1735,7 +1815,7 @@ pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 11] = [
     "version",
     "session_mode",
     "skip_permissions",
-    "codex_fast_mode",
+    "fast_mode",
     "runtime_target",
     "docker_service",
     "docker_lifecycle_intent",
@@ -1879,12 +1959,21 @@ impl IssueMonitorLaunchProfileSource {
 pub fn issue_monitor_launch_profile_summary(profile: &LaunchWizardPreviousProfile) -> String {
     let model = profile.model.as_deref().unwrap_or("default");
     let reasoning = profile.reasoning.as_deref().unwrap_or("auto");
+    // Issue #4228 AC-3: both states are spelled out. Showing the segment only
+    // when Fast Mode is on is what made a stuck bit indistinguishable from an
+    // older gwt that had no Fast Mode at all.
+    let fast_mode = if profile.fast_mode {
+        "fast:on"
+    } else {
+        "fast:off"
+    };
     format!(
-        "{} / {} / {} / {}",
+        "{} / {} / {} / {} / {}",
         profile.agent_id,
         model,
         reasoning,
-        issue_monitor_runtime_label(profile.runtime_target)
+        issue_monitor_runtime_label(profile.runtime_target),
+        fast_mode
     )
 }
 
@@ -2794,6 +2883,10 @@ pub struct IssueMonitorLaunchProfileCandidate {
     pub index: usize,
     pub agent_id: String,
     pub summary: String,
+    /// Issue #4228 AC-3: this candidate's own Fast Mode, so a stuck bit is
+    /// readable as a field and not only as a substring of `summary`.
+    #[serde(default)]
+    pub fast_mode: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefer_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7958,7 +8051,7 @@ impl IssueMonitorState {
             profile.version = None;
             // Fast mode is an explicit per-provider opt-in (the wizard maps it
             // onto each CLI's own flag), so a switch must not carry it over.
-            profile.codex_fast_mode = false;
+            profile.fast_mode = false;
         }
         let profile = profile.clone();
         self.launch_profiles =
@@ -8820,6 +8913,7 @@ impl IssueMonitorState {
                 summary: issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(
                     profile.clone(),
                 )),
+                fast_mode: profile.fast_mode,
                 prefer_for: profile.prefer_for.clone(),
                 held_until: now.and_then(|now| {
                     let provider = normalize_issue_monitor_provider(&profile.agent_id)?;
@@ -11282,8 +11376,8 @@ impl IssueMonitorState {
         issue_number: u64,
         message: String,
         window_id: String,
+        now: &str,
     ) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let attempts = self
             .duplicate_launch_refusals
             .get(&issue_number)
@@ -11315,7 +11409,7 @@ impl IssueMonitorState {
             IssueMonitorDuplicateLaunchRefusal {
                 issue_number,
                 attempts,
-                last_refused_at: now,
+                last_refused_at: now.to_string(),
                 message,
                 launched_window_id: Some(window_id),
             },
@@ -11323,6 +11417,16 @@ impl IssueMonitorState {
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_launch_failed_at(issue_number, message, &now);
+    }
+
+    fn record_launch_failed_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        now: &str,
+    ) {
         let message = message.into();
         // Issue #4150: the guard refused the new attempt, not the launch that
         // is already running. Failing the row here dropped a live agent out of
@@ -11330,10 +11434,10 @@ impl IssueMonitorState {
         // so the ledger counted fewer agents than were running and the monitor
         // admitted another one over `max_active`.
         if let Some(window_id) = self.duplicate_launch_refusal_window(issue_number, &message) {
-            self.record_duplicate_launch_refusal(issue_number, message, window_id);
+            self.record_duplicate_launch_refusal(issue_number, message, window_id, now);
             return;
         }
-        self.record_failed_issue(issue_number, message, MonitorInboxState::LaunchFailed);
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::LaunchFailed, now);
     }
 
     pub fn record_launch_failed_delivery(
@@ -11342,6 +11446,24 @@ impl IssueMonitorState {
         message: impl Into<String>,
         delivery_id: Option<&str>,
         materializer_id: Option<&str>,
+    ) -> bool {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_launch_failed_delivery_at(
+            issue_number,
+            message,
+            delivery_id,
+            materializer_id,
+            &now,
+        )
+    }
+
+    pub(crate) fn record_launch_failed_delivery_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        delivery_id: Option<&str>,
+        materializer_id: Option<&str>,
+        now: &str,
     ) -> bool {
         if delivery_id.is_none()
             && self
@@ -11369,7 +11491,7 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.record_launch_failed(issue_number, message);
+        self.record_launch_failed_at(issue_number, message, now);
         true
     }
 
@@ -11377,6 +11499,16 @@ impl IssueMonitorState {
         &mut self,
         window_id: &str,
         message: impl Into<String>,
+    ) -> Option<u64> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_agent_window_failed_at(window_id, message, &now)
+    }
+
+    pub(crate) fn record_agent_window_failed_at(
+        &mut self,
+        window_id: &str,
+        message: impl Into<String>,
+        now: &str,
     ) -> Option<u64> {
         let issue_number = self
             .launched_windows
@@ -11395,12 +11527,22 @@ impl IssueMonitorState {
                         .map(|_| item.issue.number)
                 })
             })?;
-        self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::AgentFailed, now);
         Some(issue_number)
     }
 
     pub fn record_agent_issue_failed(&mut self, issue_number: u64, message: impl Into<String>) {
-        self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.record_agent_issue_failed_at(issue_number, message, &now);
+    }
+
+    pub(crate) fn record_agent_issue_failed_at(
+        &mut self,
+        issue_number: u64,
+        message: impl Into<String>,
+        now: &str,
+    ) {
+        self.record_failed_issue_at(issue_number, message, MonitorInboxState::AgentFailed, now);
     }
 
     /// Issue #3627: launched agent windows that the owning project tab no
@@ -12756,7 +12898,7 @@ impl IssueMonitorState {
         reason: &str,
         now: &str,
     ) -> IssueMonitorRequeueOutcome {
-        // Fail closed on anything a launch still owns. `record_failed_issue`
+        // Fail closed on anything a launch still owns. `record_failed_issue_at`
         // clears active tracking, so a genuinely failed row never trips this;
         // a row that does trip it is live, and killing a running agent is the
         // one mistake no later compensation can undo.
@@ -12978,7 +13120,7 @@ impl IssueMonitorState {
 
     /// Issue #4042 AC-2: keep a failed row held but replace what it says.
     ///
-    /// Unlike [`Self::record_failed_issue`] this never re-enters the failure
+    /// Unlike [`Self::record_failed_issue_at`] this never re-enters the failure
     /// lifecycle (attempt accounting, autonomous retry, window bookkeeping):
     /// the row already failed, only its explanation changes. Returns whether
     /// the message actually changed, so a repeated scan stays silent.
@@ -14222,11 +14364,12 @@ impl IssueMonitorState {
         Some(issue_number)
     }
 
-    fn record_failed_issue(
+    fn record_failed_issue_at(
         &mut self,
         issue_number: u64,
         message: impl Into<String>,
         state: MonitorInboxState,
+        now: &str,
     ) {
         let message = message.into();
         // Issue #3941 AC-3: a launch aborted by transient infrastructure (exact
@@ -14234,8 +14377,7 @@ impl IssueMonitorState {
         // race between concurrent fetches) is neither an agent failure nor an
         // attempt: it is requeued behind a short backoff in every mode.
         if gwt_agent::is_transient_launch_failure(&message) {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            self.record_transient_launch_retry(issue_number, message, &now);
+            self.record_transient_launch_retry(issue_number, message, now);
             return;
         }
         // SPEC #3200 (review follow-up): a failure for an in-flight autonomous
@@ -14246,7 +14388,6 @@ impl IssueMonitorState {
         // never arrive. The plain human-gated `LaunchFailed`/`AgentFailed` path
         // below is preserved for every non-autonomous issue.
         if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             // Issue #4161 AC-6: the retry ladder keeps retrying past its own
             // attempt cap, so a launch that is refused deterministically —
             // every attempt failing with the identical message — is retried on
@@ -14268,7 +14409,7 @@ impl IssueMonitorState {
                 );
                 return;
             }
-            self.record_autonomous_failure(issue_number, message, &now);
+            self.record_autonomous_failure(issue_number, message, now);
             return;
         }
         self.active_launches
@@ -15030,7 +15171,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -15608,7 +15749,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -16090,7 +16231,7 @@ mod tests {
                 version: None,
                 session_mode: Default::default(),
                 skip_permissions: false,
-                codex_fast_mode: false,
+                fast_mode: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -24984,7 +25125,7 @@ mod tests {
         assert_eq!(profile.version.as_deref(), Some("0.121.0"));
         assert_eq!(profile.session_mode, gwt_agent::SessionMode::Resume);
         assert!(profile.skip_permissions);
-        assert!(profile.codex_fast_mode);
+        assert!(profile.fast_mode);
         assert_eq!(
             profile.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -25006,7 +25147,7 @@ mod tests {
         assert_eq!(previous.version.as_deref(), Some("0.121.0"));
         assert_eq!(previous.session_mode, gwt_agent::SessionMode::Resume);
         assert!(previous.skip_permissions);
-        assert!(previous.codex_fast_mode);
+        assert!(previous.fast_mode);
         assert_eq!(
             previous.runtime_target,
             gwt_agent::LaunchRuntimeTarget::Docker
@@ -25020,6 +25161,177 @@ mod tests {
             previous.windows_shell,
             Some(gwt_agent::WindowsShellKind::PowerShell7)
         );
+    }
+
+    /// Issue #4228 AC-1: the persisted profile keeps the Fast Mode of the
+    /// agent it names. `LaunchConfig::codex_fast_mode` is a Codex-only derived
+    /// value, so folding it in with `||` let a Codex bit decide a Claude
+    /// profile's Fast Mode.
+    #[test]
+    fn launch_profile_does_not_fold_codex_fast_mode_into_the_stored_bit() {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+        config.fast_mode = false;
+        config.codex_fast_mode = true;
+
+        let profile = IssueMonitorLaunchProfile::from(&config);
+        assert_eq!(profile.agent_id, "claude");
+        assert!(
+            !profile.fast_mode,
+            "a Codex-only derived bit must not enable a Claude profile's Fast Mode"
+        );
+    }
+
+    /// Issue #4228 AC-1: a Claude launch that really did opt into Fast Mode is
+    /// still stored, under the agent-neutral key.
+    #[test]
+    fn launch_profile_stores_claude_fast_mode_under_the_agent_neutral_key() {
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+            .fast_mode(true)
+            .build();
+
+        let profile = IssueMonitorLaunchProfile::from(&config);
+        assert!(profile.fast_mode);
+
+        let value = serde_json::to_value(&profile).expect("serialize profile");
+        assert_eq!(value["fast_mode"], serde_json::json!(true));
+        assert!(
+            value.get("codex_fast_mode").is_none(),
+            "the ambiguous legacy key must not be written back: {value}"
+        );
+    }
+
+    /// Issue #4228 AC-5: a pre-#4228 file wrote one `codex_fast_mode` bit whose
+    /// meaning depended on which agent the profile named. The migration honors
+    /// it only for a Codex profile; on any other agent the bit is residue from
+    /// the fold and is dropped rather than silently applied.
+    #[test]
+    fn legacy_codex_fast_mode_migrates_only_for_codex_profiles() {
+        let codex: IssueMonitorLaunchProfile =
+            serde_json::from_str(r#"{"agent_id":"codex","codex_fast_mode":true}"#)
+                .expect("decode codex profile");
+        assert!(codex.fast_mode);
+
+        let claude: IssueMonitorLaunchProfile =
+            serde_json::from_str(r#"{"agent_id":"claude","codex_fast_mode":true}"#)
+                .expect("decode claude profile");
+        assert!(
+            !claude.fast_mode,
+            "a legacy Codex bit must not survive onto a Claude profile"
+        );
+
+        let claude_explicit: IssueMonitorLaunchProfile =
+            serde_json::from_str(r#"{"agent_id":"claude","fast_mode":true}"#)
+                .expect("decode claude profile");
+        assert!(
+            claude_explicit.fast_mode,
+            "the post-#4228 key is agent-neutral and always honored"
+        );
+    }
+
+    /// Issue #4228 AC-5: the migration runs on the real prefs load path, so an
+    /// existing `issue-monitor.json` with the stuck bit is normalized without
+    /// the user editing the file.
+    #[test]
+    fn loading_legacy_prefs_normalizes_the_stuck_fast_mode_bit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let mut value =
+            serde_json::to_value(IssueMonitorPrefs::default()).expect("serialize defaults");
+        value["launch_profile"] = serde_json::json!({"agent_id":"claude","codex_fast_mode":true});
+        value["launch_profiles"] = serde_json::json!([
+            {"agent_id":"claude","codex_fast_mode":true},
+            {"agent_id":"codex","codex_fast_mode":true}
+        ]);
+        std::fs::write(&path, value.to_string()).expect("write legacy prefs");
+
+        let loaded = load_issue_monitor_prefs(&path).expect("load");
+        assert!(!loaded.launch_profile.expect("head profile").fast_mode);
+        assert!(!loaded.launch_profiles[0].fast_mode);
+        assert!(loaded.launch_profiles[1].fast_mode);
+    }
+
+    /// Issue #4228 AC-3: `issue.monitor.status` has to say whether Fast Mode is
+    /// on. Before this the summary stopped at the runtime label, so a stuck bit
+    /// was invisible between saving a profile and launching with it.
+    #[test]
+    fn launch_profile_summary_reports_fast_mode_state() {
+        let mut profile = IssueMonitorLaunchProfile::from(
+            &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build(),
+        );
+        assert!(
+            issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(
+                profile.clone()
+            ))
+            .contains("fast:off"),
+            "a disabled Fast Mode must still be visible"
+        );
+
+        profile.fast_mode = true;
+        assert!(
+            issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(profile))
+                .contains("fast:on")
+        );
+    }
+
+    /// Issue #4228 AC-5 (relaunch comment): the operator can turn a stuck Fast
+    /// Mode off through `issue.monitor.profiles.set` — the pre-#4228 key is
+    /// still accepted, and an omitted key still inherits.
+    #[test]
+    fn profiles_set_can_clear_a_stuck_fast_mode() {
+        let codex = IssueMonitorLaunchProfile {
+            fast_mode: true,
+            ..IssueMonitorLaunchProfile::from(
+                &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build(),
+            )
+        };
+        let pool = vec![codex];
+
+        for key in ["fast_mode", "codex_fast_mode"] {
+            let patches: Vec<IssueMonitorLaunchProfilePatch> =
+                serde_json::from_value(serde_json::json!([{"agent_id": "codex", key: false}]))
+                    .expect("parse patches");
+            let (merged, _) = merge_issue_monitor_profiles_set(&pool, pool.first(), &patches);
+            assert!(!merged[0].fast_mode, "{key} must clear the stuck bit");
+        }
+
+        let patches: Vec<IssueMonitorLaunchProfilePatch> =
+            serde_json::from_value(serde_json::json!([{"agent_id": "codex"}]))
+                .expect("parse patches");
+        let (merged, _) = merge_issue_monitor_profiles_set(&pool, pool.first(), &patches);
+        assert!(
+            merged[0].fast_mode,
+            "an omitted key still inherits the saved value"
+        );
+    }
+
+    /// Issue #4228 AC-3: every pool candidate carries the same information, so
+    /// a stuck bit on a non-head candidate is visible too.
+    #[test]
+    fn launch_profile_candidates_report_fast_mode_state() {
+        let codex = IssueMonitorLaunchProfile {
+            fast_mode: true,
+            ..IssueMonitorLaunchProfile::from(
+                &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build(),
+            )
+        };
+        let claude = IssueMonitorLaunchProfile::from(
+            &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build(),
+        );
+        let prefs = IssueMonitorPrefs {
+            launch_profiles: vec![codex, claude],
+            ..IssueMonitorPrefs::default()
+        };
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let status = monitor.status_view();
+
+        assert!(status.launch_profile_candidates[0].fast_mode);
+        assert!(status.launch_profile_candidates[0]
+            .summary
+            .contains("fast:on"));
+        assert!(!status.launch_profile_candidates[1].fast_mode);
+        assert!(status.launch_profile_candidates[1]
+            .summary
+            .contains("fast:off"));
     }
 
     #[test]
@@ -27824,7 +28136,7 @@ mod tests {
                     reasoning: Some("high".to_string()),
                     version: Some("0.153.2".to_string()),
                     skip_permissions: true,
-                    codex_fast_mode: true,
+                    fast_mode: true,
                     runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                     docker_service: Some("dev".to_string()),
                     ..test_launch_profile("codex")
@@ -27851,7 +28163,7 @@ mod tests {
         assert_eq!(switched.reasoning, None);
         assert_eq!(switched.version, None);
         assert!(
-            !switched.codex_fast_mode,
+            !switched.fast_mode,
             "fast mode is a per-provider opt-in and must not carry over"
         );
         assert!(switched.skip_permissions);
