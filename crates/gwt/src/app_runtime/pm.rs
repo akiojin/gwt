@@ -232,6 +232,12 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
         && instant_is_quiet(state.last_wake_at.as_deref())
 }
 
+/// Issue #4258: how many loop intervals a Running PM pane may hold a wake.
+/// The newest loop clock marks when the current turn began, so a pane still
+/// Running past this bound has most likely missed its Stop hook (#3809) and
+/// would otherwise never be woken again.
+const PM_WAKE_BUSY_DEFER_MAX_INTERVALS: u64 = 3;
+
 /// Who asked for the PM.
 ///
 /// SPEC-3431 FR-002's `auto_start` opt-out scopes to "opening a project starts
@@ -643,9 +649,11 @@ impl AppRuntime {
     /// replay a long-lived backlog as if it just happened. After that, a
     /// signal never seen before wakes the PM iff the Monitor is enabled, a
     /// registered PM pane is live, and the resident loop has gone quiet.
-    /// A delta suppressed only by an active loop is retained (not consumed),
-    /// so a loop that dies inside its floor is still revived by the next
-    /// snapshot; every other outcome consumes the delta.
+    /// A delta suppressed only by an active loop or a busy PM pane (Issue
+    /// #4258) is retained (not consumed), so a loop that dies inside its
+    /// floor is still revived by the next snapshot and a turn in progress
+    /// gets the accumulated signals once it is Idle; every other outcome
+    /// consumes the delta.
     pub(crate) fn pm_wake_decision_at(
         &mut self,
         project_root: &Path,
@@ -699,9 +707,12 @@ impl AppRuntime {
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
-        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
-            // Actively looping: its own next cycle reconciles this. Keep the
-            // delta so a floor-stopped loop is revived by the next snapshot.
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
+            || self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now)
+        {
+            // Actively looping or mid-turn: its own next cycle reconciles
+            // this. Keep the delta so a floor-stopped loop is revived by the
+            // next snapshot.
             return None;
         }
         self.pm_wake_seen
@@ -743,7 +754,8 @@ impl AppRuntime {
     /// The same quiet gate as the delta wake keeps the two from double-firing:
     /// an actively-looping or freshly-prompted PM is never interrupted, and a
     /// wake re-arms the loop so the next tick inside the interval is quiet-
-    /// gated out.
+    /// gated out. A busy PM pane (Issue #4258) holds the tick without
+    /// stamping the wake clock, so the first tick after it is Idle fires.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn pm_periodic_wake_decision_at(
         &mut self,
@@ -785,7 +797,9 @@ impl AppRuntime {
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
-        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
+            || self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now)
+        {
             return None;
         }
         if let Err(error) = pm_registry::save_pm_loop_state(
@@ -1606,6 +1620,47 @@ impl AppRuntime {
                     _ => Some(window_id.clone()),
                 }
             })
+    }
+
+    /// Issue #4258: whether the live PM pane is mid-turn (Running) or at a
+    /// prompt (Waiting), where an injected wake would splice into the turn or
+    /// be read as the prompt's answer. Both wake paths hold — never drop —
+    /// their wake while this is true. A pane Running past the deferral bound
+    /// is treated as stuck and woken; a Waiting one is only reported.
+    fn pm_wake_pane_is_busy(
+        &self,
+        window_id: &str,
+        loop_state: &pm_registry::PmLoopState,
+        interval_secs: u64,
+        now: &str,
+    ) -> bool {
+        let status = self.window_status(window_id);
+        if !matches!(
+            status,
+            Some(WindowProcessStatus::Running | WindowProcessStatus::Waiting)
+        ) {
+            return false;
+        }
+        let past_bound = pm_wake_loop_is_quiet(
+            loop_state,
+            interval_secs.saturating_mul(PM_WAKE_BUSY_DEFER_MAX_INTERVALS),
+            now,
+        );
+        if !past_bound {
+            return true;
+        }
+        if status == Some(WindowProcessStatus::Waiting) {
+            tracing::warn!(
+                window_id,
+                "PM wake still held: the PM pane has waited on a prompt past the deferral bound"
+            );
+            return true;
+        }
+        tracing::warn!(
+            window_id,
+            "PM pane has been Running past the wake deferral bound; waking it anyway"
+        );
+        false
     }
 
     /// Issue #3607 AC-1: window id of a live PM registered by *another* project
