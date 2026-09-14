@@ -4419,12 +4419,11 @@ mod tests {
     /// appended after `confirmed` can move a PR into or out of the sweep list.
     #[test]
     fn deferred_user_verification_is_read_from_the_recorded_value() {
-        for deferring in ["User Verification Result: Deferred — owner sweeps this later"] {
-            assert!(
-                body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
-                "must recognize the deferred value: {deferring}"
-            );
-        }
+        let deferring = "User Verification Result: Deferred — owner sweeps this later";
+        assert!(
+            body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
+            "must recognize the deferred value: {deferring}"
+        );
         for settled in [
             "User Verification Result: deferred (autonomous execution)",
             "- User Verification Result: deferred (autonomous execution)",
