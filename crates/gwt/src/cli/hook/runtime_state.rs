@@ -9,7 +9,7 @@ use std::{
     io,
     io::Read,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -301,7 +301,9 @@ pub(crate) fn handle_with_input_prepared(
     };
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
-    let mut session = current_session_for_id(&sessions_dir, &gwt_session_id);
+    let mut session = timed_substage(event, "runtime-state/session-load", || {
+        current_session_for_id(&sessions_dir, &gwt_session_id)
+    });
     let agent_session_id = validated_hook_agent_session_id(
         event,
         &gwt_session_id,
@@ -320,14 +322,17 @@ pub(crate) fn handle_with_input_prepared(
         let agent_session_id_to_sync = agent_session_id.as_ref().filter(|agent_session_id| {
             agent_session_id_needs_sync(session.as_ref(), agent_session_id)
         });
-        match persist_session_hook_metadata_with_wait(
-            &sessions_dir,
-            gwt_session_id.as_str(),
-            event,
-            agent_session_id_to_sync.map(HookSessionId::as_str),
-            legacy_project_state_root.as_deref(),
-            HOOK_SESSION_METADATA_LEASE_WAIT,
-        ) {
+        let persisted = timed_substage(event, "runtime-state/session-metadata", || {
+            persist_session_hook_metadata_with_wait(
+                &sessions_dir,
+                gwt_session_id.as_str(),
+                event,
+                agent_session_id_to_sync.map(HookSessionId::as_str),
+                legacy_project_state_root.as_deref(),
+                HOOK_SESSION_METADATA_LEASE_WAIT,
+            )
+        });
+        match persisted {
             Ok(updated) => session = Some(updated),
             Err(error) => {
                 log_session_metadata_error("record hook metadata for", &gwt_session_id, &error);
@@ -335,11 +340,28 @@ pub(crate) fn handle_with_input_prepared(
         }
     }
 
-    let pending_discussion = session
-        .as_ref()
-        .and_then(|session| load_pending_resume(&session.worktree_path).ok().flatten());
-    write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
-        .map(|_| session)
+    let pending_discussion = timed_substage(event, "runtime-state/pending-resume", || {
+        session
+            .as_ref()
+            .and_then(|session| load_pending_resume(&session.worktree_path).ok().flatten())
+    });
+    timed_substage(event, "runtime-state/state-write", || {
+        write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
+    })
+    .map(|_| session)
+}
+
+/// Time one `runtime-state` substage into the opt-in hook profile.
+///
+/// Issue #3777: the aggregate `runtime-state` record hides which of the two
+/// durable writes, the Session read, or the pending-resume read consumes the
+/// UserPromptSubmit budget, and the slow mode only reproduces on Windows CI.
+/// The handler names stay on the content-free allowlist in [`super::diagnostics`].
+fn timed_substage<T>(event: &str, handler: &'static str, work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let value = work();
+    super::diagnostics::record_handler_duration(event, handler, started.elapsed(), "ok");
+    value
 }
 
 pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<String> {

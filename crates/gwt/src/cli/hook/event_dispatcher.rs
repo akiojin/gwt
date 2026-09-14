@@ -995,27 +995,40 @@ mod tests {
             .collect::<Vec<_>>();
         samples.sort_unstable();
         let p95 = samples[28];
+        // A single profiled replay usually lands in the fast mode and hides the
+        // stage that blew the budget (Issue #3777: the slow mode reproduces on
+        // roughly a quarter of the Windows samples). Replay several and report
+        // the slowest, so the failure message names the responsible substage.
         let timing_summary = if p95 >= Duration::from_millis(250) {
-            let profile_path = home.path().join("warm-hook-profile.jsonl");
-            {
-                let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile_path);
-                handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
-                    .expect("profile slow warm UserPromptSubmit");
-            }
-            std::fs::read_to_string(profile_path)
-                .expect("read slow warm hook profile")
-                .lines()
-                .map(|line| {
-                    let record: Value = serde_json::from_str(line).expect("profile JSON");
-                    (
-                        record["handler"]
-                            .as_str()
-                            .unwrap_or("<missing>")
-                            .to_string(),
-                        record["duration_ms"].as_f64().unwrap_or_default(),
-                    )
+            (0..8)
+                .map(|attempt| {
+                    let profile_path = home.path().join(format!("warm-hook-{attempt}.jsonl"));
+                    {
+                        let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile_path);
+                        handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
+                            .expect("profile slow warm UserPromptSubmit");
+                    }
+                    std::fs::read_to_string(profile_path)
+                        .expect("read slow warm hook profile")
+                        .lines()
+                        .map(|line| {
+                            let record: Value = serde_json::from_str(line).expect("profile JSON");
+                            (
+                                record["handler"]
+                                    .as_str()
+                                    .unwrap_or("<missing>")
+                                    .to_string(),
+                                record["duration_ms"].as_f64().unwrap_or_default(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect::<Vec<_>>()
+                .max_by(|left, right| {
+                    event_total_ms(left)
+                        .partial_cmp(&event_total_ms(right))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -1023,6 +1036,15 @@ mod tests {
             p95 < Duration::from_millis(250),
             "warm 4 MiB UserPromptSubmit p95 must stay below 250ms, got {p95:?}: {samples:?}; stages={timing_summary:?}"
         );
+    }
+
+    /// The `event-total` duration of one profiled hook replay, or 0 when the
+    /// replay produced no total record.
+    fn event_total_ms(stages: &[(String, f64)]) -> f64 {
+        stages
+            .iter()
+            .find(|(handler, _)| handler == "event-total")
+            .map_or(0.0, |(_, duration_ms)| *duration_ms)
     }
 
     /// Issue #3716: a physical launch/write is not an answer receipt. Only a

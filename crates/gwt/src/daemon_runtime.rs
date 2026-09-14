@@ -725,6 +725,7 @@ pub(crate) fn handle_runtime_state_prepared(
             Instant::now() + Duration::from_millis(USER_PROMPT_SUBMIT_HOOK_LIVE_DEADLINE_MS),
         )
     });
+    let live_started = Instant::now();
     emit_live_event_fail_open(
         Some(event),
         RuntimeHookEvent::from_hook(
@@ -735,6 +736,12 @@ pub(crate) fn handle_runtime_state_prepared(
             session.clone(),
             parse_hook_event_best_effort(input),
         ),
+    );
+    crate::cli::hook::diagnostics::record_handler_duration(
+        event,
+        "runtime-state/live-emit",
+        live_started.elapsed(),
+        "ok",
     );
     Ok(session)
 }
