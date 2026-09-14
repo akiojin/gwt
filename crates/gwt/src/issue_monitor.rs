@@ -24652,18 +24652,14 @@ mod tests {
     fn loading_legacy_prefs_normalizes_the_stuck_fast_mode_bit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("issue-monitor.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "enabled": true,
-                "launch_profile": {"agent_id":"claude","codex_fast_mode":true},
-                "launch_profiles": [
-                    {"agent_id":"claude","codex_fast_mode":true},
-                    {"agent_id":"codex","codex_fast_mode":true}
-                ]
-            }"#,
-        )
-        .expect("write legacy prefs");
+        let mut value =
+            serde_json::to_value(IssueMonitorPrefs::default()).expect("serialize defaults");
+        value["launch_profile"] = serde_json::json!({"agent_id":"claude","codex_fast_mode":true});
+        value["launch_profiles"] = serde_json::json!([
+            {"agent_id":"claude","codex_fast_mode":true},
+            {"agent_id":"codex","codex_fast_mode":true}
+        ]);
+        std::fs::write(&path, value.to_string()).expect("write legacy prefs");
 
         let loaded = load_issue_monitor_prefs(&path).expect("load");
         assert!(!loaded.launch_profile.expect("head profile").fast_mode);

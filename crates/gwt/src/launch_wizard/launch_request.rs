@@ -798,11 +798,11 @@ mod tests {
         // `claude` while the pre-#4228 single bit is still set.
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("issue-monitor.json");
-        std::fs::write(
-            &path,
-            r#"{"enabled":true,"launch_profile":{"agent_id":"claude","codex_fast_mode":true}}"#,
-        )
-        .expect("write stuck prefs");
+        let mut stuck_prefs = serde_json::to_value(crate::IssueMonitorPrefs::default())
+            .expect("serialize default prefs");
+        stuck_prefs["launch_profile"] =
+            serde_json::json!({"agent_id":"claude","codex_fast_mode":true});
+        std::fs::write(&path, stuck_prefs.to_string()).expect("write stuck prefs");
         let stuck = crate::load_issue_monitor_prefs(&path)
             .expect("load stuck prefs")
             .launch_profile
