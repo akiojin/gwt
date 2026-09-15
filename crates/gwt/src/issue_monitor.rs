@@ -23,6 +23,15 @@ use crate::{
     LinkedIssueKind, WindowState,
 };
 
+mod quota;
+#[cfg(test)]
+pub(crate) use quota::hold_provider_quota_on_first_failure_in_this_test;
+use quota::{
+    provider_quota_required_failures, provider_quota_retry_backoff_secs,
+    PROVIDER_QUOTA_FAILURE_WINDOW_SECS, PROVIDER_QUOTA_RECOVERY_CONFIRM_SECS,
+    PROVIDER_QUOTA_REVERIFY_INTERVAL_SECS,
+};
+
 const GITHUB_AUTH_SETUP_MESSAGE: &str = concat!(
     "GitHub authentication is required before automatic Issue Monitor launches can claim Issues. ",
     "Configure it on the host terminal with: ",
@@ -1427,7 +1436,9 @@ pub enum IssueMonitorFailure {
         /// text and the usage poller's reading at that moment — so a false
         /// hold can be diagnosed from the record instead of guessed at.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
+        // Boxed: the evidence carries every launch attempt (Issue #4366) and
+        // would otherwise dwarf the other variants.
+        evidence: Option<Box<IssueMonitorProviderQuotaHoldEvidence>>,
     },
 }
 
@@ -2725,6 +2736,30 @@ pub struct IssueMonitorProviderQuotaHoldEvidence {
     pub poller_limit_reached: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub poller_windows: Vec<IssueMonitorProviderQuotaPollerWindow>,
+    /// Issue #4366 AC-3: every launch attempt the hold rests on, oldest
+    /// first — the rate-limited attempts that formed it, then any refused
+    /// re-verification. Empty for a hold formed before #4366.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<IssueMonitorProviderQuotaAttempt>,
+    /// Issue #4366 AC-4: when the provider is next given one re-verification
+    /// launch. `None` for a pre-#4366 hold, which only `reset_at` releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_reverify_at: Option<String>,
+}
+
+/// Issue #4366 AC-3: one launch attempt on a provider, as observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderQuotaAttempt {
+    pub at: String,
+    /// `rate_limited`: the provider refused the launch.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    /// The wording the provider refused the launch with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_text: Option<String>,
 }
 
 impl IssueMonitorProviderQuotaHoldEvidence {
@@ -2739,6 +2774,23 @@ impl IssueMonitorProviderQuotaHoldEvidence {
             poller_state: None,
             poller_limit_reached: None,
             poller_windows: Vec::new(),
+            attempts: Vec::new(),
+            next_reverify_at: None,
+        }
+    }
+
+    /// Issue #4366 AC-3: this observation as one rate-limited attempt.
+    fn rate_limited_attempt(
+        &self,
+        issue_number: u64,
+        at: &str,
+    ) -> IssueMonitorProviderQuotaAttempt {
+        IssueMonitorProviderQuotaAttempt {
+            at: at.to_string(),
+            outcome: "rate_limited".to_string(),
+            issue_number: Some(self.issue_number.unwrap_or(issue_number)),
+            window_id: self.window_id.clone(),
+            screen_text: self.screen_text.clone(),
         }
     }
 
@@ -2829,6 +2881,62 @@ pub enum IssueMonitorProviderQuotaHoldClearOutcome {
     },
 }
 
+/// Issue #4366 AC-2: what one rate-limited launch did to its provider.
+enum ProviderQuotaFailureOutcome {
+    /// Not enough consecutive refusals yet: retry the Issue at `retry_at`.
+    Retry { retry_at: String, failures: usize },
+    /// The provider is held until `reset_at`.
+    Held { reset_at: String },
+}
+
+/// Issue #4366: `at` plus `secs`, in the monitor's RFC3339 form.
+fn provider_quota_instant_after(at: &str, secs: i64) -> Option<String> {
+    parse_rfc3339_utc(at).map(|at| format_rfc3339_utc(at + chrono::Duration::seconds(secs)))
+}
+
+/// Issue #4366 AC-4: whether the hold `evidence` describes is due its
+/// re-verification launch at `now`. A pre-#4366 hold has no schedule.
+fn provider_quota_reverify_due(
+    evidence: Option<&IssueMonitorProviderQuotaHoldEvidence>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    evidence
+        .and_then(|evidence| evidence.next_reverify_at.as_deref())
+        .and_then(parse_rfc3339_utc)
+        .is_some_and(|due| due <= now)
+}
+
+/// Issue #4366 AC-4: the holds that gate launch admission at `now` — every
+/// hold except those due a re-verification launch, which is what admits that
+/// one launch.
+fn provider_quota_admission_holds(
+    holds: &BTreeMap<String, String>,
+    evidence: &BTreeMap<String, IssueMonitorProviderQuotaHoldEvidence>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> BTreeMap<String, String> {
+    holds
+        .iter()
+        .filter(|(provider, _)| !provider_quota_reverify_due(evidence.get(*provider), now))
+        .map(|(provider, reset_at)| (provider.clone(), reset_at.clone()))
+        .collect()
+}
+
+impl IssueMonitorPrefs {
+    /// Issue #4366 AC-4: the provider holds a launch choice honors at `now`.
+    /// A held provider due its re-verification is left out, so the choice can
+    /// pick it for that one launch.
+    pub fn launch_admission_provider_quota_holds(&self, now: &str) -> BTreeMap<String, String> {
+        match parse_rfc3339_utc(now) {
+            Some(now) => provider_quota_admission_holds(
+                &self.provider_quota_holds,
+                &self.provider_quota_hold_evidence,
+                now,
+            ),
+            None => self.provider_quota_holds.clone(),
+        }
+    }
+}
+
 /// Whether `release` voids a hold recorded with `evidence`. A hold with no
 /// recorded instant predates evidence recording and is voided by any release.
 ///
@@ -2880,6 +2988,11 @@ pub struct IssueMonitorStatusView {
     /// SPEC #3914 FR-009: the ordered candidate pool with per-candidate holds.
     #[serde(default)]
     pub launch_profile_candidates: Vec<IssueMonitorLaunchProfileCandidate>,
+    /// Issue #4366 AC-6b / AC-6c: the candidate a launch would actually use
+    /// and why, present only while a hold diverts launches away from the saved
+    /// head (`launch_profile_candidates[0]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_launch_profile: Option<IssueMonitorEffectiveLaunchProfile>,
     /// SPEC #3914 FR-009 / Issue #3923 AC-1: every provider hold still in
     /// force, whether or not a candidate uses that provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2903,6 +3016,22 @@ pub struct IssueMonitorLaunchProfileCandidate {
     pub prefer_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_until: Option<String>,
+}
+
+/// Issue #4366 AC-6b / AC-6c: the candidate launches actually use while a
+/// provider hold diverts them from the saved head, and why. Kept apart from
+/// the saved pool so a hold never reads as the operator's setting changing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorEffectiveLaunchProfile {
+    /// Index into the saved pool; `None` when every candidate is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Why the saved head is not used, e.g. `codex held until <reset>`.
+    pub reason: String,
 }
 
 /// What a pre-claim completion readback concluded about one candidate.
@@ -2964,6 +3093,11 @@ pub struct IssueMonitorAgentStatus {
     pub launch_profile_summary: String,
     #[serde(default)]
     pub launch_profile_candidates: Vec<IssueMonitorLaunchProfileCandidate>,
+    /// Issue #4366 AC-6b / AC-6c: the candidate a launch would actually use
+    /// and why, present only while a hold diverts launches away from the saved
+    /// head (`launch_profile_candidates[0]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_launch_profile: Option<IssueMonitorEffectiveLaunchProfile>,
     #[serde(default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
     /// Issue #3923 AC-1: every provider hold in force, with its evidence, so
@@ -3629,6 +3763,11 @@ pub struct IssueMonitorState {
     /// Issue #3923 AC-1: release fences per provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Issue #4366 AC-2: rate-limited launch attempts per provider that have
+    /// not formed a hold yet. Driver memory only: a restart forgets a partial
+    /// streak, which errs toward launching rather than toward a week-long hold.
+    #[serde(skip)]
+    provider_quota_failures: BTreeMap<String, Vec<IssueMonitorProviderQuotaAttempt>>,
     /// Issue #4037 AC-1: the update drain, held next to the provider holds it
     /// shares its admission gate with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5543,6 +5682,7 @@ impl IssueMonitorState {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            provider_quota_failures: BTreeMap::new(),
             update_drain: None,
             generation_reclaim: None,
             duplicate_launch_refusals: BTreeMap::new(),
@@ -6776,9 +6916,13 @@ impl IssueMonitorState {
         // truth and the row's deadline only mirrors it. Once the provider's
         // hold is released (or has expired) the row is admissible, whichever
         // process recorded the mirror.
+        // Issue #4366 AC-4: a provider due its re-verification is admissible.
+        let holds = parse_rfc3339_utc(now).map_or_else(
+            || self.provider_quota_holds.clone(),
+            |now| self.admission_provider_quota_holds(now),
+        );
         if let Some(held) = held_provider.as_deref() {
-            let provider_hold_active = self
-                .provider_quota_holds
+            let provider_hold_active = holds
                 .get(held)
                 .and_then(|reset_at| parse_rfc3339_utc(reset_at))
                 .zip(parse_rfc3339_utc(now))
@@ -6794,11 +6938,11 @@ impl IssueMonitorState {
             let Some(now) = parse_rfc3339_utc(now) else {
                 return false;
             };
-            hold_reset_after(&self.provider_quota_holds, &held, now).is_some()
-                && self.saved_launch_providers().iter().any(|saved| {
-                    *saved != held
-                        && hold_reset_after(&self.provider_quota_holds, saved, now).is_none()
-                })
+            hold_reset_after(&holds, &held, now).is_some()
+                && self
+                    .saved_launch_providers()
+                    .iter()
+                    .any(|saved| *saved != held && hold_reset_after(&holds, saved, now).is_none())
         });
         if switched_to_healthy_provider {
             // A healthy provider is available for the relaunch. The
@@ -8070,6 +8214,294 @@ impl IssueMonitorState {
         Ok(profile)
     }
 
+    /// Issue #4366 AC-2 / AC-3: count one rate-limited launch on `provider`
+    /// and decide whether it forms (or keeps) the provider hold.
+    ///
+    /// Every attempt is kept on the hold's evidence, so a hold reads as "N
+    /// launches were refused" rather than as one screen notice.
+    fn record_provider_quota_failure(
+        &mut self,
+        provider: &str,
+        issue_number: u64,
+        candidate_deadline: &str,
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
+        now: &str,
+    ) -> ProviderQuotaFailureOutcome {
+        // Issue #3923 AC-2: every hold carries what it was formed from, and
+        // the same facts go to gwt.log so a false hold can be traced to its
+        // trigger.
+        let mut evidence = evidence.unwrap_or_else(|| IssueMonitorProviderQuotaHoldEvidence {
+            recorded_at: now.to_string(),
+            source: "unrecorded".to_string(),
+            issue_number: None,
+            window_id: None,
+            screen_text: None,
+            poller_state: None,
+            poller_limit_reached: None,
+            poller_windows: Vec::new(),
+            attempts: Vec::new(),
+            next_reverify_at: None,
+        });
+        if parse_rfc3339_utc(&evidence.recorded_at).is_none() {
+            evidence.recorded_at = now.to_string();
+        }
+        evidence.issue_number.get_or_insert(issue_number);
+        let attempt = evidence.rate_limited_attempt(issue_number, now);
+        let already_held = parse_rfc3339_utc(now).is_some_and(|now| {
+            hold_reset_after(&self.provider_quota_holds, provider, now).is_some()
+        });
+        if already_held {
+            // The re-verification launch (or one that raced the hold) was
+            // refused too: the hold stands and waits a full interval again.
+            let held = self.provider_quota_hold_evidence.get(provider);
+            let mut attempts = held.map(|held| held.attempts.clone()).unwrap_or_default();
+            attempts.push(attempt);
+            if let Some(held) = held {
+                evidence.source = held.source.clone();
+            }
+            evidence.attempts = attempts;
+        } else {
+            let failures = {
+                let streak = self
+                    .provider_quota_failures
+                    .entry(provider.to_string())
+                    .or_default();
+                let stale = streak
+                    .last()
+                    .and_then(|last| parse_rfc3339_utc(&last.at))
+                    .zip(parse_rfc3339_utc(now))
+                    .is_some_and(|(last, now)| {
+                        now.signed_duration_since(last).num_seconds()
+                            > PROVIDER_QUOTA_FAILURE_WINDOW_SECS
+                    });
+                if stale {
+                    streak.clear();
+                }
+                streak.push(attempt);
+                streak.len()
+            };
+            let required = provider_quota_required_failures();
+            if failures < required {
+                let retry_at =
+                    provider_quota_instant_after(now, provider_quota_retry_backoff_secs(failures))
+                        .unwrap_or_else(|| candidate_deadline.to_string());
+                tracing::info!(
+                    provider = %provider,
+                    issue_number,
+                    failures,
+                    required,
+                    retry_at = %retry_at,
+                    screen_text = ?evidence.screen_text,
+                    "Issue Monitor launch refused by a provider limit; retrying before holding the provider (Issue #4366)"
+                );
+                return ProviderQuotaFailureOutcome::Retry { retry_at, failures };
+            }
+            evidence.attempts = self
+                .provider_quota_failures
+                .remove(provider)
+                .unwrap_or_default();
+            evidence.source = "launch_attempts".to_string();
+        }
+        evidence.next_reverify_at =
+            provider_quota_instant_after(now, PROVIDER_QUOTA_REVERIFY_INTERVAL_SECS);
+        let reset_at =
+            merge_provider_quota_hold(&mut self.provider_quota_holds, provider, candidate_deadline)
+                .unwrap_or_else(|| candidate_deadline.to_string());
+        tracing::warn!(
+            provider = %provider,
+            reset_at = %reset_at,
+            issue_number,
+            source = %evidence.source,
+            window_id = ?evidence.window_id,
+            screen_text = ?evidence.screen_text,
+            poller_state = ?evidence.poller_state,
+            poller_limit_reached = ?evidence.poller_limit_reached,
+            poller_windows = ?evidence.poller_windows,
+            attempts = ?evidence.attempts,
+            next_reverify_at = ?evidence.next_reverify_at,
+            "Issue Monitor provider quota hold recorded (Issue #3923 / #4366)"
+        );
+        self.provider_quota_hold_evidence
+            .insert(provider.to_string(), evidence);
+        ProviderQuotaFailureOutcome::Held { reset_at }
+    }
+
+    /// Issue #4366 AC-4: the provider holds that gate admission at `now`.
+    fn admission_provider_quota_holds(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BTreeMap<String, String> {
+        provider_quota_admission_holds(
+            &self.provider_quota_holds,
+            &self.provider_quota_hold_evidence,
+            now,
+        )
+    }
+
+    /// Issue #4366 AC-4: a launch confirmed while a held provider's
+    /// re-verification is due is that re-verification. Closing the window
+    /// here keeps it to one launch per interval.
+    fn consume_due_provider_quota_reverifications(&mut self, at: &str) {
+        let Some(at_instant) = parse_rfc3339_utc(at) else {
+            return;
+        };
+        for (provider, evidence) in &mut self.provider_quota_hold_evidence {
+            if hold_reset_after(&self.provider_quota_holds, provider, at_instant).is_some()
+                && provider_quota_reverify_due(Some(evidence), at_instant)
+            {
+                evidence.next_reverify_at =
+                    provider_quota_instant_after(at, PROVIDER_QUOTA_REVERIFY_INTERVAL_SECS);
+                tracing::info!(
+                    provider = %provider,
+                    launched_at = %at,
+                    next_reverify_at = ?evidence.next_reverify_at,
+                    "Issue Monitor provider quota re-verification launch admitted (Issue #4366)"
+                );
+            }
+        }
+    }
+
+    /// Issue #4366 AC-4: `agent_id`'s agent showed activity on
+    /// `issue_number`'s launch at `at`.
+    ///
+    /// Activity proves the provider serves again only from a launch confirmed
+    /// after the provider's last refused attempt, and only
+    /// `PROVIDER_QUOTA_RECOVERY_CONFIRM_SECS` after that launch — a launch
+    /// the provider is about to refuse needs up to the screen settle window to
+    /// say so. The proof releases a hold, recording the release, and forgets
+    /// a pending streak. Returns whether anything changed.
+    pub fn record_provider_activity(
+        &mut self,
+        issue_number: u64,
+        agent_id: &str,
+        at: &str,
+    ) -> bool {
+        let (Some(provider), Some(at_instant)) = (
+            normalize_issue_monitor_provider(agent_id),
+            parse_rfc3339_utc(at),
+        ) else {
+            return false;
+        };
+        let Some(launched_at) = self
+            .launch_confirmations
+            .get(&issue_number)
+            .and_then(|ack| parse_rfc3339_utc(&ack.confirmed_at))
+        else {
+            return false;
+        };
+        if at_instant.signed_duration_since(launched_at).num_seconds()
+            < PROVIDER_QUOTA_RECOVERY_CONFIRM_SECS
+        {
+            return false;
+        }
+        let launched_after = |refused_at: Option<&str>| {
+            refused_at
+                .and_then(parse_rfc3339_utc)
+                .is_some_and(|refused_at| launched_at > refused_at)
+        };
+        let mut changed = false;
+        if launched_after(
+            self.provider_quota_failures
+                .get(&provider)
+                .and_then(|streak| streak.last())
+                .map(|attempt| attempt.at.as_str()),
+        ) {
+            self.provider_quota_failures.remove(&provider);
+            changed = true;
+        }
+        let held = hold_reset_after(&self.provider_quota_holds, &provider, at_instant).is_some();
+        if held
+            && launched_after(
+                self.provider_quota_hold_evidence
+                    .get(&provider)
+                    .map(|evidence| {
+                        evidence
+                            .attempts
+                            .last()
+                            .map_or(evidence.recorded_at.as_str(), |attempt| attempt.at.as_str())
+                    }),
+            )
+        {
+            let reason = format!(
+                "re-verification: {provider} agent active on issue #{issue_number} at {at}, \
+                 launched {}",
+                format_rfc3339_utc(launched_at)
+            );
+            self.clear_provider_quota_hold(&provider, &reason, at);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Issue #4366 AC-5: the usage poller reads a held `provider` as usable at
+    /// `at`, so its re-verification launch is admitted now instead of after
+    /// the interval. Returns whether the schedule moved.
+    pub fn hasten_provider_quota_reverification(&mut self, provider: &str, at: &str) -> bool {
+        let (Some(provider), Some(at_instant)) = (
+            normalize_issue_monitor_provider(provider),
+            parse_rfc3339_utc(at),
+        ) else {
+            return false;
+        };
+        if hold_reset_after(&self.provider_quota_holds, &provider, at_instant).is_none() {
+            return false;
+        }
+        let Some(evidence) = self.provider_quota_hold_evidence.get_mut(&provider) else {
+            return false;
+        };
+        if provider_quota_reverify_due(Some(evidence), at_instant) {
+            return false;
+        }
+        evidence.next_reverify_at = Some(format_rfc3339_utc(at_instant));
+        tracing::info!(
+            provider = %provider,
+            at = %at,
+            "Issue Monitor provider quota re-verification brought forward by a healthy usage reading (Issue #4366)"
+        );
+        true
+    }
+
+    /// Issue #4366 AC-6b / AC-6c: the candidate a launch would use at `now`,
+    /// while a hold diverts launches away from the saved head.
+    fn effective_launch_profile_at(&self, now: &str) -> Option<IssueMonitorEffectiveLaunchProfile> {
+        let now_instant = parse_rfc3339_utc(now)?;
+        let head_provider =
+            normalize_issue_monitor_provider(&self.launch_profiles.first()?.agent_id)?;
+        let holds = self.admission_provider_quota_holds(now_instant);
+        let reset_at = hold_reset_after(&holds, &head_provider, now_instant)?;
+        let mut reason = format!("{head_provider} held until {reset_at}");
+        if let Some(next) = self
+            .provider_quota_hold_evidence
+            .get(&head_provider)
+            .and_then(|evidence| evidence.next_reverify_at.as_deref())
+        {
+            reason.push_str("; re-verification launch at ");
+            reason.push_str(next);
+        }
+        let selection = select_launch_profile(
+            &self.launch_profiles,
+            &holds,
+            &[],
+            self.launch_usage_threshold_percent,
+            &[],
+            None,
+            now,
+        );
+        let selected = selection
+            .selected
+            .and_then(|index| Some((index, self.launch_profiles.get(index)?)));
+        Some(IssueMonitorEffectiveLaunchProfile {
+            index: selected.map(|(index, _)| index),
+            agent_id: selected.map(|(_, profile)| profile.agent_id.clone()),
+            summary: selected.map(|(_, profile)| {
+                issue_monitor_launch_profile_summary(&LaunchWizardPreviousProfile::from(
+                    profile.clone(),
+                ))
+            }),
+            reason,
+        })
+    }
+
     /// Issue #3923 AC-1: release `provider`'s quota hold on the operator's
     /// authority.
     ///
@@ -8097,6 +8529,8 @@ impl IssueMonitorState {
         };
         let released_reset_at = self.provider_quota_holds.remove(&provider);
         let evidence = self.provider_quota_hold_evidence.remove(&provider);
+        // Issue #4366: a release starts any later streak from zero.
+        self.provider_quota_failures.remove(&provider);
         self.provider_quota_hold_releases.insert(
             provider.clone(),
             IssueMonitorProviderQuotaHoldRelease {
@@ -8949,10 +9383,11 @@ impl IssueMonitorState {
         if providers.is_empty() {
             return None;
         }
+        // Issue #4366 AC-4: a provider due its re-verification admits a launch.
+        let holds = self.admission_provider_quota_holds(now);
         let mut earliest: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
         for provider in providers {
-            let deadline = self
-                .provider_quota_holds
+            let deadline = holds
                 .get(&provider)
                 .and_then(|reset_at| parse_rfc3339_utc(reset_at))
                 .filter(|deadline| *deadline > now)?;
@@ -9135,6 +9570,7 @@ impl IssueMonitorState {
             quota_hold,
             update_drain: self.update_drain.clone(),
             launch_profile_candidates: self.launch_profile_candidates_at(now),
+            effective_launch_profile: self.effective_launch_profile_at(now),
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             usage_threshold_percent: self.launch_usage_threshold_percent,
             autonomous_issues: self
@@ -9271,6 +9707,7 @@ impl IssueMonitorState {
             update_drain: status.update_drain.clone(),
             launch_profile_summary: status.launch_profile_summary.clone(),
             launch_profile_candidates: status.launch_profile_candidates.clone(),
+            effective_launch_profile: status.effective_launch_profile.clone(),
             usage_threshold_percent: status.usage_threshold_percent,
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             // Issue #4207 AC-5: while a surge is in force the failed rows are
@@ -11556,6 +11993,7 @@ impl IssueMonitorState {
         // one place every launch is confirmed.
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         self.record_autonomous_heartbeat(issue_number, &now);
+        self.consume_due_provider_quota_reverifications(confirmed_at.unwrap_or(&now));
     }
 
     /// Issue #4150 AC-1 / AC-2: a launch refused because this Issue's
@@ -12460,6 +12898,8 @@ impl IssueMonitorState {
                 poller_state: None,
                 poller_limit_reached: Some(true),
                 poller_windows: Vec::new(),
+                attempts: Vec::new(),
+                next_reverify_at: None,
             }),
             now,
         )
@@ -12538,50 +12978,31 @@ impl IssueMonitorState {
         }
         let candidate_deadline = concrete_provider_quota_deadline(resets_at, now);
         let provider = provider.and_then(normalize_issue_monitor_provider);
-        let floor = provider
-            .as_deref()
-            .and_then(|provider| {
-                merge_provider_quota_hold(
-                    &mut self.provider_quota_holds,
-                    provider,
-                    &candidate_deadline,
-                )
-            })
-            .unwrap_or(candidate_deadline);
-        if let Some(provider) = provider.as_deref() {
-            // Issue #3923 AC-2: every hold carries what it was formed from,
-            // and the same facts go to gwt.log so a false hold can be traced
-            // to its trigger.
-            let mut evidence = evidence.unwrap_or_else(|| IssueMonitorProviderQuotaHoldEvidence {
-                recorded_at: now.to_string(),
-                source: "unrecorded".to_string(),
-                issue_number: None,
-                window_id: None,
-                screen_text: None,
-                poller_state: None,
-                poller_limit_reached: None,
-                poller_windows: Vec::new(),
-            });
-            if parse_rfc3339_utc(&evidence.recorded_at).is_none() {
-                evidence.recorded_at = now.to_string();
-            }
-            evidence.issue_number.get_or_insert(issue_number);
-            tracing::warn!(
-                provider = %provider,
-                reset_at = %floor,
+        // Issue #4366 AC-2: a refused launch holds the provider only once
+        // enough consecutive launches were refused; until then the Issue is
+        // retried after an exponential backoff.
+        let (floor, reason, retry_hold_provider) = match provider.as_deref() {
+            Some(held) => match self.record_provider_quota_failure(
+                held,
                 issue_number,
-                source = %evidence.source,
-                window_id = ?evidence.window_id,
-                screen_text = ?evidence.screen_text,
-                poller_state = ?evidence.poller_state,
-                poller_limit_reached = ?evidence.poller_limit_reached,
-                poller_windows = ?evidence.poller_windows,
-                reason = ?reason,
-                "Issue Monitor provider quota hold recorded (Issue #3923)"
-            );
-            self.provider_quota_hold_evidence
-                .insert(provider.to_string(), evidence);
-        }
+                &candidate_deadline,
+                evidence,
+                now,
+            ) {
+                ProviderQuotaFailureOutcome::Retry { retry_at, failures } => {
+                    let reason = format!(
+                        "{} (launch attempt {failures}/{} refused; retrying)",
+                        reason.as_deref().unwrap_or("provider usage limit reached"),
+                        provider_quota_required_failures(),
+                    );
+                    (retry_at, Some(reason), None)
+                }
+                ProviderQuotaFailureOutcome::Held { reset_at } => {
+                    (reset_at, reason, provider.clone())
+                }
+            },
+            None => (candidate_deadline, reason, None),
+        };
         // SPEC #3914 FR-008: prepared claims are only cancelled when the whole
         // pool is now held; another candidate can still honor them.
         let every_pool_provider_held =
@@ -12593,7 +13014,7 @@ impl IssueMonitorState {
         let record = self.autonomous_record_mut(issue_number);
         record.retry_not_before = Some(floor);
         record.retry_hold_reason = reason;
-        record.retry_hold_provider = provider;
+        record.retry_hold_provider = retry_hold_provider;
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
         if let Some(item) = self
             .inbox
@@ -15244,6 +15665,7 @@ mod tests {
                 update_drain: None,
                 launch_profile_summary: "configure before auto start".to_string(),
                 launch_profile_candidates: Vec::new(),
+                effective_launch_profile: None,
                 usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: Vec::new(),
@@ -16792,6 +17214,7 @@ mod tests {
     /// budget alone.
     #[test]
     fn a_provider_quota_block_holds_the_issue_without_spending_an_attempt() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
         let attempts_before = monitor
             .autonomous_record(42)
@@ -16841,6 +17264,7 @@ mod tests {
     /// launch churn; blocking forever makes recovery manual.
     #[test]
     fn a_provider_quota_block_without_reset_uses_the_default_backoff() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         for (case, resets_at) in [
             ("missing", None),
             ("invalid", Some("not-a-reset")),
@@ -16893,6 +17317,7 @@ mod tests {
 
     #[test]
     fn legacy_rate_limit_release_records_the_saved_profiles_provider_hold() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
@@ -16929,6 +17354,7 @@ mod tests {
     /// quota block from a hang.
     #[test]
     fn a_provider_quota_block_is_visible_in_the_agent_status_projection() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
         monitor.try_hold_provider_usage_limit(
             42,
@@ -16972,6 +17398,7 @@ mod tests {
     /// display reason.
     #[test]
     fn a_provider_quota_hold_is_structured_in_agent_and_gui_status() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let profile = test_launch_profile("codex");
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig {
@@ -17005,8 +17432,16 @@ mod tests {
             // Issue #3923 AC-2: the hold names what it was formed from.
             "evidence": {
                 "recorded_at": "2026-08-16T02:26:00Z",
-                "source": "unrecorded",
+                "source": "launch_attempts",
                 "issue_number": 42,
+                // Issue #4366 AC-3 / AC-4: the refused launches the hold
+                // rests on, and when it is next re-verified.
+                "attempts": [{
+                    "at": "2026-08-16T02:26:00Z",
+                    "outcome": "rate_limited",
+                    "issue_number": 42,
+                }],
+                "next_reverify_at": "2026-08-16T02:56:00Z",
             },
         });
         let agent_status = serde_json::to_value(monitor.agent_status_at("2026-08-16T02:26:30Z"))
@@ -17834,6 +18269,7 @@ mod tests {
 
     #[test]
     fn a_pool_hold_cancels_prepared_claims_only_when_every_provider_is_held() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 8,
@@ -18293,6 +18729,7 @@ mod tests {
 
     #[test]
     fn provider_hold_compensates_prepared_attempting_and_unclaimed_work_exactly() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig {
                 enabled: true,
@@ -18414,6 +18851,7 @@ mod tests {
 
     #[test]
     fn provider_hold_preserves_materializer_owned_and_confirmed_launches() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig {
                 enabled: true,
@@ -18504,6 +18942,7 @@ mod tests {
 
     #[test]
     fn provider_hold_restores_fresh_required_from_an_unclaimed_delivery() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig {
                 enabled: true,
@@ -18628,6 +19067,7 @@ mod tests {
     /// else's billing cycle.
     #[test]
     fn clearing_the_hold_lets_the_pm_relaunch_before_the_reset() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
         monitor.try_hold_provider_usage_limit(
             42,
@@ -28400,6 +28840,8 @@ mod tests {
                     used_percent: 26,
                 },
             ],
+            attempts: Vec::new(),
+            next_reverify_at: None,
         }
     }
 
@@ -28408,6 +28850,7 @@ mod tests {
     /// provider-wide hold and readmits every issue it was holding.
     #[test]
     fn clearing_a_provider_quota_hold_readmits_the_issues_it_held() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
@@ -28518,6 +28961,7 @@ mod tests {
     /// was formed after it.
     #[test]
     fn a_provider_quota_hold_release_fences_the_stale_hold_but_not_a_newer_one() {
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut daemon = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {

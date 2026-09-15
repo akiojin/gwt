@@ -1660,6 +1660,15 @@ enum IssueMonitorControl {
     Heartbeat {
         issue_number: u64,
         at: String,
+        /// Issue #4366 AC-4: the agent that showed the activity, so activity
+        /// on a held provider can prove that provider has recovered.
+        agent_id: Option<String>,
+    },
+    /// Issue #4366 AC-5: the usage poller reads a held provider as usable, so
+    /// its re-verification launch is brought forward to `at`.
+    QuotaHoldReverify {
+        provider: String,
+        at: String,
     },
     /// Issue #3844 AC-1: the launched agent declared it is waiting; stuck
     /// detection skips the issue while the declaration is within its cap.
@@ -2231,7 +2240,7 @@ fn try_apply_typed_issue_monitor_failure(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
             )
@@ -2329,9 +2338,20 @@ fn apply_routine_issue_monitor_control(
             monitor.apply_review_verdict(issue_number, &reviewed_sha, &verdict_raw);
             true
         }
-        IssueMonitorControl::Heartbeat { issue_number, at } => {
+        IssueMonitorControl::Heartbeat {
+            issue_number,
+            at,
+            agent_id,
+        } => {
             monitor.record_autonomous_heartbeat(issue_number, &at);
-            false
+            // Issue #4366 AC-4: activity on a held provider can release it,
+            // and a released hold readmits Issues, so that case scans.
+            agent_id.is_some_and(|agent_id| {
+                monitor.record_provider_activity(issue_number, &agent_id, &at)
+            })
+        }
+        IssueMonitorControl::QuotaHoldReverify { provider, at } => {
+            monitor.hasten_provider_quota_reverification(&provider, &at)
         }
         IssueMonitorControl::WaitDeclared {
             issue_number,
@@ -2436,7 +2456,7 @@ fn apply_routine_issue_monitor_control(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
@@ -2859,7 +2879,28 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .get("at")
                     .and_then(serde_json::Value::as_str)?
                     .to_string();
-                return Some(IssueMonitorControl::Heartbeat { issue_number, at });
+                let agent_id = heartbeat
+                    .get("agent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|agent_id| !agent_id.is_empty())
+                    .map(str::to_string);
+                return Some(IssueMonitorControl::Heartbeat {
+                    issue_number,
+                    at,
+                    agent_id,
+                });
+            }
+            if let Some(reverify) = payload.get("quota_hold_reverify") {
+                let provider = reverify.get("provider")?.as_str()?.trim();
+                let at = reverify.get("at")?.as_str()?.trim();
+                if provider.is_empty() || at.is_empty() {
+                    return None;
+                }
+                return Some(IssueMonitorControl::QuotaHoldReverify {
+                    provider: provider.to_string(),
+                    at: at.to_string(),
+                });
             }
             if let Some(wait) = payload.get("wait") {
                 let issue_number = wait.get("issue_number")?.as_u64()?;
@@ -8046,6 +8087,7 @@ exit 0
                 IssueMonitorControl::Heartbeat {
                     issue_number: 42,
                     at: "2026-07-27T00:05:00Z".to_string(),
+                    agent_id: None,
                 },
                 false,
             ),
@@ -8750,6 +8792,7 @@ exit 0
     /// human handoff.
     #[test]
     fn a_provider_usage_limit_control_holds_the_issue_instead_of_failing_it() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
@@ -8833,6 +8876,7 @@ exit 0
     /// after reset.
     #[test]
     fn a_provider_usage_limit_control_gates_claim_planning_until_reset() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut profile = sample_issue_monitor_profile();
         profile.agent_id = "codex".to_string();
         let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -8897,12 +8941,18 @@ exit 0
         restored.record_candidate(sample_issue_monitor_issue(42));
         restored.record_candidate(sample_issue_monitor_issue(43));
 
-        let before_reset_result: Result<usize, std::convert::Infallible> = restored
-            .try_prepare_claim_effects_with_probe("host/session", &before_reset, 1, |_| Ok(false));
+        // Issue #4366 AC-4: the hold admits one re-verification launch every
+        // interval instead of waiting for reset, so the gate is asserted while
+        // the hold is in force and that launch is not yet due.
+        let while_held = (chrono::Utc::now() + chrono::Duration::seconds(60))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(while_held < before_reset);
+        let while_held_result: Result<usize, std::convert::Infallible> = restored
+            .try_prepare_claim_effects_with_probe("host/session", &while_held, 1, |_| Ok(false));
         assert_eq!(
-            before_reset_result.expect("infallible probe"),
+            while_held_result.expect("infallible probe"),
             0,
-            "the exhausted provider must gate every queued Issue before reset"
+            "the exhausted provider must gate every queued Issue while it is held"
         );
         assert!(
             restored.pending_effects().is_empty(),
@@ -8941,6 +8991,7 @@ exit 0
 
     #[test]
     fn typed_provider_usage_limit_primary_path_preserves_the_reported_provider() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
@@ -9006,6 +9057,7 @@ exit 0
 
     #[test]
     fn typed_provider_usage_limit_routine_defense_preserves_the_reported_provider() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
