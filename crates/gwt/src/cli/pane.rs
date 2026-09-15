@@ -881,9 +881,10 @@ fn pane_backend_silence(context: &str, received: usize, budget: Duration) -> Str
         format!(
             "{context}: pane_backend_unresponsive — connected to the gwt instance behind this pane \
              WebSocket, but it sent nothing within {budget}. Pane replies come from the GUI event \
-             loop, so a single long dispatch holds them; check the gwt log for \
-             `gwt.frontend.timing` \"blocked the GUI event loop\" warnings at this time. Nothing \
-             was changed; retry after the stall clears."
+             loop, so a single long dispatch holds them. This may be a temporary GUI stall; \
+             replies resume when the dispatch finishes. Nothing was changed. Wait 2.5 seconds \
+             and retry; if the silence persists, check the gwt log for \
+             `gwt.frontend.timing` \"blocked the GUI event loop\" warnings at this time."
         )
     } else {
         format!(
@@ -2816,7 +2817,7 @@ mod tests {
     }
 
     #[test]
-    fn request_window_list_identifies_backend_response_timeout() {
+    fn request_window_list_recovers_on_retry_after_backend_stall() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2844,8 +2845,24 @@ mod tests {
                     .await
                     .expect("accept pane list websocket");
                 assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
-                let _socket = socket;
-                let _ = release_rx.await;
+                // Model a dispatch holding replies beyond both response budgets.
+                release_rx.await.expect("wait for the stall to clear");
+                drop(socket);
+
+                // The same backend answers a new request once the dispatch ends.
+                let (stream, _) = listener.accept().await.expect("accept pane list retry");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept retry websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
+                let state = workspace_state_for_test(
+                    "/repo/project",
+                    vec![window("tab::agent", WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send recovered pane list");
             });
 
             let error = request_window_list_with_timeout(
@@ -2856,7 +2873,15 @@ mod tests {
             .await
             .expect_err("pane list response must time out");
             release_tx.send(()).expect("release pane list mock");
+            let windows =
+                request_window_list(&format!("ws://{address}/internal/pane-ws"), "/repo/project")
+                    .await
+                    .expect(
+                        "retry must succeed after the stall clears without restarting the backend",
+                    );
             server.await.expect("pane list mock task");
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].id, "tab::agent");
 
             // Issue #3606 AC-3: a silent backend is named, not reported as a
             // bare give-up. #3510 raised the budget so a stalled instance still
@@ -3500,6 +3525,14 @@ mod tests {
             assert!(
                 error.contains("gwt.frontend.timing"),
                 "the refusal must point at the event-loop stall evidence: {error}"
+            );
+            assert!(
+                error.contains("temporary GUI stall") && error.contains("replies resume"),
+                "the refusal must explain that a dispatch stall can recover: {error}"
+            );
+            assert!(
+                error.contains("Wait 2.5 seconds and retry"),
+                "the refusal must recommend a concrete retry interval: {error}"
             );
             server.abort();
             let _ = server.await;
