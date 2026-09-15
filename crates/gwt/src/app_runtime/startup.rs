@@ -831,6 +831,19 @@ impl AppRuntime {
         project_root: &Path,
         window_id: Option<&str>,
     ) -> Result<(), RestoreRefusal> {
+        // Preserve terminal cleanup before applying spawn-only refusals.
+        match self.restore_work_terminality(session, project_root, window_id) {
+            RestoreAdmission::RefuseTerminal(reason) => {
+                return Err(RestoreRefusal::TerminalWork(reason))
+            }
+            RestoreAdmission::RefuseUnprovable(cause) => {
+                return Err(RestoreRefusal::TerminalFactsUnreadable(cause))
+            }
+            RestoreAdmission::RefuseRetainedTerminal => {
+                return Err(RestoreRefusal::ClosedWorkDiagnostic)
+            }
+            RestoreAdmission::Admit => {}
+        }
         // Reopened #4143 AC-6: queued and in-flight restores reserve their
         // worktree before a PTY attaches and enters active_agent_sessions.
         let worktree = &session.worktree_path;
@@ -858,7 +871,13 @@ impl AppRuntime {
         // Reopened #4143 AC-5: retaining a stopped diagnostic does not
         // authorize starting its process again after the branch has landed.
         // Resolve only the local remote-tracking ref; startup never fetches.
-        if gwt_core::process::hidden_command("git")
+        // The resident PM is a continuing conversation on a detached base,
+        // not an Issue branch whose commits can mark its work as landed.
+        if !gwt::pm_registry::registered_pm_worktree_authority(
+            project_root,
+            &session.id,
+            &session.worktree_path,
+        ) && gwt_core::process::hidden_command("git")
             .args([
                 "merge-base",
                 "--is-ancestor",
@@ -870,18 +889,6 @@ impl AppRuntime {
             .is_ok_and(|output| output.status.success())
         {
             return Err(RestoreRefusal::LandedWorktree);
-        }
-        match self.restore_work_terminality(session, project_root, window_id) {
-            RestoreAdmission::RefuseTerminal(reason) => {
-                return Err(RestoreRefusal::TerminalWork(reason))
-            }
-            RestoreAdmission::RefuseUnprovable(cause) => {
-                return Err(RestoreRefusal::TerminalFactsUnreadable(cause))
-            }
-            RestoreAdmission::RefuseRetainedTerminal => {
-                return Err(RestoreRefusal::ClosedWorkDiagnostic)
-            }
-            RestoreAdmission::Admit => {}
         }
         if launch_config_from_persisted_session(session).session_mode
             != gwt_agent::SessionMode::Resume
