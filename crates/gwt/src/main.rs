@@ -2138,6 +2138,7 @@ mod tests {
             quota_hold: None,
             update_drain: None,
             launch_profile_candidates: Vec::new(),
+            effective_launch_profile: None,
             provider_quota_holds: Vec::new(),
             usage_threshold_percent: 80,
         };

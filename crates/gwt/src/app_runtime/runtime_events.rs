@@ -133,7 +133,7 @@ pub(super) fn provider_usage_limit_failure(
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        evidence,
+        evidence: evidence.map(Box::new),
     }
 }
 
@@ -1274,7 +1274,7 @@ impl AppRuntime {
     /// PTY teardown removes the active session before the failure is published,
     /// so the persisted fallback is what keeps the account attributable at the
     /// moment it matters — the same ordering `approval_prompt_provider` uses.
-    fn pane_agent_id(&self, window_id: &str) -> Option<String> {
+    pub(crate) fn pane_agent_id(&self, window_id: &str) -> Option<String> {
         self.active_agent_sessions
             .get(window_id)
             .map(|session| session.agent_id.clone())

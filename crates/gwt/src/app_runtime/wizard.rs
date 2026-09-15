@@ -1924,7 +1924,11 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         let base_branch_name = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
-        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        // Issue #4366 AC-6: the settings form shows what the operator saved.
+        // The launch choice skips held providers, and pre-filling from it made
+        // a hold look like the saved agent had changed — and saving the form
+        // unchanged wrote the fallback over the head.
+        let previous_profiles = self.issue_monitor_saved_head_profiles(&project_root);
         let pool = self.issue_monitor_saved_pool(&project_root);
         let quick_start_root = project_root;
         let quick_start_entries = Vec::new();
@@ -1994,6 +1998,23 @@ impl AppRuntime {
             .profiles
     }
 
+    /// Issue #4366 AC-6: the saved pool head exactly as saved. Unlike the
+    /// launch choice this never skips a held provider, because it is what the
+    /// Agent Settings form shows and writes back.
+    pub(super) fn issue_monitor_saved_head_profiles(
+        &self,
+        project_root: &Path,
+    ) -> gwt::LaunchWizardPreviousProfiles {
+        match self
+            .issue_monitor_saved_pool(project_root)
+            .into_iter()
+            .next()
+        {
+            Some(head) => gwt::LaunchWizardPreviousProfiles::from_profile(Some(head.into())),
+            None => self.issue_monitor_previous_profiles(project_root),
+        }
+    }
+
     /// Issue #4079 AC-2: the saved candidate pool, read once when the Agent
     /// Settings form opens so the wizard can preview the save's effect on it.
     pub(super) fn issue_monitor_saved_pool(
@@ -2025,7 +2046,9 @@ impl AppRuntime {
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let selection = gwt::select_launch_profile(
                     &pool,
-                    &prefs.provider_quota_holds,
+                    // Issue #4366 AC-4: a held provider due its
+                    // re-verification is selectable for that one launch.
+                    &prefs.launch_admission_provider_quota_holds(&now),
                     &[],
                     prefs.launch_usage_threshold_percent,
                     &[],

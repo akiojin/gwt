@@ -43600,6 +43600,14 @@ fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
                 issue_number: 42,
                 window_id: window_id.to_string(),
             }],
+            // Issue #4366: one refusal alone no longer forms a hold, so the
+            // reported provider is already held; the fallback must extend
+            // *that* provider's hold to the reported reset, never the saved
+            // profile's.
+            provider_quota_holds: std::collections::BTreeMap::from([(
+                "codex".to_string(),
+                "2099-08-21T00:00:00Z".to_string(),
+            )]),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
@@ -49920,6 +49928,75 @@ fn app_runtime_issue_monitor_configure_profile_previews_the_pool_head_replacemen
     assert_eq!(
         saved_summary, previewed_summary,
         "the previewed summary must be the one the Monitor reports after the save"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_configure_profile_shows_the_saved_head_while_it_is_held() {
+    // Issue #4366 AC-6: a hold on the saved head's provider must not change
+    // what Agent Settings shows. The form used to open on the launch choice,
+    // which skips held providers — so it read as the fallback agent, and
+    // saving it unchanged replaced the operator's head with that fallback.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    // The saved head carries a non-default reasoning level, so the profile the
+    // form is filled from shows in what an unchanged save would write.
+    let mut saved_head = pool_profile("codex");
+    saved_head.model = Some("gpt-6-astra".to_string());
+    saved_head.reasoning = Some("high".to_string());
+    seeded.set_launch_profile_pool(vec![saved_head, pool_profile("claude")]);
+    seeded
+        .provider_quota_holds
+        .insert("codex".to_string(), "2099-01-01T00:00:00Z".to_string());
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed held pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    let impact = view
+        .issue_monitor_pool_impact
+        .as_ref()
+        .expect("Agent Settings previews its effect on the candidate pool");
+    assert_eq!(
+        impact.agent_id, "codex",
+        "the form opens on the saved head, not on the held fallback: {impact:?}"
+    );
+    assert_eq!(
+        impact.replaced_agent_id, None,
+        "saving the form unchanged must not switch the saved head to the fallback: {impact:?}"
+    );
+    // The agent picker follows the installed agents in this environment, so
+    // the profile the form was filled from shows in what the save would
+    // write: an unchanged save must leave the saved pool exactly as it is.
+    let saved_summary =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), seeded)
+            .status_view()
+            .launch_profile_summary;
+    assert_eq!(
+        impact.resulting_summary, saved_summary,
+        "the form must open on the saved head's own model and reasoning: {impact:?}"
     );
 }
 

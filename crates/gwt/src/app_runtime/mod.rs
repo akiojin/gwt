@@ -4651,7 +4651,7 @@ impl AppRuntime {
                                     provider,
                                     message.to_string(),
                                     resets_at.as_deref(),
-                                    evidence.clone(),
+                                    evidence.as_deref().cloned(),
                                     &now,
                                 ) {
                                     gwt::IssueMonitorProviderUsageLimitOutcome::Held => {
@@ -4847,7 +4847,11 @@ impl AppRuntime {
         if let Err(error) = self.publish_issue_monitor_control(
             project_root,
             serde_json::json!({
-                "heartbeat": { "issue_number": issue_number, "at": now },
+                "heartbeat": {
+                    "issue_number": issue_number,
+                    "at": now,
+                    "agent_id": self.pane_agent_id(window_id),
+                },
             }),
         ) {
             tracing::debug!(
@@ -8951,7 +8955,72 @@ impl AppRuntime {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<OutboundEvent> {
         self.provider_usage_accounts = accounts;
+        self.hasten_provider_quota_reverifications(now);
         self.sweep_provider_quota_candidates(now)
+    }
+
+    /// Issue #4366 AC-5: a poller reading newer than a held provider's last
+    /// refused launch, and reading the account as usable, contradicts the
+    /// hold. The daemon is asked to give that provider its re-verification
+    /// launch now; the launch outcome, not the reading, decides the release.
+    fn hasten_provider_quota_reverifications(&self, now: chrono::DateTime<chrono::Utc>) {
+        let at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut project_roots: Vec<PathBuf> = Vec::new();
+        for tab in &self.tabs {
+            if tab.kind == gwt::ProjectKind::Git && !project_roots.contains(&tab.project_root) {
+                project_roots.push(tab.project_root.clone());
+            }
+        }
+        for project_root in project_roots {
+            let Ok(prefs) = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+            ) else {
+                continue;
+            };
+            let admission_holds = prefs.launch_admission_provider_quota_holds(&at);
+            for (provider, evidence) in &prefs.provider_quota_hold_evidence {
+                if !admission_holds.contains_key(provider)
+                    || !gwt::issue_monitor::provider_reports_healthy_for_agent(
+                        provider,
+                        &self.provider_usage_accounts,
+                    )
+                {
+                    continue;
+                }
+                let reading_is_newer = self
+                    .provider_usage_accounts
+                    .iter()
+                    .filter(|account| {
+                        matches!(
+                            (&account.provider, provider.as_str()),
+                            (gwt_core::usage::UsageProvider::Codex, "codex")
+                                | (gwt_core::usage::UsageProvider::ClaudeCode, "claude")
+                        )
+                    })
+                    .filter_map(|account| account.fetched_at)
+                    .zip(
+                        chrono::DateTime::parse_from_rfc3339(&evidence.recorded_at)
+                            .ok()
+                            .map(|recorded| recorded.with_timezone(&chrono::Utc)),
+                    )
+                    .any(|(fetched, recorded)| fetched > recorded);
+                if !reading_is_newer {
+                    continue;
+                }
+                if let Err(error) = self.publish_issue_monitor_control(
+                    &project_root,
+                    serde_json::json!({
+                        "quota_hold_reverify": { "provider": provider, "at": at },
+                    }),
+                ) {
+                    tracing::debug!(
+                        error = %error,
+                        provider = %provider,
+                        "issue monitor quota re-verification publish failed (non-fatal)"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(test)]

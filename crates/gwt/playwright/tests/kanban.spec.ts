@@ -180,6 +180,74 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
   });
 
+  // Issue #4366 AC-6 / AC-6b: a provider hold never rewrites the saved Agent
+  // settings line; the launch target and its reason render on their own line
+  // and disappear when the hold clears.
+  test("keeps the saved agent settings and shows the held fallback on its own line", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page);
+    await page.goto(APP_URL);
+
+    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    await expect(issueSurface).toBeVisible();
+    const settings = issueSurface.locator(".knowledge-monitor-settings-copy");
+    const effective = issueSurface.locator(".knowledge-monitor-effective-copy");
+    const saved = {
+      enabled: true,
+      state: "active",
+      queue_len: 2,
+      active_count: 1,
+      max_active_agents: 1,
+      total_candidates: 2,
+      launch_profile_source: "saved",
+      launch_profile_summary: "codex / gpt-5 / high",
+    };
+
+    await page.evaluate((status) => {
+      window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status });
+    }, {
+      ...saved,
+      effective_launch_profile: {
+        index: 1,
+        agent_id: "claude",
+        summary: "claude / opus / high",
+        reason:
+          "codex held until 2026-09-21T08:41:00Z; re-verification launch at 2026-09-15T10:00:00Z",
+      },
+    });
+    await expect(settings).toHaveText("Agent settings Saved: codex / gpt-5 / high");
+    await expect(effective).toBeVisible();
+    await expect(effective).toHaveText(
+      "Launching with claude / opus / high (codex held until 2026-09-21T08:41:00Z; re-verification launch at 2026-09-15T10:00:00Z)",
+    );
+    // Operator tokens only: the line reads as secondary copy, like the
+    // settings line above it.
+    const [effectiveColor, mutedToken] = await effective.evaluate((node) => [
+      getComputedStyle(node).color,
+      getComputedStyle(document.documentElement).getPropertyValue("--color-text-muted").trim(),
+    ]);
+    expect(mutedToken).not.toEqual("");
+    expect(effectiveColor).toEqual(await settings.evaluate((node) => getComputedStyle(node).color));
+
+    await page.evaluate((status) => {
+      window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status });
+    }, saved);
+    await expect(settings).toHaveText("Agent settings Saved: codex / gpt-5 / high");
+    await expect(effective).toBeHidden();
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
   test("projects monitor state and controls through the canonical Issue surface", async ({
     page,
   }) => {
