@@ -892,6 +892,9 @@ pub struct IssueMonitorPrefs {
     /// process. See [`IssueMonitorProviderQuotaHoldRelease`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    /// Last locally observed account per provider; timestamps order cross-process rebases.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_quota_accounts: BTreeMap<String, IssueMonitorProviderAccount>,
     /// Issue #4037 AC-4: the update drain, if raised. Absent in pre-#4037 prefs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_drain: Option<IssueMonitorUpdateDrain>,
@@ -1070,6 +1073,7 @@ impl Default for IssueMonitorPrefs {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            provider_quota_accounts: BTreeMap::new(),
             update_drain: None,
             generation_reclaim: None,
             duplicate_launch_refusals: Vec::new(),
@@ -1427,7 +1431,7 @@ pub enum IssueMonitorFailure {
         /// text and the usage poller's reading at that moment — so a false
         /// hold can be diagnosed from the record instead of guessed at.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
+        evidence: Option<Box<IssueMonitorProviderQuotaHoldEvidence>>,
     },
 }
 
@@ -2639,6 +2643,39 @@ pub struct IssueMonitorProviderQuotaHold {
     /// process that formed it recorded any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
+    #[serde(default)]
+    pub evidence_stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_age_secs: Option<u64>,
+}
+
+impl IssueMonitorProviderQuotaHold {
+    fn at(
+        provider: String,
+        reset_at: String,
+        evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let evidence_age_secs = evidence
+            .as_ref()
+            .and_then(|evidence| parse_rfc3339_utc(&evidence.recorded_at))
+            .filter(|recorded| *recorded <= now)
+            .map(|recorded| now.signed_duration_since(recorded).num_seconds() as u64);
+        Self {
+            provider,
+            reset_at,
+            evidence,
+            evidence_stale: evidence_age_secs
+                .is_none_or(|age| age > gwt_core::usage::state::DEFAULT_STALE_AFTER_SECS as u64),
+            evidence_age_secs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorProviderAccount {
+    pub account_id: String,
+    pub observed_at: String,
 }
 
 /// Issue #4037: who raised the update drain.
@@ -2711,6 +2748,10 @@ pub struct IssueMonitorProviderQuotaHoldEvidence {
     /// detail.
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poller_observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
@@ -2736,6 +2777,8 @@ impl IssueMonitorProviderQuotaHoldEvidence {
             issue_number: None,
             window_id: Some(window_id.to_string()),
             screen_text: Some(screen_text.trim().to_string()).filter(|text| !text.is_empty()),
+            account_id: None,
+            poller_observed_at: None,
             poller_state: None,
             poller_limit_reached: None,
             poller_windows: Vec::new(),
@@ -2752,6 +2795,8 @@ impl IssueMonitorProviderQuotaHoldEvidence {
         else {
             return self;
         };
+        self.account_id = account.account_id.clone();
+        self.poller_observed_at = account.fetched_at.map(|at| at.to_rfc3339());
         self.poller_state = Some(usage_state_label(&account.state).to_string());
         self.poller_limit_reached = Some(account.limit_reached);
         self.poller_windows = account
@@ -2763,6 +2808,40 @@ impl IssueMonitorProviderQuotaHoldEvidence {
             })
             .collect();
         self
+    }
+
+    /// Only a timestamped, recent, nonempty healthy reading can contradict a hold.
+    pub fn contradicted_by(
+        &self,
+        account: &gwt_core::usage::ProviderUsage,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let Some(account_id) = account.account_id.as_deref() else {
+            return false;
+        };
+        if self
+            .account_id
+            .as_deref()
+            .is_some_and(|held| held != account_id)
+        {
+            return true;
+        }
+        self.account_id.as_deref() == Some(account_id)
+            && account.state == gwt_core::usage::UsageState::Ok
+            && !account.limit_reached
+            && !account.windows.is_empty()
+            && account.windows.iter().all(|window| {
+                window.used_percent.is_finite() && (0.0..100.0).contains(&window.used_percent)
+            })
+            && account
+                .fetched_at
+                .zip(parse_rfc3339_utc(&self.recorded_at))
+                .is_some_and(|(observed, recorded)| {
+                    observed > recorded
+                        && observed <= now
+                        && now.signed_duration_since(observed).num_seconds()
+                            <= gwt_core::usage::state::DEFAULT_STALE_AFTER_SECS
+                })
     }
 }
 
@@ -3629,6 +3708,8 @@ pub struct IssueMonitorState {
     /// Issue #3923 AC-1: release fences per provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_quota_hold_releases: BTreeMap<String, IssueMonitorProviderQuotaHoldRelease>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_quota_accounts: BTreeMap<String, IssueMonitorProviderAccount>,
     /// Issue #4037 AC-1: the update drain, held next to the provider holds it
     /// shares its admission gate with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5616,6 +5697,7 @@ impl IssueMonitorState {
             provider_quota_holds: BTreeMap::new(),
             provider_quota_hold_evidence: BTreeMap::new(),
             provider_quota_hold_releases: BTreeMap::new(),
+            provider_quota_accounts: BTreeMap::new(),
             update_drain: None,
             generation_reclaim: None,
             duplicate_launch_refusals: BTreeMap::new(),
@@ -5679,6 +5761,7 @@ impl IssueMonitorState {
             normalize_provider_keyed(&prefs.provider_quota_hold_evidence);
         state.provider_quota_hold_releases =
             normalize_provider_keyed(&prefs.provider_quota_hold_releases);
+        state.provider_quota_accounts = normalize_provider_keyed(&prefs.provider_quota_accounts);
         state.enforce_provider_quota_hold_releases();
         state.update_drain = prefs.update_drain.clone();
         state.generation_reclaim = prefs.generation_reclaim;
@@ -5814,6 +5897,8 @@ impl IssueMonitorState {
                     && !state.merged_issues.contains(issue_number)
             });
         state.apply_closed_issue_facts();
+        state.enforce_provider_quota_account_bindings();
+        state.enforce_provider_quota_hold_releases();
         state
     }
 
@@ -5830,6 +5915,7 @@ impl IssueMonitorState {
             provider_quota_holds: self.provider_quota_holds.clone(),
             provider_quota_hold_evidence: self.provider_quota_hold_evidence.clone(),
             provider_quota_hold_releases: self.provider_quota_hold_releases.clone(),
+            provider_quota_accounts: self.provider_quota_accounts.clone(),
             update_drain: self.update_drain.clone(),
             generation_reclaim: self.generation_reclaim.clone(),
             duplicate_launch_refusals: self.duplicate_launch_refusals.values().cloned().collect(),
@@ -8071,12 +8157,63 @@ impl IssueMonitorState {
     }
 
     fn merge_provider_quota_holds_from_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        for (provider, account) in normalize_provider_keyed(&disk.provider_quota_accounts) {
+            let Some(disk_at) = parse_rfc3339_utc(&account.observed_at) else {
+                continue;
+            };
+            if self
+                .provider_quota_accounts
+                .get(&provider)
+                .and_then(|local| parse_rfc3339_utc(&local.observed_at))
+                .is_none_or(|local_at| disk_at > local_at)
+            {
+                self.provider_quota_accounts.insert(provider, account);
+            }
+        }
+        self.enforce_provider_quota_account_bindings();
         for (provider, reset_at) in &disk.provider_quota_holds {
+            if provider_quota_hold_is_released(
+                disk.provider_quota_hold_evidence.get(provider),
+                self.provider_quota_hold_releases.get(provider),
+            ) || self
+                .provider_quota_accounts
+                .get(provider)
+                .is_some_and(|account| {
+                    disk.provider_quota_hold_evidence
+                        .get(provider)
+                        .and_then(|evidence| evidence.account_id.as_ref())
+                        .or_else(|| {
+                            disk.provider_quota_accounts
+                                .get(provider)
+                                .map(|known| &known.account_id)
+                        })
+                        .is_some_and(|id| id != &account.account_id)
+                })
+            {
+                continue;
+            }
             merge_provider_quota_hold(&mut self.provider_quota_holds, provider, reset_at);
         }
         // A disk entry whose instant does not parse can neither be ordered
         // nor fence anything, so it never replaces a valid local entry.
         for (provider, evidence) in normalize_provider_keyed(&disk.provider_quota_hold_evidence) {
+            if self
+                .provider_quota_accounts
+                .get(&provider)
+                .is_some_and(|account| {
+                    evidence
+                        .account_id
+                        .as_ref()
+                        .or_else(|| {
+                            disk.provider_quota_accounts
+                                .get(&provider)
+                                .map(|known| &known.account_id)
+                        })
+                        .is_some_and(|id| id != &account.account_id)
+                })
+            {
+                continue;
+            }
             let Some(disk_at) = parse_rfc3339_utc(&evidence.recorded_at) else {
                 continue;
             };
@@ -8107,6 +8244,25 @@ impl IssueMonitorState {
         self.enforce_provider_quota_hold_releases();
     }
 
+    fn enforce_provider_quota_account_bindings(&mut self) {
+        let obsolete = self
+            .provider_quota_accounts
+            .iter()
+            .filter(|(provider, account)| {
+                self.provider_quota_holds.contains_key(*provider)
+                    && self
+                        .provider_quota_hold_evidence
+                        .get(*provider)
+                        .and_then(|evidence| evidence.account_id.as_deref())
+                        .is_some_and(|id| id != account.account_id)
+            })
+            .map(|(provider, account)| (provider.clone(), account.observed_at.clone()))
+            .collect::<Vec<_>>();
+        for (provider, at) in obsolete {
+            self.clear_provider_quota_hold(&provider, "account changed", &at);
+        }
+    }
+
     /// Issue #3923 AC-1: drop every hold that a recorded release fences.
     fn enforce_provider_quota_hold_releases(&mut self) {
         let released = self
@@ -8124,6 +8280,106 @@ impl IssueMonitorState {
             self.provider_quota_holds.remove(&provider);
             self.provider_quota_hold_evidence.remove(&provider);
         }
+        for record in self.autonomous_records.values_mut() {
+            if record.retry_hold_provider.as_ref().is_some_and(|provider| {
+                self.provider_quota_hold_releases.contains_key(provider)
+                    && !self.provider_quota_holds.contains_key(provider)
+            }) {
+                record.retry_not_before = None;
+                record.retry_hold_reason = None;
+                record.retry_hold_provider = None;
+            }
+        }
+    }
+
+    /// Reconcile a local credential observation and publish the same durable
+    /// release as an operator clear, including the per-Issue retry cascade.
+    pub fn reconcile_provider_account(
+        &mut self,
+        provider: &str,
+        account_id: &str,
+        now: &str,
+    ) -> bool {
+        let Some(provider) = normalize_issue_monitor_provider(provider) else {
+            return false;
+        };
+        if account_id.is_empty() || parse_rfc3339_utc(now).is_none() {
+            return false;
+        }
+        if self
+            .provider_quota_accounts
+            .get(&provider)
+            .is_some_and(|known| known.account_id == account_id)
+        {
+            return false;
+        }
+        let previous = self.provider_quota_accounts.insert(
+            provider.clone(),
+            IssueMonitorProviderAccount {
+                account_id: account_id.to_string(),
+                observed_at: now.to_string(),
+            },
+        );
+        if self.provider_quota_holds.contains_key(&provider)
+            && (previous.is_some()
+                || self
+                    .provider_quota_hold_evidence
+                    .get(&provider)
+                    .and_then(|evidence| evidence.account_id.as_deref())
+                    .is_some_and(|id| id != account_id))
+        {
+            self.clear_provider_quota_hold(&provider, "account changed", now);
+        } else if let Some(evidence) = self.provider_quota_hold_evidence.get_mut(&provider) {
+            // A first observation is not proof of a switch. Bind legacy
+            // evidence without changing its original age or releasing it.
+            evidence
+                .account_id
+                .get_or_insert_with(|| account_id.to_string());
+        }
+        true
+    }
+
+    pub fn reconcile_provider_usage(
+        &mut self,
+        account: &gwt_core::usage::ProviderUsage,
+        now: &str,
+    ) -> bool {
+        let Some(account_id) = account.account_id.as_deref() else {
+            return false;
+        };
+        let provider = match account.provider {
+            gwt_core::usage::UsageProvider::Codex => "codex",
+            gwt_core::usage::UsageProvider::ClaudeCode => "claude",
+        };
+        // A queued snapshot from another GUI must not roll an account switch
+        // back. Identity-only changes are confirmed by the local scan instead.
+        if self
+            .provider_quota_accounts
+            .get(provider)
+            .is_some_and(|known| {
+                known.account_id != account_id
+                    && account
+                        .fetched_at
+                        .zip(parse_rfc3339_utc(&known.observed_at))
+                        .is_none_or(|(observed, current)| observed <= current)
+            })
+        {
+            return false;
+        }
+        let mut changed = self.reconcile_provider_account(provider, account_id, now);
+        if parse_rfc3339_utc(now).is_some_and(|now| {
+            self.provider_quota_hold_evidence
+                .get(provider)
+                .is_some_and(|evidence| evidence.contradicted_by(account, now))
+        }) {
+            self.clear_provider_quota_hold(
+                provider,
+                "newer account usage confirms quota is available",
+                now,
+            );
+            changed = true;
+        }
+        changed
     }
 
     /// Issue #3923 AC-5: switch the saved launch profile to `agent` from the
@@ -8433,6 +8689,7 @@ impl IssueMonitorState {
         // evidence, so join it before refreshing disk-owned replacement fields.
         self.merge_provider_quota_holds_from_prefs(disk);
         self.refresh_disk_owned_prefs(disk);
+        self.enforce_provider_quota_hold_releases();
         for issue_number in restarted {
             if !self.merged_issues.contains(&issue_number) && !self.issue_is_closed(issue_number) {
                 self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
@@ -9054,10 +9311,13 @@ impl IssueMonitorState {
                 earliest = Some((provider, deadline));
             }
         }
-        earliest.map(|(provider, deadline)| IssueMonitorProviderQuotaHold {
-            evidence: self.provider_quota_hold_evidence.get(&provider).cloned(),
-            provider,
-            reset_at: format_rfc3339_utc(deadline),
+        earliest.map(|(provider, deadline)| {
+            IssueMonitorProviderQuotaHold::at(
+                provider.clone(),
+                format_rfc3339_utc(deadline),
+                self.provider_quota_hold_evidence.get(&provider).cloned(),
+                now,
+            )
         })
     }
 
@@ -9071,10 +9331,13 @@ impl IssueMonitorState {
             .iter()
             .filter_map(|(provider, reset_at)| {
                 let deadline = parse_rfc3339_utc(reset_at)?;
-                (deadline > now).then(|| IssueMonitorProviderQuotaHold {
-                    provider: provider.clone(),
-                    reset_at: format_rfc3339_utc(deadline),
-                    evidence: self.provider_quota_hold_evidence.get(provider).cloned(),
+                (deadline > now).then(|| {
+                    IssueMonitorProviderQuotaHold::at(
+                        provider.clone(),
+                        format_rfc3339_utc(deadline),
+                        self.provider_quota_hold_evidence.get(provider).cloned(),
+                        now,
+                    )
                 })
             })
             .collect()
@@ -12566,6 +12829,8 @@ impl IssueMonitorState {
                 issue_number: Some(issue_number),
                 window_id: Some(window_id.to_string()),
                 screen_text: None,
+                account_id: None,
+                poller_observed_at: None,
                 poller_state: None,
                 poller_limit_reached: Some(true),
                 poller_windows: Vec::new(),
@@ -12647,6 +12912,18 @@ impl IssueMonitorState {
         }
         let candidate_deadline = concrete_provider_quota_deadline(resets_at, now);
         let provider = provider.and_then(normalize_issue_monitor_provider);
+        if provider
+            .as_ref()
+            .and_then(|provider| self.provider_quota_accounts.get(provider))
+            .zip(
+                evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.account_id.as_ref()),
+            )
+            .is_some_and(|(current, observed)| current.account_id != *observed)
+        {
+            return false;
+        }
         let floor = provider
             .as_deref()
             .and_then(|provider| {
@@ -12667,12 +12944,20 @@ impl IssueMonitorState {
                 issue_number: None,
                 window_id: None,
                 screen_text: None,
+                account_id: None,
+                poller_observed_at: None,
                 poller_state: None,
                 poller_limit_reached: None,
                 poller_windows: Vec::new(),
             });
             if parse_rfc3339_utc(&evidence.recorded_at).is_none() {
                 evidence.recorded_at = now.to_string();
+            }
+            if evidence.account_id.is_none() {
+                evidence.account_id = self
+                    .provider_quota_accounts
+                    .get(provider)
+                    .map(|current| current.account_id.clone());
             }
             evidence.issue_number.get_or_insert(issue_number);
             tracing::warn!(
@@ -16795,6 +17080,7 @@ mod tests {
 
         let exhausted = ProviderUsage {
             provider: UsageProvider::Codex,
+            account_id: None,
             account_label: None,
             plan: None,
             windows: vec![UsageWindow::new(
@@ -17111,6 +17397,8 @@ mod tests {
         let expected_hold = serde_json::json!({
             "provider": "codex",
             "reset_at": "2026-08-22T03:46:00Z",
+            "evidence_stale": false,
+            "evidence_age_secs": 30,
             // Issue #3923 AC-2: the hold names what it was formed from.
             "evidence": {
                 "recorded_at": "2026-08-16T02:26:00Z",
@@ -17412,6 +17700,7 @@ mod tests {
     ) -> gwt_core::usage::ProviderUsage {
         gwt_core::usage::ProviderUsage {
             provider,
+            account_id: None,
             account_label: None,
             plan: None,
             windows: windows
@@ -17665,6 +17954,8 @@ mod tests {
                 provider: "claude".to_string(),
                 reset_at: "2026-08-22T04:00:00Z".to_string(),
                 evidence: None,
+                evidence_stale: true,
+                evidence_age_secs: None,
             }),
             "the pool hold reports the earliest release"
         );
@@ -18066,6 +18357,8 @@ mod tests {
                 provider: "codex".to_string(),
                 reset_at: "2026-08-22T04:00:00Z".to_string(),
                 evidence: None,
+                evidence_stale: true,
+                evidence_age_secs: None,
             }]
         );
 
@@ -28663,6 +28956,8 @@ mod tests {
                  to purchase more credits or try again at Sep 7th, 2026 12:58 PM."
                     .to_string(),
             ),
+            account_id: None,
+            poller_observed_at: None,
             poller_state: Some("ok".to_string()),
             poller_limit_reached: Some(false),
             poller_windows: vec![
@@ -28785,6 +29080,172 @@ mod tests {
             IssueMonitorProviderQuotaHoldClearOutcome::UnknownProvider,
             "a custom agent id is a valid provider, so only a blank name is unknown"
         );
+    }
+
+    #[test]
+    fn quota_account_identity_survives_prefs_roundtrip() {
+        let mut stored = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        stored["provider_quota_accounts"] = serde_json::json!({
+                "codex": { "account_id": "account-a", "observed_at": "2026-09-02T09:00:00Z" }
+        });
+        let prefs: IssueMonitorPrefs = serde_json::from_value(stored).unwrap();
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let saved = serde_json::to_value(monitor.prefs()).unwrap();
+        assert_eq!(
+            saved["provider_quota_accounts"]["codex"]["account_id"],
+            "account-a"
+        );
+    }
+
+    #[test]
+    fn quota_hold_list_marks_old_evidence_stale() {
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs
+            .provider_quota_holds
+            .insert("codex".into(), "2026-09-07T03:58:00Z".into());
+        prefs
+            .provider_quota_hold_evidence
+            .insert("codex".into(), quota_hold_evidence_fixture());
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let status = serde_json::to_value(monitor.agent_status_at("2026-09-02T10:01:00Z")).unwrap();
+        assert_eq!(status["provider_quota_holds"][0]["evidence_stale"], true);
+        assert_eq!(status["provider_quota_holds"][0]["evidence_age_secs"], 3600);
+    }
+
+    fn account_bound_quota_fixture() -> IssueMonitorState {
+        let mut evidence = quota_hold_evidence_fixture();
+        evidence.account_id = Some("account-a".into());
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs
+            .provider_quota_holds
+            .insert("codex".into(), "2026-09-07T03:58:00Z".into());
+        prefs
+            .provider_quota_hold_evidence
+            .insert("codex".into(), evidence);
+        prefs.provider_quota_accounts.insert(
+            "codex".into(),
+            IssueMonitorProviderAccount {
+                account_id: "account-a".into(),
+                observed_at: "2026-09-02T09:00:00Z".into(),
+            },
+        );
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let record = monitor.autonomous_record_mut(42);
+        record.retry_hold_provider = Some("codex".into());
+        record.retry_hold_reason = Some("quota".into());
+        record.retry_not_before = Some("2026-09-07T03:58:00Z".into());
+        monitor
+    }
+
+    #[test]
+    fn quota_legacy_hold_survives_first_identity_binding_and_rebase() {
+        let mut prefs = account_bound_quota_fixture().prefs();
+        prefs.provider_quota_accounts.clear();
+        prefs
+            .provider_quota_hold_evidence
+            .get_mut("codex")
+            .unwrap()
+            .account_id = None;
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        assert!(monitor.reconcile_provider_account("codex", "account-a", "2026-09-02T09:02:00Z"));
+        assert!(monitor.provider_quota_holds.contains_key("codex"));
+        monitor.rebase_daemon_driver_prefs(&prefs);
+        let restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(restored.provider_quota_holds.contains_key("codex"));
+        assert_eq!(
+            restored.provider_quota_hold_evidence["codex"].recorded_at,
+            "2026-09-02T09:01:00Z"
+        );
+    }
+
+    #[test]
+    fn quota_account_switch_releases_provider_and_issue_holds_across_rebase() {
+        let mut monitor = account_bound_quota_fixture();
+        let before = monitor.prefs();
+        assert!(!monitor.reconcile_provider_account("codex", "account-a", "2026-09-02T09:02:00Z"));
+        monitor.reconcile_provider_account("claude", "another-provider", "2026-09-02T09:02:00Z");
+        assert!(monitor.provider_quota_holds.contains_key("codex"));
+        assert!(monitor.reconcile_provider_account("codex", "account-b", "2026-09-02T09:03:00Z"));
+        assert!(monitor.provider_quota_holds.is_empty());
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .retry_not_before
+            .is_none());
+        monitor.rebase_daemon_driver_prefs(&before);
+        assert!(
+            monitor.provider_quota_holds.is_empty(),
+            "old disk state cannot restore account A"
+        );
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.rebase_gui_observer_prefs(&before);
+        assert!(restored
+            .autonomous_record(42)
+            .unwrap()
+            .retry_not_before
+            .is_none());
+        let old_evidence = before.provider_quota_hold_evidence.get("codex").cloned();
+        assert!(!restored.hold_provider_usage_limit_core(
+            42,
+            Some("codex"),
+            None,
+            Some("2026-09-07T03:58:00Z"),
+            old_evidence,
+            "2026-09-02T09:04:00Z"
+        ));
+        let mut current_evidence = quota_hold_evidence_fixture();
+        current_evidence.account_id = Some("account-b".into());
+        current_evidence.recorded_at = "2026-09-02T09:04:00Z".into();
+        assert!(restored.hold_provider_usage_limit_core(
+            42,
+            Some("codex"),
+            None,
+            Some("2026-09-02T10:00:00Z"),
+            Some(current_evidence),
+            "2026-09-02T09:04:00Z"
+        ));
+        restored.rebase_daemon_driver_prefs(&before);
+        assert_eq!(
+            restored.provider_quota_holds["codex"], "2026-09-02T10:00:00Z",
+            "account A's later reset must not extend account B's hold"
+        );
+        let mut legacy_writer = before;
+        let evidence = legacy_writer
+            .provider_quota_hold_evidence
+            .get_mut("codex")
+            .unwrap();
+        evidence.account_id = None;
+        evidence.recorded_at = "2026-09-02T09:05:00Z".into();
+        restored.rebase_daemon_driver_prefs(&legacy_writer);
+        assert_eq!(
+            restored.provider_quota_hold_evidence["codex"]
+                .account_id
+                .as_deref(),
+            Some("account-b")
+        );
+    }
+
+    #[test]
+    fn quota_release_requires_newer_healthy_account_observation() {
+        let mut monitor = account_bound_quota_fixture();
+        let mut account = codex_usage(20.0);
+        account.account_id = Some("account-a".into());
+        account.fetched_at = parse_rfc3339_utc("2026-09-02T09:00:00Z");
+        assert!(!monitor.reconcile_provider_usage(&account, "2026-09-02T09:03:00Z"));
+        account.fetched_at = parse_rfc3339_utc("2026-09-02T09:02:00Z");
+        account.limit_reached = true;
+        assert!(!monitor.reconcile_provider_usage(&account, "2026-09-02T09:03:00Z"));
+        account.limit_reached = false;
+        assert!(monitor.reconcile_provider_usage(&account, "2026-09-02T09:03:00Z"));
+        assert!(monitor.provider_quota_holds.is_empty());
+        assert!(monitor
+            .autonomous_record(42)
+            .unwrap()
+            .retry_hold_provider
+            .is_none());
     }
 
     /// Issue #3923 AC-1: removing the hold from disk says nothing to a process
@@ -28988,6 +29449,7 @@ mod tests {
 
         let healthy = ProviderUsage {
             provider: UsageProvider::Codex,
+            account_id: None,
             account_label: None,
             plan: None,
             windows: vec![
