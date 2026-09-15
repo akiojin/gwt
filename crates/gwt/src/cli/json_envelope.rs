@@ -2140,6 +2140,7 @@ mod tests {
                 review_status: "APPROVED".to_string(),
                 body: String::new(),
                 closing_issues: Vec::new(),
+                fallback_owner_closed: false,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
