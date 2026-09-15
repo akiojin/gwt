@@ -2675,7 +2675,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 (expected_project_tab_id, live_window_ids)
             {
                 let reconciliation =
-                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids);
+                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids, now);
                 if !reconciliation.readopted.is_empty() {
                     tracing::warn!(
                         issues = ?reconciliation.readopted,
@@ -4973,6 +4973,7 @@ impl AppRuntime {
     fn finalize_issue_monitor_vanished_windows_in_background(
         project_root: &Path,
         live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
+        observed_at: &str,
         commit_timeout: std::time::Duration,
     ) -> Vec<String> {
         if live_windows_per_tab.is_empty() {
@@ -4991,7 +4992,7 @@ impl AppRuntime {
         let targets = live_windows_per_tab
             .iter()
             .flat_map(|(tab_id, live_window_ids)| {
-                monitor.vanished_launched_windows(tab_id, live_window_ids)
+                monitor.vanished_launched_windows(tab_id, live_window_ids, observed_at)
             })
             .filter_map(|window_id| {
                 let issue_number = monitor.launched_window_issue(&window_id)?;
@@ -6201,6 +6202,7 @@ impl AppRuntime {
                     Self::finalize_issue_monitor_vanished_windows_in_background(
                         &worker_project_root,
                         &live_windows_per_tab,
+                        &worker_now,
                         fallback_commit_timeout,
                     );
                 // Issue #3883: the scan owns the re-adoption, so it happens

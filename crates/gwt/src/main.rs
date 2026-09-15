@@ -7225,8 +7225,22 @@ mod tests {
 
     #[test]
     fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+        // Executing the plan revokes Codex project trust, which resolves its
+        // config from the process-global `CODEX_HOME` (falling back to the real
+        // user home). Pin it to this test's tempdir under the env lock, the same
+        // way the sibling prune tests do: without it this test reads whichever
+        // `CODEX_HOME` a concurrently running test happens to have installed —
+        // including the deliberately malformed config written by
+        // `orphan_intake_prune_keeps_worktree_when_codex_trust_revocation_fails`
+        // — and then keeps the snapshotted orphan because trust cleanup failed,
+        // so `removed` is 0 instead of 1 (Issue #4299).
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
