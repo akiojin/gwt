@@ -19,6 +19,7 @@ pub enum StartupPhase {
     RuntimeInit,
     WorkspaceRestore,
     ProjectStateLoad,
+    SessionLoad,
     BrowserInit,
     CanvasReady,
     FirstFrame,
@@ -36,6 +37,7 @@ impl StartupPhase {
             Self::RuntimeInit => "runtime_init",
             Self::WorkspaceRestore => "workspace_restore",
             Self::ProjectStateLoad => "project_state_load",
+            Self::SessionLoad => "session_load",
             Self::BrowserInit => "browser_init",
             Self::CanvasReady => "canvas_ready",
             Self::FirstFrame => "first_frame",
@@ -47,11 +49,12 @@ impl StartupPhase {
         }
     }
 
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::ProcessStart,
         Self::RuntimeInit,
         Self::WorkspaceRestore,
         Self::ProjectStateLoad,
+        Self::SessionLoad,
         Self::BrowserInit,
         Self::CanvasReady,
         Self::FirstFrame,
@@ -73,6 +76,9 @@ pub struct StartupSample {
     pub restored_window_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+    /// How many items the phase processed, e.g. Session files parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 struct TerminalReadiness {
@@ -112,6 +118,32 @@ impl StartupRun {
         start_ms: f64,
         duration_ms: f64,
     ) -> Option<PerfRecord> {
+        self.counted_phase(phase, start_ms, duration_ms, None)
+    }
+
+    /// Issue #4377 (AC-4): the Session ledger read on the startup thread and
+    /// how many Session files it parsed there.
+    pub fn session_load(
+        &mut self,
+        start_ms: f64,
+        duration_ms: f64,
+        count: usize,
+    ) -> Option<PerfRecord> {
+        self.counted_phase(
+            StartupPhase::SessionLoad,
+            start_ms,
+            duration_ms,
+            Some(count),
+        )
+    }
+
+    fn counted_phase(
+        &mut self,
+        phase: StartupPhase,
+        start_ms: f64,
+        duration_ms: f64,
+        count: Option<usize>,
+    ) -> Option<PerfRecord> {
         if !start_ms.is_finite()
             || !duration_ms.is_finite()
             || start_ms < 0.0
@@ -121,7 +153,7 @@ impl StartupRun {
             return None;
         }
         self.seen.insert(phase);
-        Some(self.sample(phase, start_ms, duration_ms, None))
+        Some(self.sample(phase, start_ms, duration_ms, None, count))
     }
 
     fn sample(
@@ -130,6 +162,7 @@ impl StartupRun {
         start_ms: f64,
         duration_ms: f64,
         window_id: Option<String>,
+        count: Option<usize>,
     ) -> PerfRecord {
         PerfRecord::startup(
             StartupSample {
@@ -139,6 +172,7 @@ impl StartupRun {
                 start_ms,
                 restored_window_count: self.restored_window_count,
                 window_id,
+                count,
             },
             duration_ms,
         )
@@ -196,6 +230,7 @@ impl StartupRun {
             start_ms,
             (elapsed_ms - start_ms).max(0.0),
             Some(super::sanitize_ui_action_field(id)),
+            None,
         )];
         records.extend(self.record_interactive(id, elapsed_ms));
         records
@@ -251,6 +286,10 @@ fn update(action: impl FnOnce(&mut StartupRun, f64) -> Vec<PerfRecord>) {
 }
 
 fn record(phase: StartupPhase, started: Instant, duration_ms: f64) {
+    record_at(started, |run, offset| run.phase(phase, offset, duration_ms));
+}
+
+fn record_at(started: Instant, action: impl FnOnce(&mut StartupRun, f64) -> Option<PerfRecord>) {
     let Some(state) = STARTUP.get() else {
         return;
     };
@@ -263,7 +302,16 @@ fn record(phase: StartupPhase, started: Instant, duration_ms: f64) {
         }
         Err(_) => return,
     };
-    update(|run, _| run.phase(phase, offset, duration_ms).into_iter().collect());
+    update(|run, _| action(run, offset).into_iter().collect());
+}
+
+/// Record the startup Session read that began at `started` and parsed
+/// `count` Session files on the startup thread.
+pub fn session_load(started: Instant, count: usize) {
+    let duration_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    record_at(started, |run, offset| {
+        run.session_load(offset, duration_ms, count)
+    });
 }
 
 pub fn mark(phase: StartupPhase) {
@@ -350,6 +398,8 @@ pub struct StartupPhaseResult {
     pub end_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,6 +444,7 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
             duration_ms: record.value,
             end_ms: sample.start_ms + record.value,
             window_id: sample.window_id.clone(),
+            count: sample.count,
         })
         .collect::<Vec<_>>();
     let first_frame_budget_ms = if restored_window_count == 0 {
@@ -455,6 +506,25 @@ mod tests {
 
     fn read_record(record: PerfRecord) -> PerfLogRecord {
         serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap()
+    }
+
+    /// Issue #4377 (AC-4): the startup breakdown names the session ledger
+    /// load and how many Session files it parsed on the startup thread.
+    #[test]
+    fn session_load_phase_carries_the_parsed_session_count() {
+        let mut run = StartupRun::new(Utc.timestamp_opt(100, 0).unwrap());
+        let record = run.session_load(30.0, 12.0, 7).unwrap();
+        let report = latest_startup(&[read_record(record)]).unwrap();
+        let phase = report
+            .phases
+            .iter()
+            .find(|p| p.phase == StartupPhase::SessionLoad)
+            .unwrap();
+        assert_eq!(
+            (phase.start_ms, phase.duration_ms, phase.count),
+            (30.0, 12.0, Some(7))
+        );
+        assert!(!report.missing_phases.contains(&StartupPhase::SessionLoad));
     }
 
     #[test]

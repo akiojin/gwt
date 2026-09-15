@@ -1605,28 +1605,80 @@ impl AppRuntime {
             .unwrap_or_default()
     }
 
+    /// Issue #4377: read on the startup thread only the Sessions startup may
+    /// restore — one a paused placeholder still references, or one whose file
+    /// changed inside the freshness window (a file is never older than the
+    /// `last_activity_at` it records, and an older orphan is refused as
+    /// `Stale` anyway). Update-resumed projects bypass freshness, so they read
+    /// every Session. The rest get the same Interrupted judgement on the
+    /// blocking worker, keeping startup independent of the stopped-Session
+    /// count.
     pub(super) fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+        let started = std::time::Instant::now();
         let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
             return Vec::new();
         };
-        entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
-            .filter_map(|path| {
-                let session_id = path.file_stem()?.to_str()?;
-                gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
-                    if session.status != gwt_agent::AgentStatus::Interrupted
-                        && session.worktree_path.exists()
-                        && session.should_mark_interrupted_from_lifecycle()
-                    {
-                        session.update_status(gwt_agent::AgentStatus::Interrupted);
-                    }
-                    Ok(())
-                })
-                .ok()
-            })
-            .collect()
+        let fresh_after = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(
+            STARTUP_AUTO_RESUME_STALE_AFTER_SECS.unsigned_abs(),
+        ));
+        let read_all = !self.update_resume_tab_ids.is_empty();
+        let mut candidates = Vec::new();
+        let mut deferred = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let fresh = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .map_or(true, |modified| {
+                    fresh_after.is_none_or(|after| modified >= after)
+                });
+            if read_all
+                || fresh
+                || self
+                    .paused_placeholder_tab_for_session(session_id)
+                    .is_some()
+            {
+                candidates.push(session_id.to_string());
+            } else {
+                deferred.push(session_id.to_string());
+            }
+        }
+
+        let sessions = candidates
+            .iter()
+            .filter_map(|session_id| Self::load_recovery_session(&self.sessions_dir, session_id))
+            .collect();
+        gwt::perf::startup::session_load(started, candidates.len());
+        if !deferred.is_empty() {
+            let sessions_dir = self.sessions_dir.clone();
+            if let Err(error) = self.blocking_tasks.try_spawn(move || {
+                for session_id in &deferred {
+                    let _ = Self::load_recovery_session(&sessions_dir, session_id);
+                }
+            }) {
+                tracing::warn!(%error, "deferred Session recovery sweep could not be scheduled");
+            }
+        }
+        sessions
+    }
+
+    fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
+        gwt_agent::update_session_if_changed(sessions_dir, session_id, |session| {
+            if session.status != gwt_agent::AgentStatus::Interrupted
+                && session.worktree_path.exists()
+                && session.should_mark_interrupted_from_lifecycle()
+            {
+                session.update_status(gwt_agent::AgentStatus::Interrupted);
+            }
+            Ok(())
+        })
+        .ok()
     }
 
     pub(crate) fn set_agent_capability_issuer(&mut self, issuer: AgentCapabilityIssuer) {
