@@ -1,6 +1,105 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.96.1] - 2026-09-14
+
+### Bug Fixes
+
+- **issue-monitor:** 全open母集団の復帰と縮小診断を修正
+- **pm:** 常駐 subscribe の待機を5秒に制限する
+- **pm:** PM pane が Running / Waiting の間は自動 wake を保留する
+
+### Miscellaneous Tasks
+
+- **work:** #4184の受け入れ条件再監査を記録
+- **work:** #4184の再開時監査を記録
+- **work:** Issue 3825 の作業イベントを記帳する
+- **work:** Issue 3825 の作業イベントを記帳する
+- **work:** #4258 の終端 Work イベントを記録する
+
+## [9.96.0] - 2026-09-13
+
+### Bug Fixes
+
+- **launch:** 同一 Session の再起動は並行世代ではなく Continue work へ案内する
+- **issue-monitor:** Live launch を持たない行の回収経路を PM に返す
+- **pm:** 管理対象ファイルとの衝突を保全して再配置する
+- **index:** 非 ASCII パス配下で HNSW が永続化されず再構築ループになるのを止める
+- **pr:** Rustdoc の壊れた intra-doc link で Lint job が落ちるのを直す
+
+### Features
+
+- **launch:** 生存中の Active holder に対する起動拒否を撤去して並行世代を許可する
+- **pr:** PM が BEHIND を解消できる pr.update_branch を追加する
+- **pr:** Head branch と owner Issue の導出元を返す
+
+### Miscellaneous Tasks
+
+- **work:** Work event shard を記録する
+- **work:** Work event shard を記録する
+- **work:** アプリ更新前に作業記録を退避
+- **work:** Issue #3992 の作業イベントを記録
+- **work:** Issue #3992 の作業イベントを追記
+- **work:** Issue #3992 の終端 Work イベントを記録
+- **work:** Issue 3572 の既存作業履歴を保全する
+- **work:** Issue 3572 の再開履歴を記録する
+- **work:** #4205 の Work イベントシャードを記録する
+- **work:** SPEC #3835 の Work receipt shard を記録する
+
+### Testing
+
+- **pm:** 復元テストのHOME隔離をテスト本体で保持する
+
+## [9.95.1] - 2026-09-11
+
+### Bug Fixes
+
+- **ci:** Windows テストの重複実行を解消し Test workflow のクリティカルパスを短縮する
+- **ci:** Stable_server_port の 25 秒固定待ちを GTK a11y バスの opt-out で除去する
+- **ci:** Stable_server_port の 25 秒待ちに session bus を与えて解消する
+- **gui:** 入力遅延を計測して不要なGit照会を省く
+- **gui:** Work投影ごとにhook失敗ledgerを1回だけ読む
+- **verify:** Windows の derived matrix から gwt の bin target を外して host 検証の飢餓を止める
+- **verify:** Clippy の unnecessary_map_or に合わせて is_none_or を使う
+- **verify:** Derive への intra-doc link を関数指定にして rustdoc の曖昧リンクを解消する
+- **codex-config:** PATH の codex が読めない features table を書かず既存分を除去する
+- **issue-monitor:** 一覧から一度漏れた open Issue を同一 revision の観測で inbox へ戻す
+- **issue-monitor:** Priority.move/set の応答で queue に入らないことと inbox 外の番号を明示する
+
+### Documentation
+
+- **diagnostics:** 実運用データ量と追加比較の残件を記録
+
+### Miscellaneous Tasks
+
+- **work:** #4134 の Work event receipt を記録する
+- **work:** #4134 の Work event receipt を記録する
+- **work:** #4134 の terminal Work receipt を記録する
+- **work:** #4134 の Work event receipt を記録する
+- **diagnostics:** 入力停止の再現手順とスレッド実測を保全
+- **diagnostics:** Work別ledger全走査の量依存を実測して保全
+- **diagnostics:** Ledger snapshotの量依存解消を実測して保全
+- **work:** Issue #4172 の Work イベントを保存する
+- **work:** Record issue 4172 terminal work event shards
+- **work:** Issue #4182 の Work event receipt を記録する
+- **work:** Issue #4182 の terminal Work update を記録する
+- **work:** #4229 の Work イベントシャードを記録する
+- **work:** #4229 の終端 Work イベントを記録する
+- **work:** #4229 を done で終端する Work イベントを記録する
+- **work:** #4229 の Work イベントシャードを記録する
+- **work:** #4229 の Work イベントマージを終端として記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の Work event shard を記録する
+- **work:** #4231 の終端 Work イベントを記録する
+- **work:** #4134 の Work event receipt を記録する
+
+### Testing
+
+- **verify:** Windows ゲート追従テストの参照先を nightly.yml の job に合わせる
+
 ## [9.95.0] - 2026-09-11
 
 ### Bug Fixes

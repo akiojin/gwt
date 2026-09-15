@@ -319,7 +319,7 @@ fn format_pr_help() -> String {
         "Operations:",
         "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
         "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
-        "  pr.review_threads.reply_and_resolve",
+        "  pr.update_branch | pr.review_threads.reply_and_resolve",
         "",
         "Key params:",
         "  number, base, head, title, body, labels, add_labels, draft",
@@ -536,7 +536,7 @@ fn format_execution_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen",
+        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen | execution.release_prepared",
         "",
         "Notes:",
         "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
@@ -552,6 +552,10 @@ fn format_execution_help() -> String {
         "  post-block matrix through verify.run, then call execution.reopen",
         "  with a non-empty params.reason. Reopen returns to Active; it does",
         "  not claim completion.",
+        "  When execution.status reports blocking_prepared_transactions for an",
+        "  owner, every launch is refused until they are released. Clear them",
+        "  with execution.release_prepared and params.issue or params.spec plus",
+        "  a non-empty params.reason; params.operation_id releases exactly one.",
         "",
     ]
     .join("\n")
