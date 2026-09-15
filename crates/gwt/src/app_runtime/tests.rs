@@ -3726,6 +3726,7 @@ fn sample_runtime_with_events(
         pm_wake_seen: HashMap::new(),
         pending_pm_wakes: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
+        pending_pm_worktree_preparations: HashSet::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
@@ -3784,6 +3785,7 @@ fn sample_runtime_with_events(
         recoverable_agent_error_windows: HashSet::new(),
         provider_quota_holds: HashMap::new(),
         provider_quota_candidates: HashMap::new(),
+        released_provider_quota_notices: HashMap::new(),
         provider_usage_accounts: Vec::new(),
         last_agent_activity: HashMap::new(),
         agent_capability_issuer: None,
@@ -28459,6 +28461,61 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
     }
 }
 
+/// Issue #3808 AC-4: the worktree-wide managed hook self-heal audited 203
+/// worktrees for 191 s on the startup path, ahead of the embedded server
+/// bind. Launches refresh the managed assets of the worktree they start in,
+/// so the sweep is a repair rather than a launch precondition: it runs on the
+/// blocking worker and never delays the first frame.
+#[test]
+fn bootstrap_runs_managed_hook_self_heal_off_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, &["init", "-q"]);
+    let missing_pin = temp
+        .path()
+        .join(format!("missing/gwtd{}", std::env::consts::EXE_SUFFIX));
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+    let config = repo.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let legacy = r#"{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"/repo/target/debug/gwtd hook event SessionStart"}]}]}}"#;
+    fs::write(&config, legacy).unwrap();
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        legacy,
+        "the self-heal sweep must not run synchronously inside bootstrap"
+    );
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    assert!(
+        !queued.is_empty(),
+        "bootstrap must schedule the sweep on the blocking worker"
+    );
+    for task in queued {
+        task();
+    }
+    let healed = fs::read_to_string(&config).unwrap();
+    assert!(
+        healed.contains("GWT_BIN_PATH"),
+        "the deferred sweep must still heal the worktree: {healed}"
+    );
+    assert!(repo.join(".gwt/managed-hook-self-healed").exists());
+}
+
 #[test]
 fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
     let _env_lock = crate::env_test_lock()
@@ -32417,11 +32474,23 @@ fn agent_activity_abandons_a_pending_quota_candidate() {
         Some(CLAUDE_USAGE_LIMIT_SCREEN),
         instant("2026-08-17T09:20:00Z"),
     );
+    runtime.released_provider_quota_notices.insert(
+        window_id.clone(),
+        gwt_core::usage::detect_provider_limit_notice(
+            CLAUDE_USAGE_LIMIT_SCREEN,
+            &chrono::Local::now(),
+        )
+        .unwrap(),
+    );
+
     let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
         "Running",
         "PreToolUse",
         "session-1",
     ));
+    assert!(!runtime
+        .released_provider_quota_notices
+        .contains_key(&window_id));
     let _ = runtime.observe_provider_quota_notice(
         &window_id,
         Some(CLAUDE_USAGE_LIMIT_SCREEN),
@@ -32481,6 +32550,7 @@ fn a_corroborated_quota_notice_holds_immediately() {
     let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
     runtime.set_provider_usage_accounts(vec![gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::ClaudeCode,
+        account_id: None,
         account_label: None,
         plan: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
@@ -32554,6 +32624,7 @@ fn a_different_providers_exhaustion_does_not_corroborate_this_pane() {
     let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
     runtime.set_provider_usage_accounts(vec![gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::ClaudeCode,
+        account_id: None,
         account_label: None,
         plan: None,
         windows: Vec::new(),
@@ -35480,6 +35551,106 @@ fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() 
         gwt_agent::Session::CURRENT_SCHEMA_VERSION
     );
     assert_eq!(persisted.status, gwt_agent::AgentStatus::Interrupted);
+}
+
+/// Issue #4377 (AC-1 / AC-3): startup reads only the Sessions it may restore.
+/// A stale Session file is neither locked nor parsed on the startup path; the
+/// blocking worker applies the same Interrupted judgement afterwards. A
+/// placeholder-referenced Session, or any Session of an update-resumed
+/// project, is still read regardless of age.
+#[test]
+fn app_runtime_startup_recovery_reads_only_restore_candidates_and_defers_the_rest() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let mut persisted = empty_workspace_state();
+    let mut placeholder = sample_window(
+        "agent-placeholder",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    placeholder.session_id = Some("session-placeholder".to_string());
+    persisted.windows.push(placeholder);
+    persisted.next_z_index = 2;
+    let mut tab = sample_project_tab("tab-repo", "Repo", worktree.clone(), ProjectKind::Git, &[]);
+    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let age = |session_id: &str| {
+        fs::File::options()
+            .write(true)
+            .open(runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("open session file")
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60))
+            .expect("age session file");
+    };
+    for session_id in ["session-fresh", "session-stale", "session-placeholder"] {
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/recovery", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.record_hook_event("UserPromptSubmit");
+        session.status = gwt_agent::AgentStatus::Running;
+        session.save(&runtime.sessions_dir).expect("save session");
+    }
+    age("session-stale");
+    age("session-placeholder");
+    let stale_path = runtime.sessions_dir.join("session-stale.toml");
+    // `Session::save` takes the per-Session lock too; drop the setup's lock
+    // file so the assertion below sees only what the startup read does.
+    fs::remove_file(runtime.sessions_dir.join(".session-stale.lock")).expect("drop setup lock");
+
+    let mut loaded = runtime
+        .load_recovery_sessions()
+        .into_iter()
+        .map(|session| (session.id, session.status))
+        .collect::<Vec<_>>();
+    loaded.sort_by(|left, right| left.0.cmp(&right.0));
+
+    assert_eq!(
+        loaded,
+        vec![
+            (
+                "session-fresh".to_string(),
+                gwt_agent::AgentStatus::Interrupted
+            ),
+            (
+                "session-placeholder".to_string(),
+                gwt_agent::AgentStatus::Interrupted
+            ),
+        ]
+    );
+    assert!(
+        !runtime.sessions_dir.join(".session-stale.lock").exists(),
+        "a stale Session must not be locked or parsed on the startup path"
+    );
+    assert_eq!(
+        gwt_agent::Session::load(&stale_path).expect("stale").status,
+        gwt_agent::AgentStatus::Running
+    );
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+    assert_eq!(
+        gwt_agent::Session::load(&stale_path).expect("stale").status,
+        gwt_agent::AgentStatus::Interrupted,
+        "the deferred sweep must apply the same Interrupted judgement"
+    );
+
+    // Issue #4038: an update-resumed project bypasses the freshness gate, so
+    // its old Sessions are restore candidates again.
+    age("session-stale");
+    runtime.update_resume_tab_ids.insert("tab-repo".to_string());
+    assert!(runtime
+        .load_recovery_sessions()
+        .iter()
+        .any(|session| session.id == "session-stale"));
 }
 
 #[test]
@@ -60385,7 +60556,8 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
         ProjectKind::Git,
         &[],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![second_tab], Some("tab-second"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![second_tab], Some("tab-second"));
 
     let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo.main);
     run_git(
@@ -60406,6 +60578,8 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
     .expect("seed dead registration");
 
     runtime.ensure_pm_agent_for_tab("tab-second", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(
         runtime.pending_pm_launches.len(),
@@ -60530,7 +60704,8 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
 
     let mut session =
         gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
@@ -60540,7 +60715,9 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     session.update_status(gwt_agent::AgentStatus::Stopped);
     session.save(&runtime.sessions_dir).expect("save session");
 
-    let events = runtime.restore_open_project_windows("tab-current");
+    runtime.restore_open_project_windows("tab-current");
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
         !events.is_empty(),
@@ -60605,9 +60782,12 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "fresh spawn emits workspace events");
     let windows = runtime
@@ -60654,6 +60834,292 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     );
 }
 
+/// Issue #4375: run the completion of the PM worktree preparation the runtime
+/// just handed to a blocking worker, so a test can observe the spawn it gates.
+fn drain_pm_worktree_preparation(
+    runtime: &mut AppRuntime,
+    recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    wait_for_recorded_event("PM worktree preparation", recorded_events, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, UserEvent::PmWorktreePrepared { .. }))
+    });
+    let prepared = {
+        let mut events = recorded_events.lock().expect("event log");
+        events
+            .iter()
+            .position(|event| matches!(event, UserEvent::PmWorktreePrepared { .. }))
+            .map(|index| events.remove(index))
+            .expect("PM worktree preparation event")
+    };
+    let UserEvent::PmWorktreePrepared {
+        continuation,
+        result,
+    } = prepared
+    else {
+        unreachable!("matched above")
+    };
+    runtime.handle_pm_worktree_prepared(*continuation, result)
+}
+
+/// Issue #4375 (AC-1): preparing the PM worktree runs `git worktree add` and
+/// `git fetch`, whose cost scales with the repository's worktree count. It must
+/// not run on the GUI event loop, so the ensure hands the preparation to a
+/// blocking worker and the pane appears when the completion event is
+/// dispatched, not inside the ensure call itself.
+#[test]
+fn pm_ensure_prepares_the_worktree_off_the_event_loop() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "the PM pane must not spawn before the worktree preparation reports back"
+    );
+    assert!(
+        runtime.pending_pm_launches.is_empty(),
+        "no launch may be tracked before the preparation reports back"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|outbound| matches!(outbound.event, BackendEvent::PmStatus { .. })),
+        "the on-loop part of the ensure only reports PM status"
+    );
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert!(
+        !events.is_empty(),
+        "the prepared spawn emits workspace events"
+    );
+    let windows = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "the prepared spawn tracks its launch for registration at completion"
+    );
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    assert!(
+        pm_worktree.join(".git").exists(),
+        "the worker must have prepared the canonical PM worktree at {}",
+        pm_worktree.display()
+    );
+    assert!(
+        runtime.pending_pm_worktree_preparations.is_empty(),
+        "consuming the completion releases the in-flight gate"
+    );
+}
+
+/// Issue #4375: moving the preparation off the loop must not cost the PM its
+/// singleton property. While one preparation is in flight a second ensure must
+/// not start another, which would land two PM panes for one repository.
+/// Issue #4375 (AC-2): `refresh_pm_worktree_for_repo_path` must never run on
+/// the GUI event loop thread. This is judged by execution path rather than by
+/// startup telemetry: with the blocking spawner holding its queue, the ensure
+/// returns having created no Git state at all, and the worktree only appears
+/// once the queued task is actually run. If the refresh were still inline, the
+/// worktree would exist the moment the ensure returned.
+#[test]
+fn pm_ensure_never_touches_git_on_the_event_loop_thread() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    // The queue never runs on its own, so "did Git run during the ensure?" has
+    // a deterministic answer instead of a race with a worker thread.
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    assert!(
+        !pm_worktree.exists(),
+        "fixture starts without a PM worktree"
+    );
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        !pm_worktree.exists(),
+        "the ensure must not have run `git worktree add` on the calling thread; \
+         the PM worktree at {} already exists",
+        pm_worktree.display()
+    );
+    let task = {
+        let mut tasks = queued.lock().expect("queued tasks");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "the Git refresh must be handed to the blocking spawner"
+        );
+        tasks.remove(0)
+    };
+
+    task();
+
+    assert!(
+        pm_worktree.join(".git").exists(),
+        "running the queued task is what materializes the PM worktree at {}",
+        pm_worktree.display()
+    );
+}
+
+#[test]
+fn pm_ensure_refuses_a_second_in_flight_worktree_preparation() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    // Hold every preparation in the queue so the gate is observed while the
+    // first one is still in flight rather than after it has finished.
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert_eq!(
+        queued.lock().expect("queued tasks").len(),
+        1,
+        "only one PM worktree preparation may be in flight per repository"
+    );
+    assert!(
+        runtime.pending_pm_worktree_preparations.contains(&repo),
+        "the in-flight gate names the repository being prepared"
+    );
+}
+
+/// Issue #4375 (AC-3): a preparation that fails off the loop must stay visible.
+/// The synchronous path only logged, so a PM that never appeared — a Git error,
+/// a full disk — was indistinguishable from one that was simply disabled.
+#[test]
+fn failed_pm_worktree_preparation_is_reported_and_spawns_nothing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .pending_pm_worktree_preparations
+        .insert(repo.clone());
+
+    let events = runtime.handle_pm_worktree_prepared(
+        super::pm::PmWorktreeContinuation::FreshSpawn {
+            tab_id: "tab-1".to_string(),
+            project_root: repo.clone(),
+        },
+        Err("git worktree add failed: No space left on device".to_string()),
+    );
+
+    assert!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty(),
+        "a failed preparation must not leave a pane behind"
+    );
+    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(
+        !runtime.pending_pm_worktree_preparations.contains(&repo),
+        "a failed preparation releases the gate so a later ensure can retry"
+    );
+    let (level, message) = events
+        .iter()
+        .find_map(|outbound| match &outbound.event {
+            BackendEvent::IssueMonitorToast { level, message, .. } => {
+                Some((level.clone(), message.clone()))
+            }
+            _ => None,
+        })
+        .expect("the failure must reach the notification center");
+    assert_eq!(level, "error");
+    assert!(
+        message.contains("No space left on device"),
+        "the toast must carry the underlying Git failure: {message}"
+    );
+}
+
+/// Issue #4375 (AC-4): the restore drain reports its own breakdown, so a
+/// startup stall is attributable to the phase that caused it instead of only to
+/// the dispatch total.
+#[test]
+fn restore_drain_stall_warning_names_the_phase_that_blocked_the_loop() {
+    use super::startup::restore_drain_stall_warning;
+
+    assert!(
+        restore_drain_stall_warning(&[("resume", 12), ("pm_ensure", 8)]).is_none(),
+        "a drain inside the budget produces no warning"
+    );
+    assert!(
+        restore_drain_stall_warning(&[("pm_ensure", 99)]).is_none(),
+        "99ms stays inside the 100ms event-loop budget"
+    );
+    assert!(
+        restore_drain_stall_warning(&[("pm_ensure", 100)]).is_some(),
+        "100ms is the point the drain is reported as blocking"
+    );
+
+    let warning = restore_drain_stall_warning(&[("resume", 12), ("pm_ensure", 3_687)])
+        .expect("a phase over the budget must be reported");
+    assert!(
+        warning.contains("pm_ensure 3687ms"),
+        "the warning names the phase and its cost: {warning}"
+    );
+    assert!(
+        !warning.contains("resume 12ms"),
+        "phases inside the budget stay out of the warning: {warning}"
+    );
+}
+
 #[test]
 fn pm_ensure_refreshes_existing_unregistered_pm_worktree_to_latest_origin_develop() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
@@ -60674,9 +61140,12 @@ fn pm_ensure_refreshes_existing_unregistered_pm_worktree_to_latest_origin_develo
         "the fixture must contain commits A and B"
     );
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(
         gwt::pm_registry::pm_worktree_path_for_repo_path(&repo),
@@ -61547,9 +62016,12 @@ fn pm_ensure_migrates_legacy_notes_before_refreshing_existing_unregistered_pm_wo
         "the fixture must contain commits A and B"
     );
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     let scratch = gwt::pm_registry::pm_scratch_dir_for_repo_path(&repo);
     assert_eq!(
@@ -61597,9 +62069,12 @@ fn pm_ensure_externalizes_modified_tracked_legacy_notes_then_restores_project_co
     fs::write(pm_worktree.join("tasks/todo.md"), local_notes).expect("modify tracked notes");
     let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(git_stdout(&pm_worktree, &["rev-parse", "HEAD"]), commit_b);
     assert_eq!(
@@ -61637,9 +62112,12 @@ fn pm_ensure_preserves_existing_pm_worktree_and_records_cached_target_when_fetch
     fs::rename(&origin, temp.path().join("offline-origin.git"))
         .expect("make origin temporarily unavailable without changing project identity");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
@@ -61685,9 +62163,12 @@ fn pm_ensure_preserves_tracked_local_work_and_records_local_work_stage() {
         .expect("write tracked local PM bytes");
     let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(git_stdout(&pm_worktree, &["rev-parse", "HEAD"]), commit_a);
     assert_eq!(
@@ -62104,17 +62585,20 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
     let commit_b = advance_origin_develop_by_one_commit(&repo, &origin);
     assert_ne!(commit_a, commit_b);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::Codex);
     session.agent_session_id = Some("pm-conversation-resume".to_string());
 
-    let events = runtime.spawn_restored_agent_session(
+    runtime.spawn_restored_agent_session(
         "tab-1",
         session,
         None,
         canvas_bounds(),
         super::startup::RestoreOrigin::Automatic,
     );
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "PM resume must still spawn its pane");
     assert_eq!(
@@ -62210,9 +62694,12 @@ fn pm_ensure_fresh_spawn_rejects_symlinked_scratch_dir() {
     })
     .expect("seed prior Fresh state");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
         runtime
@@ -62278,9 +62765,12 @@ fn pm_ensure_fresh_spawn_rejects_symlinked_project_state_dir() {
     symlink(&external, &project_state).expect("symlink project-state");
     let original_target = fs::read_link(&project_state).expect("read project-state target");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
         runtime
@@ -62325,7 +62815,8 @@ fn explicit_pm_actions_start_the_pm_even_when_auto_start_is_opted_out() {
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     disable_pm_auto_start(&repo);
 
     // The project-open path stays suppressed (FR-002).
@@ -62346,6 +62837,8 @@ fn explicit_pm_actions_start_the_pm_even_when_auto_start_is_opted_out() {
         "client-1".to_string(),
         FrontendEvent::OpenPmAgent { bounds: None },
     );
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(
         runtime
@@ -62639,6 +63132,67 @@ fn pm_ensure_resumes_stale_registration_conversation() {
     );
 }
 
+/// Issue #4375: the stale-registration resume must still record its successor
+/// for PM registration. The synchronous path marked the new pane in the ensure
+/// call, immediately after `spawn_restored_agent_session` returned. Once that
+/// resume waits on an off-loop worktree preparation there is no pane to mark at
+/// that moment, so the marking has to travel with the continuation — otherwise
+/// launch completion never rewrites `pm.json` and it keeps naming the dead
+/// session.
+#[test]
+fn pm_ensure_resume_inside_the_pm_worktree_still_tracks_its_launch() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::ClaudeCode);
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.restore_window_on_startup = true;
+    session.save(&runtime.sessions_dir).expect("save session");
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture(&session.id, &pm_worktree),
+        |_| false,
+    )
+    .expect("seed stale registration");
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        runtime.pending_pm_launches.is_empty(),
+        "the resume waits for the off-loop worktree preparation"
+    );
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert!(!events.is_empty(), "the prepared resume spawns the PM pane");
+    let windows = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    assert_eq!(windows.len(), 1, "the resume spawns exactly one PM pane");
+    assert_eq!(
+        runtime.pending_pm_launches.len(),
+        1,
+        "the resumed launch must still register the successor session at completion"
+    );
+}
+
 #[test]
 fn pm_bootstrap_ensures_pm_for_open_git_tabs() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
@@ -62652,7 +63206,8 @@ fn pm_bootstrap_ensures_pm_for_open_git_tabs() {
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.bootstrap();
 
@@ -62667,7 +63222,9 @@ fn pm_bootstrap_ensures_pm_for_open_git_tabs() {
         .is_empty());
     assert_eq!(runtime.pending_startup_pm_tabs, vec!["tab-1".to_string()]);
 
-    let events = runtime.startup_auto_resume_ready_events(canvas_bounds());
+    runtime.startup_auto_resume_ready_events(canvas_bounds());
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "canvas-ready drain spawns the PM pane");
     let windows = runtime
@@ -63512,14 +64069,17 @@ fn open_pm_agent_event_routes_to_the_active_tab_ensure() {
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_frontend_event(
+    runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::OpenPmAgent {
             bounds: Some(canvas_bounds()),
         },
     );
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "the launcher must produce events");
     let windows = runtime
@@ -63906,7 +64466,8 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1".to_string();
     let mut session = sample_active_agent_session("tab-1", &window_id);
     session.session_id = "pm-session-live".to_string();
@@ -63921,8 +64482,9 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
     )
     .expect("seed registration");
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::RestartPmAgent);
+    runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::RestartPmAgent);
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "restart must produce events");
     assert!(
@@ -64475,6 +65037,12 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
     init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    // Issue #4375: the spawn this test is about now begins with a Git refresh
+    // handed to the blocking worker, so the queue is where "did the launcher
+    // start the PM?" is answered. Holding the queue also keeps the fixture's
+    // remote-less repository from running `git fetch` at all.
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     // A crashed PM registration whose backoff floor is far in the future, with
     // no live pane and no materializable session (forces the fresh-spawn arm).
@@ -64490,12 +65058,18 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
         runtime.pending_pm_launches.is_empty(),
         "the automatic ladder must keep honouring the backoff floor"
     );
+    assert!(
+        queued.lock().expect("queued tasks").is_empty(),
+        "the backoff floor must stop the automatic ladder before it even          prepares the worktree"
+    );
     drop(automatic);
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Explicit);
-    assert!(
-        !runtime.pending_pm_launches.is_empty(),
-        "FR-021: the explicit launcher must start the PM despite the backoff floor"
+
+    assert_eq!(
+        queued.lock().expect("queued tasks").len(),
+        1,
+        "FR-021: the explicit launcher must start the PM despite the backoff          floor, which now begins by preparing the worktree off the event loop"
     );
 }
 
@@ -64663,9 +65237,12 @@ fn pm_spawn_prepares_the_worktree_for_a_bare_layout_project() {
     );
 
     let tab = sample_project_tab("tab-1", "Repo", parent.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Explicit);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
         !runtime.pending_pm_launches.is_empty(),
@@ -67842,6 +68419,7 @@ fn codex_usage_account(
 ) -> gwt_core::usage::ProviderUsage {
     gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::Codex,
+        account_id: None,
         account_label: None,
         plan: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
@@ -67853,6 +68431,51 @@ fn codex_usage_account(
         state: gwt_core::usage::UsageState::Ok,
         fetched_at: None,
     }
+}
+
+#[test]
+fn account_switch_releases_pane_quota_without_relatching_the_old_notice() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+    let mut old = codex_usage_account(100.0, true);
+    old.account_id = Some("account-a".into());
+    runtime.set_provider_usage_accounts(vec![old]);
+    runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:00:00Z"),
+    );
+    assert!(runtime.provider_quota_holds.contains_key(&window_id));
+    let mut new = gwt_core::usage::ProviderUsage::degraded(
+        gwt_core::usage::UsageProvider::Codex,
+        gwt_core::usage::UsageState::NoData,
+    );
+    new.account_id = Some("account-b".into());
+    runtime.handle_provider_usage_snapshot(vec![new], instant("2026-09-02T09:02:00Z"));
+    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
+    runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:03:00Z"),
+    );
+    runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:05:00Z"),
+    );
+    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
+    runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
+        true,
+    );
+    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
 }
 
 /// Issue #3923 AC-3: the incident was a Codex pane whose tail still showed an

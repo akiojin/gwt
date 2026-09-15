@@ -282,6 +282,19 @@ pub(super) fn run<E: CliEnv>(
             clear,
             out,
         )?,
+        IssueCommand::MonitorWaitInvalidate {
+            project_root,
+            number,
+            reason,
+            by,
+        } => run_monitor_wait_invalidate(
+            env,
+            project_root.as_deref(),
+            number,
+            &reason,
+            by.as_deref(),
+            out,
+        )?,
         IssueCommand::MonitorQuestions { project_root } => {
             run_monitor_questions(env, project_root.as_deref(), out)?
         }
@@ -2844,6 +2857,155 @@ fn run_monitor_wait<E: CliEnv>(
         );
     }
     out.push_str(&response.to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+/// Issue #4286: whether `number` currently carries a wait declaration in the
+/// Issue Monitor that owns `project_root` — the daemon snapshot when one is
+/// running, the persisted prefs otherwise.
+fn monitor_wait_is_declared(
+    project_root: &std::path::Path,
+    number: u64,
+) -> Result<bool, SpecOpsError> {
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
+        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    {
+        let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        return Ok(status
+            .inbox
+            .iter()
+            .any(|row| row.issue_number == number && row.waiting.is_some()));
+    }
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    Ok(prefs
+        .autonomous_records
+        .iter()
+        .any(|record| record.issue_number == number && record.wait.is_some()))
+}
+
+/// Issue #4286 AC-2: who is invalidating — an explicit `by`, else the calling
+/// gwt session, else the process.
+fn monitor_wait_invalidator(explicit: Option<&str>) -> String {
+    if let Some(by) = explicit.map(str::trim).filter(|by| !by.is_empty()) {
+        return by.to_string();
+    }
+    match std::env::var("GWT_SESSION_ID") {
+        Ok(session) if !session.trim().is_empty() => format!("session:{}", session.trim()),
+        _ => format!("pid:{}", std::process::id()),
+    }
+}
+
+/// Issue #4286 AC-2: commit the invalidation straight to the durable prefs
+/// when no daemon is reachable (same fallback shape as the declaration).
+fn record_monitor_wait_invalidation_in_prefs(
+    project_root: &std::path::Path,
+    number: u64,
+    by: &str,
+    reason: &str,
+    now: &str,
+) -> Result<(), String> {
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&prefs_path, |prefs| {
+        if let Some(record) = prefs
+            .autonomous_records
+            .iter_mut()
+            .find(|record| record.issue_number == number)
+        {
+            crate::invalidate_wait_on_record(record, by, reason, now);
+        }
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+/// Issue #4286 AC-1/AC-2: the PM invalidates the wait declaration of
+/// `number` because its condition no longer holds. The daemon records who /
+/// when / why on the declaration, stuck detection applies to the row again
+/// from the next scan, and the PM reads the record back from
+/// `issue.monitor.status` (`waiting.invalidated`, `waiting.in_force:false`).
+fn run_monitor_wait_invalidate<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    reason: &str,
+    by: Option<&str>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    if !monitor_wait_is_declared(&project_root, number)? {
+        // Fail closed: reporting an invalidation for a row that declared
+        // nothing would tell the PM a record exists when none does.
+        out.push_str(
+            &serde_json::json!({
+                "number": number,
+                "status": "refused",
+                "refusal": "not_waiting",
+                "detail": "this issue carries no wait declaration in the Issue Monitor; nothing to invalidate",
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(1);
+    }
+    let by = monitor_wait_invalidator(by);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let wait = serde_json::json!({
+        "issue_number": number,
+        "invalidate": true,
+        "by": by,
+        "reason": reason,
+        "at": now,
+    });
+    let transport = match publish_monitor_wait_control(&project_root, wait) {
+        Ok(()) => "daemon",
+        Err(error) if error.allows_local_fallback() => {
+            if let Err(commit_error) =
+                record_monitor_wait_invalidation_in_prefs(&project_root, number, &by, reason, &now)
+            {
+                out.push_str(
+                    &serde_json::json!({
+                        "number": number,
+                        "status": "failed",
+                        "detail": format!(
+                            "wait invalidation could not be published ({error}) or recorded locally: {commit_error}"
+                        ),
+                    })
+                    .to_string(),
+                );
+                out.push('\n');
+                return Ok(1);
+            }
+            "local"
+        }
+        Err(error) => {
+            out.push_str(
+                &serde_json::json!({
+                    "number": number,
+                    "status": "failed",
+                    "detail": format!("wait invalidation publish failed: {error}"),
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    };
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "invalidated",
+            "by": by,
+            "reason": reason,
+            "at": now,
+            "transport": transport,
+            "detail": "the declaration no longer suspends stuck detection; the ordinary stuck_timeout_secs rule applies from the agent's last activity on the next scan, and the record is readable as waiting.invalidated in issue.monitor.status",
+        })
+        .to_string(),
+    );
     out.push('\n');
     Ok(0)
 }
@@ -7095,6 +7257,90 @@ mod tests {
         );
     }
 
+    /// Issue #4286 AC-1/AC-2: without a daemon the PM's invalidation lands in
+    /// the same durable prefs the declaration did, so the record (who / when /
+    /// why) survives and the next scan sees the row unprotected. A row with
+    /// no declaration is refused with zero mutation.
+    #[test]
+    fn monitor_wait_invalidate_records_durably_and_refuses_a_row_without_a_wait() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut waiting = crate::AutonomousIssueRecord::new(42);
+        crate::declare_wait_on_record(
+            &mut waiting,
+            "host lease 待ち",
+            "verify.lease.acquire が granted を返す",
+            "2026-09-12T07:57:46Z",
+        );
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                autonomous_records: vec![waiting],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWaitInvalidate {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "bootstrap cargo build needs no verification lease".to_string(),
+                by: Some("session:pm".to_string()),
+            },
+            &mut out,
+        )
+        .expect("invalidate runs");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("\"status\":\"invalidated\""), "{out}");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        let invalidated = persisted
+            .autonomous_records
+            .iter()
+            .find(|record| record.issue_number == 42)
+            .and_then(|record| record.wait.as_ref())
+            .and_then(|wait| wait.invalidated.clone())
+            .expect("invalidation persisted on the declaration");
+        assert_eq!(invalidated.by, "session:pm");
+        assert_eq!(
+            invalidated.reason,
+            "bootstrap cargo build needs no verification lease"
+        );
+
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut refused = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWaitInvalidate {
+                project_root: Some(repo.clone()),
+                number: 43,
+                reason: "nothing to invalidate".to_string(),
+                by: None,
+            },
+            &mut refused,
+        )
+        .expect("invalidate runs");
+        assert_eq!(code, 1, "{refused}");
+        assert!(refused.contains("\"status\":\"refused\""), "{refused}");
+        assert!(refused.contains("not_waiting"), "{refused}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused invalidation must be zero-mutation"
+        );
+    }
+
     /// Issue #3844: a wait declaration is only meaningful for a launch that is
     /// running right now, so a row without a live launch is refused with zero
     /// mutation instead of being silently accepted.
@@ -8350,6 +8596,8 @@ mod tests {
                         issue_number: Some(42),
                         window_id: Some("tab-1::agent-42".to_string()),
                         screen_text: Some("You've hit your usage limit".to_string()),
+                        account_id: None,
+                        poller_observed_at: None,
                         poller_state: Some("ok".to_string()),
                         poller_limit_reached: Some(false),
                         poller_windows: vec![crate::IssueMonitorProviderQuotaPollerWindow {

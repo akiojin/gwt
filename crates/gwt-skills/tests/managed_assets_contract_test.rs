@@ -139,6 +139,38 @@ fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
     }
 }
 
+#[test]
+fn browser_check_embedded_seed_disables_automatic_agents() {
+    let embedded = gwt_skills::assets::CLAUDE_SKILLS
+        .get_file("browser-check/SKILL.md")
+        .expect("embedded browser-check")
+        .contents_utf8()
+        .expect("UTF-8 skill");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for provider in [".claude", ".codex"] {
+        let source = fs::read_to_string(
+            workspace_root.join(format!("{provider}/skills/browser-check/SKILL.md")),
+        )
+        .expect("skill mirror");
+        assert_eq!(source, embedded, "{provider} must match the embedded skill");
+    }
+    let seed = markdown_block(
+        embedded,
+        "# browser-check-agent-seed-begin",
+        Some("# browser-check-agent-seed-end"),
+    );
+    let prefs: Vec<serde_json::Value> = seed
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line.trim()).expect("valid seed JSON"))
+        .collect();
+    assert_eq!(prefs.len(), 2, "seed both PM and Issue Monitor preferences");
+    assert_eq!(prefs[0]["settings"]["auto_start"], false);
+    assert_eq!(prefs[1]["enabled"], false);
+    assert!(prefs[1]["max_active_agents"].as_u64().unwrap() > 0);
+    assert_eq!(prefs[1]["priority_order"], serde_json::json!([]));
+}
+
 #[cfg(unix)]
 #[test]
 fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
