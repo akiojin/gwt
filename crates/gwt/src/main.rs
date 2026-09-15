@@ -3453,6 +3453,7 @@ mod tests {
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             provider_quota_holds: std::collections::HashMap::new(),
             provider_quota_candidates: std::collections::HashMap::new(),
+            released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
