@@ -1,6 +1,7 @@
 //! Managed hook health read model.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
@@ -133,6 +134,33 @@ pub struct ManagedHookFailureSnapshot {
     /// size entirely: the rows are canonicalized and reduced once, so a Work
     /// row only looks its own worktree up.
     by_worktree: HashMap<PathBuf, WorktreeHookFailures>,
+    /// Issue #4257: bare hook binaries resolved during this projection.
+    hook_binaries: HookBinaryResolutionCache,
+}
+
+/// Memo of bare hook-binary resolvability for one projection.
+///
+/// Issue #4257: resolving a bare fallback such as `gwtd` walks the whole
+/// PATH (~11ms per lookup on a 59-entry Windows PATH) and depends only on
+/// process-wide state, yet every managed command of every event of every
+/// Work row asked again. The GUI builds the projection on its event loop,
+/// so that repetition held pane replies for tens of seconds.
+#[derive(Debug, Clone, Default)]
+struct HookBinaryResolutionCache {
+    bare_resolvable: RefCell<HashMap<String, bool>>,
+}
+
+impl HookBinaryResolutionCache {
+    fn bare_hook_binary_is_resolvable(&self, actual: &str) -> bool {
+        if let Some(resolvable) = self.bare_resolvable.borrow().get(actual) {
+            return *resolvable;
+        }
+        let resolvable = bare_hook_binary_is_resolvable(actual);
+        self.bare_resolvable
+            .borrow_mut()
+            .insert(actual.to_string(), resolvable);
+        resolvable
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,7 +196,15 @@ impl ManagedHookFailureSnapshot {
                 entry.latest_hard = Some(row);
             }
         }
-        Self { by_worktree }
+        Self {
+            by_worktree,
+            hook_binaries: HookBinaryResolutionCache::default(),
+        }
+    }
+
+    /// Number of distinct bare hook binaries this projection resolved.
+    pub fn resolved_hook_binaries(&self) -> usize {
+        self.hook_binaries.bare_resolvable.borrow().len()
     }
 
     /// Project managed hook health for one worktree out of this snapshot.
@@ -204,7 +240,7 @@ fn read_managed_hook_health_with(
         issues: Vec::new(),
     };
 
-    audit_managed_hook_configs(input, &mut health);
+    audit_managed_hook_configs(input, &failures.hook_binaries, &mut health);
     audit_hook_profile(input, &mut health);
     audit_hook_failures(input, failures, &mut health);
 
@@ -407,7 +443,11 @@ fn comparable_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
+fn audit_managed_hook_configs(
+    input: &ManagedHookHealthInput,
+    cache: &HookBinaryResolutionCache,
+    health: &mut ManagedHookHealth,
+) {
     let worktree = &input.worktree_root;
     let claude_dir = worktree.join(".claude");
     let claude_settings = worktree.join(".claude/settings.local.json");
@@ -463,23 +503,50 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
     }
 
     if claude_settings.exists() {
-        audit_hook_json_config(&claude_settings, input.expected_hook_bin.as_deref(), health);
+        audit_hook_json_config(
+            &claude_settings,
+            input.expected_hook_bin.as_deref(),
+            cache,
+            health,
+        );
     }
     for hooks in &codex_hooks_paths {
         if hooks.exists() {
-            audit_hook_json_config(hooks, input.expected_hook_bin.as_deref(), health);
+            audit_hook_json_config(hooks, input.expected_hook_bin.as_deref(), cache, health);
         }
     }
 
     for (root, artifact) in provider_hooks {
         if artifact.exists() {
-            audit_provider_hook_config(&artifact, input.expected_hook_bin.as_deref(), health);
+            audit_provider_hook_config(
+                &artifact,
+                input.expected_hook_bin.as_deref(),
+                cache,
+                health,
+            );
         } else if root.exists() {
             needs_attention(
                 health,
                 format!("managed hook config missing: {}", artifact.display()),
             );
         }
+    }
+
+    audit_managed_git_hooks(worktree, health);
+}
+
+/// Issue #4339: a `core.hooksPath` aimed at a directory with no hook in it
+/// makes Git skip commitlint and the commit/push gates without a word. Report
+/// it so the skip is visible and the self-heal pass can materialize them.
+fn audit_managed_git_hooks(worktree: &Path, health: &mut ManagedHookHealth) {
+    for missing in gwt_skills::missing_managed_git_hooks(worktree) {
+        needs_attention(
+            health,
+            format!(
+                "managed git hook missing: {} (core.hooksPath is configured but the hook is not materialized)",
+                missing.display()
+            ),
+        );
     }
 }
 
@@ -505,6 +572,7 @@ fn expected_hook_bin_for_config_path<'a>(
 fn audit_hook_json_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
+    cache: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
 ) {
     let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
@@ -563,7 +631,7 @@ fn audit_hook_json_config(
                 let Some(actual) = hook_command_binary_fallback(&command) else {
                     continue;
                 };
-                audit_hook_binary(path, &actual, Some(expected), health);
+                audit_hook_binary(path, &actual, Some(expected), cache, health);
             }
         } else {
             for command in commands {
@@ -571,7 +639,7 @@ fn audit_hook_json_config(
                     continue;
                 }
                 if let Some(actual) = hook_command_binary_fallback(&command) {
-                    audit_hook_binary(path, &actual, None, health);
+                    audit_hook_binary(path, &actual, None, cache, health);
                 }
             }
         }
@@ -581,6 +649,7 @@ fn audit_hook_json_config(
 fn audit_provider_hook_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
+    cache: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
 ) {
     let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
@@ -604,13 +673,14 @@ fn audit_provider_hook_config(
         );
         return;
     };
-    audit_hook_binary(path, &actual, expected_hook_bin, health);
+    audit_hook_binary(path, &actual, expected_hook_bin, cache, health);
 }
 
 fn audit_hook_binary(
     path: &Path,
     actual: &str,
     expected_hook_bin: Option<&str>,
+    cache: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
 ) {
     let actual_path = Path::new(actual);
@@ -659,7 +729,7 @@ fn audit_hook_binary(
                 ),
             );
         }
-    } else if !bare_hook_binary_is_resolvable(actual) {
+    } else if !cache.bare_hook_binary_is_resolvable(actual) {
         degraded(
             health,
             format!(
@@ -870,7 +940,9 @@ pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHo
     let provider_surface = worktree_root.join(".gwt/opencode").exists()
         || worktree_root.join(".gwt/openclaw").exists()
         || worktree_root.join(".gwt/hermes").exists();
-    let mut repaired = false;
+    // #4339: the Git hook directory belongs to the repository, not to any agent
+    // provider, so repair it even in a worktree with no agent surface at all.
+    let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
     if claude_surface || codex_surface || provider_surface {
         crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;
