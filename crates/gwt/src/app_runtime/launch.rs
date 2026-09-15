@@ -3445,8 +3445,11 @@ impl AppRuntime {
         let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
         // Issue #4145 AC-1: `inflight_launches` already stamps the spawn
         // request, so the pane-create route is the span from that stamp to this
-        // completion — worktree resolution, Docker probing and the PTY spawn
-        // included. Recorded before the entry is dropped below.
+        // completion — worktree resolution, Docker probing, runner health
+        // probes and Session persistence on the launch thread, plus the event
+        // delivery back here. The PTY spawn below is not inside it. Issue
+        // #4283 AC-5 records the per-phase split as `phase:pane.create.*`.
+        // Recorded before the entry is dropped below.
         if let Some((_, (_, started_at))) = self
             .inflight_launches
             .iter()
@@ -5116,6 +5119,9 @@ impl AppRuntime {
             });
         let mut issued_capability_token = None;
         let mut active_launch_handshake_cleanup = prepared_manual_launch_claim;
+        // Issue #4283 AC-5: attribute the pane-create route to its phases so
+        // the next regression is read from the perf stream, not guessed.
+        let mut phases = gwt::perf::RoutePhaseClock::start(gwt::perf::PerfRoute::PaneCreate);
         let result = (|| {
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -5140,6 +5146,7 @@ impl AppRuntime {
             } else {
                 None
             };
+            phases.mark("worktree");
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -5147,6 +5154,7 @@ impl AppRuntime {
             });
             let docker_launch_binding =
                 prepare_docker_runtime_for_launch(Path::new(&project_root), &mut config)?;
+            phases.mark("docker");
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -5184,10 +5192,12 @@ impl AppRuntime {
             resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
             let tool_runtime_migration_source =
                 hydrate_tool_runtime_provenance_from_source_session(&sessions_dir, &mut config)?;
+            phases.mark("environment");
             let runner_health_report = (config.runtime_target
                 == gwt_agent::LaunchRuntimeTarget::Host)
                 .then(|| resolve_host_runner_health_checked(&mut config))
                 .transpose()?;
+            phases.mark("runner_health");
             if let Some(report) = &runner_health_report {
                 for message in &report.messages {
                     proxy.send(UserEvent::LaunchProgress {
@@ -5214,6 +5224,7 @@ impl AppRuntime {
                         worktree_path.display()
                     )
                 })?;
+            phases.mark("managed_assets");
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,
                 &worktree_path,
@@ -5606,6 +5617,7 @@ impl AppRuntime {
             // initialization window. This runs on the per-launch worker
             // thread, never on the UI thread, and a worktree-local CODEX_HOME
             // has no contention to pace.
+            phases.mark("session");
             if gwt_agent::shares_user_codex_state(&agent_id, runtime_target, &process_launch.env) {
                 let waited = gwt_agent::pace_shared_codex_spawn();
                 if !waited.is_zero() {
@@ -5614,6 +5626,7 @@ impl AppRuntime {
                         "paced Codex spawn to avoid shared ~/.codex state contention"
                     );
                 }
+                phases.mark("codex_pace");
             }
             Ok((
                 process_launch,
