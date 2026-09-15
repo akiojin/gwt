@@ -9910,16 +9910,36 @@ fn with_exact_recovery_session_lease<T>(
     )
 }
 
-fn update_exact_recovery_session<T>(
+/// Host publication participates in adoption's owner -> Session -> registry
+/// transaction. Acquisition may reject before any durable mutation; publication
+/// is infallible and releases the registry guard after the Session commit.
+pub trait ExecutionAdoptionPublisher {
+    fn acquire(&mut self) -> io::Result<()>;
+    fn publish(&mut self, binding: gwt_agent::SessionExecutionBinding);
+}
+
+fn update_exact_recovery_session_with_publisher<T>(
     expected_session: &gwt_agent::Session,
     mutate: impl FnOnce(&mut gwt_agent::Session) -> io::Result<T>,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<T> {
     match gwt_agent::update_session_if_unchanged_with(
         &gwt_core::paths::gwt_sessions_dir(),
         expected_session,
-        mutate,
+        |session| {
+            if let Some(publisher) = publisher.as_mut() {
+                publisher.acquire()?;
+            }
+            let value = mutate(session)?;
+            Ok((value, session.execution_binding.clone()))
+        },
     ) {
-        Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated(value)) => Ok(value),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated((value, binding))) => {
+            if let Some(publisher) = publisher.as_mut() {
+                publisher.publish(binding.expect("Host adoption retains its Session binding"));
+            }
+            Ok(value)
+        }
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(io::Error::new(
             ErrorKind::PermissionDenied,
             format!(
@@ -10214,7 +10234,7 @@ fn persist_generation_takeover_if_owned(
     record: &ExecutionControlRecord,
     transfer: &OwnershipTransfer,
 ) -> io::Result<bool> {
-    persist_generation_takeover_if_owned_with_session(worktree, record, transfer, None)
+    persist_generation_takeover_if_owned_with_session(worktree, record, transfer, None, &mut None)
 }
 
 fn bind_recovery_session_to_generation(
@@ -10265,12 +10285,14 @@ fn persist_generation_takeover_if_owned_for_recovery(
     record: &ExecutionControlRecord,
     transfer: &OwnershipTransfer,
     expected_session: &gwt_agent::Session,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<bool> {
     persist_generation_takeover_if_owned_with_session(
         worktree,
         record,
         transfer,
         Some(expected_session),
+        publisher,
     )
 }
 
@@ -10279,6 +10301,7 @@ fn persist_generation_takeover_if_owned_with_session(
     record: &ExecutionControlRecord,
     transfer: &OwnershipTransfer,
     expected_session: Option<&gwt_agent::Session>,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<bool> {
     let owner = ExecutionOwnerKey {
         kind: record.owner_kind,
@@ -10358,9 +10381,11 @@ fn persist_generation_takeover_if_owned_with_session(
             Ok(true)
         };
         match expected_session {
-            Some(expected_session) => {
-                update_exact_recovery_session(expected_session, |session| commit(Some(session)))
-            }
+            Some(expected_session) => update_exact_recovery_session_with_publisher(
+                expected_session,
+                |session| commit(Some(session)),
+                publisher,
+            ),
             None => commit(None),
         }
     })
@@ -10370,6 +10395,7 @@ fn persist_current_generation_binding_if_owned_for_recovery(
     worktree: &Path,
     record: &ExecutionControlRecord,
     expected_session: &gwt_agent::Session,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<()> {
     let owner = ExecutionOwnerKey {
         kind: record.owner_kind,
@@ -10401,9 +10427,11 @@ fn persist_current_generation_binding_if_owned_for_recovery(
             ));
         }
         let identity = execution_binding_for_generation(&ledger, current);
-        update_exact_recovery_session(expected_session, |session| {
-            bind_recovery_session_to_generation(session, owner, identity)
-        })
+        update_exact_recovery_session_with_publisher(
+            expected_session,
+            |session| bind_recovery_session_to_generation(session, owner, identity),
+            publisher,
+        )
     })
 }
 
@@ -10453,6 +10481,7 @@ fn active_generation_owner_for_recovery_session(
 fn reconcile_committed_generation_takeover_for_recovery(
     worktree: &Path,
     expected_session: &gwt_agent::Session,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<bool> {
     let Some(owner) = active_generation_owner_for_recovery_session(worktree, expected_session)?
     else {
@@ -10529,10 +10558,14 @@ fn reconcile_committed_generation_takeover_for_recovery(
             return Ok(false);
         }
         let identity = execution_binding_for_generation(&ledger, current);
-        update_exact_recovery_session(expected_session, |session| {
-            bind_recovery_session_to_generation(session, owner, identity)?;
-            write_activated_generation(context, &ledger, &projection_json)
-        })?;
+        update_exact_recovery_session_with_publisher(
+            expected_session,
+            |session| {
+                bind_recovery_session_to_generation(session, owner, identity)?;
+                write_activated_generation(context, &ledger, &projection_json)
+            },
+            publisher,
+        )?;
         Ok(true)
     })
 }
@@ -14283,6 +14316,33 @@ pub(super) fn run<E: CliEnv>(
             .and_then(|context| context.as_ref().ok())
             .expect("validated protected recovery context")
             .session();
+        if let Some(target) = crate::daemon_runtime::HookForwardTarget::from_env_strict()
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?
+        {
+            let request = crate::AgentExecutionAdoptionRequest {
+                schema_version: 1,
+                claimed_session_id: session_id.clone(),
+                reason: reason.clone(),
+            };
+            return match crate::daemon_runtime::send_execution_adoption_via_agent_bridge(
+                &target,
+                &request,
+                expected_session,
+            ) {
+                Ok(receipt) => {
+                    out.push_str(&format!(
+                        "execution: adopted {} #{} for session {} through the Host (capability generation {})\n",
+                        receipt.execution_binding.owner_kind, receipt.execution_binding.owner_number,
+                        receipt.execution_binding.session_id, receipt.execution_binding.capability_generation,
+                    ));
+                    Ok(0)
+                }
+                Err(error) => {
+                    out.push_str(&format!("execution: adopt refused — {error}\n"));
+                    Ok(2)
+                }
+            };
+        }
         return run_adopt(
             recovery_worktree,
             &session_id,
@@ -14887,12 +14947,54 @@ fn run_reopen_locked(
 /// current session with an audited transfer entry. Integrity-failed records
 /// require a fresh execution lifetime: rewriting one here could canonize a
 /// truncated recovery history.
+pub(crate) fn adopt_for_authenticated_host(
+    worktree: &Path,
+    session: &gwt_agent::Session,
+    reason: &str,
+    publisher: &mut dyn ExecutionAdoptionPublisher,
+) -> Result<(), crate::AgentWorkspaceUpdateError> {
+    use crate::{AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode};
+    let mut out = String::new();
+    let code = run_adopt_with_publisher(
+        worktree,
+        &session.id,
+        session,
+        reason,
+        &mut out,
+        Some(publisher),
+    )
+    .map_err(|_| {
+        AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::Internal,
+            "Host adoption did not complete; inspect execution.status before retrying",
+        )
+    })?;
+    if code != 0 {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::TransactionConflict,
+            out.trim(),
+        ));
+    }
+    Ok(())
+}
+
 fn run_adopt(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
     reason: &str,
     out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    run_adopt_with_publisher(worktree, session_id, expected_session, reason, out, None)
+}
+
+fn run_adopt_with_publisher(
+    worktree: &Path,
+    session_id: &str,
+    expected_session: &gwt_agent::Session,
+    reason: &str,
+    out: &mut String,
+    mut publisher: Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> Result<i32, SpecOpsError> {
     if reason.trim().is_empty() {
         return Err(SpecOpsError::from(ApiError::Unexpected(
@@ -14918,6 +15020,7 @@ fn run_adopt(
             expected_session,
             reason,
             out,
+            &mut publisher,
         ))
     })
     .map_err(|err| {
@@ -14933,11 +15036,16 @@ fn run_adopt_locked(
     expected_session: &gwt_agent::Session,
     reason: &str,
     out: &mut String,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> Result<i32, SpecOpsError> {
     let mut prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
     let mut reconciled = false;
     if prerequisites.is_err() {
-        match reconcile_committed_generation_takeover_for_recovery(worktree, expected_session) {
+        match reconcile_committed_generation_takeover_for_recovery(
+            worktree,
+            expected_session,
+            publisher,
+        ) {
             Ok(true) => {
                 reconciled = true;
                 prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
@@ -14964,6 +15072,15 @@ fn run_adopt_locked(
             return Ok(2);
         }
     };
+    if publisher.is_some()
+        && match &prerequisites {
+            ExecutionAdoptPrerequisites::Satisfied { binding, .. }
+            | ExecutionAdoptPrerequisites::Available { binding, .. } => binding.is_none(),
+        }
+    {
+        out.push_str("execution: adopt refused — Host adoption requires a generation binding\n");
+        return Ok(2);
+    }
     let mut record = match prerequisites {
         ExecutionAdoptPrerequisites::Satisfied { record, binding } => {
             let session_result = if reconciled {
@@ -14973,6 +15090,7 @@ fn run_adopt_locked(
                     worktree,
                     &record,
                     expected_session,
+                    publisher,
                 )
             } else {
                 with_satisfied_recovery_session_lease(
@@ -15027,6 +15145,7 @@ fn run_adopt_locked(
         &record,
         &transfer,
         expected_session,
+        publisher,
     ) {
         Ok(updated) => updated,
         Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
@@ -22912,6 +23031,8 @@ mod tests {
             repo: &Path,
             command: ExecutionCommand,
         ) -> Result<(i32, String), gwt_github::SpecOpsError> {
+            let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+            let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             if let ExecutionCommand::Reopen { reason } = &command {
                 if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
                     .ok()
@@ -28566,6 +28687,58 @@ exit 1
         // P9a (T-117): execution.adopt takes over with an audited reason and
         // then allows same-session settlement.
         #[test]
+        fn adopt_host_grant_rejection_happens_under_session_lease_before_mutation() {
+            struct RejectedGrant;
+            impl ExecutionAdoptionPublisher for RejectedGrant {
+                fn acquire(&mut self) -> io::Result<()> {
+                    assert!(gwt_agent::current_thread_holds_session_lease());
+                    Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "grant was revoked",
+                    ))
+                }
+                fn publish(&mut self, _: gwt_agent::SessionExecutionBinding) {
+                    panic!("a revoked grant must never publish authority");
+                }
+            }
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(repo.path(), &active_record("previous")).unwrap();
+            ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo.path(), owner)
+                .unwrap()
+                .unwrap();
+            persist_generation_session_binding(repo.path(), owner, "successor", binding);
+            let session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("successor.toml"),
+            )
+            .unwrap();
+            let before = recovery_operation_authority_bytes(repo.path(), owner, &["successor"]);
+            assert!(adopt_for_authenticated_host(
+                repo.path(),
+                &session,
+                "recover",
+                &mut RejectedGrant
+            )
+            .is_err());
+            assert_eq!(
+                recovery_operation_authority_bytes(repo.path(), owner, &["successor"]),
+                before
+            );
+        }
+
+        #[test]
         fn adopt_installs_durable_binding_for_current_generation_caller() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -28626,6 +28799,8 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+            let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -28775,6 +28950,8 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+            let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
