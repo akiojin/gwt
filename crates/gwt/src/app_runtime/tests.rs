@@ -60534,7 +60534,8 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
 
     let mut session =
         gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
@@ -60544,7 +60545,9 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     session.update_status(gwt_agent::AgentStatus::Stopped);
     session.save(&runtime.sessions_dir).expect("save session");
 
-    let events = runtime.restore_open_project_windows("tab-current");
+    runtime.restore_open_project_windows("tab-current");
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
         !events.is_empty(),
@@ -60768,6 +60771,63 @@ fn pm_ensure_prepares_the_worktree_off_the_event_loop() {
 /// Issue #4375: moving the preparation off the loop must not cost the PM its
 /// singleton property. While one preparation is in flight a second ensure must
 /// not start another, which would land two PM panes for one repository.
+/// Issue #4375 (AC-2): `refresh_pm_worktree_for_repo_path` must never run on
+/// the GUI event loop thread. This is judged by execution path rather than by
+/// startup telemetry: with the blocking spawner holding its queue, the ensure
+/// returns having created no Git state at all, and the worktree only appears
+/// once the queued task is actually run. If the refresh were still inline, the
+/// worktree would exist the moment the ensure returned.
+#[test]
+fn pm_ensure_never_touches_git_on_the_event_loop_thread() {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    // The queue never runs on its own, so "did Git run during the ensure?" has
+    // a deterministic answer instead of a race with a worker thread.
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    assert!(
+        !pm_worktree.exists(),
+        "fixture starts without a PM worktree"
+    );
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    assert!(
+        !pm_worktree.exists(),
+        "the ensure must not have run `git worktree add` on the calling thread; \
+         the PM worktree at {} already exists",
+        pm_worktree.display()
+    );
+    let task = {
+        let mut tasks = queued.lock().expect("queued tasks");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "the Git refresh must be handed to the blocking spawner"
+        );
+        tasks.remove(0)
+    };
+
+    task();
+
+    assert!(
+        pm_worktree.join(".git").exists(),
+        "running the queued task is what materializes the PM worktree at {}",
+        pm_worktree.display()
+    );
+}
+
 #[test]
 fn pm_ensure_refuses_a_second_in_flight_worktree_preparation() {
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
@@ -62464,9 +62524,12 @@ fn pm_ensure_fresh_spawn_rejects_symlinked_scratch_dir() {
     })
     .expect("seed prior Fresh state");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
         runtime
@@ -62532,9 +62595,12 @@ fn pm_ensure_fresh_spawn_rejects_symlinked_project_state_dir() {
     symlink(&external, &project_state).expect("symlink project-state");
     let original_target = fs::read_link(&project_state).expect("read project-state target");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
         runtime
@@ -62579,7 +62645,8 @@ fn explicit_pm_actions_start_the_pm_even_when_auto_start_is_opted_out() {
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     disable_pm_auto_start(&repo);
 
     // The project-open path stays suppressed (FR-002).
@@ -62600,6 +62667,8 @@ fn explicit_pm_actions_start_the_pm_even_when_auto_start_is_opted_out() {
         "client-1".to_string(),
         FrontendEvent::OpenPmAgent { bounds: None },
     );
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(
         runtime
@@ -63830,14 +63899,17 @@ fn open_pm_agent_event_routes_to_the_active_tab_ensure() {
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_frontend_event(
+    runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::OpenPmAgent {
             bounds: Some(canvas_bounds()),
         },
     );
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "the launcher must produce events");
     let windows = runtime
@@ -64224,7 +64296,8 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1".to_string();
     let mut session = sample_active_agent_session("tab-1", &window_id);
     session.session_id = "pm-session-live".to_string();
@@ -64239,8 +64312,9 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
     )
     .expect("seed registration");
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::RestartPmAgent);
+    runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::RestartPmAgent);
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "restart must produce events");
     assert!(
@@ -64793,6 +64867,12 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
     init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    // Issue #4375: the spawn this test is about now begins with a Git refresh
+    // handed to the blocking worker, so the queue is where "did the launcher
+    // start the PM?" is answered. Holding the queue also keeps the fixture's
+    // remote-less repository from running `git fetch` at all.
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     // A crashed PM registration whose backoff floor is far in the future, with
     // no live pane and no materializable session (forces the fresh-spawn arm).
@@ -64808,12 +64888,18 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
         runtime.pending_pm_launches.is_empty(),
         "the automatic ladder must keep honouring the backoff floor"
     );
+    assert!(
+        queued.lock().expect("queued tasks").is_empty(),
+        "the backoff floor must stop the automatic ladder before it even          prepares the worktree"
+    );
     drop(automatic);
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Explicit);
-    assert!(
-        !runtime.pending_pm_launches.is_empty(),
-        "FR-021: the explicit launcher must start the PM despite the backoff floor"
+
+    assert_eq!(
+        queued.lock().expect("queued tasks").len(),
+        1,
+        "FR-021: the explicit launcher must start the PM despite the backoff          floor, which now begins by preparing the worktree off the event loop"
     );
 }
 
