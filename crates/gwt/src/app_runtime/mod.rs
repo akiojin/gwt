@@ -6684,10 +6684,14 @@ impl AppRuntime {
 
     /// Issue #3906 AC-3: a staged update (manifest persisted) raises the
     /// `Auto` update drain when the Issue Monitor runs unattended and
-    /// auto-apply is on (the default while autonomous). Attended mode keeps
-    /// the manual update button and raises nothing. AC-5 / AC-6: an install
-    /// that needs elevation, or a version whose apply already failed, is
-    /// refused unattended and falls back to the manual button with a notice.
+    /// auto-apply is on (the default while autonomous). Issue #4376 AC-1 /
+    /// AC-2: an attended monitor raises the same drain when the download of
+    /// a manual Update click lands while the host is not quiescent (agent
+    /// panes running, claims pending, ...), so the click waits for the
+    /// agents instead of restarting over them; a quiet host keeps the ready
+    /// modal's Restart now. AC-5 / AC-6: an install that needs elevation, or
+    /// a version whose apply already failed, is refused unattended and falls
+    /// back to the manual button with a notice.
     pub(crate) fn update_staged_events(&mut self, version: &str) -> Vec<OutboundEvent> {
         let last_failed_version = gwt_core::update::load_update_apply_result()
             .filter(|result| result.outcome == gwt_core::update::UpdateApplyOutcome::Failure)
@@ -6718,7 +6722,25 @@ impl AppRuntime {
         };
         let auto_apply = prefs.auto_apply_updates.unwrap_or(prefs.autonomous_mode);
         if !(prefs.autonomous_mode && auto_apply) {
-            return Vec::new();
+            // Issue #4376 AC-1 / AC-2 / AC-3: a manual Update click waits for
+            // the agents that are running. The payload is staged; when the
+            // host is not quiescent right now, the click joins the `Auto`
+            // drain below exactly like the unattended path — new launches
+            // are held (#4037), agents are never stopped, and the drain tick
+            // applies once the same quiescence check clears. A quiet host
+            // keeps the ready modal's Restart now.
+            let monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            if self.update_drain_blockers(&monitor).is_empty() {
+                return Vec::new();
+            }
+            tracing::info!(
+                target: "gwt::update",
+                version,
+                "manual update click landed on a busy host; joining the update drain"
+            );
         }
         if let Some(refusal) = refusal {
             tracing::warn!(
