@@ -118,6 +118,11 @@ pub(super) enum RestoreRefusal {
     /// CLI, so restoring it can only produce an idle pane.
     NoResumeSession,
     DuplicateResumeSession,
+    LandedWorktree,
+    EmptyLandedWorktree,
+    DiagnosticWindow,
+    WorktreeAlreadyRestoring,
+    ClosedWorkDiagnostic,
     AlreadyRunning,
     NoProjectTab,
     TabNotRestorable,
@@ -138,11 +143,24 @@ impl RestoreRefusal {
             Self::Stale => "stale".to_string(),
             Self::NoResumeSession => "no_resume_session".to_string(),
             Self::DuplicateResumeSession => "duplicate_resume_session".to_string(),
+            Self::LandedWorktree => "landed_worktree".to_string(),
+            Self::EmptyLandedWorktree => "empty_landed_worktree".to_string(),
+            Self::DiagnosticWindow => "diagnostic_window_retained".to_string(),
+            Self::WorktreeAlreadyRestoring => "worktree_already_restoring".to_string(),
+            Self::ClosedWorkDiagnostic => "closed_work_diagnostic_retained".to_string(),
             Self::AlreadyRunning => "already_running".to_string(),
             Self::NoProjectTab => "no_project_tab".to_string(),
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
             Self::TerminalWork(reason) => format!("terminal_work:{}", reason.as_str()),
             Self::TerminalFactsUnreadable(cause) => format!("terminal_facts_unreadable:{cause}"),
+        }
+    }
+
+    fn removal_reason(self) -> Option<&'static str> {
+        match self {
+            Self::TerminalWork(reason) => Some(reason.as_str()),
+            Self::EmptyLandedWorktree => Some("empty_landed_worktree"),
+            _ => None,
         }
     }
 
@@ -261,6 +279,7 @@ pub(super) fn prepare_open_project_window_restores(
                     &session.worktree_path,
                 ));
                 Some(PreparedProjectWindowRestore::Agent {
+                    window_id: window.id.clone(),
                     session: Box::new(session),
                     workspace_resume_context,
                     fallback_geometry: window.geometry.clone(),
@@ -873,8 +892,13 @@ impl AppRuntime {
                 self.restore_admission(&session, &project_root, placeholder_window_id.as_deref())
             {
                 admission.refuse(&session.id, refusal);
-                if let RestoreRefusal::TerminalWork(reason) = refusal {
-                    self.refuse_terminal_session_restore(&tab_id, &session.id, reason);
+                if let Some(reason) = refusal.removal_reason() {
+                    self.remove_refused_session_restore(
+                        &tab_id,
+                        &session.id,
+                        placeholder_window_id.as_deref(),
+                        reason,
+                    );
                 }
                 continue;
             }
@@ -916,6 +940,10 @@ impl AppRuntime {
         project_root: &Path,
         window_id: Option<&str>,
     ) -> Result<(), RestoreRefusal> {
+        if window_id.and_then(|id| self.window_status(id)) == Some(WindowProcessStatus::Error) {
+            return Err(RestoreRefusal::DiagnosticWindow);
+        }
+        // Preserve terminal cleanup before applying spawn-only refusals.
         match self.restore_work_terminality(session, project_root, window_id) {
             RestoreAdmission::RefuseTerminal(reason) => {
                 return Err(RestoreRefusal::TerminalWork(reason))
@@ -923,7 +951,59 @@ impl AppRuntime {
             RestoreAdmission::RefuseUnprovable(cause) => {
                 return Err(RestoreRefusal::TerminalFactsUnreadable(cause))
             }
+            RestoreAdmission::RefuseRetainedTerminal => {
+                return Err(RestoreRefusal::ClosedWorkDiagnostic)
+            }
             RestoreAdmission::Admit => {}
+        }
+        // Reopened #4143 AC-6: queued and in-flight restores reserve their
+        // worktree before a PTY attaches and enters active_agent_sessions.
+        let worktree = &session.worktree_path;
+        if self
+            .active_agent_sessions
+            .values()
+            .any(|active| same_worktree_path(&active.worktree_path, worktree))
+            || self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .any(|pending| same_worktree_path(&pending.session.worktree_path, worktree))
+            || self
+                .pending_auto_resume_sources
+                .iter()
+                .any(|(window, source)| {
+                    self.window_lookup.contains_key(window)
+                        && gwt_agent::Session::load(
+                            &self.sessions_dir.join(format!("{source}.toml")),
+                        )
+                        .is_ok_and(|pending| same_worktree_path(&pending.worktree_path, worktree))
+                })
+        {
+            return Err(RestoreRefusal::WorktreeAlreadyRestoring);
+        }
+        // Reopened #4143 AC-5: retaining a stopped diagnostic does not
+        // authorize starting its process again after the branch has landed.
+        // Resolve only the local remote-tracking ref; startup never fetches.
+        // The resident PM is a continuing conversation on a detached base,
+        // not an Issue branch whose commits can mark its work as landed.
+        if !gwt::pm_registry::registered_pm_worktree_authority(
+            project_root,
+            &session.id,
+            &session.worktree_path,
+        ) && gwt_core::process::hidden_command("git")
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                "HEAD",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&session.worktree_path)
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            if self.restore_placeholder_is_known_empty(session, window_id) {
+                return Err(RestoreRefusal::EmptyLandedWorktree);
+            }
+            return Err(RestoreRefusal::LandedWorktree);
         }
         if launch_config_from_persisted_session(session).session_mode
             != gwt_agent::SessionMode::Resume
@@ -931,6 +1011,54 @@ impl AppRuntime {
             return Err(RestoreRefusal::NoResumeSession);
         }
         Ok(())
+    }
+
+    /// Only discard a provably empty placeholder. An unknown execution,
+    /// prior failure, or any text/runtime belongs to the operator to inspect.
+    fn restore_placeholder_is_known_empty(
+        &self,
+        session: &gwt_agent::Session,
+        window_id: Option<&str>,
+    ) -> bool {
+        let Some(id) = window_id else { return false };
+        let Some(address) = self.window_lookup.get(id) else {
+            return false;
+        };
+        let Some(window) = self
+            .tab(&address.tab_id)
+            .and_then(|tab| tab.workspace.window(&address.raw_id))
+        else {
+            return false;
+        };
+        session.linked_issue_number.is_none()
+            && session.execution_binding.is_none()
+            && window.linked_issue_number.is_none()
+            && window.status == WindowProcessStatus::Stopped
+            && matches!(
+                session.status,
+                gwt_agent::AgentStatus::Idle | gwt_agent::AgentStatus::Stopped
+            )
+            && !session.last_exit_code.is_some_and(|code| code != 0)
+            && session.last_exit_signal.is_none()
+            && !self.runtimes.contains_key(id)
+            && !self
+                .window_details
+                .get(id)
+                .is_some_and(|text| !text.trim().is_empty())
+            && !self
+                .launch_error_terminal_details
+                .get(id)
+                .is_some_and(|text| !text.trim().is_empty())
+            && !window
+                .dynamic_title_detail
+                .as_ref()
+                .is_some_and(|text| !text.trim().is_empty())
+            && gwt::cli::execution_state::diagnose_for_projection(
+                &session.worktree_path,
+                Some(&session.id),
+            )
+            .ecr_status
+                == gwt::cli::execution_state::ExecutionDiagnosisState::Missing
     }
 
     /// Reap every integrity-valid stale Active owner visible in the fixed
@@ -1244,7 +1372,7 @@ impl AppRuntime {
             config.launch_route = gwt_agent::LaunchRoute::Manual;
         }
         let geometry = self
-            .remove_stale_paused_agent_window(tab_id, &session.id)
+            .remove_stale_paused_agent_window(tab_id, &session.id, None)
             .unwrap_or(fallback_geometry);
         // Snapshot the window registry *after* the paused placeholder is
         // removed: the freshly spawned window may reuse the placeholder's id
@@ -1449,25 +1577,15 @@ impl AppRuntime {
         let mut restored = 0usize;
         for restore in restores {
             let window_id = match &restore {
-                PreparedProjectWindowRestore::Agent { session, .. } => {
-                    self.tab(tab_id).and_then(|tab| {
-                        tab.workspace.persisted().windows.iter().find_map(|window| {
-                            (window.session_id.as_deref() == Some(session.id.as_str()))
-                                .then(|| window.id.clone())
-                        })
-                    })
-                }
-                PreparedProjectWindowRestore::Process { window_id, .. } => Some(window_id.clone()),
+                PreparedProjectWindowRestore::Agent { window_id, .. }
+                | PreparedProjectWindowRestore::Process { window_id, .. } => window_id,
             };
-            let Some(window_id) = window_id else {
-                continue;
-            };
-            let combined = combined_window_id(tab_id, &window_id);
+            let combined = combined_window_id(tab_id, window_id);
             // A window with a live PTY/runtime is already running (e.g. when an
             // already-open project tab is re-selected); only paused placeholders
             // should be restarted. `window_lookup` is the registry of known
             // windows, not the set of running ones, so it must not gate here.
-            if self.runtimes.contains_key(&combined) {
+            if !self.tracked_window_exists(&combined) || self.runtimes.contains_key(&combined) {
                 continue;
             }
             match restore {
@@ -1475,6 +1593,7 @@ impl AppRuntime {
                     session,
                     workspace_resume_context,
                     fallback_geometry,
+                    ..
                 } => {
                     if self
                         .active_agent_sessions
@@ -1494,8 +1613,13 @@ impl AppRuntime {
                         self.restore_admission(&session, &project_root, Some(&combined))
                     {
                         admission.refuse(&session.id, refusal);
-                        if let RestoreRefusal::TerminalWork(reason) = refusal {
-                            self.refuse_terminal_session_restore(tab_id, &session.id, reason);
+                        if let Some(reason) = refusal.removal_reason() {
+                            self.remove_refused_session_restore(
+                                tab_id,
+                                &session.id,
+                                Some(&combined),
+                                reason,
+                            );
                             events.push(self.workspace_state_broadcast());
                         }
                         continue;
@@ -1536,8 +1660,10 @@ impl AppRuntime {
             .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
             .find(|tab| {
                 tab.workspace.persisted().windows.iter().any(|window| {
-                    window.status == WindowProcessStatus::Stopped
-                        && crate::runtime_support::window_is_agent_pane(window)
+                    matches!(
+                        window.status,
+                        WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    ) && crate::runtime_support::window_is_agent_pane(window)
                         && window.session_id.as_deref() == Some(session_id)
                 })
             })
@@ -1548,6 +1674,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         session_id: &str,
+        window_id: Option<&str>,
     ) -> Option<WindowGeometry> {
         let tab = self.tab_mut(tab_id)?;
         // SPEC-1921 Phase 65 (T337): stale placeholder removal must cover the
@@ -1564,6 +1691,7 @@ impl AppRuntime {
                 crate::runtime_support::window_is_agent_pane(w)
                     && w.status == WindowProcessStatus::Stopped
                     && w.session_id.as_deref() == Some(session_id)
+                    && window_id.is_none_or(|id| combined_window_id(tab_id, &w.id) == id)
             })
             .map(|w| (w.id.clone(), w.geometry.clone()));
         let (raw_id, geometry) = stale?;
