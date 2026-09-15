@@ -135,7 +135,31 @@ mod imp {
             apply_group_nice(pid, policy.priority.unix_nice(), set_group_nice)
         }
 
-        /// Unix has no tree-wide CPU cap to lift (Issue #4405).
+        /// Unix has no tree-wide CPU cap to lift, and no reversible priority
+        /// lever to replace it with (Issue #4405 AC-2).
+        ///
+        /// Measured on the reporting host (macOS 25.5, unprivileged):
+        ///
+        /// ```text
+        /// setpriority(self, 10)  -> 0        raising is always permitted
+        /// setpriority(self, 0)   -> EACCES   even back down to where we began
+        /// setpriority(child, 0)  -> EACCES   the launcher cannot lower it either
+        /// ```
+        ///
+        /// So neither half of AC-2 is reachable here. The holder's nice cannot
+        /// be lowered (that needs root), and suppressing the other panes by
+        /// raising theirs is a one-way door: nothing could restore them when
+        /// the lease is released, so every pane would decay to nice 19 after
+        /// the first verification and stay there for its whole multi-hour life.
+        ///
+        /// What remains true is that the holder is not *disadvantaged*: the
+        /// launch policy nices the whole pane group (`apply_policy` above), so
+        /// `verify.run` and the implementation agents all sit at nice 10 —
+        /// parity, which is what AC-1 asks for. Starvation on Unix therefore
+        /// comes from oversubscription, not from a priority gap, and it is
+        /// reported rather than corrected: see `holder_activity` (AC-3) and
+        /// the deferral text (AC-4). Lifting it belongs to `max_active` and to
+        /// the gwt-side CPU burn tracked by #4397 / #4234.
         pub fn relieve_cap_for_lease_holder(
             &mut self,
             _holder_pid: Option<u32>,
