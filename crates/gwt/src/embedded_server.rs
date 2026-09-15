@@ -192,7 +192,7 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
 pub(super) struct PreparedOutbound {
-    payload: String,
+    payload: axum::extract::ws::Utf8Bytes,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
@@ -222,7 +222,9 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         _ => (None, None, None),
     };
     PreparedOutbound {
-        payload: serde_json::to_string(event).expect("backend event json"),
+        payload: serde_json::to_string(event)
+            .expect("backend event json")
+            .into(),
         kind,
         coalesce_key,
         repair_pane_id,
@@ -280,12 +282,26 @@ pub(super) fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbou
             );
         }
     }
-    prepared.payload = serde_json::to_string(&payload).expect("backend event json");
+    prepared.payload = serde_json::to_string(&payload)
+        .expect("backend event json")
+        .into();
     prepared
 }
 
+impl PreparedOutbound {
+    /// Issue #4371 AC-2: the pane whose torn stream this event heals in any
+    /// client queue, not only in the one it was addressed to.
+    fn healing_pane(&self) -> Option<&str> {
+        (self.kind == "terminal_snapshot")
+            .then_some(self.terminal_pane.as_deref())
+            .flatten()
+    }
+}
+
 struct QueuedOutbound {
-    payload: String,
+    /// Issue #4371 AC-2: shared with every other queue holding the same
+    /// event; cloning it never copies the serialized bytes.
+    payload: axum::extract::ws::Utf8Bytes,
     kind: &'static str,
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
@@ -319,11 +335,14 @@ pub(super) struct ClientCloseFrame {
 /// One step handed to the per-client drain loop in [`client_session`].
 pub(super) enum DrainStep {
     Message {
-        payload: String,
+        payload: axum::extract::ws::Utf8Bytes,
         /// Panes whose streamed output was dropped while the queue was
         /// saturated; the session loop must request snapshot re-sends for
         /// them (SPEC-2359 W-17 FR-396).
         repair_panes: Vec<String>,
+        /// Pane of a `terminal_snapshot` payload, so an agent session can
+        /// authorize it without parsing megabytes of scrollback (Issue #4371).
+        snapshot_pane: Option<String>,
     },
     Closed(Option<ClientCloseFrame>),
 }
@@ -521,9 +540,13 @@ impl ClientQueue {
         } else {
             Vec::new()
         };
+        let snapshot_pane = (entry.kind == "terminal_snapshot")
+            .then_some(entry.terminal_pane)
+            .flatten();
         Some(DrainStep::Message {
             payload: entry.payload,
             repair_panes,
+            snapshot_pane,
         })
     }
 
@@ -553,6 +576,16 @@ impl ClientQueue {
         state.close_frame = close_frame;
         drop(state);
         self.notify.notify_one();
+    }
+
+    /// Issue #4371 AC-2: whether this client dropped output of `pane` that no
+    /// snapshot has replaced yet.
+    fn is_torn(&self, pane: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .torn_panes
+            .contains(pane)
     }
 
     fn health_stats(&self) -> ClientHubHealthStats {
@@ -599,7 +632,7 @@ impl ClientQueue {
     #[cfg(test)]
     pub(crate) fn try_recv(&self) -> Option<String> {
         match self.try_next()? {
-            DrainStep::Message { payload, .. } => Some(payload),
+            DrainStep::Message { payload, .. } => Some(payload.to_string()),
             DrainStep::Closed(_) => None,
         }
     }
@@ -724,6 +757,31 @@ impl ClientHub {
         stats
     }
 
+    /// Issue #4371 AC-2: keep only the panes `client_id` still has torn. The
+    /// drain loop asks for a repair again on every drain while a pane stays
+    /// torn, so by the time a request reaches the event loop an earlier
+    /// request — or another client's snapshot — may already have healed it.
+    /// A client that went away needs no repair at all.
+    pub(super) fn panes_needing_repair(
+        &self,
+        client_id: &str,
+        pane_ids: Vec<String>,
+    ) -> Vec<String> {
+        let queue = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(client_id)
+            .map(|registration| registration.queue.clone());
+        let Some(queue) = queue else {
+            return Vec::new();
+        };
+        pane_ids
+            .into_iter()
+            .filter(|pane| queue.is_torn(pane))
+            .collect()
+    }
+
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
         // Snapshot queue handles under a short-lived lock so serialization
         // and per-client enqueue work happen outside the registry mutex. This
@@ -778,7 +836,21 @@ impl ClientHub {
                     if let Some((_, queue, _)) = snapshot.iter().find(|(id, _, _)| id == &client_id)
                     {
                         if queue.enqueue(&prepared) {
-                            dead_clients.push(client_id);
+                            dead_clients.push(client_id.clone());
+                        }
+                    }
+                    // Issue #4371 AC-2: the snapshot also heals every other
+                    // client that tore the same pane, sharing this one
+                    // serialization instead of each client asking the event
+                    // loop to reflow and encode the pane again.
+                    if let Some(pane) = prepared.healing_pane() {
+                        for (other_id, queue, _) in &snapshot {
+                            if other_id != &client_id
+                                && queue.is_torn(pane)
+                                && queue.enqueue(&prepared)
+                            {
+                                dead_clients.push(other_id.clone());
+                            }
                         }
                     }
                 }
@@ -3800,10 +3872,31 @@ impl ClientSessionScope {
         }
     }
 
+    #[cfg(test)]
     fn filter_outbound(&mut self, payload: String) -> Option<String> {
         match self {
             Self::Browser => Some(payload),
             Self::Agent(scope) => scope.filter_outbound(payload),
+        }
+    }
+
+    /// Issue #4371 AC-2: decide one queued payload without copying it. A
+    /// terminal snapshot is authorized by its pane alone — parsing megabytes
+    /// of scrollback into a JSON value just to read that id cost a full copy
+    /// per agent client.
+    fn filter_outbound_payload(
+        &mut self,
+        payload: axum::extract::ws::Utf8Bytes,
+        snapshot_pane: Option<&str>,
+    ) -> Option<axum::extract::ws::Utf8Bytes> {
+        match (self, snapshot_pane) {
+            (Self::Browser, _) => Some(payload),
+            (Self::Agent(scope), Some(pane)) => {
+                scope.allowed_window_ids.contains(pane).then_some(payload)
+            }
+            (Self::Agent(scope), None) => scope
+                .filter_outbound(payload.to_string())
+                .map(axum::extract::ws::Utf8Bytes::from),
         }
     }
 
@@ -3950,7 +4043,11 @@ async fn client_session_with_scope(
         tokio::select! {
             step = outbound.next() => {
                 match step {
-                    DrainStep::Message { payload, repair_panes } => {
+                    DrainStep::Message {
+                        payload,
+                        repair_panes,
+                        snapshot_pane,
+                    } => {
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
@@ -3959,10 +4056,12 @@ async fn client_session_with_scope(
                             .await;
                             break;
                         }
-                        let Some(payload) = scope.filter_outbound(payload) else {
+                        let Some(payload) =
+                            scope.filter_outbound_payload(payload, snapshot_pane.as_deref())
+                        else {
                             continue;
                         };
-                        if sender.send(Message::Text(payload.into())).await.is_err() {
+                        if sender.send(Message::Text(payload)).await.is_err() {
                             break;
                         }
                         let repair_panes = scope.filter_repair_panes(repair_panes);
@@ -6112,7 +6211,8 @@ mod tests {
                         }]
                     }
                 })
-                .to_string(),
+                .to_string()
+                .into(),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6299,7 +6399,8 @@ mod tests {
                         }]
                     }
                 })
-                .to_string(),
+                .to_string()
+                .into(),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6563,7 +6664,8 @@ mod tests {
                         }]
                     }
                 })
-                .to_string(),
+                .to_string()
+                .into(),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -8496,8 +8598,9 @@ mod tests {
                 DrainStep::Message {
                     payload,
                     repair_panes,
+                    ..
                 } => {
-                    payloads.push(payload);
+                    payloads.push(payload.to_string());
                     repairs.extend(repair_panes);
                 }
                 DrainStep::Closed(_) => break,
@@ -8909,6 +9012,108 @@ mod tests {
             queue.len() < DRAIN_LOW_WATER,
             "repair fires only below the low-water mark"
         );
+    }
+
+    // Issue #4371 AC-2: one serialized event is shared by every client queue
+    // it lands in instead of being copied once per client.
+    #[test]
+    fn client_hub_shares_one_serialized_payload_across_client_queues() {
+        let hub = ClientHub::default();
+        let first = hub.register("client-a".to_string());
+        let second = hub.register("client-b".to_string());
+        hub.dispatch(vec![OutboundEvent::broadcast(terminal_output(
+            "tab-1::agent-7",
+            "chunk",
+        ))]);
+
+        let (
+            Some(DrainStep::Message { payload: a, .. }),
+            Some(DrainStep::Message { payload: b, .. }),
+        ) = (first.try_next(), second.try_next())
+        else {
+            panic!("both clients receive the broadcast");
+        };
+        assert_eq!(a.as_ptr(), b.as_ptr(), "the payload is one shared buffer");
+    }
+
+    // Issue #4371 AC-2: a snapshot serialized for one client heals every other
+    // client that dropped the same pane's stream, so N clients never make the
+    // event loop reflow and encode the same pane N times — and a repair
+    // request still in flight for a healed pane is dropped.
+    #[test]
+    fn terminal_snapshot_heals_every_client_that_tore_the_same_pane() {
+        let hub = ClientHub::default();
+        let pane = "tab-1::agent-7";
+        let requester = hub.register("client-a".to_string());
+        let bystander = hub.register("client-b".to_string());
+        for index in 0..(LOSSY_HIGH_WATER + 10) {
+            hub.dispatch(vec![OutboundEvent::broadcast(terminal_output(
+                pane,
+                &format!("chunk-{index}"),
+            ))]);
+        }
+        for client in ["client-a", "client-b"] {
+            assert_eq!(
+                hub.panes_needing_repair(
+                    client,
+                    vec![pane.to_string(), "tab-1::never-torn".to_string()]
+                ),
+                vec![pane.to_string()],
+                "{client} dropped output for the pane, and only for it"
+            );
+        }
+
+        hub.dispatch(vec![OutboundEvent::reply(
+            "client-a",
+            terminal_snapshot(pane, "screen"),
+        )]);
+
+        for (client, queue) in [("client-a", &requester), ("client-b", &bystander)] {
+            assert!(
+                hub.panes_needing_repair(client, vec![pane.to_string()])
+                    .is_empty(),
+                "{client} is healed by the one snapshot"
+            );
+            let (payloads, _) = drain_all(queue);
+            assert!(
+                payloads
+                    .iter()
+                    .any(|payload| payload.contains("\"terminal_snapshot\"")),
+                "{client} received the snapshot"
+            );
+        }
+    }
+
+    // Issue #4371 AC-2: an agent session authorizes a terminal snapshot by its
+    // pane alone; the payload — megabytes of scrollback — is never parsed.
+    #[test]
+    fn agent_scope_authorizes_terminal_snapshot_by_pane_without_parsing_it() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let principal =
+            AgentSessionPrincipal::new(project.path(), "session-pm").expect("agent principal");
+        let mut agent = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        agent
+            .allowed_window_ids
+            .insert("tab-owned::agent-1".to_string());
+        let mut scope = super::ClientSessionScope::Agent(agent);
+        // Not JSON at all: any attempt to parse it would reject it.
+        let payload = axum::extract::ws::Utf8Bytes::from("opaque snapshot bytes");
+
+        let allowed = scope
+            .filter_outbound_payload(payload.clone(), Some("tab-owned::agent-1"))
+            .expect("a snapshot of an owned pane passes");
+        assert_eq!(
+            allowed.as_ptr(),
+            payload.as_ptr(),
+            "the shared buffer passes through uncopied"
+        );
+        assert!(scope
+            .filter_outbound_payload(payload, Some("tab-foreign::agent-2"))
+            .is_none());
     }
 
     fn terminal_output_at(pane: &str, data: &str, seq: u64) -> PreparedOutbound {

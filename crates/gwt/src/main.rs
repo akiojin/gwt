@@ -8663,6 +8663,9 @@ fn main() -> std::io::Result<()> {
     // can be measured. Fail-open — a disabled kill switch or an unwritable log
     // directory leaves every later `record_*` call a no-op.
     gwt::perf::install_from_settings();
+    // Issue #4371 AC-4: resident-size history for `issue.monitor.status`, so
+    // a recovered spike reads differently from residency that stayed.
+    gwt::memory_pressure::spawn_gui_rss_sampler();
 
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
@@ -9510,8 +9513,13 @@ fn main() -> std::io::Result<()> {
                 client_id,
                 pane_ids,
             }) => {
-                let events = app.client_pane_snapshot_repair_events(&client_id, &pane_ids);
-                clients.dispatch(events);
+                // Issue #4371 AC-2: a pane an earlier request or another
+                // client's snapshot already healed is not reflowed again.
+                let pane_ids = clients.panes_needing_repair(&client_id, pane_ids);
+                if !pane_ids.is_empty() {
+                    let events = app.client_pane_snapshot_repair_events(&client_id, &pane_ids);
+                    clients.dispatch(events);
+                }
             }
             Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
                 clients.dispatch(vec![OutboundEvent::broadcast(
