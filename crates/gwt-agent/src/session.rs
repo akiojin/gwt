@@ -751,7 +751,17 @@ impl Session {
             && self.has_exact_resume_session_id()
     }
 
-    fn has_lifecycle_recovery_evidence(&self) -> bool {
+    /// Whether the agent itself ever reported in.
+    ///
+    /// Both fields are written only by a delivered managed hook event
+    /// ([`Session::record_hook_event`], [`Session::record_completed_stop`]),
+    /// never by the launch path — `update_status(Running)` at spawn time moves
+    /// `status` and `last_activity_at` and leaves these untouched. So this is
+    /// the one durable reading that separates "the agent ran" from "a process
+    /// was started for it", and it is the positive half of Issue #4200 AC-2:
+    /// a holder with no lifecycle evidence at all never consumed a model turn.
+    #[must_use]
+    pub fn has_lifecycle_recovery_evidence(&self) -> bool {
         self.last_hook_event_at.is_some() || self.last_completed_stop_at.is_some()
     }
 
