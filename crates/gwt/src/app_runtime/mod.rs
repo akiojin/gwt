@@ -6659,7 +6659,7 @@ impl AppRuntime {
         active_executions.sort();
         active_executions.dedup();
         let held_verification_leases =
-            gwt_core::index_coordinator::IndexCoordinator::open_default()
+            gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
                 .ok()
                 .and_then(|coordinator| coordinator.heavy_lease_status().ok())
                 .filter(|lease| lease.held && !lease.expired)
