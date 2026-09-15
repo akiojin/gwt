@@ -310,6 +310,18 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
     if operation.starts_with("board.") {
         return;
     }
+    let session = current_session_from_env().ok().flatten();
+    if crate::pm_registry::pane_is_pm(
+        env.repo_path(),
+        Some(
+            session
+                .as_ref()
+                .map_or(env.repo_path(), |session| session.worktree_path.as_path()),
+        ),
+        session.as_ref().map(|session| session.id.as_str()),
+    ) {
+        return;
+    }
     let Some(kind) = classify_operation_refusal(operation, error) else {
         return;
     };
