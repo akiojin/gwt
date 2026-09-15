@@ -175,6 +175,51 @@ pub fn answer_cursor_position_query(handle: &crate::pty::PtyHandle) {
     let _ = handle.write_input(b"\x1b[1;1R");
 }
 
+/// Issue #4234: per-thread live-heap accounting for the lib test binary.
+///
+/// Each thread tracks the bytes it allocated minus the bytes it freed, so a
+/// retention test on the calling thread is not disturbed by other tests
+/// running in parallel. Memory freed on another thread than the one that
+/// allocated it shows up as retained here, so a measuring test must create
+/// and drop everything it measures on its own thread.
+pub struct CountingAllocator;
+
+thread_local! {
+    static THREAD_LIVE_BYTES: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+fn add_live(delta: isize) {
+    THREAD_LIVE_BYTES.with(|cell| cell.set(cell.get().wrapping_add(delta)));
+}
+
+/// Bytes currently allocated by this thread and not yet freed by it.
+pub fn thread_live_heap_bytes() -> isize {
+    THREAD_LIVE_BYTES.with(std::cell::Cell::get)
+}
+
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let ptr = std::alloc::System.alloc(layout);
+        if !ptr.is_null() {
+            add_live(layout.size() as isize);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        std::alloc::System.dealloc(ptr, layout);
+        add_live(-(layout.size() as isize));
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = std::alloc::System.realloc(ptr, layout, new_size);
+        if !new_ptr.is_null() {
+            add_live(new_size as isize - layout.size() as isize);
+        }
+        new_ptr
+    }
+}
+
 /// Drop every ANSI escape sequence from `data`: CSI (`ESC [ … final`), the
 /// string sequences OSC / DCS / SOS / PM / APC (terminated by BEL or ST), and
 /// plain two-byte escapes.
