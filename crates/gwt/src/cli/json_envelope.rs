@@ -2190,6 +2190,7 @@ mod tests {
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -2225,6 +2226,7 @@ mod tests {
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());

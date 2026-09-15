@@ -7882,6 +7882,7 @@ pub(crate) mod tests {
 
     #[test]
     fn workspace_ensure_terminal_binding_guides_status_recovery_without_build_abort_loop() {
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());

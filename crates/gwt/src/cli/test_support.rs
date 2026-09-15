@@ -375,3 +375,23 @@ pub fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<
         .filter_map(|hook| hook["command"].as_str())
         .collect()
 }
+
+/// Declare that this test accepts its runner's own scheduling priority for
+/// verification children (Issue #4409).
+///
+/// `verify.run` refuses to launch verification from a process running at a
+/// degraded nice value when no daemon can launch it instead, because spawning
+/// in place would hand the workload the agent launch policy's priority. A test
+/// runner inherits whatever priority its parent had and cannot change it, so a
+/// test that drives the real operation would pass or fail on where it happened
+/// to be started from — green in CI and in a terminal, red inside an agent.
+///
+/// These tests are about the record, the settlement rules, and the PR
+/// lifecycle, not about where verification is hosted; the placement decision
+/// has its own tests in `gwt_core::verification_priority` and
+/// `cli::daemon::verification_host`. Hold [`gwt_core::test_support::env_lock`]
+/// before calling this, like any other environment override.
+#[must_use]
+pub fn declare_inherited_spawn_host() -> ScopedEnvVar {
+    ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit")
+}

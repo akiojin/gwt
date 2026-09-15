@@ -6093,11 +6093,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Issue #4409: these tests exercise the record and the settlement
-        // rules, not where verification is hosted. The placement decision
-        // reads the launcher's inherited priority, which a test runner cannot
-        // control, so the host is declared instead of discovered.
-        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
         let dir = tempfile::tempdir().unwrap();
         crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
@@ -6808,11 +6804,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Issue #4409: these tests exercise the record and the settlement
-        // rules, not where verification is hosted. The placement decision
-        // reads the launcher's inherited priority, which a test runner cannot
-        // control, so the host is declared instead of discovered.
-        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -6881,11 +6873,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Issue #4409: these tests exercise the record and the settlement
-        // rules, not where verification is hosted. The placement decision
-        // reads the launcher's inherited priority, which a test runner cannot
-        // control, so the host is declared instead of discovered.
-        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -6984,11 +6972,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Issue #4409: these tests exercise the record and the settlement
-        // rules, not where verification is hosted. The placement decision
-        // reads the launcher's inherited priority, which a test runner cannot
-        // control, so the host is declared instead of discovered.
-        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());

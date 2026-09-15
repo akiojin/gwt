@@ -495,7 +495,10 @@ mod tests {
             "the record must name the next operation: {reason}"
         );
         let both = priority_reason(Some(10), Some("BACKGROUND")).expect("both penalties");
-        assert!(both.contains("nice 10") && both.contains("BACKGROUND"), "{both}");
+        assert!(
+            both.contains("nice 10") && both.contains("BACKGROUND"),
+            "{both}"
+        );
     }
 
     /// The child must see the caller's environment, not the daemon's.
