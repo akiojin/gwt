@@ -2457,7 +2457,7 @@ fn run_monitor_wait<E: CliEnv>(
             &serde_json::json!({
                 "status": "refused",
                 "refusal": "issue_unknown",
-                "detail": "pass params.number, or run inside a monitor-launched session where GWT_AUTONOMOUS_ISSUE names the owner Issue",
+                "detail": "pass params.number, or run inside a monitor-launched session where GWT_AUTONOMOUS_ISSUE names the owner Issue. This refusal changed nothing: it does not release your verification lease or any other exclusivity, so retry with an explicit params.number instead of tearing down held resources in a finally block.",
             })
             .to_string(),
         );
@@ -6500,6 +6500,55 @@ mod tests {
         );
         assert_eq!(resolve_monitor_wait_issue_number(None, Some(" ")), None);
         assert_eq!(resolve_monitor_wait_issue_number(None, None), None);
+    }
+
+    /// Issue #4334 AC-3: with no launch context and no `number`, the refusal
+    /// must say that nothing was released.
+    ///
+    /// Agents put the clear call in a `finally`, so a refusal there raises
+    /// through a block that also tears down the verification lease the agent
+    /// still holds — "I only cleared my wait" silently became "I gave up host
+    /// exclusivity" in #4324. The refusal text is the only thing the caller
+    /// sees, so it has to carry that instruction itself.
+    #[test]
+    fn monitor_wait_refusal_without_a_number_states_it_released_nothing() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _launch = ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWait {
+                project_root: Some(repo.clone()),
+                number: None,
+                reason: None,
+                resume_condition: None,
+                clear: true,
+            },
+            &mut out,
+        )
+        .expect("wait runs");
+        assert_eq!(code, 1, "{out}");
+        let response: serde_json::Value = serde_json::from_str(out.trim()).expect("json response");
+        assert_eq!(response["refusal"], "issue_unknown", "{out}");
+        let detail = response["detail"].as_str().expect("detail string");
+        assert!(
+            detail.contains("params.number"),
+            "the refusal must name the parameter that fixes it: {detail}"
+        );
+        assert!(
+            detail.contains("lease"),
+            "the refusal must name the lease it did not touch: {detail}"
+        );
+        assert!(
+            detail.contains("does not release"),
+            "the refusal must state that it released nothing: {detail}"
+        );
     }
 
     /// Issue #4077 AC-3: a requeue that leaves a live foreign claim in place
