@@ -651,6 +651,7 @@ impl AppRuntime {
             Ok(mut guard) => {
                 let previous = guard.insert(id.to_string(), Arc::clone(&pty));
                 drop(guard);
+                gwt::perf::startup::pty_ready(id);
                 if let Some(previous) = previous.filter(|previous| !Arc::ptr_eq(previous, &pty)) {
                     previous.revoke_input_generation();
                     let window_id = id.to_string();
@@ -681,6 +682,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn deregister_pty_writer(&self, id: &str) {
+        gwt::perf::startup::forget_terminal(id);
         match self.pty_writers.write() {
             Ok(mut guard) => {
                 let previous = guard.remove(id);
