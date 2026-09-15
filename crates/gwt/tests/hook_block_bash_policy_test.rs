@@ -68,9 +68,10 @@ fn expected_existing_hook_output(
 Recommended alternatives:\n\
 - read: JSON operations `issue.view`, `issue.comments`, `issue.linked_prs`\n\
 - write: JSON operations `issue.create`, `issue.comment`\n\
-- PR workflow: JSON operations `pr.current`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
+- PR workflow: JSON operations `pr.current`, `pr.list`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
 - PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
 - Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
+- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
                 ),
@@ -757,6 +758,7 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
         "GitHub workflow CLI",
         "issue.view",
         "pr.view",
+        "pr.list",
         "pr.ready",
         "pr.draft",
         "actions.logs",
@@ -768,6 +770,21 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
             "{required:?} missing from permission_decision_reason: {visible}"
         );
     }
+}
+
+#[test]
+fn github_workflow_cli_blocks_gh_pr_list_in_favor_of_pr_list_operation() {
+    let decision = block_bash_policy::evaluate_bash_command("gh pr list --state open", &root())
+        .expect("gh pr list must block");
+    let visible = decision.permission_decision_reason();
+    assert!(
+        visible.contains("pr.list"),
+        "block message must name the canonical inventory operation: {visible}"
+    );
+    assert!(
+        visible.contains("Blocked command: gh pr list --state open"),
+        "{visible}"
+    );
 }
 
 #[test]

@@ -24,6 +24,7 @@ const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
 const CSS_CONTENT_TYPE: &str = "text/css; charset=utf-8";
 const FONT_CONTENT_TYPE: &str = "font/woff2";
+const ICON_CONTENT_TYPE: &str = "image/x-icon";
 
 /// First-party sources change on every build; never serve them stale.
 const MUTABLE_CACHE_CONTROL: &str = "no-store, max-age=0";
@@ -88,7 +89,6 @@ root_js_modules! {
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
     "workspace-kanban-surface.js" => "createWorkspaceKanbanSurface",
-    "improvement-inbox-surface.js" => "createImprovementInboxSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",
     "terminal-context-menu.js" => "createTerminalContextMenuController",
@@ -191,13 +191,13 @@ root_js_modules! {
     // app.js imports this at module top level, so the asset MUST be registered
     // or the ES module load 404s and the splash hangs.
     "pm-settings-panel.js" => "createPmSettingsPanel",
-    // SPEC #3200 FR-034/FR-035 — autonomous Issue Monitor scrollable side-toast
-    // notification stack. app.js imports this at module top level, so the asset
-    // MUST be registered or the ES module load fails and the splash hangs.
-    "autonomous-notifications.js" => "createAutonomousNotifications",
-    // SPEC #3206 — shared floating-toast primitive imported by
-    // autonomous-notifications.js (and later the bottom-right alerts trio).
+    // SPEC #3206 — shared floating-toast primitive behind the bottom-right
+    // alerts stack and the notification-center history list.
     "toast-host.js" => "createToastStack",
+    // SPEC #3206 v2 — notification center (bell + unread badge + history
+    // drawer). app.js imports this at module top level, so the asset MUST be
+    // registered or the ES module load fails and the splash hangs.
+    "notification-center.js" => "createNotificationCenter",
     // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
     // worktree picker + text/hex viewer + window mount) extracted from
     // app.js.
@@ -270,6 +270,12 @@ pub const STATIC_ASSETS: &[StaticAsset] = &[
         content_type: JS_CONTENT_TYPE,
         cache_control: Some(MUTABLE_CACHE_CONTROL),
         body: AssetBody::Text(include_str!("../web/app.js")),
+    },
+    StaticAsset {
+        route: "/favicon.ico",
+        content_type: ICON_CONTENT_TYPE,
+        cache_control: Some(IMMUTABLE_CACHE_CONTROL),
+        body: AssetBody::Bytes(include_bytes!("../../../assets/icons/icon.ico")),
     },
     // Vendored xterm.js — pinned versions bundled so the terminal works
     // offline without CDN reach.

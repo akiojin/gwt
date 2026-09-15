@@ -13,6 +13,7 @@
 //! └── <issue_number>/
 //!     ├── body.md                  # verbatim Issue body
 //!     ├── meta.json                # serialized CacheMeta
+//!     ├── issue-validation.json    # full-snapshot validation receipt
 //!     ├── sections/
 //!     │   ├── spec.md              # parsed section content (no markers)
 //!     │   ├── tasks.md
@@ -30,13 +31,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chrono::{DateTime, SecondsFormat, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     body::{ParseError, SpecBody, SpecMeta},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
 };
+
+pub const ISSUE_VALIDATION_RECEIPT_FILE: &str = "issue-validation.json";
+const ISSUE_VALIDATION_RECEIPT_VERSION: u32 = 1;
 
 /// Errors reported by cache operations.
 #[derive(Debug, thiserror::Error)]
@@ -58,10 +65,12 @@ pub struct CacheMeta {
     pub state: String,
     pub updated_at: String,
     pub comment_ids: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
 }
 
 impl CacheMeta {
-    fn from_snapshot(snapshot: &IssueSnapshot) -> Self {
+    fn from_snapshot(snapshot: &IssueSnapshot, generation: String) -> Self {
         CacheMeta {
             number: snapshot.number.0,
             title: snapshot.title.clone(),
@@ -72,6 +81,7 @@ impl CacheMeta {
             },
             updated_at: snapshot.updated_at.0.clone(),
             comment_ids: snapshot.comments.iter().map(|c| c.id.0).collect(),
+            generation: Some(generation),
         }
     }
 }
@@ -81,6 +91,37 @@ impl CacheMeta {
 pub struct CacheEntry {
     pub snapshot: IssueSnapshot,
     pub spec_body: SpecBody,
+}
+
+/// Proof that a complete Issue snapshot was validated against GitHub.
+///
+/// `generation` is opaque to callers. Internally it binds the receipt to the
+/// exact persisted snapshot and adds a unique suffix so a reader can detect
+/// both mixed-generation reads and ABA-style replacement races.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueValidationReceipt {
+    pub version: u32,
+    pub generation: String,
+    pub validated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheGeneration(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedCacheEntry {
+    pub entry: CacheEntry,
+    pub generation: Option<CacheGeneration>,
+}
+
+/// Result of loading an Issue cache entry together with a stable validation
+/// receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidatedCacheEntry {
+    Missing { generation: Option<CacheGeneration> },
+    Unvalidated(VersionedCacheEntry),
+    Stale(VersionedCacheEntry),
+    Fresh(VersionedCacheEntry),
 }
 
 /// Root of the on-disk cache.
@@ -100,6 +141,200 @@ impl Cache {
         self.root.join(number.0.to_string())
     }
 
+    pub fn validation_receipt_path(&self, number: IssueNumber) -> PathBuf {
+        self.issue_dir(number).join(ISSUE_VALIDATION_RECEIPT_FILE)
+    }
+
+    pub fn invalidate_validation_receipt(&self, number: IssueNumber) -> Result<(), CacheError> {
+        self.with_issue_lock(number, || {
+            self.invalidate_validation_receipt_unlocked(number)
+        })
+    }
+
+    fn invalidate_validation_receipt_unlocked(
+        &self,
+        number: IssueNumber,
+    ) -> Result<(), CacheError> {
+        match fs::remove_file(self.validation_receipt_path(number)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(CacheError::Io(error)),
+        }
+    }
+
+    fn with_issue_lock<T>(
+        &self,
+        number: IssueNumber,
+        action: impl FnOnce() -> Result<T, CacheError>,
+    ) -> Result<T, CacheError> {
+        let lock_dir = self.root.join(".locks");
+        fs::create_dir_all(&lock_dir)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_dir.join(format!("{}.lock", number.0)))?;
+        lock.lock_exclusive()?;
+        let result = action();
+        let unlock_result = FileExt::unlock(&lock).map_err(CacheError::Io);
+        match (result, unlock_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    fn mutate_without_validation<T>(
+        &self,
+        number: IssueNumber,
+        mutation: impl FnOnce() -> Result<T, CacheError>,
+    ) -> Result<T, CacheError> {
+        self.with_issue_lock(number, || {
+            self.mutate_without_validation_unlocked(number, mutation)
+        })
+    }
+
+    fn mutate_without_validation_unlocked<T>(
+        &self,
+        number: IssueNumber,
+        mutation: impl FnOnce() -> Result<T, CacheError>,
+    ) -> Result<T, CacheError> {
+        self.invalidate_validation_receipt_unlocked(number)?;
+        let result = mutation();
+        let final_invalidation = self.invalidate_validation_receipt_unlocked(number);
+        match (result, final_invalidation) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    /// Load a cache entry only when one stable, content-bound validation
+    /// receipt surrounds the read. Missing, malformed, future-dated, or
+    /// snapshot-mismatched receipts fail closed.
+    pub fn load_validated_entry(
+        &self,
+        number: IssueNumber,
+        ttl: std::time::Duration,
+    ) -> Result<ValidatedCacheEntry, CacheError> {
+        self.with_issue_lock(number, || {
+            let generation = self.current_generation_unlocked(number)?;
+            let Some(entry) = self.load_entry(number) else {
+                return Ok(ValidatedCacheEntry::Missing { generation });
+            };
+            let versioned = VersionedCacheEntry { entry, generation };
+            let Ok(receipt_bytes) = fs::read(self.validation_receipt_path(number)) else {
+                return Ok(ValidatedCacheEntry::Unvalidated(versioned));
+            };
+            let Ok(receipt) = serde_json::from_slice::<IssueValidationReceipt>(&receipt_bytes)
+            else {
+                return Ok(ValidatedCacheEntry::Unvalidated(versioned));
+            };
+            if receipt.version != ISSUE_VALIDATION_RECEIPT_VERSION
+                || receipt
+                    .generation
+                    .split_once(':')
+                    .filter(|(_, validation_generation)| !validation_generation.is_empty())
+                    .map(|(cache_generation, _)| cache_generation)
+                    != versioned.generation.as_ref().map(|value| value.0.as_str())
+            {
+                return Ok(ValidatedCacheEntry::Unvalidated(versioned));
+            }
+            let Ok(validated_at) = DateTime::parse_from_rfc3339(&receipt.validated_at) else {
+                return Ok(ValidatedCacheEntry::Unvalidated(versioned));
+            };
+            let age = Utc::now().signed_duration_since(validated_at.with_timezone(&Utc));
+            let Ok(ttl) = chrono::Duration::from_std(ttl) else {
+                return Ok(ValidatedCacheEntry::Stale(versioned));
+            };
+            if age < chrono::Duration::zero() || age >= ttl {
+                Ok(ValidatedCacheEntry::Stale(versioned))
+            } else {
+                Ok(ValidatedCacheEntry::Fresh(versioned))
+            }
+        })
+    }
+
+    /// Renew the full-snapshot validation receipt only if the persisted cache
+    /// still matches the snapshot that was just validated.
+    pub fn renew_validation_receipt_if_current(
+        &self,
+        expected: &IssueSnapshot,
+    ) -> Result<bool, CacheError> {
+        self.with_issue_lock(expected.number, || {
+            let generation = self.current_generation_unlocked(expected.number)?;
+            self.renew_validation_receipt_unlocked(expected, generation.as_ref())
+        })
+    }
+
+    pub fn renew_validation_receipt_if_generation(
+        &self,
+        expected: &IssueSnapshot,
+        generation: Option<&CacheGeneration>,
+    ) -> Result<bool, CacheError> {
+        self.with_issue_lock(expected.number, || {
+            self.renew_validation_receipt_unlocked(expected, generation)
+        })
+    }
+
+    fn renew_validation_receipt_unlocked(
+        &self,
+        expected: &IssueSnapshot,
+        generation: Option<&CacheGeneration>,
+    ) -> Result<bool, CacheError> {
+        if self.current_generation_unlocked(expected.number)?.as_ref() != generation {
+            return Ok(false);
+        }
+        let Some(current) = self.load_entry(expected.number) else {
+            return Ok(false);
+        };
+        if !persisted_snapshots_match(&current.snapshot, expected) {
+            return Ok(false);
+        }
+        let Some(generation) = generation else {
+            return Ok(false);
+        };
+        let receipt = IssueValidationReceipt {
+            version: ISSUE_VALIDATION_RECEIPT_VERSION,
+            generation: format!("{}:{}", generation.0, Uuid::new_v4()),
+            validated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
+        };
+        self.invalidate_validation_receipt_unlocked(expected.number)?;
+        write_atomic(
+            &self.validation_receipt_path(expected.number),
+            &serde_json::to_vec_pretty(&receipt)?,
+        )?;
+        Ok(true)
+    }
+
+    pub fn current_generation(
+        &self,
+        number: IssueNumber,
+    ) -> Result<Option<CacheGeneration>, CacheError> {
+        self.with_issue_lock(number, || self.current_generation_unlocked(number))
+    }
+
+    fn current_generation_unlocked(
+        &self,
+        number: IssueNumber,
+    ) -> Result<Option<CacheGeneration>, CacheError> {
+        let meta_path = self.issue_dir(number).join("meta.json");
+        let bytes = match fs::read(meta_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(CacheError::Io(error)),
+        };
+        let meta: CacheMeta = match serde_json::from_slice(&bytes) {
+            Ok(meta) => meta,
+            // A malformed metadata file cannot supply a trustworthy
+            // generation. Treat it like a legacy/unvalidated entry so an
+            // unconditional remote fetch can atomically self-repair it.
+            Err(_) => return Ok(None),
+        };
+        Ok(meta.generation.map(CacheGeneration))
+    }
+
     /// Write a full Issue snapshot to the cache atomically.
     ///
     /// After writing, the `sections/` and `comments/` directories are
@@ -110,6 +345,38 @@ impl Cache {
     /// versa), and stale reads from `read_section` would return
     /// content the Issue has already deleted.
     pub fn write_snapshot(&self, snapshot: &IssueSnapshot) -> Result<(), CacheError> {
+        self.mutate_without_validation(snapshot.number, || {
+            self.write_snapshot_files_unlocked(
+                snapshot,
+                CacheGeneration(Uuid::new_v4().to_string()),
+            )
+        })
+    }
+
+    /// Commit a remotely fetched snapshot only if no cache writer has changed
+    /// the Issue since the caller inspected it.
+    pub fn write_snapshot_if_generation(
+        &self,
+        snapshot: &IssueSnapshot,
+        expected: Option<&CacheGeneration>,
+    ) -> Result<Option<CacheGeneration>, CacheError> {
+        self.with_issue_lock(snapshot.number, || {
+            if self.current_generation_unlocked(snapshot.number)?.as_ref() != expected {
+                return Ok(None);
+            }
+            let committed_generation = CacheGeneration(Uuid::new_v4().to_string());
+            self.mutate_without_validation_unlocked(snapshot.number, || {
+                self.write_snapshot_files_unlocked(snapshot, committed_generation.clone())
+            })?;
+            Ok(Some(committed_generation))
+        })
+    }
+
+    fn write_snapshot_files_unlocked(
+        &self,
+        snapshot: &IssueSnapshot,
+        generation: CacheGeneration,
+    ) -> Result<(), CacheError> {
         use std::collections::HashSet;
 
         let dir = self.issue_dir(snapshot.number);
@@ -169,11 +436,10 @@ impl Cache {
             }
         }
 
-        // Finally, write meta.json.
-        let meta = CacheMeta::from_snapshot(snapshot);
+        // Finally publish the new generation in meta.json.
+        let meta = CacheMeta::from_snapshot(snapshot, generation.0);
         let meta_bytes = serde_json::to_vec_pretty(&meta)?;
         write_atomic(&dir.join("meta.json"), &meta_bytes)?;
-
         Ok(())
     }
 
@@ -326,23 +592,41 @@ impl Cache {
         number: IssueNumber,
         new_labels: Vec<String>,
     ) -> Result<(), CacheError> {
-        let meta_path = self.issue_dir(number).join("meta.json");
-        let meta_bytes = match fs::read(&meta_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CacheError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("issue #{} not in cache", number.0),
-                )));
-            }
-            Err(err) => return Err(CacheError::Io(err)),
-        };
-        let mut meta: CacheMeta = serde_json::from_slice(&meta_bytes)?;
-        meta.labels = new_labels;
-        let updated_bytes = serde_json::to_vec_pretty(&meta)?;
-        write_atomic(&meta_path, &updated_bytes)?;
-        Ok(())
+        self.mutate_without_validation(number, || {
+            let meta_path = self.issue_dir(number).join("meta.json");
+            let meta_bytes = match fs::read(&meta_path) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(CacheError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("issue #{} not in cache", number.0),
+                    )));
+                }
+                Err(err) => return Err(CacheError::Io(err)),
+            };
+            let mut meta: CacheMeta = serde_json::from_slice(&meta_bytes)?;
+            meta.labels = new_labels;
+            meta.generation = Some(Uuid::new_v4().to_string());
+            let updated_bytes = serde_json::to_vec_pretty(&meta)?;
+            write_atomic(&meta_path, &updated_bytes)?;
+            Ok(())
+        })
     }
+}
+
+fn persisted_snapshots_match(left: &IssueSnapshot, right: &IssueSnapshot) -> bool {
+    left.number == right.number
+        && left.title == right.title
+        && left.body == right.body
+        && left.labels == right.labels
+        && left.state == right.state
+        && left.updated_at == right.updated_at
+        && left.comments.len() == right.comments.len()
+        && left
+            .comments
+            .iter()
+            .zip(&right.comments)
+            .all(|(left, right)| left.id == right.id && left.body == right.body)
 }
 
 /// Write bytes to `path` atomically via a `.tmp-<pid>-<nanos>` sibling file

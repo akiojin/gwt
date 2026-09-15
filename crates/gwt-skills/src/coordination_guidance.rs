@@ -122,6 +122,33 @@ posting output and every PM-facing surface repeat back to you:
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### Waiting is not a stall: declare it
+
+The Issue Monitor judges a launched agent stuck when it sees no activity
+for `stuck_timeout_secs` (30 minutes by default), and each stuck verdict
+costs an autonomous attempt. Waiting on a host-exclusivity turn, on a PM
+serialization ruling, or on a long verification run you must not touch
+produces no activity either, so before you go quiet for that long,
+declare the wait:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` defaults to the owner Issue of this launch. While the
+declaration is in force stuck detection skips your issue and the PM reads
+`reason` / `resume_condition` / `expires_at` from the `waiting` field of
+your row in `issue.monitor.status`. It is capped (`max_wait_secs` in the
+response, 3 hours): re-declaring refreshes the text but never the cap, and
+past it the ordinary rule applies again. Clear it the moment you resume:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+Do not fake activity instead (periodic `workspace.update` or Board posts
+to look alive) - a declared wait is the honest signal.
+
 ### Proposing new Issues to the PM
 
 Do not call `issue.create`. When you find something that deserves its own
@@ -136,6 +163,17 @@ Board with the registered Issue number, threaded under your proposal via
 Commenting on an existing Issue with `issue.comment` is never restricted
 - add evidence, propose acceptance criteria, and share analysis freely.
 Only creating a new Issue routes through the PM.
+
+### Friction in gwt itself takes the same route
+
+Friction and capability gaps in gwt itself - a hook, launch, skill, index,
+verification, coordination, or Issue/SPEC workflow that contradicts what gwt
+told you to do - is reported the same way: post it to the Board for the PM,
+who registers it with `gwt-register-issue`. Never file an Issue upstream in
+the gwt repository yourself, and never work around it silently. Include the
+contract you were following, what you observed instead, and the primary
+evidence (command, output, file and line). gwt has no automatic capture for
+this; the Board post is the intake.
 
 ## Work (current state)
 
@@ -220,6 +258,22 @@ gwtd binary:
     JSON
 
 There is no standalone `gwt-search` executable.
+
+## Canonical verification admission
+
+Only canonical `verify.run` acquires the host-wide lease, in-process for
+its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+`cargo clippy`, `cargo build`, coverage, direct headed browser checks, and
+pre-push checks do not require a verification lease. Run them directly.
+
+Use `verify.plan` followed by `verify.run` for canonical verification
+records. Manual `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` are retired and return an error without acquiring or
+reserving a lease. Use `verify.lease.status` to inspect contention;
+`verify.lease.release` remains available to drain a legacy holder.
+`verify.run` waits up to `params.max_wait_secs` and returns `deferred`
+when admission times out. Inspect the reported holder before retrying;
+there is no manual acquire loop or fixed retry schedule.
 
 ## Persisted Work files
 
@@ -367,6 +421,31 @@ blocker が解消したら、必ず明示的に escalation を閉じます（他
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### 待機は停滞ではない: 申告する
+
+Issue Monitor は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
+を stuck と判定し、判定ごとに autonomous attempt を 1 つ消費します。host
+排他の順番待ち、PM の直列化裁定待ち、触ってはいけない長時間 verification
+の完走待ちも活動を生まないため、その長さの沈黙に入る前に待機を申告します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` は省略するとこの launch の担当 Issue になります。申告が有効な間は
+stuck 判定が自分の Issue をスキップし、PM は `issue.monitor.status` の自分の
+行の `waiting` フィールドから `reason` / `resume_condition` / `expires_at` を
+読めます。申告には上限があります（応答の `max_wait_secs`、3 時間）。再申告は
+本文を更新しますが上限は延びず、超過後は通常の判定に戻ります。再開したら
+すぐ解除します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"clear":true}}
+    JSON
+
+生存を装うために定期的な `workspace.update` や Board 投稿で活動を偽装しない
+でください。待機の申告が正直なシグナルです。
+
 ### Issue 化は PM へ提案する
 
 `issue.create` を直接呼ばないでください。Issue 化すべき事象を見つけたら
@@ -381,6 +460,16 @@ agent をブロックしているか）。PM は登録した Issue 番号を返�
 分析の共有は自由に行ってください。制限するのは新規 Issue の登録だけです。
 PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
 指定した Board 返信で返します。
+
+### gwt 自体の摩擦・機能ギャップも同じ経路
+
+gwt 自体の摩擦や機能ギャップ（hook、launch、skill、index、verification、
+coordination、Issue/SPEC workflow が gwt の指示と食い違う）も同じ経路で
+扱います。Board に投稿して PM へ報告し、PM が `gwt-register-issue` で
+起票します。gwt リポジトリに自分で Issue を作らないでください。黙って
+回避するのも禁止です。投稿には、従っていた契約、実際に観測した挙動、
+一次証拠（コマンド、出力、ファイルと行）を含めます。自動捕捉の仕組みは
+無く、この Board 投稿が唯一の intake です。
 
 ## Work (current state)
 
@@ -460,6 +549,23 @@ binary の `search` JSON operation で実行します:
     JSON
 
 `gwt-search` という単体の実行ファイルは存在しません。
+
+## Canonical verification admission
+
+host 全体の lease を取得するのは canonical `verify.run` だけです。
+各 run がプロセス内で取得・管理します。初回の
+`cargo build -p gwt --bin gwtd`、通常の `cargo test`、`cargo clippy`、
+`cargo build`、coverage、直接の headed browser 確認、pre-push 確認には
+verification lease は不要です。そのまま実行してください。
+
+canonical な検証記録は `verify.plan` → `verify.run` で生成します。
+手動の `verify.lease.acquire`、`verify.lease.hold`、`verify.lease.extend`
+は廃止され、lease の取得や予約をせずエラーを返します。
+`verify.lease.status` で競合を確認でき、旧 holder の解放には
+`verify.lease.release` を引き続き使えます。
+`verify.run` は `params.max_wait_secs` まで待機し、時間切れなら
+`deferred` を返します。報告された holder を確認してから再試行してください。
+手動 acquire のループや固定の再試行間隔はありません。
 
 ## Persisted Work files
 
@@ -646,6 +752,25 @@ mod tests {
                 "generated guidance: {phrase}"
             );
         }
+    }
+
+    /// SPEC #3576 AC-C6: only canonical verification uses host admission.
+    #[test]
+    fn canonical_verification_guidance_is_materialized_without_manual_admission() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        for relative in [
+            ".claude/skills/gwt-coordination/SKILL.md",
+            ".codex/skills/gwt-coordination/SKILL.md",
+        ] {
+            let body = std::fs::read_to_string(tmp.path().join(relative)).unwrap();
+            assert!(body.contains("Only canonical `verify.run` acquires the host-wide lease"));
+            assert!(body.contains("cargo build -p gwt --bin gwtd"));
+            assert!(body.contains("do not require a verification lease"));
+            assert!(!body.contains("\"operation\":\"verify.lease.acquire\""));
+            assert!(!body.contains("even a single focused test"));
+        }
+        assert!(SKILL_BODY_JA.contains("canonical `verify.run` だけ"));
     }
 
     #[test]

@@ -658,6 +658,40 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
     )
 }
 
+/// Issue #3684 AC-2: physically detach this session's claim-provenance refs
+/// from same-container duplicates of its canonical Work, under the split-root
+/// state lock. Pure projection repair — no events are appended. A later full
+/// rebuild folds the same healed shape because the duplicate claim is now
+/// rejected at fold time (`would_reject_session_attach`). Returns the healed
+/// Work ids.
+pub fn heal_same_container_duplicate_claim_attachments_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    canonical_id: &str,
+) -> Result<Vec<String>> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    with_split_root_workspace_state_lock(
+        project_state_root,
+        work_event_root,
+        &current_path,
+        &work_items_path,
+        |_| {
+            let Some(mut work_items) = load_workspace_work_items_from_path(&work_items_path)?
+            else {
+                return Ok(Vec::new());
+            };
+            let healed =
+                work_items.detach_same_container_duplicate_claims(session_id, canonical_id);
+            if !healed.is_empty() {
+                save_workspace_work_items_projection_to_path(&work_items_path, &work_items)?;
+            }
+            Ok(healed)
+        },
+    )
+}
+
 /// Recover an interrupted Workspace state transaction without synthesizing or
 /// mutating Workspace state when no transaction is pending.
 pub fn recover_pending_workspace_state_transaction(repo_path: &Path) -> Result<()> {
@@ -4583,6 +4617,57 @@ pub fn record_workspace_work_events_paths(
     })
 }
 
+/// Latest superseded Pause acceptance time per Work item in `events`. A Pause
+/// is superseded when the stored projection already holds a newer
+/// session-attachment event (Start/Claim/Resume/Split): the close was accepted
+/// before that newer generation committed.
+fn superseded_pause_cutoffs(
+    projection: &WorkItemsProjection,
+    events: &[WorkEvent],
+) -> HashMap<String, DateTime<Utc>> {
+    let mut cutoffs: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for pause in events
+        .iter()
+        .filter(|event| event.kind == WorkEventKind::Pause)
+    {
+        let superseded = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == pause.work_item_id)
+            .is_some_and(|item| {
+                item.events.iter().any(|event| {
+                    event.updated_at > pause.updated_at
+                        && workspace_event_establishes_session_attachment(event.kind)
+                })
+            });
+        if superseded {
+            let cutoff = cutoffs
+                .entry(pause.work_item_id.clone())
+                .or_insert(pause.updated_at);
+            *cutoff = (*cutoff).max(pause.updated_at);
+        }
+    }
+    cutoffs
+}
+
+/// Whether `event` belongs to a superseded Pause batch: the superseded Pause
+/// itself, or a Board-ref Update stamped no later than that Pause. Any other
+/// event for the same Work item (e.g. a genuinely newer Update in the same
+/// batch) must still fold into the stored projection (PR #3787 review).
+fn event_belongs_to_superseded_pause(
+    event: &WorkEvent,
+    cutoffs: &HashMap<String, DateTime<Utc>>,
+) -> bool {
+    let Some(cutoff) = cutoffs.get(&event.work_item_id) else {
+        return false;
+    };
+    match event.kind {
+        WorkEventKind::Pause => event.updated_at <= *cutoff,
+        WorkEventKind::Update => event.board_entry_id.is_some() && event.updated_at <= *cutoff,
+        _ => false,
+    }
+}
+
 fn persist_workspace_work_events_locked(
     work_items_path: &Path,
     events_path: &Path,
@@ -4592,8 +4677,18 @@ fn persist_workspace_work_events_locked(
     if events.is_empty() {
         return Ok(0);
     }
+    // A pane-close worker may acquire the WorkItems lock only after a newer
+    // Resume/Start has committed. Its Pause timestamp is the close acceptance
+    // time, so retain the late event for audit but never regress the newer
+    // producing projection. Only the superseded Pause and the Board-ref
+    // Updates stamped with it are skipped; unrelated newer events in the same
+    // batch still fold (PR #3787 review).
+    let pause_cutoffs = superseded_pause_cutoffs(projection, &events);
     let mut candidate = projection.clone();
     for event in &events {
+        if event_belongs_to_superseded_pause(event, &pause_cutoffs) {
+            continue;
+        }
         if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Ok(0);
         }
@@ -4613,8 +4708,12 @@ fn persist_workspace_work_events_to_store_locked(
     if events.is_empty() {
         return Ok(0);
     }
+    let pause_cutoffs = superseded_pause_cutoffs(projection, &events);
     let mut candidate = projection.clone();
     for event in &events {
+        if event_belongs_to_superseded_pause(event, &pause_cutoffs) {
+            continue;
+        }
         if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Ok(0);
         }
@@ -6154,6 +6253,172 @@ pub fn append_workspace_work_event_to_path(path: &Path, event: &WorkEvent) -> Re
     append_workspace_work_events_to_path(path, std::slice::from_ref(event))
 }
 
+/// Preserve existing history in the reader-visible immutable shard store.
+///
+/// Unlike a typed event writer, this copies the original JSON line, including
+/// future kinds and additive fields. Every record and destination is checked
+/// before publication starts. Existing identical shards are accepted; a
+/// conflicting identity is never overwritten. The source remains untouched,
+/// including when only part of the batch could be durably published. Callers
+/// must separately serialize and verify any later relocation of the source.
+pub fn preserve_workspace_work_event_log_as_shards(
+    source: &Path,
+    events_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    validate_work_event_preservation_source(source)?;
+    let original = fs::read(source)?;
+    let records = original
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !trim_ascii_json_line(line).is_empty())
+        .map(decode_workspace_work_event_record)
+        .collect::<Result<Vec<_>>>()?;
+    let mut prepared = Vec::with_capacity(records.len());
+    let mut bytes_by_id = HashMap::with_capacity(records.len());
+    for record in records {
+        let (event_id, mut bytes) = match record {
+            WorkEventLogRecord::Known {
+                event,
+                original_line: Some(line),
+            } => (event.id, line),
+            WorkEventLogRecord::Opaque { original_line } => {
+                // The decoder already validated the identity schema, even
+                // for kinds this release can only preserve opaquely.
+                let value: serde_json::Value =
+                    serde_json::from_slice(&original_line).map_err(|error| {
+                        GwtError::Other(format!("workspace work event json: {error}"))
+                    })?;
+                let event_id = value["id"].as_str().ok_or_else(|| {
+                    GwtError::Other("workspace work event id must be a string".to_string())
+                })?;
+                (event_id.to_string(), original_line)
+            }
+            WorkEventLogRecord::Known {
+                original_line: None,
+                ..
+            } => {
+                return Err(GwtError::Other(
+                    "preserved Work event is missing its original bytes".to_string(),
+                ));
+            }
+        };
+        bytes.push(b'\n');
+        let path = gwt_work_event_shard_path(events_dir, &event_id);
+        if let Some(existing) = bytes_by_id.get(&event_id) {
+            if existing != &bytes {
+                return Err(divergent_workspace_work_event_shard_error(&event_id, &path));
+            }
+            continue;
+        }
+        bytes_by_id.insert(event_id.clone(), bytes.clone());
+        prepared.push((event_id, path, bytes));
+    }
+
+    validate_work_event_preservation_store(events_dir)?;
+    for (event_id, path, bytes) in &prepared {
+        validate_work_event_preservation_node(path.parent().expect("shard bucket"), true, true)?;
+        if validate_work_event_preservation_node(path, false, true)? && fs::read(path)? != *bytes {
+            return Err(divergent_workspace_work_event_shard_error(event_id, path));
+        }
+    }
+    validate_work_event_preservation_source(source)?;
+    if fs::read(source)? != original {
+        return Err(GwtError::Other(format!(
+            "Work event preservation source changed before publication: {}",
+            source.display()
+        )));
+    }
+    for (event_id, path, bytes) in &prepared {
+        validate_work_event_preservation_store(events_dir)?;
+        validate_work_event_preservation_node(path.parent().expect("shard bucket"), true, true)?;
+        validate_work_event_preservation_node(path, false, true)?;
+        write_workspace_work_event_shard_bytes(event_id, events_dir, path, bytes)?;
+    }
+    for (event_id, path, bytes) in &prepared {
+        validate_work_event_preservation_store(events_dir)?;
+        let bucket = path.parent().expect("shard bucket");
+        validate_work_event_preservation_node(bucket, true, false)?;
+        validate_work_event_preservation_node(path, false, false)?;
+        read_workspace_work_event_shard_record(
+            path,
+            bucket.file_name().and_then(|name| name.to_str()),
+        )?;
+        if fs::read(path)? != *bytes {
+            return Err(divergent_workspace_work_event_shard_error(event_id, path));
+        }
+        sync_directory(bucket)?;
+    }
+    Ok(prepared.into_iter().map(|(_, path, _)| path).collect())
+}
+
+fn validate_work_event_preservation_source(source: &Path) -> Result<()> {
+    validate_work_event_preservation_node(source, false, false)?;
+    let managed_root = source
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == ".gwt"));
+    let parent = source
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for path in parent.ancestors() {
+        validate_work_event_preservation_node(path, true, false)?;
+        if managed_root.is_none() || managed_root == Some(path) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn validate_work_event_preservation_store(events_dir: &Path) -> Result<()> {
+    // Keep the existing store boundary: a repository root may legitimately
+    // be reached through an OS alias, but its managed tail must be real.
+    for path in events_dir.ancestors().take(3) {
+        validate_work_event_preservation_node(path, true, true)?;
+    }
+    Ok(())
+}
+
+fn validate_work_event_preservation_node(
+    path: &Path,
+    directory: bool,
+    missing_allowed: bool,
+) -> Result<bool> {
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(GwtError::Other(format!(
+            "Work event preservation path contains a parent traversal: {}",
+            path.display()
+        )));
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound && missing_allowed => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    #[cfg(windows)]
+    let indirect = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x0400 != 0
+    };
+    #[cfg(not(windows))]
+    let indirect = metadata.file_type().is_symlink();
+    let expected_kind = if directory { "directory" } else { "file" };
+    if indirect
+        || if directory {
+            !metadata.is_dir()
+        } else {
+            !metadata.is_file()
+        }
+    {
+        return Err(GwtError::Other(format!(
+            "Work event preservation {expected_kind} must be a real {expected_kind}: {}",
+            path.display()
+        )));
+    }
+    Ok(true)
+}
+
 /// Release A is reader-first: future event kinds can only enter this binary as
 /// opaque records read from an existing log. Production writers remain typed
 /// by the closed [`WorkEventKind`] enum until the release-B reader floor is
@@ -6576,10 +6841,10 @@ fn canonical_workspace_work_event_bytes(event: &WorkEvent) -> Result<Vec<u8>> {
     Ok(canonical)
 }
 
-fn divergent_workspace_work_event_shard_error(event: &WorkEvent, shard_path: &Path) -> GwtError {
+fn divergent_workspace_work_event_shard_error(event_id: &str, shard_path: &Path) -> GwtError {
     GwtError::Other(format!(
         "divergent Work event shard for event {} at {}",
-        event.id,
+        event_id,
         shard_path.display()
     ))
 }
@@ -6650,7 +6915,7 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
         if let Some(existing) = canonical_by_id.get(&event.id) {
             if existing != &canonical {
                 return Err(divergent_workspace_work_event_shard_error(
-                    event,
+                    &event.id,
                     &shard_path,
                 ));
             }
@@ -6677,7 +6942,7 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
             Ok(_) => match fs::read(shard_path) {
                 Ok(existing) if existing != *canonical => {
                     return Err(divergent_workspace_work_event_shard_error(
-                        event, shard_path,
+                        &event.id, shard_path,
                     ))
                 }
                 Ok(_) => {}
@@ -6688,14 +6953,14 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
         }
     }
     for (event, shard_path, canonical) in prepared {
-        write_workspace_work_event_shard_bytes(event, events_dir, &shard_path, &canonical)?;
+        write_workspace_work_event_shard_bytes(&event.id, events_dir, &shard_path, &canonical)?;
     }
     Ok(())
 }
 
 /// Publish one fully-written canonical event at its immutable shard path.
 fn write_workspace_work_event_shard_bytes(
-    event: &WorkEvent,
+    event_id: &str,
     events_dir: &Path,
     shard_path: &Path,
     canonical: &[u8],
@@ -6745,7 +7010,7 @@ fn write_workspace_work_event_shard_bytes(
                 Ok(())
             } else {
                 Err(divergent_workspace_work_event_shard_error(
-                    event, shard_path,
+                    event_id, shard_path,
                 ))
             }
         }

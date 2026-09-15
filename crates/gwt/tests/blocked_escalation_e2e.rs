@@ -395,4 +395,45 @@ fn the_escalation_outlives_the_board_projection_window() {
         vec![2338],
         "AC-9: the PM-facing answer must not depend on the Board timeline window"
     );
+
+    // Issue #3690: the same overflowed handle must still close through
+    // params.resolves — the surface the PM actually uses.
+    let entry_id = open_escalation_ids(&fixture).remove(0);
+    let resolved = run(
+        &fixture,
+        &serde_json::json!({
+            "schema_version": 1,
+            "operation": "board.post",
+            "params": {
+                "kind": "decision",
+                "owners": ["2338"],
+                "resolves": entry_id,
+                "body": "現在の状態: fresh launch を手配したので unblock 済みです。",
+            },
+        })
+        .to_string(),
+    );
+    assert_eq!(resolved["ok"], Value::Bool(true), "{resolved}");
+    let output = output_text(&resolved);
+    assert!(
+        output.contains(&format!("board escalations resolved: {entry_id}")),
+        "overflowed ids must close, not be reported as unknown: {output}"
+    );
+    assert!(
+        !output.contains("not found"),
+        "an overflowed durable id is not missing: {output}"
+    );
+    assert!(
+        needs_human(&fixture).is_empty(),
+        "closing the overflowed escalation must clear needs_human"
+    );
+    let store = gwt_core::coordination::load_escalation_store(fixture.project.path())
+        .expect("escalation index");
+    let closed = store
+        .escalations
+        .iter()
+        .find(|escalation| escalation.entry_id == entry_id)
+        .expect("the overflowed row remains in the index");
+    assert!(closed.resolved_at.is_some());
+    assert!(closed.resolved_by_entry_id.is_some());
 }

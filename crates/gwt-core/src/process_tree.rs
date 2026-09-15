@@ -8,6 +8,15 @@ pub const WINDOWS_CREATE_SUSPENDED: u32 = 0x0000_0004;
 pub const WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS: u32 =
     WINDOWS_CREATE_NO_WINDOW | WINDOWS_CREATE_SUSPENDED;
 
+/// Process priority class applied to an agent process-tree root (SPEC #1921
+/// Phase 86). Descendants created without an explicit class inherit it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessPriorityClass {
+    Normal,
+    BelowNormal,
+    Idle,
+}
+
 #[cfg(windows)]
 mod windows_job {
     use std::process::Command;
@@ -18,18 +27,28 @@ mod windows_job {
             Foundation::{CloseHandle, HANDLE},
             System::{
                 JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    QueryInformationJobObject, SetInformationJobObject,
-                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
+                    JobObjectExtendedLimitInformation, QueryInformationJobObject,
+                    SetInformationJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+                    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JOB_OBJECT_CPU_RATE_CONTROL, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+                    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{
-                    OpenProcess, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+                    GetPriorityClass, OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+                    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
+                    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SET_QUOTA,
+                    PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
                 },
             },
         },
     };
 
-    use super::WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS;
+    use super::{ProcessPriorityClass, WINDOWS_HIDDEN_SUSPENDED_CREATION_FLAGS};
+
+    /// Hard-cap CPU rate is expressed in hundredths of a percent of total
+    /// machine CPU time.
+    const CPU_RATE_PER_PERCENT: u32 = 100;
 
     // Resumes every thread of a process from a process handle alone. Not part
     // of the Win32 metadata the `windows` crate is generated from, so it is
@@ -45,12 +64,22 @@ mod windows_job {
             operation: &'static str,
             source: WindowsError,
         },
+        /// A CPU hard cap outside 1..=100 percent.
+        InvalidCpuRate(u8),
+        /// A priority class gwt does not model (for example HIGH or REALTIME).
+        UnsupportedPriorityClass(u32),
     }
 
     impl std::fmt::Display for WindowsJobError {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::Operation { operation, .. } => write!(formatter, "{operation} failed"),
+                Self::InvalidCpuRate(percent) => {
+                    write!(formatter, "CPU hard cap {percent}% is outside 1..=100")
+                }
+                Self::UnsupportedPriorityClass(class) => {
+                    write!(formatter, "unsupported priority class {class:#x}")
+                }
             }
         }
     }
@@ -59,7 +88,54 @@ mod windows_job {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
             match self {
                 Self::Operation { source, .. } => Some(source),
+                Self::InvalidCpuRate(_) | Self::UnsupportedPriorityClass(_) => None,
             }
+        }
+    }
+
+    /// Set the priority class of a running process. Children the process
+    /// creates afterwards inherit BELOW_NORMAL / IDLE, so applying this to a
+    /// tree root before it starts its target governs the whole tree.
+    pub fn set_process_priority_class(
+        process_id: u32,
+        class: ProcessPriorityClass,
+    ) -> Result<(), WindowsJobError> {
+        let flags = match class {
+            ProcessPriorityClass::Normal => NORMAL_PRIORITY_CLASS,
+            ProcessPriorityClass::BelowNormal => BELOW_NORMAL_PRIORITY_CLASS,
+            ProcessPriorityClass::Idle => IDLE_PRIORITY_CLASS,
+        };
+        // SAFETY: OpenProcess returns a new owned handle for the exact PID.
+        let process = unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, process_id) }
+            .map(ScopedHandle)
+            .map_err(|source| operation_error("OpenProcess", source))?;
+        // SAFETY: `process` is live for this call and was opened with the
+        // PROCESS_SET_INFORMATION access SetPriorityClass requires.
+        unsafe { SetPriorityClass(process.0, flags) }
+            .map_err(|source| operation_error("SetPriorityClass", source))
+    }
+
+    /// Query the priority class of a running process.
+    pub fn process_priority_class(
+        process_id: u32,
+    ) -> Result<ProcessPriorityClass, WindowsJobError> {
+        // SAFETY: OpenProcess returns a new owned handle for the exact PID.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
+            .map(ScopedHandle)
+            .map_err(|source| operation_error("OpenProcess", source))?;
+        // SAFETY: `process` is live for this call.
+        let class = unsafe { GetPriorityClass(process.0) };
+        if class == 0 {
+            return Err(operation_error(
+                "GetPriorityClass",
+                WindowsError::from_thread(),
+            ));
+        }
+        match PROCESS_CREATION_FLAGS(class) {
+            NORMAL_PRIORITY_CLASS => Ok(ProcessPriorityClass::Normal),
+            BELOW_NORMAL_PRIORITY_CLASS => Ok(ProcessPriorityClass::BelowNormal),
+            IDLE_PRIORITY_CLASS => Ok(ProcessPriorityClass::Idle),
+            _ => Err(WindowsJobError::UnsupportedPriorityClass(class)),
         }
     }
 
@@ -139,6 +215,87 @@ mod windows_job {
         pub fn assign_and_resume(&mut self, process_id: u32) -> Result<(), WindowsJobError> {
             self.assign_process(process_id)?;
             resume_suspended_process_threads(process_id)
+        }
+
+        /// Configure a hard CPU cap (1..=100 percent of total machine CPU
+        /// time) for every process in the Job. Kill-on-close stays armed; the
+        /// two limits live in different information classes.
+        pub fn set_cpu_rate_hard_cap(&mut self, percent: u8) -> Result<(), WindowsJobError> {
+            if !(1..=100).contains(&percent) {
+                return Err(WindowsJobError::InvalidCpuRate(percent));
+            }
+            let job = self.handle.expect("live Windows Job handle");
+            let info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+                ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL(
+                    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE.0 | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP.0,
+                ),
+                Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 {
+                    CpuRate: u32::from(percent) * CPU_RATE_PER_PERCENT,
+                },
+            };
+            let info_size = std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32;
+            // SAFETY: `info` is the exact structure required by the selected
+            // information class and remains alive for the duration of the call.
+            unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectCpuRateControlInformation,
+                    &info as *const _ as _,
+                    info_size,
+                )
+            }
+            .map_err(|source| operation_error("SetInformationJobObject", source))
+        }
+
+        /// Read back the configured hard CPU cap, or `None` when rate control
+        /// is not a hard cap.
+        pub fn cpu_rate_hard_cap_percent(&self) -> Result<Option<u8>, WindowsJobError> {
+            let job = self.handle.expect("live Windows Job handle");
+            let mut info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+            let info_size = std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32;
+            // SAFETY: `info` is the exact buffer required by the selected
+            // information class and is writable for the duration of the call.
+            unsafe {
+                QueryInformationJobObject(
+                    Some(job),
+                    JobObjectCpuRateControlInformation,
+                    &mut info as *mut _ as _,
+                    info_size,
+                    None,
+                )
+            }
+            .map_err(|source| operation_error("QueryInformationJobObject", source))?;
+            let required =
+                JOB_OBJECT_CPU_RATE_CONTROL_ENABLE.0 | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP.0;
+            if info.ControlFlags.0 & required != required {
+                return Ok(None);
+            }
+            // SAFETY: with HARD_CAP set the union carries `CpuRate`.
+            let rate = unsafe { info.Anonymous.CpuRate };
+            Ok(Some((rate / CPU_RATE_PER_PERCENT).min(100) as u8))
+        }
+
+        /// Whether `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is currently armed.
+        pub fn kill_on_close_enabled(&self) -> Result<bool, WindowsJobError> {
+            let job = self.handle.expect("live Windows Job handle");
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            let info_size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+            // SAFETY: `info` is the exact buffer required by the selected
+            // information class and is writable for the duration of the call.
+            unsafe {
+                QueryInformationJobObject(
+                    Some(job),
+                    JobObjectExtendedLimitInformation,
+                    &mut info as *mut _ as _,
+                    info_size,
+                    None,
+                )
+            }
+            .map_err(|source| operation_error("QueryInformationJobObject", source))?;
+            Ok(
+                info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    == JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            )
         }
 
         /// Close the Job handle synchronously. With
@@ -264,7 +421,9 @@ mod windows_job {
 }
 
 #[cfg(windows)]
-pub use windows_job::{WindowsJobError, WindowsJobObject};
+pub use windows_job::{
+    process_priority_class, set_process_priority_class, WindowsJobError, WindowsJobObject,
+};
 
 #[cfg(test)]
 mod tests {
@@ -333,5 +492,61 @@ mod tests {
         assert!(
             release.find("CloseHandle(job)").unwrap() < release.find("self.handle = None").unwrap()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_cpu_rate_hard_cap_configures_alongside_kill_on_close() {
+        let mut job = WindowsJobObject::new().expect("create job");
+        assert_eq!(job.cpu_rate_hard_cap_percent().expect("query cap"), None);
+        job.set_cpu_rate_hard_cap(35).expect("set 35% hard cap");
+        assert_eq!(
+            job.cpu_rate_hard_cap_percent().expect("query cap"),
+            Some(35)
+        );
+        assert!(job.kill_on_close_enabled().expect("query kill on close"));
+        assert!(job.set_cpu_rate_hard_cap(0).is_err());
+        assert!(job.set_cpu_rate_hard_cap(101).is_err());
+        job.set_cpu_rate_hard_cap(100).expect("set 100% hard cap");
+        assert_eq!(
+            job.cpu_rate_hard_cap_percent().expect("query cap"),
+            Some(100)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test needs a plain paused child whose priority class it can mutate"
+    )]
+    fn windows_process_priority_class_roundtrips_on_a_live_child() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn paused child");
+        let pid = child.id();
+        assert_eq!(
+            process_priority_class(pid).expect("query initial class"),
+            ProcessPriorityClass::Normal
+        );
+        set_process_priority_class(pid, ProcessPriorityClass::BelowNormal)
+            .expect("lower child priority class");
+        assert_eq!(
+            process_priority_class(pid).expect("query lowered class"),
+            ProcessPriorityClass::BelowNormal
+        );
+        set_process_priority_class(pid, ProcessPriorityClass::Idle).expect("idle class");
+        assert_eq!(
+            process_priority_class(pid).expect("query idle class"),
+            ProcessPriorityClass::Idle
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

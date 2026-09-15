@@ -1,6 +1,7 @@
 //! Managed hook health read model.
 
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -11,6 +12,8 @@ use serde_json::Value;
 
 const SLOW_HANDLER_THRESHOLD_MS: f64 = 1000.0;
 const SELF_HEALED_MARKER: &str = ".gwt/managed-hook-self-healed";
+/// How long a hook failure keeps showing in `hook.health` (Issue #3541).
+const HOOK_FAILURE_RETENTION_HOURS: i64 = 24;
 const MANAGED_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -111,7 +114,77 @@ struct RuntimeStateReadModel {
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
 
+/// Hook failures read once and reused for a whole projection.
+///
+/// Issue #4172: `read_managed_hook_health` is called once per Work row, and
+/// each call used to scan the whole host error ledger. With a real ledger the
+/// scan alone cost seconds per projection and grew with the recorded volume.
+/// One projection now takes a single snapshot and every row reads its own
+/// worktree's failures out of it, so the cost stops scaling with Work count.
+///
+/// The snapshot is deliberately not cached beyond the projection that holds
+/// it: the next projection takes a fresh one, so newly recorded failures still
+/// surface on the next refresh.
+#[derive(Debug, Clone, Default)]
+pub struct ManagedHookFailureSnapshot {
+    /// Latest hard / fail-open failure per canonicalized worktree root.
+    ///
+    /// Folding at snapshot time keeps the per-worktree read out of the ledger
+    /// size entirely: the rows are canonicalized and reduced once, so a Work
+    /// row only looks its own worktree up.
+    by_worktree: HashMap<PathBuf, WorktreeHookFailures>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorktreeHookFailures {
+    latest_hard: Option<gwt_core::error_ledger::ErrorRecord>,
+    latest_fail_open: Option<gwt_core::error_ledger::ErrorRecord>,
+}
+
+impl ManagedHookFailureSnapshot {
+    /// Read the retained hook failures from the host error ledger once.
+    ///
+    /// A ledger that cannot be read yields an empty snapshot, matching the
+    /// fail-open behaviour the per-row read had.
+    pub fn read() -> Self {
+        use gwt_core::error_ledger::ErrorKind;
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(HOOK_FAILURE_RETENTION_HOURS);
+        let mut by_worktree: HashMap<PathBuf, WorktreeHookFailures> = HashMap::new();
+        // `list_since` returns rows oldest first, so the last match wins.
+        for row in gwt_core::error_ledger::list_since(Some(since))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.kind == ErrorKind::HookFailure)
+        {
+            let Some(project_root) = row.target.project_root.as_deref() else {
+                continue;
+            };
+            let key = comparable_path(Path::new(project_root));
+            let entry = by_worktree.entry(key).or_default();
+            if row.context.get("fail_open").map(String::as_str) == Some("true") {
+                entry.latest_fail_open = Some(row);
+            } else {
+                entry.latest_hard = Some(row);
+            }
+        }
+        Self { by_worktree }
+    }
+
+    /// Project managed hook health for one worktree out of this snapshot.
+    pub fn read_health(&self, input: &ManagedHookHealthInput) -> ManagedHookHealth {
+        read_managed_hook_health_with(input, self)
+    }
+}
+
 pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHealth {
+    read_managed_hook_health_with(input, &ManagedHookFailureSnapshot::read())
+}
+
+fn read_managed_hook_health_with(
+    input: &ManagedHookHealthInput,
+    failures: &ManagedHookFailureSnapshot,
+) -> ManagedHookHealth {
     let mut health = ManagedHookHealth {
         status: ManagedHookHealthStatus::Ready,
         last_event: None,
@@ -133,6 +206,7 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
 
     audit_managed_hook_configs(input, &mut health);
     audit_hook_profile(input, &mut health);
+    audit_hook_failures(input, failures, &mut health);
 
     let Some(runtime_state_path) = input.runtime_state_path.as_ref() else {
         if health.status == ManagedHookHealthStatus::Ready {
@@ -269,6 +343,70 @@ fn audit_hook_profile(input: &ManagedHookHealthInput, health: &mut ManagedHookHe
     }
 }
 
+/// Issue #3541: project recent hook failures from the host error ledger so a
+/// later successful event turns them into "recovered" evidence instead of
+/// erasing them. Unresolved handler failures degrade health; recovered and
+/// fail-open (live forwarding) failures need attention until they age out.
+fn audit_hook_failures(
+    input: &ManagedHookHealthInput,
+    failures: &ManagedHookFailureSnapshot,
+    health: &mut ManagedHookHealth,
+) {
+    let worktree = comparable_path(&input.worktree_root);
+    let Some(matching) = failures.by_worktree.get(&worktree) else {
+        return;
+    };
+
+    if let Some(row) = matching.latest_hard.as_ref() {
+        let completed_at = input
+            .runtime_state_path
+            .as_deref()
+            .and_then(read_last_completed_hook_event_at);
+        let recovered = completed_at.is_some_and(|at| at > row.recorded_at);
+        let state = if recovered { "recovered" } else { "unresolved" };
+        let issue = describe_hook_failure(row, state);
+        if recovered {
+            needs_attention(health, issue);
+        } else {
+            degraded(health, issue);
+        }
+    }
+    if let Some(row) = matching.latest_fail_open.as_ref() {
+        needs_attention(health, describe_hook_failure(row, "fail-open"));
+    }
+}
+
+fn describe_hook_failure(row: &gwt_core::error_ledger::ErrorRecord, state: &str) -> String {
+    let field = |key: &str| {
+        row.context
+            .get(key)
+            .map(String::as_str)
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    format!(
+        "managed hook failure: {}/{} state={state} recorded_at={} (errors.list id={})",
+        field("event"),
+        field("handler"),
+        row.recorded_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        row.id
+    )
+}
+
+fn read_last_completed_hook_event_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let at = value.get("last_completed_hook_event_at")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc))
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
     let worktree = &input.worktree_root;
     let claude_dir = worktree.join(".claude");
@@ -343,6 +481,42 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
             );
         }
     }
+
+    audit_managed_git_hooks(worktree, health);
+}
+
+/// Issue #4339: a `core.hooksPath` aimed at a directory with no hook in it
+/// makes Git skip commitlint and the commit/push gates without a word. Report
+/// it so the skip is visible and the self-heal pass can materialize them.
+fn audit_managed_git_hooks(worktree: &Path, health: &mut ManagedHookHealth) {
+    for missing in gwt_skills::missing_managed_git_hooks(worktree) {
+        needs_attention(
+            health,
+            format!(
+                "managed git hook missing: {} (core.hooksPath is configured but the hook is not materialized)",
+                missing.display()
+            ),
+        );
+    }
+}
+
+/// The binary a config at `path` is expected to fall back to.
+///
+/// #3567: the generator writes the canonical bare `gwtd` into a git-tracked
+/// config and the absolute install path into a machine-local one, so the
+/// auditor has to ask the same question. Auditing a tracked config against the
+/// running binary's absolute path reported "binary skew" forever, and startup
+/// self-heal answered it by rewriting the tracked file on every boot — the loop
+/// that kept every worktree permanently dirty.
+fn expected_hook_bin_for_config_path<'a>(
+    path: &Path,
+    configured: Option<&'a str>,
+) -> Option<&'a str> {
+    configured?;
+    if gwt_skills::managed_hook_config_is_git_tracked(path) {
+        return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
+    }
+    configured
 }
 
 fn audit_hook_json_config(
@@ -350,6 +524,7 @@ fn audit_hook_json_config(
     expected_hook_bin: Option<&str>,
     health: &mut ManagedHookHealth,
 ) {
+    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
@@ -425,6 +600,7 @@ fn audit_provider_hook_config(
     expected_hook_bin: Option<&str>,
     health: &mut ManagedHookHealth,
 ) {
+    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
@@ -711,7 +887,9 @@ pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHo
     let provider_surface = worktree_root.join(".gwt/opencode").exists()
         || worktree_root.join(".gwt/openclaw").exists()
         || worktree_root.join(".gwt/hermes").exists();
-    let mut repaired = false;
+    // #4339: the Git hook directory belongs to the repository, not to any agent
+    // provider, so repair it even in a worktree with no agent surface at all.
+    let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
     if claude_surface || codex_surface || provider_surface {
         crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;

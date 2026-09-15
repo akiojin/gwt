@@ -57,7 +57,8 @@ pub struct BoardPostCommand {
     pub targets: Vec<String>,
     pub mentions: Vec<String>,
     /// Issue #3655: Board entry ids this post closes. Only `blocked` entries
-    /// are meaningful here; unknown or already-closed ids are ignored.
+    /// are meaningful here. Overflowed ids still close via the durable index
+    /// (Issue #3690); unknown and already-closed ids are reported separately.
     pub resolves: Vec<String>,
     pub broadcast: bool,
 }
@@ -411,7 +412,9 @@ fn already_escalated(repo_path: &std::path::Path, owner: Option<u64>, operation:
 /// A mistyped or already-closed id is silent otherwise, and the poster walks
 /// away believing the blocker is retired while the Issue stays parked in
 /// `needs_human` — the same "everything looks fine" failure this Issue is
-/// about, just one step later.
+/// about, just one step later. Overflowed ids (gone from the 500-entry Board
+/// window but still in the durable index or event log) are reported
+/// separately from ids that never existed (Issue #3690).
 fn report_resolutions(
     repo_path: &std::path::Path,
     resolver_id: &str,
@@ -425,30 +428,67 @@ fn report_resolutions(
         ));
         return;
     };
-    let (closed, missed): (Vec<&String>, Vec<&String>) = requested.iter().partition(|id| {
-        store.escalations.iter().any(|escalation| {
-            &&escalation.entry_id == id
-                && escalation.resolved_by_entry_id.as_deref() == Some(resolver_id)
-        })
-    });
-    if !closed.is_empty() {
+    let mut resolved = Vec::new();
+    let mut already_closed = Vec::new();
+    let mut still_open = Vec::new();
+    let mut in_history = Vec::new();
+    let mut unknown = Vec::new();
+    for id in requested {
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        match store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == id)
+        {
+            Some(escalation) if escalation.resolved_by_entry_id.as_deref() == Some(resolver_id) => {
+                resolved.push(id);
+            }
+            Some(escalation) if !escalation.is_open() => already_closed.push(id),
+            Some(_) => still_open.push(id),
+            None => {
+                if gwt_core::coordination::board_entry_exists(repo_path, id).unwrap_or(false) {
+                    in_history.push(id);
+                } else {
+                    unknown.push(id);
+                }
+            }
+        }
+    }
+    if !resolved.is_empty() {
         out.push_str(&format!(
             "board escalations resolved: {}\n",
-            closed
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            resolved.join(", ")
         ));
     }
-    if !missed.is_empty() {
+    if !already_closed.is_empty() {
         out.push_str(&format!(
-            "board escalations not resolved (unknown or already closed): {}\n",
-            missed
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "board escalations already closed: {}\n",
+            already_closed.join(", ")
+        ));
+    }
+    if !still_open.is_empty() {
+        out.push_str(&format!(
+            "board escalations still open in the durable index (not in the 500-entry Board window): {}\n\
+             Retry params.resolves with these exact ids; board.show is not the source of truth.\n",
+            still_open.join(", ")
+        ));
+    }
+    if !in_history.is_empty() {
+        out.push_str(&format!(
+            "board escalations present in Board history but missing from the index (scrolled out of the 500-entry window): {}\n\
+             Retry params.resolves; the index should fold the historical blocked post and close it.\n",
+            in_history.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        out.push_str(&format!(
+            "board escalations not found: {}\n\
+             Copy the exact id from the wake prompt or issue.monitor.status. \
+             board.show only lists the latest 500 posts, so a missing Board card does not mean the id is invalid.\n",
+            unknown.join(", ")
         ));
     }
 }
@@ -778,6 +818,7 @@ mod tests {
 
     use crate::board_provider::post_entry;
     use crate::cli::test_support::ScopedEnvVar;
+    use gwt_core::test_support::ScopedGwtHome;
 
     use super::*;
 
@@ -822,6 +863,7 @@ mod tests {
         // SPEC-3046 受け入れシナリオ 1: GUI と同じ空 body 検証が CLI にも
         // 適用される（whitespace-only body は保存されずエラー）。
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let cmd = parse(&[s("post"), s("--kind"), s("status"), s("--body"), s("   ")]).unwrap();
         let mut out = String::new();
@@ -856,6 +898,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let cmd = parse(&[
             s("post"),
@@ -892,6 +935,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.seed(gwt_github::IssueSnapshot {
             number: gwt_github::IssueNumber(2338),
@@ -942,6 +986,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.fail_create_comment_after(0);
         let cmd = parse(&[
@@ -981,6 +1026,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let mut out = String::new();
         run(
@@ -1040,6 +1086,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1062,12 +1109,171 @@ mod tests {
         .unwrap();
 
         assert!(
-            out.contains(
-                "board escalations not resolved (unknown or already closed): typo-entry-id"
-            ),
-            "a silent no-op here leaves the blocker parked forever: {out}"
+            out.contains("board escalations not found: typo-entry-id"),
+            "a missing id must not be lumped in with an overflowed durable row: {out}"
+        );
+        assert!(
+            out.contains("issue.monitor.status"),
+            "the PM must be told where to copy a real handle from: {out}"
         );
         assert!(!out.contains("board escalations resolved:"), "{out}");
+        assert!(
+            !out.contains("already closed"),
+            "an unknown id is not an already-closed one: {out}"
+        );
+    }
+
+    #[test]
+    fn board_family_run_post_distinguishes_an_already_closed_escalation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("blocked"),
+                s("--body"),
+                escalation_body(),
+                s("--owner"),
+                s("2338"),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        let entry_id = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap()[0]
+            .entry_id
+            .clone();
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("fresh launch を手配しました"),
+                s("--owner"),
+                s("2338"),
+                s("--resolves"),
+                s(&entry_id),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            out.contains(&format!("board escalations resolved: {entry_id}")),
+            "{out}"
+        );
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("もう一度閉じる"),
+                s("--owner"),
+                s("2338"),
+                s("--resolves"),
+                s(&entry_id),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            out.contains(&format!("board escalations already closed: {entry_id}")),
+            "a second resolve must not look like a missing id: {out}"
+        );
+        assert!(!out.contains("board escalations not found:"), "{out}");
+    }
+
+    #[test]
+    fn board_family_run_post_resolves_an_escalation_dropped_from_a_hot_window_rebuild() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("blocked"),
+                s("--body"),
+                escalation_body(),
+                s("--owner"),
+                s("2338"),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        let entry_id = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap()[0]
+            .entry_id
+            .clone();
+
+        let path = gwt_core::coordination::coordination_escalations_path(tmp.path());
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&gwt_core::board_escalation::BoardEscalationStore::default())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(gwt_core::coordination::load_open_escalations(tmp.path())
+            .unwrap()
+            .is_empty());
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("fresh launch を手配しました"),
+                s("--owner"),
+                s("2338"),
+                s("--resolves"),
+                s(&entry_id),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains(&format!("board escalations resolved: {entry_id}")),
+            "a hot-window rebuild must not trap the PM on unknown-or-already-closed: {out}"
+        );
+        assert!(gwt_core::coordination::load_open_escalations(tmp.path())
+            .unwrap()
+            .is_empty());
+        let closed = gwt_core::coordination::load_escalation_store(tmp.path())
+            .unwrap()
+            .escalations
+            .into_iter()
+            .find(|escalation| escalation.entry_id == entry_id)
+            .expect("the recovered row must be persisted");
+        assert!(closed.resolved_at.is_some());
+        assert!(closed.resolved_by_entry_id.is_some());
     }
 
     #[test]
@@ -1080,6 +1286,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let cmd = parse(&[
             s("post"),
@@ -1112,6 +1319,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         auto_file_operation_refusal(
@@ -1136,6 +1344,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         for _ in 0..3 {
             auto_file_operation_refusal(
@@ -1164,6 +1373,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         auto_file_operation_refusal(
             &mut env,
@@ -1194,6 +1404,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         auto_file_operation_refusal(&mut env, "issue.view", "issue #99 is unavailable");
         auto_file_operation_refusal(
@@ -1217,6 +1428,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         auto_file_operation_refusal(&mut env, "board.post", "board post refused");
 
@@ -1281,6 +1493,7 @@ mod tests {
     #[test]
     fn board_family_run_show_workspace_filter_keeps_broadcast_and_matching_audience() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         for (body, audience) in [
@@ -1324,6 +1537,7 @@ mod tests {
     #[test]
     fn board_family_run_show_all_flag_shows_full_timeline() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         for (body, audience) in [
@@ -1611,6 +1825,7 @@ mod tests {
     #[test]
     fn board_family_run_post_persists_target_owners() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1646,6 +1861,7 @@ mod tests {
     #[test]
     fn board_family_run_post_persists_typed_mentions() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1727,6 +1943,7 @@ mod tests {
     #[test]
     fn board_family_run_post_persists_audience_from_workspace_mentions() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1774,6 +1991,7 @@ mod tests {
     #[test]
     fn board_family_run_post_broadcast_flag_keeps_audience_empty_without_explicit_workspace() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -1812,8 +2030,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
         session.save(&sessions_dir).unwrap();
@@ -1864,8 +2081,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -1917,8 +2133,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -1995,8 +2210,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2067,8 +2281,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2133,8 +2346,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2231,6 +2443,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -2279,6 +2492,7 @@ mod tests {
     #[test]
     fn board_family_run_post_updates_projection() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -2312,6 +2526,7 @@ mod tests {
     #[test]
     fn board_family_run_post_succeeds_when_entry_commits_without_snapshot() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         gwt_core::coordination::load_snapshot(tmp.path()).unwrap();
         let projection_path =
@@ -2348,6 +2563,7 @@ mod tests {
     #[test]
     fn board_family_run_show_scopes_workspace_and_all_timelines() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let mut env = crate::cli::TestEnv::new(repo.clone());
@@ -2437,8 +2653,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", tmp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let _home = ScopedGwtHome::set(tmp.path());
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -2502,9 +2717,13 @@ mod tests {
         assert!(!out.contains("other entry"), "{out}");
     }
 
+    // Issue #4052: the Board store lives under gwt_home(), so this test pins
+    // its own thread-local gwt home instead of depending on whatever process
+    // HOME a sibling test happens to have swapped in at the time.
     #[test]
     fn board_family_run_show_renders_origin_metadata_suffix() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),
@@ -2545,6 +2764,7 @@ mod tests {
     #[test]
     fn board_family_run_show_falls_back_to_author_without_origin_metadata() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),
@@ -2583,6 +2803,7 @@ mod tests {
     #[test]
     fn board_family_run_show_renders_snapshot() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),
@@ -2621,6 +2842,7 @@ mod tests {
     #[test]
     fn board_family_run_show_renders_multiline_body_as_indented_block() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         post_entry(
             tmp.path(),

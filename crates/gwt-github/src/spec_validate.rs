@@ -25,7 +25,7 @@ pub struct ValidationIssue {
 }
 
 /// Validation configuration. `default_rules()` returns the canonical
-/// 7-section / FR-NNN rule set used by `gwt-register-spec`.
+/// 8-section / FR-NNN rule set used by `gwt-register-spec`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationRules {
     pub title_prefix: &'static str,
@@ -33,7 +33,7 @@ pub struct ValidationRules {
     pub frbidden_marker: &'static str,
 }
 
-/// Canonical rules: `SPEC: ` prefix, 7 sections, no `[NEEDS CLARIFICATION]`.
+/// Canonical rules: `SPEC: ` prefix, 8 sections, no `[NEEDS CLARIFICATION]`.
 pub fn default_rules() -> ValidationRules {
     ValidationRules {
         title_prefix: "SPEC: ",
@@ -43,6 +43,7 @@ pub fn default_rules() -> ValidationRules {
             "## ユーザーシナリオと受け入れシナリオ",
             "## 機能要件",
             "## 成功基準",
+            "## 受け入れ基準",
             "## Out of Scope",
             "## Related Artifacts",
         ],
@@ -204,6 +205,10 @@ A story.
 
 - All tests pass.
 
+## 受け入れ基準
+
+- [ ] AC-1: `cargo test -p gwt-github` is GREEN
+
 ## Out of Scope (v1)
 
 - nothing
@@ -242,6 +247,17 @@ A story.
         let body = good_body().replace("## Out of Scope (v1)", "## OutOfScope (typo)");
         let issues = validate_spec_body(&body, "SPEC: Demo Feature", &default_rules());
         assert!(issues.iter().any(|i| i.location.contains("Out of Scope")));
+    }
+
+    #[test]
+    fn flags_missing_acceptance_criteria_section() {
+        // Issue #3873 AC-4: `## 受け入れ基準` is a canonical section, so a body
+        // that only has `## 成功基準` is Structural-invalid.
+        let body = good_body().replace("## 受け入れ基準", "## Acceptance (misnamed)");
+        let issues = validate_spec_body(&body, "SPEC: Demo Feature", &default_rules());
+        assert!(issues
+            .iter()
+            .any(|i| i.location == "## 受け入れ基準" && i.severity == Severity::Structural));
     }
 
     #[test]

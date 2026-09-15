@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,6 +57,190 @@ class StatusHealthTests(unittest.TestCase):
             / "worktrees"
             / self.WORKTREE_HASH
         )
+
+    def _git(self, root: Path, *args: str) -> None:
+        env = os.environ.copy()
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_ATTR_NOSYSTEM"] = "1"
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_status_defaults_to_legacy_and_explicit_v2_observes_fallback_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            self._git(root, "init", "--quiet")
+            self._git(root, "symbolic-ref", "HEAD", "refs/heads/develop")
+            self._make_repo(root)
+            self._git(root, "add", "-A")
+            self._git(
+                root,
+                "-c",
+                "user.name=gwt tests",
+                "-c",
+                "user.email=gwt-tests@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "status fixture",
+            )
+            db_root = Path(tmp) / "index_root"
+            coordinator = Path(tmp) / "coordinator"
+            coordinator.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GWT_INDEX_COORDINATOR_ROOT": str(coordinator),
+                    "GWT_INDEX_FAKE_EMBEDDING": "1",
+                },
+                clear=False,
+            ):
+                legacy = runner.action_index_files_v2(
+                    project_root=str(root),
+                    repo_hash=self.REPO_HASH,
+                    worktree_hash=self.WORKTREE_HASH,
+                    mode="full",
+                    db_root=db_root,
+                    scope="files",
+                    file_index_protocol="legacy",
+                )
+                self.assertTrue(legacy.get("ok"), legacy)
+                legacy_db = runner.resolve_db_path(
+                    self.REPO_HASH,
+                    self.WORKTREE_HASH,
+                    "files",
+                    db_root=db_root,
+                )
+                legacy_pointer = runner.active_pointer_path(legacy_db)
+                legacy_pointer_before = legacy_pointer.read_bytes()
+                first = runner.action_index_files_v2(
+                    project_root=str(root),
+                    repo_hash=self.REPO_HASH,
+                    worktree_hash=self.WORKTREE_HASH,
+                    mode="full",
+                    db_root=db_root,
+                    scope="files",
+                    file_index_protocol="v2",
+                )
+                self.assertTrue(first.get("ok"), first)
+                (root / "src" / "overlay.rs").write_text(
+                    "//! status fallback overlay\n", encoding="utf-8"
+                )
+                second = runner.action_index_files_v2(
+                    project_root=str(root),
+                    repo_hash=self.REPO_HASH,
+                    worktree_hash=self.WORKTREE_HASH,
+                    mode="full",
+                    db_root=db_root,
+                    scope="files",
+                    file_index_protocol="v2",
+                )
+                self.assertTrue(second.get("ok"), second)
+
+                v2_worktree = (
+                    runner.resolve_file_index_v2_root(
+                        self.REPO_HASH, db_root=db_root
+                    )
+                    / "worktrees"
+                    / self.WORKTREE_HASH
+                )
+                head_path = v2_worktree / "head.json"
+                head = json.loads(head_path.read_text(encoding="utf-8"))
+                self.assertEqual(head["previous_view_id"], first["view_id"])
+                active_view = json.loads(
+                    (
+                        v2_worktree
+                        / "views"
+                        / second["view_id"]
+                        / "descriptor.json"
+                    ).read_text(encoding="utf-8")
+                )
+                active_overlay = runner.resolve_file_index_v2_overlay_dir(
+                    self.REPO_HASH,
+                    self.WORKTREE_HASH,
+                    active_view["overlay_generation_id"],
+                    db_root=db_root,
+                )
+                active_descriptor = active_overlay / "descriptor.json"
+                active_descriptor.write_text("{corrupt overlay", encoding="utf-8")
+                head_before = head_path.read_bytes()
+                descriptor_before = active_descriptor.read_bytes()
+                quarantine_before = {
+                    path
+                    for path in runner.resolve_file_index_v2_root(
+                        self.REPO_HASH, db_root=db_root
+                    ).rglob("*quarantine-*")
+                }
+
+                legacy_status = runner.action_status_v2(
+                    repo_hash=self.REPO_HASH,
+                    worktree_hash=self.WORKTREE_HASH,
+                    db_root=db_root,
+                )
+                self.assertEqual(head_path.read_bytes(), head_before)
+                self.assertEqual(active_descriptor.read_bytes(), descriptor_before)
+                self.assertEqual(legacy_pointer.read_bytes(), legacy_pointer_before)
+                explicit_status = runner.action_status_v2(
+                    repo_hash=self.REPO_HASH,
+                    worktree_hash=self.WORKTREE_HASH,
+                    db_root=db_root,
+                    file_index_protocol="v2",
+                )
+
+                self.assertTrue(legacy_status.get("ok"), legacy_status)
+                legacy_files = legacy_status["status"]["files"]
+                self.assertTrue(legacy_files.get("healthy"), legacy_files)
+                self.assertNotIn("fallback_source", legacy_files)
+                files = explicit_status["status"]["files"]
+                self.assertEqual(files.get("fallback_source"), "previous", files)
+                self.assertEqual(files.get("view_id"), first["view_id"], files)
+                self.assertTrue(files.get("healthy"), files)
+                self.assertTrue(files.get("repair_required"), files)
+                self.assertEqual(head_path.read_bytes(), head_before)
+                self.assertEqual(active_descriptor.read_bytes(), descriptor_before)
+                self.assertEqual(legacy_pointer.read_bytes(), legacy_pointer_before)
+                self.assertEqual(
+                    {
+                        path
+                        for path in runner.resolve_file_index_v2_root(
+                            self.REPO_HASH, db_root=db_root
+                        ).rglob("*quarantine-*")
+                    },
+                    quarantine_before,
+                    "status is read-only for both default and explicit protocols",
+                )
+
+    def test_status_dispatch_forwards_explicit_file_index_protocol(self):
+        args = argparse.Namespace(
+            repo_hash=self.REPO_HASH,
+            worktree_hash=self.WORKTREE_HASH,
+            db_root="",
+            worktree_hashes="",
+            file_index_protocol="v2",
+        )
+        expected = {"ok": True, "status": {}}
+        with mock.patch.object(
+            runner, "action_status_v2", return_value=expected
+        ) as status, mock.patch.object(runner, "emit") as emit:
+            exit_code = runner._dispatch_v2("status", args)
+
+        self.assertEqual(exit_code, 0)
+        status.assert_called_once_with(
+            self.REPO_HASH,
+            self.WORKTREE_HASH,
+            db_root=None,
+            worktree_hashes=None,
+            file_index_protocol="v2",
+        )
+        emit.assert_called_once_with(expected)
 
     def test_status_reports_repair_required_for_missing_manifest_and_docs_scope(self):
         with tempfile.TemporaryDirectory() as tmp:

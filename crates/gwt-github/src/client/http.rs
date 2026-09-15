@@ -28,10 +28,11 @@ use sha2::{Digest, Sha256};
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CommitComparisonStatus, CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueNumber, IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError,
-    OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation,
-    RepositoryComment, RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
-    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
+    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
+    RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
+    RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
+    UpdatedAt,
 };
 
 /// HTTP method.
@@ -357,7 +358,21 @@ pub struct HttpIssueClient<T: HttpTransport = ReqwestTransport> {
     repo: String,
     rest_base: String,
     graphql_url: String,
+    /// SPEC #4093 FR-004: the budget ledger this client's calls are charged
+    /// to and refused from, plus the in-process refusal memory. Production
+    /// constructors attach the machine-wide pair shared with every `gh`
+    /// spawn; a bare [`Self::with_transport`] client is unbudgeted so test
+    /// fixtures never write into the real ledger.
+    budget: Option<(
+        gwt_core::github_budget::BudgetLedger,
+        &'static gwt_core::github_quota::QuotaGate,
+    )>,
 }
+
+/// The argv shape the budget classifies this client's GraphQL calls as.
+const GRAPHQL_BUDGET_ARGS: [&str; 2] = ["api", "graphql"];
+/// The argv shape the budget classifies this client's REST mutations as.
+const REST_BUDGET_ARGS: [&str; 2] = ["api", "repos"];
 
 impl HttpIssueClient<ReqwestTransport> {
     /// Construct an [`HttpIssueClient`] using `gh auth token` for credentials
@@ -365,7 +380,7 @@ impl HttpIssueClient<ReqwestTransport> {
     pub fn from_gh_auth(owner: &str, repo: &str) -> Result<Self, ApiError> {
         let token = resolve_gh_token()?;
         let transport = ReqwestTransport::new().map_err(|e| ApiError::Network(e.to_string()))?;
-        Ok(Self::with_transport(transport, token, owner, repo))
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
     }
 
     pub fn from_gh_auth_with_deadline(
@@ -378,7 +393,7 @@ impl HttpIssueClient<ReqwestTransport> {
         let transport =
             ReqwestTransport::new().map_err(|error| ApiError::Network(error.to_string()))?;
         deadline.remaining("owner client construction")?;
-        Ok(Self::with_transport(transport, token, owner, repo))
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
     }
 
     pub fn from_owner_environment_with_deadline(
@@ -432,7 +447,77 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             repo: repo.to_string(),
             rest_base: "https://api.github.com".to_string(),
             graphql_url: "https://api.github.com/graphql".to_string(),
+            budget: None,
         }
+    }
+
+    /// Charge this client's calls to the machine-wide budget ledger and the
+    /// process-global refusal gate (SPEC #4093 FR-004) — what every
+    /// production constructor does.
+    pub fn with_global_budget(self) -> Self {
+        self.with_budget(
+            gwt_core::github_budget::BudgetLedger::global(),
+            gwt_core::github_quota::global(),
+        )
+    }
+
+    /// Charge this client's calls to an explicit ledger and gate (tests).
+    pub fn with_budget(
+        mut self,
+        budget: gwt_core::github_budget::BudgetLedger,
+        gate: &'static gwt_core::github_quota::QuotaGate,
+    ) -> Self {
+        self.budget = Some((budget, gate));
+        self
+    }
+
+    /// SPEC #4093 FR-004 / AC-5: refuse a call inside an open refusal window
+    /// — the in-process gate's or the one another process persisted — before
+    /// it is sent, and otherwise count it on the ledger.
+    fn admit(&self, args: &[&str]) -> Result<(), ApiError> {
+        let Some((budget, gate)) = &self.budget else {
+            return Ok(());
+        };
+        let now = chrono::Utc::now();
+        if gwt_core::github_budget::suppressed_spawn_detail(gate, budget, args, now).is_some() {
+            let quota = gwt_core::github_quota::classify_gh_args(args);
+            let retry_after = budget
+                .active_block(quota, now)
+                .or_else(|| gate.active_block(quota, now))
+                .map(|block| u64::try_from(block.retry_after_secs(now)).unwrap_or(0));
+            return Err(ApiError::RateLimited { retry_after });
+        }
+        budget.record_spawn_from(
+            gwt_core::github_quota::classify_gh_args(args),
+            &gwt_core::github_budget::http_source(args),
+            now,
+        );
+        Ok(())
+    }
+
+    /// Settle a call's outcome on the shared budget: a refusal opens the
+    /// persisted window every process honours; a success closes it.
+    fn settle<V>(&self, args: &[&str], result: Result<V, ApiError>) -> Result<V, ApiError> {
+        let Some((budget, gate)) = &self.budget else {
+            return result;
+        };
+        let quota = gwt_core::github_quota::classify_gh_args(args);
+        let now = chrono::Utc::now();
+        match &result {
+            Ok(_) => {
+                gate.record_success(quota);
+                budget.clear_block(quota);
+            }
+            Err(ApiError::RateLimited { .. }) => {
+                let block = budget.record_block(
+                    &gwt_core::github_quota::block_from_probe(quota, None, now),
+                    now,
+                );
+                gate.record_exhaustion(block);
+            }
+            Err(_) => {}
+        }
+        result
     }
 
     /// Point an explicitly test-mode debug client at loopback endpoints.
@@ -477,6 +562,11 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn rest_patch(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(&REST_BUDGET_ARGS, self.rest_patch_unbudgeted(path, body))
+    }
+
+    fn rest_patch_unbudgeted(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
         let mut headers = self.auth_headers();
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
         let resp = self
@@ -493,6 +583,11 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn rest_post(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(&REST_BUDGET_ARGS, self.rest_post_unbudgeted(path, body))
+    }
+
+    fn rest_post_unbudgeted(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
         let mut headers = self.auth_headers();
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
         let resp = self
@@ -509,6 +604,11 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn rest_delete(&self, path: &str) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(&REST_BUDGET_ARGS, self.rest_delete_unbudgeted(path))
+    }
+
+    fn rest_delete_unbudgeted(&self, path: &str) -> Result<HttpResponse, ApiError> {
         let resp = self
             .transport
             .execute(HttpRequest {
@@ -523,6 +623,23 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn graphql(&self, query: &str, variables: Value) -> Result<Value, ApiError> {
+        self.admit(&GRAPHQL_BUDGET_ARGS)?;
+        let result = self.graphql_unbudgeted(query, variables);
+        if let (Ok(value), Some((budget, _))) = (&result, &self.budget) {
+            // SPEC #4093 FR-001: settle the points the query cost and refresh
+            // the window from the same response.
+            if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(value) {
+                budget.record_graphql_response(
+                    &gwt_core::github_budget::http_source(&GRAPHQL_BUDGET_ARGS),
+                    &rate_limit,
+                    chrono::Utc::now(),
+                );
+            }
+        }
+        self.settle(&GRAPHQL_BUDGET_ARGS, result)
+    }
+
+    fn graphql_unbudgeted(&self, query: &str, variables: Value) -> Result<Value, ApiError> {
         let mut headers = self.auth_headers();
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
         let payload = json!({
@@ -541,8 +658,15 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         check_status(&resp)?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("graphql json: {e}")))?;
-        if let Some(errs) = value.get("errors") {
-            return Err(ApiError::Unexpected(format!("graphql errors: {errs}")));
+        if let Some(errs) = value.get("errors").filter(|errors| !errors.is_null()) {
+            // Issue #3928: GitHub answers a secondary rate limit with HTTP 200
+            // and a `RATE_LIMIT` entry in the response body, so a status-only
+            // check sees a healthy call. Classifying it here — the way the
+            // owner-request path above already does — is what turns it into
+            // `RateLimited` instead of an opaque `Unexpected`, which is what a
+            // caller needs to back off instead of retrying straight into the
+            // same limit.
+            return Err(classify_graphql_errors(errs, "graphql query"));
         }
         Ok(value)
     }
@@ -1601,6 +1725,7 @@ fn encode_path_segment(value: &str) -> String {
 
 const FETCH_ISSUE_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issue(number:$number){
       number title body state updatedAt
@@ -1611,8 +1736,18 @@ query($owner:String!,$repo:String!,$number:Int!){
 }
 "#;
 
+const FETCH_ISSUE_UPDATED_AT_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$number:Int!){
+  rateLimit{cost remaining resetAt nodeCount}
+  repository(owner:$owner, name:$repo){
+    issue(number:$number){ updatedAt }
+  }
+}
+"#;
+
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issues(labels:["gwt-spec"], first:100, after:$after, orderBy:{field:UPDATED_AT,direction:DESC}){
       nodes{ number title state updatedAt labels(first:20){nodes{name}} }
@@ -1624,6 +1759,7 @@ query($owner:String!,$repo:String!,$after:String){
 
 const LIST_OWNER_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issues(states:[OPEN,CLOSED], first:100, after:$after, orderBy:{field:CREATED_AT,direction:ASC}){
       nodes{ number title body state updatedAt labels(first:100){totalCount nodes{name}} }
@@ -1635,6 +1771,7 @@ query($owner:String!,$repo:String!,$after:String){
 
 const LIST_OWNER_COMMENTS_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issue(number:$number){
       comments(first:100, after:$after){
@@ -1651,6 +1788,7 @@ query($owner:String!,$repo:String!,$number:Int!,$after:String){
 
 const FETCH_OWNER_ISSUE_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issue(number:$number){
       number title body state updatedAt labels(first:100){totalCount nodes{name}}
@@ -1665,6 +1803,32 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError> {
+        if let Some(previous) = since {
+            let value = self.graphql(
+                FETCH_ISSUE_UPDATED_AT_QUERY,
+                json!({
+                    "owner": self.owner,
+                    "repo": self.repo,
+                    "number": number.0,
+                }),
+            )?;
+            let issue = value
+                .get("data")
+                .and_then(|data| data.get("repository"))
+                .and_then(|repository| repository.get("issue"))
+                .ok_or(ApiError::NotFound(number))?;
+            if issue.is_null() {
+                return Err(ApiError::NotFound(number));
+            }
+            let updated_at = issue
+                .get("updatedAt")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::Unexpected("issue.updatedAt missing".to_string()))?;
+            if *previous == UpdatedAt::new(updated_at) {
+                return Ok(FetchResult::NotModified);
+            }
+        }
+
         let value = self.graphql(
             FETCH_ISSUE_QUERY,
             json!({
@@ -1682,11 +1846,6 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
             return Err(ApiError::NotFound(number));
         }
         let snapshot = parse_graphql_issue(issue)?;
-        if let Some(prev) = since {
-            if *prev == snapshot.updated_at {
-                return Ok(FetchResult::NotModified);
-            }
-        }
         Ok(FetchResult::Updated(snapshot))
     }
 
@@ -1703,6 +1862,28 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let resp = self.rest_patch(&path, json!({ "title": new_title }))?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("patch_title json: {e}")))?;
+        parse_rest_issue(&value)
+    }
+
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        let mut payload = serde_json::Map::new();
+        if let Some(title) = &fields.title {
+            payload.insert("title".to_string(), json!(title));
+        }
+        if let Some(body) = &fields.body {
+            payload.insert("body".to_string(), json!(body));
+        }
+        if let Some(labels) = &fields.labels {
+            payload.insert("labels".to_string(), json!(labels));
+        }
+        let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
+        let resp = self.rest_patch(&path, Value::Object(payload))?;
+        let value: Value = serde_json::from_str(&resp.body)
+            .map_err(|e| ApiError::Unexpected(format!("patch_issue_fields json: {e}")))?;
         parse_rest_issue(&value)
     }
 
@@ -2394,8 +2575,11 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
-    use super::{check_status, classify_graphql_errors, HttpResponse};
-    use crate::client::ApiError;
+    use super::{
+        check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
+        HttpResponse, HttpTransport, ResolutionDeadline,
+    };
+    use crate::client::{ApiError, IssueClient, SpecListFilter};
 
     /// SPEC-3214 T-016 / FR-011: a non-rate-limit 403 must surface the
     /// GitHub-provided reason (e.g. personal repo restrictions) instead of
@@ -2448,6 +2632,114 @@ mod check_status_tests {
                 retry_after: Some(17)
             }
         ));
+    }
+
+    /// Issue #3928: the plain GraphQL path must classify a rate-limit body the
+    /// same way the owner-request path does. GitHub answers a secondary limit
+    /// with HTTP 200 and a `RATE_LIMIT` entry in the body, so this path used to
+    /// report it as an opaque `Unexpected` and its callers — the Issue cache
+    /// reads a PM surface runs on — retried straight back into the limit
+    /// instead of backing off.
+    #[test]
+    fn a_rate_limited_graphql_body_is_typed_even_on_the_plain_query_path() {
+        struct RateLimitedBody;
+        impl RateLimitedBody {
+            fn response() -> HttpResponse {
+                HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: r#"{"errors":[{"type":"RATE_LIMIT","message":"API rate limit already exceeded for user ID 965624."}]}"#
+                        .to_string(),
+                }
+            }
+        }
+        impl HttpTransport for RateLimitedBody {
+            fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+
+            fn execute_with_deadline(
+                &self,
+                _request: HttpRequest,
+                _deadline: &ResolutionDeadline,
+            ) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+        }
+
+        let client =
+            HttpIssueClient::with_transport(RateLimitedBody, "token".to_string(), "octo", "gwt");
+        let error = client
+            .list_spec_issues(&SpecListFilter::default())
+            .expect_err("a rate-limited body must not read as success");
+        assert!(
+            matches!(error, ApiError::RateLimited { .. }),
+            "expected RateLimited, got {error:?}"
+        );
+    }
+
+    /// SPEC #4093 AC-5: the reqwest path honours the window another process
+    /// persisted — the read is refused before any request is sent — and a
+    /// refusal GitHub answers is written back to that shared window.
+    #[test]
+    fn the_http_client_is_gated_and_settled_on_the_shared_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate: &'static gwt_core::github_quota::QuotaGate =
+            Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let now = chrono::Utc::now();
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(300),
+            },
+            now,
+        );
+        let transport = crate::client::http::FakeTransport::new();
+        let client = HttpIssueClient::with_transport(transport, "token".to_string(), "octo", "gwt")
+            .with_budget(ledger.clone(), gate);
+
+        let error = client
+            .fetch(crate::IssueNumber(7), None)
+            .expect_err("an open window refuses the read");
+        match error {
+            ApiError::RateLimited { retry_after } => {
+                assert!(retry_after.is_some_and(|secs| secs > 0), "{retry_after:?}")
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert!(
+            client.transport().recorded().is_empty(),
+            "nothing is sent inside the window"
+        );
+        ledger.clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+
+        client.transport().enqueue(HttpResponse {
+            status: 429,
+            headers: Vec::new(),
+            body: String::new(),
+        });
+        let error = client
+            .fetch(crate::IssueNumber(7), None)
+            .expect_err("GitHub refused the read");
+        assert!(matches!(error, ApiError::RateLimited { .. }), "{error:?}");
+        assert!(
+            ledger
+                .active_block(
+                    gwt_core::github_quota::GitHubQuota::GraphQl,
+                    chrono::Utc::now()
+                )
+                .is_some(),
+            "the refusal opens the persisted window"
+        );
+        let snapshot = ledger.snapshot(chrono::Utc::now());
+        assert_eq!(
+            snapshot.local["graphql"].calls_last_hour, 1,
+            "the sent call was counted: {:?}",
+            snapshot.local
+        );
     }
 
     #[test]
