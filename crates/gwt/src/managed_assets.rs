@@ -1312,6 +1312,15 @@ fn materialize_managed_gwt_assets_for_targets(
             ),
         ));
     }
+    // #4339: `core.hooksPath` is inherited through git config, but the
+    // directory it names is generated and never arrives with a clone or a
+    // `git worktree add`. Materializing it here — before any provider-specific
+    // work, and regardless of which targets are selected — is what keeps
+    // commitlint and the commit/push gates from silently doing nothing in a
+    // fresh worktree.
+    gwt_skills::materialize_managed_git_hooks(worktree).map_err(|error| {
+        io::Error::other(format!("failed to materialize managed git hooks: {error}"))
+    })?;
     // #3374: an ephemeral worktree refreshes tracked gwt-* assets from the
     // embedded bundle — its tracked copies are a stale base-ref snapshot, not
     // user content. Persistent worktrees keep the preserve-tracked default.
@@ -1364,6 +1373,12 @@ fn materialize_managed_gwt_assets_for_targets(
 
 pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<()> {
     with_managed_asset_lock(worktree, || {
+        // #4339: a worktree created before gwt owned `core.hooksPath` still has
+        // an empty hook directory. Self-heal is the route that reaches those
+        // worktrees without waiting for a relaunch.
+        gwt_skills::materialize_managed_git_hooks(worktree).map_err(|error| {
+            io::Error::other(format!("failed to materialize managed git hooks: {error}"))
+        })?;
         let targets = detect_existing_managed_asset_targets(worktree);
         regenerate_managed_hook_configs_for_targets(
             worktree,
@@ -1963,6 +1978,31 @@ mod tests {
         fs2::FileExt::try_lock_exclusive(&contender)
             .expect("the transaction must release the materializer lock after its callback");
         fs2::FileExt::unlock(&contender).unwrap();
+    }
+
+    #[test]
+    #[ignore = "load worker controlled by scripts/test-managed-assets-lock-stress.py"]
+    fn pm_repoint_transaction_lock_stress_worker() {
+        let ready = PathBuf::from(
+            std::env::var_os("GWT_MANAGED_ASSETS_STRESS_READY").expect("stress runner ready path"),
+        );
+        let stop = PathBuf::from(
+            std::env::var_os("GWT_MANAGED_ASSETS_STRESS_STOP").expect("stress runner stop path"),
+        );
+        let mut iterations = 0;
+        loop {
+            pm_repoint_transaction_holds_materializer_lock_through_callback();
+            iterations += 1;
+            if iterations == 1 {
+                std::fs::write(&ready, b"ready").unwrap();
+            }
+            // The runner controls lifetime so scheduler delays cannot let a
+            // finite background suite finish before the foreground checks.
+            if stop.exists() {
+                break;
+            }
+        }
+        println!("load worker completed {iterations} lock checks");
     }
 
     #[test]

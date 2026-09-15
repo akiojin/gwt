@@ -304,6 +304,14 @@ pub enum FrontendEvent {
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
+    /// Initial workspace has had a browser rendering opportunity (#3808).
+    StartupFirstFrame {
+        navigation_ms: f64,
+    },
+    /// xterm can accept input; the backend also requires a live PTY writer.
+    StartupTerminalReady {
+        id: String,
+    },
     /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
     /// resident PM pane if it is not running, then frames it in the viewport.
     OpenPmAgent {
