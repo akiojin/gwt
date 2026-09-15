@@ -279,6 +279,10 @@ pub(super) fn self_heal_managed_hooks_in_worktrees_with_expected<'a>(
     worktrees: impl IntoIterator<Item = &'a Path>,
     expected_hook_bin: Option<&str>,
 ) {
+    // Issue #3808: the host error ledger is read once per sweep, not once per
+    // worktree.
+    let failures = gwt::cli::hook::health::ManagedHookFailureSnapshot::read();
+    let started = std::time::Instant::now();
     let mut seen = HashSet::new();
     for worktree in worktrees {
         let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
@@ -290,7 +294,7 @@ pub(super) fn self_heal_managed_hooks_in_worktrees_with_expected<'a>(
         if let Some(expected_hook_bin) = expected_hook_bin {
             input.expected_hook_bin = Some(expected_hook_bin.to_string());
         }
-        let health = gwt::cli::hook::health::read_managed_hook_health(&input);
+        let health = failures.read_health(&input);
         let needs_repair = matches!(
             health.status,
             gwt::cli::hook::health::ManagedHookHealthStatus::NeedsAttention
@@ -327,6 +331,11 @@ pub(super) fn self_heal_managed_hooks_in_worktrees_with_expected<'a>(
             }
         }
     }
+    tracing::info!(
+        worktrees = seen.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "managed hook startup self-heal completed"
+    );
 }
 
 fn startup_auto_resume_window_geometry(
@@ -544,7 +553,17 @@ impl AppRuntime {
                     })
             })
             .collect::<Vec<_>>();
-        self_heal_managed_hooks_in_worktrees(startup_worktrees.iter().map(PathBuf::as_path));
+        // Issue #3808 AC-4: this sweep audited every worktree of the repo
+        // (235 here) for 191 s on the startup path, ahead of the embedded
+        // server bind. Launches refresh the managed assets of the worktree
+        // they start in, so the sweep is a repair rather than a launch
+        // precondition and runs on the blocking worker.
+        let self_heal_worktrees = startup_worktrees.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            self_heal_managed_hooks_in_worktrees(self_heal_worktrees.iter().map(PathBuf::as_path));
+        }) {
+            tracing::warn!(%error, "managed hook startup self-heal could not be scheduled");
+        }
 
         // Issue #4075: managed Codex config keys, fail-open. Issue #4229: the
         // pass probes `codex --version` (~0.6s), so it runs off the startup

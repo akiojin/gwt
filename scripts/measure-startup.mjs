@@ -87,8 +87,11 @@ const locator = spawnSync(process.platform === "win32" ? "where.exe" : "which", 
   { env: auditEnv, windowsHide: true, encoding: "utf8" });
 const allowMissingLogical = env.GWT_HOOK_BIN === "gwtd" && locator.status !== 0;
 function assertHookHealth(health) {
-  const issues = health?.issues?.filter((issue) => !(allowMissingLogical
-    && issue.startsWith("managed hook binary missing: ") && issue.endsWith(" uses gwtd")));
+  // Same non-blocking set as the browser-check skill: a missing logical
+  // fallback binary and fail-open handler failures do not block the launch.
+  const issues = health?.issues?.filter((issue) => !((allowMissingLogical
+    && issue.startsWith("managed hook binary missing: ") && issue.endsWith(" uses gwtd"))
+    || (issue.startsWith("managed hook failure: ") && / state=fail-open( |$)/.test(issue))));
   if (!health || health.status === "inactive" || !Array.isArray(issues) || issues.length) {
     throw new Error(`Hook convergence failed: ${JSON.stringify(health)}`);
   }
