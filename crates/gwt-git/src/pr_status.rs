@@ -5041,42 +5041,49 @@ mod tests {
         let mut gh = FakeGh::new(rows);
         let mut owner_closed = false;
         for offset in [0, PR_INVENTORY_CACHE_TTL_SECS + 1] {
-            let mut owner_calls = 0;
+            // The hydration loop fans out across threads, so `run_gh` is a
+            // `Fn + Sync`: the call counter and the fake CLI need interior
+            // mutability rather than a captured `&mut`.
+            let owner_calls = std::sync::atomic::AtomicUsize::new(0);
             let calls_before = gh.calls.len();
             let now = now_3891() + chrono::Duration::seconds(offset);
-            let read = fetch_pr_inventory_cached_with(
-                Path::new("/tmp/repo"),
-                &tmp.path().join(PR_INVENTORY_CACHE_FILE),
-                &ledger,
-                now,
-                &PrInventoryOptions::default(),
-                |_, args| {
-                    if args.starts_with(&["api", "graphql"]) {
-                        owner_calls += 1;
-                        let query = args.join(" ");
-                        assert_eq!(query.matches("issue(number:3972)").count(), 1);
-                        assert!(query.contains(github_budget::GRAPHQL_RATE_LIMIT_SELECTION));
-                        ledger.record_spawn_from(
-                            GitHubQuota::GraphQl,
-                            &github_budget::spawn_source(args),
-                            now,
-                        );
-                        Ok(GhCliOutput {
-                            success: true,
-                            stderr: String::new(),
-                            stdout: serde_json::json!({"data":{
-                                "rateLimit":{"cost":3,"remaining":4700,"resetAt":"2026-09-02T01:00:00Z","nodeCount":1},
-                                "repository":{"owner_3972":{"state":
-                                if owner_closed {"CLOSED"} else {"OPEN"}
-                            }}}})
-                            .to_string(),
-                        })
-                    } else {
-                        gh.run(args)
-                    }
-                },
-            )
-            .unwrap();
+            let read = {
+                let gh = std::sync::Mutex::new(&mut gh);
+                fetch_pr_inventory_cached_with(
+                    Path::new("/tmp/repo"),
+                    &tmp.path().join(PR_INVENTORY_CACHE_FILE),
+                    &ledger,
+                    now,
+                    &PrInventoryOptions::default(),
+                    |_, args| {
+                        if args.starts_with(&["api", "graphql"]) {
+                            owner_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let query = args.join(" ");
+                            assert_eq!(query.matches("issue(number:3972)").count(), 1);
+                            assert!(query.contains(github_budget::GRAPHQL_RATE_LIMIT_SELECTION));
+                            ledger.record_spawn_from(
+                                GitHubQuota::GraphQl,
+                                &github_budget::spawn_source(args),
+                                now,
+                            );
+                            Ok(GhCliOutput {
+                                success: true,
+                                stderr: String::new(),
+                                stdout: serde_json::json!({"data":{
+                                    "rateLimit":{"cost":3,"remaining":4700,"resetAt":"2026-09-02T01:00:00Z","nodeCount":1},
+                                    "repository":{"owner_3972":{"state":
+                                    if owner_closed {"CLOSED"} else {"OPEN"}
+                                }}}})
+                                .to_string(),
+                            })
+                        } else {
+                            gh.lock().unwrap().run(args)
+                        }
+                    },
+                )
+                .unwrap()
+            };
+            let owner_calls = owner_calls.into_inner();
             assert_eq!(owner_calls, 1);
             let budget = ledger.snapshot(now);
             assert_eq!(
