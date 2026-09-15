@@ -6514,6 +6514,9 @@ mod tests {
     fn monitor_wait_refusal_without_a_number_states_it_released_nothing() {
         use gwt_core::test_support::ScopedEnvVar;
 
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let _launch = ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
