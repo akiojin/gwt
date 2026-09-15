@@ -229,6 +229,7 @@ pub(super) fn prepare_open_project_window_restores(
                     &session.worktree_path,
                 ));
                 Some(PreparedProjectWindowRestore::Agent {
+                    window_id: window.id.clone(),
                     session: Box::new(session),
                     workspace_resume_context,
                     fallback_geometry: window.geometry.clone(),
@@ -801,7 +802,12 @@ impl AppRuntime {
             {
                 admission.refuse(&session.id, refusal);
                 if let Some(reason) = refusal.removal_reason() {
-                    self.remove_refused_session_restore(&tab_id, &session.id, reason);
+                    self.remove_refused_session_restore(
+                        &tab_id,
+                        &session.id,
+                        placeholder_window_id.as_deref(),
+                        reason,
+                    );
                 }
                 continue;
             }
@@ -934,6 +940,7 @@ impl AppRuntime {
             return false;
         };
         session.linked_issue_number.is_none()
+            && session.execution_binding.is_none()
             && window.linked_issue_number.is_none()
             && window.status == WindowProcessStatus::Stopped
             && matches!(
@@ -1233,7 +1240,7 @@ impl AppRuntime {
             config.launch_route = gwt_agent::LaunchRoute::Manual;
         }
         let geometry = self
-            .remove_stale_paused_agent_window(tab_id, &session.id)
+            .remove_stale_paused_agent_window(tab_id, &session.id, None)
             .unwrap_or(fallback_geometry);
         // Snapshot the window registry *after* the paused placeholder is
         // removed: the freshly spawned window may reuse the placeholder's id
@@ -1398,25 +1405,15 @@ impl AppRuntime {
         let mut restored = 0usize;
         for restore in restores {
             let window_id = match &restore {
-                PreparedProjectWindowRestore::Agent { session, .. } => {
-                    self.tab(tab_id).and_then(|tab| {
-                        tab.workspace.persisted().windows.iter().find_map(|window| {
-                            (window.session_id.as_deref() == Some(session.id.as_str()))
-                                .then(|| window.id.clone())
-                        })
-                    })
-                }
-                PreparedProjectWindowRestore::Process { window_id, .. } => Some(window_id.clone()),
+                PreparedProjectWindowRestore::Agent { window_id, .. }
+                | PreparedProjectWindowRestore::Process { window_id, .. } => window_id,
             };
-            let Some(window_id) = window_id else {
-                continue;
-            };
-            let combined = combined_window_id(tab_id, &window_id);
+            let combined = combined_window_id(tab_id, window_id);
             // A window with a live PTY/runtime is already running (e.g. when an
             // already-open project tab is re-selected); only paused placeholders
             // should be restarted. `window_lookup` is the registry of known
             // windows, not the set of running ones, so it must not gate here.
-            if self.runtimes.contains_key(&combined) {
+            if !self.tracked_window_exists(&combined) || self.runtimes.contains_key(&combined) {
                 continue;
             }
             match restore {
@@ -1424,6 +1421,7 @@ impl AppRuntime {
                     session,
                     workspace_resume_context,
                     fallback_geometry,
+                    ..
                 } => {
                     if self
                         .active_agent_sessions
@@ -1444,7 +1442,12 @@ impl AppRuntime {
                     {
                         admission.refuse(&session.id, refusal);
                         if let Some(reason) = refusal.removal_reason() {
-                            self.remove_refused_session_restore(tab_id, &session.id, reason);
+                            self.remove_refused_session_restore(
+                                tab_id,
+                                &session.id,
+                                Some(&combined),
+                                reason,
+                            );
                             events.push(self.workspace_state_broadcast());
                         }
                         continue;
@@ -1499,6 +1502,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         session_id: &str,
+        window_id: Option<&str>,
     ) -> Option<WindowGeometry> {
         let tab = self.tab_mut(tab_id)?;
         // SPEC-1921 Phase 65 (T337): stale placeholder removal must cover the
@@ -1515,6 +1519,7 @@ impl AppRuntime {
                 crate::runtime_support::window_is_agent_pane(w)
                     && w.status == WindowProcessStatus::Stopped
                     && w.session_id.as_deref() == Some(session_id)
+                    && window_id.is_none_or(|id| combined_window_id(tab_id, &w.id) == id)
             })
             .map(|w| (w.id.clone(), w.geometry.clone()));
         let (raw_id, geometry) = stale?;

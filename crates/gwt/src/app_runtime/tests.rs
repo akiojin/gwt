@@ -69346,6 +69346,46 @@ fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics()
 }
 
 #[test]
+fn open_project_empty_landed_cleanup_preserves_same_session_diagnostic_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = restore_fixture_tab(
+        "tab-landed",
+        &repo,
+        &[
+            ("diagnostic".into(), "session-shared".into()),
+            ("empty".into(), "session-shared".into()),
+        ],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-landed"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-shared",
+        &repo,
+        Some("native-shared"),
+        None,
+    );
+    runtime.window_details.insert(
+        combined_window_id("tab-landed", "diagnostic"),
+        "Retained failure details".into(),
+    );
+    runtime.restore_open_project_windows("tab-landed");
+    let windows = &runtime
+        .tab("tab-landed")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(windows.len(), 1);
+    assert_eq!(
+        windows[0].id, "diagnostic",
+        "remove the exact empty window, not another window sharing its Session"
+    );
+}
+
+#[test]
 fn startup_restore_queues_only_one_session_per_worktree() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

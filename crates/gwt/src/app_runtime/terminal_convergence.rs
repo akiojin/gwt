@@ -734,6 +734,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         session_id: &str,
+        window_id: Option<&str>,
         reason: &str,
     ) {
         match gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
@@ -756,7 +757,7 @@ impl AppRuntime {
                 "automatic restore refused, but the Session could not be marked restore-disabled"
             ),
         }
-        self.remove_stale_paused_agent_window(tab_id, session_id);
+        self.remove_stale_paused_agent_window(tab_id, session_id, window_id);
         let _ = self.persist();
     }
 }
