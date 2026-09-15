@@ -227,6 +227,20 @@ drive them.
   do not chase it — check whether the resume condition is something you
   can unblock (a serialization order, a ruling), and report what it is
   waiting for rather than that it is idle.
+- Read `waiting.in_force` before trusting the field: `false` means the
+  declaration no longer protects the row (it expired, or it was
+  invalidated — `waiting.invalidated` names who, when, and why), so treat
+  the row by its `last_activity_at` like any other. `waiting.silent_secs`
+  and `waiting.silent_beyond_stuck_timeout` say how long the agent has
+  been silent; a declaration in force with that flag set is a row to look
+  at, not one to skip.
+- When your own ruling removes a wait condition (a lease the agent never
+  needed, a dependency that landed), do not wait for the agent to read the
+  Board: `issue.monitor.wait.invalidate` with `params.number` and
+  `params.reason` voids the declaration, records the invalidation on the
+  row, and returns it to ordinary stuck detection on the next scan. Tell
+  the agent why on the Board as well; a fresh declaration from it
+  supersedes the invalidation.
 
 - `board.show` with `params.all` set to true returns the project-wide
   Board, where agents post their own milestones, blockers, and handoffs.
@@ -931,34 +945,25 @@ that then stalls the Issue Monitor scan and every agent's PR handoff.
 
 ## Heavy verification serialization
 
-Agents serialize heavy verification through `verify.lease.acquire`; a
-contended attempt returns the current holder instead of queueing. The
-agent-side wait procedure is defined in the gwt-verify skill: declare
-the wait with `issue.monitor.wait` (Issue #3844), retry
-`verify.lease.acquire` every 3 minutes for up to 15 attempts (about 45
-minutes), keep the holder readable through `workspace.update`
-`current_focus`, and on the final refusal post `kind:"blocked"` to the
-Board naming the holder. Your part:
+Only canonical `verify.run` acquires the host-wide lease, in-process for
+its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo / TDD /
+lint / coverage, direct headed browser checks, and pre-push checks do not require a verification lease.
+Do not ask agents to acquire a manual lease for these operations.
 
-- A Board post from a waiting agent names the lease holder. Read
-  `verify.lease.status` and arbitrate the order — tell the holder to
-  release or the waiter to keep waiting — instead of relaunching either.
-- `verify.lease.status` names `holder_kind`. When it is `index` (a
-  background `chroma_index_runner` job, Issue #4086), verification
-  already outranks it: a refused agent leaves a reservation the runner
-  yields to at its next batch boundary, and `estimated_remaining_ms` /
-  `remaining_batches` say how long that is. To force the order yourself,
-  run `verify.lease.release` with the index lease's `lease_id`: it answers
-  `yield requested` and leaves the same reservation instead of failing
-  with "no control channel".
-- An agent whose `current_focus` says it is waiting for the lease, or
-  whose row carries a `waiting` declaration, is waiting, not stuck. Do
-  not stop it on `last_activity_at` alone.
-- `verify.run` admits itself (Issue #3913): it claims the lease
-  in-process and waits, bounded, for other worktrees' heavy processes to
-  drain. While it waits `verify.lease.status` counts it under `pending`;
-  when the budget runs out it answers `deferred` and the agent reruns it.
-  A `deferred` agent is retrying, not stuck.
+- Inspect `verify.lease.status` when canonical verification is waiting.
+  An agent with a `waiting` declaration is waiting, not stuck; do not stop
+  it on `last_activity_at` alone.
+- `verify.run` owns admission and its bounded wait. Status reports waiting
+  runs under `pending`; a `deferred` result means no verification record
+  was written. Use the reported holder and wait reason to arbitrate a
+  retry. There is no manual acquire loop or fixed retry schedule.
+- A holder with no live verification workload is a lease-lifecycle fault,
+  not evidence that all builds must be serialized. Report its run / PID
+  and timing evidence. Do not stop unrelated Cargo processes.
+- Manual `verify.lease.acquire`, `verify.lease.hold`, and
+  `verify.lease.extend` are retired. `verify.lease.release` remains for
+  draining a legacy holder; it does not kill the holder process. Index
+  holders still yield at a batch boundary when release requests a yield.
 
 ## NeedsHuman
 
@@ -1975,10 +1980,9 @@ mod tests {
         let body = body();
         for phrase in [
             "## Heavy verification serialization",
-            "`verify.lease.acquire`",
-            "every 3 minutes",
-            "15 attempts",
-            "`workspace.update`",
+            "Only canonical `verify.run` acquires the host-wide lease",
+            "do not require a verification lease",
+            "cargo build -p gwt --bin gwtd",
             "`verify.lease.status`",
             "waiting, not stuck",
             // Issue #3913: verify.run admits itself and answers `deferred`
@@ -2269,6 +2273,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             .expect("codex mirror exists");
         assert_eq!(claude, codex, "mirrors must be byte-identical");
         assert_eq!(claude, render_skill_md());
+        assert!(claude.contains("Only canonical `verify.run` acquires the host-wide lease"));
+        assert!(!claude.contains("every 3 minutes"));
+        assert!(!claude.contains("15 attempts"));
     }
 
     #[test]

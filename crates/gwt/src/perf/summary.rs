@@ -61,6 +61,9 @@ pub struct PerfLogRecord {
     /// Shared detector version; absent on legacy or unverified measurements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detector_version: Option<u32>,
+    /// Startup correlation and phase boundaries, absent on older samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<super::startup::StartupSample>,
 }
 
 impl PerfLogRecord {
@@ -615,6 +618,7 @@ mod tests {
                 consecutive_count: None,
                 duration_seconds: None,
                 detector_version: None,
+                startup: None,
             })
             .collect();
         records.push(PerfLogRecord {
@@ -630,6 +634,7 @@ mod tests {
             consecutive_count: Some(3),
             duration_seconds: Some(1.5),
             detector_version: None,
+            startup: None,
         });
 
         let summary = summarize(&records, &budgets, Some(at(9, 0)));
@@ -664,6 +669,7 @@ mod tests {
                 consecutive_count: None,
                 duration_seconds: None,
                 detector_version: None,
+                startup: None,
             })
             .collect();
 
@@ -687,6 +693,7 @@ mod tests {
             consecutive_count: None,
             duration_seconds: None,
             detector_version: None,
+            startup: None,
         }];
 
         let summary = summarize(&records, &PerfBudgets::default(), None);
@@ -790,6 +797,7 @@ mod tests {
                 consecutive_count: None,
                 duration_seconds: None,
                 detector_version: None,
+                startup: None,
             },
             PerfLogRecord {
                 schema_version: 1,
@@ -804,6 +812,7 @@ mod tests {
                 consecutive_count: Some(3),
                 duration_seconds: Some(4.0),
                 detector_version: None,
+                startup: None,
             },
         ];
 

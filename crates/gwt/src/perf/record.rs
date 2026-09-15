@@ -40,6 +40,7 @@ pub enum PerfUnit {
 enum PerfRecordType {
     Sample,
     Violation,
+    StartupPhase,
 }
 
 /// Evidence captured when a sustained budget violation is emitted.
@@ -95,6 +96,8 @@ pub struct PerfRecord {
     duration_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detector_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    startup: Option<super::startup::StartupSample>,
 }
 
 impl PerfRecord {
@@ -118,6 +121,7 @@ impl PerfRecord {
             consecutive_count: None,
             duration_seconds: None,
             detector_version: None,
+            startup: None,
         }
     }
 
@@ -142,7 +146,21 @@ impl PerfRecord {
             consecutive_count: Some(details.consecutive_count),
             duration_seconds: Some(details.duration_seconds),
             detector_version: None,
+            startup: None,
         }
+    }
+
+    pub fn startup(sample: super::startup::StartupSample, duration_ms: f64) -> Self {
+        let mut record = Self::sample(
+            Utc::now(),
+            PerfStream::Ui,
+            format!("startup:{}", sample.phase.name()),
+            duration_ms,
+            PerfUnit::Milliseconds,
+        );
+        record.record_type = PerfRecordType::StartupPhase;
+        record.startup = Some(sample);
+        record
     }
 
     pub fn with_role(mut self, role: impl AsRef<str>) -> Self {

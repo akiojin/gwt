@@ -44,6 +44,7 @@ fn sample_record(target: &str, value: f64) -> PerfLogRecord {
         consecutive_count: None,
         duration_seconds: None,
         detector_version: None,
+        startup: None,
     }
 }
 

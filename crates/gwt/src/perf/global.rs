@@ -82,7 +82,19 @@ impl PerfRuntime {
             route.target(),
             None,
             elapsed.as_secs_f64() * 1_000.0,
-            budget,
+            Some(budget),
+        );
+    }
+
+    /// Record one phase of a route (Issue #4283 AC-5): an unbudgeted sample
+    /// that attributes the route total to its dominant step.
+    pub fn record_route_phase(&mut self, route: PerfRoute, phase: &str, elapsed: Duration) {
+        self.record(
+            PerfStream::Ui,
+            route.phase_target(phase),
+            None,
+            elapsed.as_secs_f64() * 1_000.0,
+            None,
         );
     }
 
@@ -99,7 +111,7 @@ impl PerfRuntime {
             format!("{OPERATION_TARGET_PREFIX}{operation}"),
             Some(role),
             elapsed.as_secs_f64() * 1_000.0,
-            budget,
+            Some(budget),
         );
     }
 
@@ -109,7 +121,7 @@ impl PerfRuntime {
         target: String,
         role: Option<&'static str>,
         value_ms: f64,
-        budget: f64,
+        budget: Option<f64>,
     ) {
         if !self.sink.is_enabled() || !value_ms.is_finite() {
             return;
@@ -128,7 +140,10 @@ impl PerfRuntime {
                 PerfRecord::sample(now, stream, &target, value_ms, PerfUnit::Milliseconds),
                 role,
             );
-            let _ = self.sink.append_budgeted(&sample, budget);
+            let _ = match budget {
+                Some(budget) => self.sink.append_budgeted(&sample, budget),
+                None => self.sink.append(&sample),
+            };
         }
 
         self.governor
@@ -195,9 +210,22 @@ pub fn record_route(route: PerfRoute, elapsed: Duration) {
     with_runtime(|runtime| runtime.record_route(route, elapsed));
 }
 
+/// Record one route phase, or do nothing when uninstalled.
+pub fn record_route_phase(route: PerfRoute, phase: &str, elapsed: Duration) {
+    with_runtime(|runtime| runtime.record_route_phase(route, phase, elapsed));
+}
+
 /// Record one gwtd operation measurement, or do nothing when uninstalled.
 pub fn record_operation(operation: &str, elapsed: Duration, read_only: bool) {
     with_runtime(|runtime| runtime.record_operation(operation, elapsed, read_only));
+}
+
+/// Startup milestones occur once, rather than at a sampling frequency. Keep
+/// each milestone while retaining the same disabled sink and retention policy.
+pub(crate) fn record_startup_sample(record: &PerfRecord) {
+    with_runtime(|runtime| {
+        let _ = runtime.sink.append(record);
+    });
 }
 
 /// Scope guard recording a route measurement when it drops.
@@ -222,6 +250,38 @@ impl RouteTimer {
 impl Drop for RouteTimer {
     fn drop(&mut self) {
         record_route(self.route, self.started.elapsed());
+    }
+}
+
+/// Phase clock for one route (Issue #4283 AC-5).
+///
+/// Each `mark` records the span since the previous mark (or the start) as
+/// `phase:<route>.<phase>`, so a route full of `?` early returns still leaves
+/// the phases it completed in the perf stream. Nothing is recorded on drop:
+/// the route total is the caller's `record_route`.
+pub struct RoutePhaseClock {
+    route: PerfRoute,
+    last_mark: Instant,
+}
+
+impl RoutePhaseClock {
+    /// Start the clock for `route`.
+    pub fn start(route: PerfRoute) -> Self {
+        Self {
+            route,
+            last_mark: Instant::now(),
+        }
+    }
+
+    /// Record the span since the previous mark as `phase`.
+    pub fn mark(&mut self, phase: &str) {
+        let now = Instant::now();
+        record_route_phase(
+            self.route,
+            phase,
+            now.saturating_duration_since(self.last_mark),
+        );
+        self.last_mark = now;
     }
 }
 
@@ -313,6 +373,64 @@ mod tests {
         assert_eq!(violations[0].target, "route:pane.close");
         assert_eq!(violations[0].budget, Some(100.0));
         assert_eq!(violations[0].consecutive_count, Some(3));
+    }
+
+    /// Issue #4283 AC-5: the pane-create route records which preparation
+    /// phase was dominant, so the next regression is attributed from the perf
+    /// stream instead of guessed. Phases are unbudgeted: a slow phase never
+    /// produces a violation of its own — the route total already does.
+    #[test]
+    fn route_phases_land_as_unbudgeted_samples_next_to_the_route() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let mut runtime =
+            PerfRuntime::from_config(&PerfConfig::default()).expect("create perf runtime");
+
+        for _ in 0..3 {
+            runtime.record_route_phase(
+                PerfRoute::PaneCreate,
+                "runner_health",
+                Duration::from_millis(12_000),
+            );
+        }
+
+        let records = read_all();
+        assert_eq!(records.len(), 3, "three samples, no violation");
+        assert!(records.iter().all(|record| record.is_sample()));
+        assert_eq!(records[0].target, "phase:pane.create.runner_health");
+        assert_eq!(records[0].stream, "ui");
+        assert_eq!(records[0].unit, "ms");
+        assert!((records[0].value - 12_000.0).abs() < 1.0);
+        assert_eq!(
+            crate::perf::summary::budget_for_target(&records[0].target, None, runtime.budgets()),
+            None,
+            "phases carry no budget of their own"
+        );
+    }
+
+    #[test]
+    fn a_phase_clock_records_each_mark_as_the_span_since_the_previous_mark() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        assert!(install(&PerfConfig::default()) || is_installed());
+
+        let mut clock = RoutePhaseClock::start(PerfRoute::PaneCreate);
+        std::thread::sleep(Duration::from_millis(20));
+        clock.mark("worktree");
+        clock.mark("docker");
+
+        let records: Vec<_> = read_all()
+            .into_iter()
+            .filter(|record| record.target.starts_with("phase:pane.create."))
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].target, "phase:pane.create.worktree");
+        assert!(records[0].value >= 20.0, "first mark spans the sleep");
+        assert_eq!(records[1].target, "phase:pane.create.docker");
+        assert!(
+            records[1].value < 20.0,
+            "second mark spans only its own step"
+        );
     }
 
     #[test]

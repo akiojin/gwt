@@ -592,6 +592,11 @@ where
 {
     let mut incoming = Vec::new();
     let mut decoded_by_content_identity = HashMap::<usize, Vec<CachedSharedWorkEventLine>>::new();
+    // Issue #4371: one shard is offered once per origin ref that holds it
+    // (701 refs peaked the rebuild at 4.7 GB). The fold keeps the canonical
+    // event, and the first identical duplicate records its provenance; any
+    // further identical copy is a no-op it would only count as a duplicate.
+    let mut copies_by_stable_key = HashMap::<String, u8>::new();
     for source in sources {
         let content_identity = Arc::as_ptr(&source.content) as *const () as usize;
         let decoded = decoded_by_content_identity
@@ -640,6 +645,12 @@ where
             let stable_key = serde_json::to_string(&event).map_err(|error| {
                 GwtError::Other(format!("work events intake stable key: {error}"))
             })?;
+            let copies = copies_by_stable_key.entry(stable_key.clone()).or_default();
+            if *copies >= 2 {
+                report.skipped_duplicate += 1;
+                continue;
+            }
+            *copies += 1;
             incoming.push((event, stable_key));
         }
     }
@@ -1068,6 +1079,68 @@ mod tests {
                 .as_ref()
                 .and_then(|container| container.branch.as_deref()),
             Some("work/original")
+        );
+    }
+
+    fn event_with_own_container() -> Arc<str> {
+        Arc::from(event_json(
+            "evt-owned",
+            "work-owned",
+            "start",
+            "2026-07-28T10:00:00Z",
+            ",\"title\":\"owned\",\"status_category\":\"active\",\"execution_container\":{\"branch\":\"work/original\"}",
+        ))
+    }
+
+    fn sources_from_refs(content: &Arc<str>, refs: usize) -> Vec<SharedWorkEventsSource> {
+        (0..refs)
+            .map(|index| {
+                SharedWorkEventsSource::new(
+                    Arc::clone(content),
+                    Some(source_container(&format!("work/ref-{index}"))),
+                )
+            })
+            .collect()
+    }
+
+    /// Issue #4371: a shard held by many origin refs reaches the rebuild once
+    /// per ref. Past the canonical event and the first duplicate — the one that
+    /// records duplicate provenance — further identical copies change nothing.
+    #[test]
+    fn identical_copies_beyond_the_first_duplicate_do_not_change_the_rebuild() {
+        let content = event_with_own_container();
+        let rebuild = |refs: usize| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let works = tmp.path().join("works.json");
+            let sources = sources_from_refs(&content, refs);
+            rebuild_work_events_with_shared_loader(&works, || Ok((sources, ())), None)
+                .expect("rebuild");
+            let mut projection = load_workspace_work_items_from_path(&works)
+                .expect("load projection")
+                .expect("projection");
+            projection.updated_at = Utc.timestamp_opt(0, 0).single().expect("epoch");
+            serde_json::to_value(&projection).expect("projection json")
+        };
+
+        assert_eq!(rebuild(5), rebuild(2));
+    }
+
+    /// Issue #4371: with 701 origin refs holding the same shards, the rebuild
+    /// held one cloned event plus its JSON key per ref and peaked at 4.7 GB.
+    /// The collected list must not grow with the number of refs.
+    #[test]
+    fn identical_copies_are_collected_at_most_twice() {
+        let content = event_with_own_container();
+        let mut report = WorkEventsIntakeReport::default();
+
+        let incoming =
+            collect_shared_work_event_sources(sources_from_refs(&content, 701), &mut report)
+                .expect("collect sources");
+
+        assert_eq!(incoming.len(), 2, "canonical + the provenance duplicate");
+        assert_eq!(
+            report.skipped_duplicate, 699,
+            "dropped copies are still accounted"
         );
     }
 
