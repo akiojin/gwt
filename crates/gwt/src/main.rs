@@ -1172,11 +1172,10 @@ fn issue_monitor_daemon_user_event(
     match event_name {
         "status" => {
             let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorStatus {
-                    status: Box::new(status),
-                },
-            )]))
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: project_root.to_path_buf(),
+                status: Box::new(status),
+            })
         }
         "inbox" => {
             let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
@@ -1475,6 +1474,10 @@ enum UserEvent {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     },
+    IssueMonitorDaemonStatus {
+        project_root: PathBuf,
+        status: Box<gwt::IssueMonitorStatusView>,
+    },
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
     IssueMonitorDaemonInbox {
@@ -1705,7 +1708,7 @@ mod tests {
     /// poll interval.
     #[test]
     fn the_gui_drives_daemon_supervision_on_its_own_timer() {
-        let source = include_str!("main.rs");
+        let source = include_str!("main.rs").replace("\r\n", "\n");
         let supervision = source
             .split_once("runtime-daemon-ensure-tick")
             .expect("the GUI must own a daemon supervision thread")
@@ -2151,19 +2154,19 @@ mod tests {
             serde_json::to_value(status.clone()).expect("status serializes"),
             42,
         );
-        match super::daemon_broadcast_user_event(
+        let status_event = super::daemon_broadcast_user_event(
             gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
             status_payload,
             project_root,
             99,
-        ) {
-            Some(UserEvent::Dispatch(events)) => {
-                assert!(events.iter().any(|event| {
-                    matches!(
-                        &event.event,
-                        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
-                    )
-                }));
+        );
+        match status_event {
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: actual_project_root,
+                status: actual,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(*actual, status);
             }
             other => panic!("unexpected issue monitor status event: {other:?}"),
         }
@@ -7274,8 +7277,22 @@ mod tests {
 
     #[test]
     fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+        // Executing the plan revokes Codex project trust, which resolves its
+        // config from the process-global `CODEX_HOME` (falling back to the real
+        // user home). Pin it to this test's tempdir under the env lock, the same
+        // way the sibling prune tests do: without it this test reads whichever
+        // `CODEX_HOME` a concurrently running test happens to have installed —
+        // including the deliberately malformed config written by
+        // `orphan_intake_prune_keeps_worktree_when_codex_trust_revocation_fails`
+        // — and then keeps the snapshotted orphan because trust cleanup failed,
+        // so `removed` is 0 instead of 1 (Issue #4299).
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -9542,18 +9559,17 @@ fn main() -> std::io::Result<()> {
                 ));
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
+                project_root,
+                status,
+            }) => {
+                clients.dispatch(app.issue_monitor_daemon_status_events(&project_root, status));
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
                 project_root,
                 items,
             }) => {
-                // SPEC-3431 T-093: the wake decision runs before the frontend
-                // broadcast so a parked PM is revived by daemon-side activity.
-                app.replace_knowledge_monitor_snapshot(&project_root, &items);
-                let mut events = app.pm_wake_events(&project_root, &items);
-                events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
-                    items,
-                }));
-                clients.dispatch(events);
+                clients.dispatch(app.issue_monitor_daemon_inbox_events(&project_root, items));
             }
             Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
                 window_id,

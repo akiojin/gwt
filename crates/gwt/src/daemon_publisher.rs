@@ -294,6 +294,32 @@ fn publish_issue_monitor_control_with_timeout_and_liveness(
     publish_issue_monitor_control_to_endpoint(endpoint, payload, timeout, started)
 }
 
+/// Hand one agent-window canvas snapshot to the daemon that owns the Issue
+/// Monitor scan (Issue #4084 AC-1).
+///
+/// Absence from the snapshot is what makes a launch binding dead, so a daemon
+/// that never receives one can never release the slot of a pane that died.
+///
+/// Issue #4131: this publish used to be `#[cfg(unix)]`. The daemon runs on
+/// Windows too — over a named pipe rather than a Unix socket — and it is the
+/// scan driver there, so the Windows daemon never saw a canvas at all:
+/// `classify_idle_windows` found no fresh snapshot on every scan, and every
+/// launch whose pane an auto-update restart killed held its slot until a PM
+/// issued `issue.monitor.stop` by hand.
+pub fn publish_issue_monitor_window_snapshot(
+    project_root: &Path,
+    snapshot: &crate::IssueMonitorWindowSnapshot,
+) -> Result<(), IssueMonitorControlPublishError> {
+    publish_issue_monitor_control(
+        project_root,
+        crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({ "window_snapshot": snapshot }),
+            std::process::id(),
+        ),
+    )
+}
+
 /// Read the daemon-owned atomic Issue Monitor projection. `Ok(None)` means no
 /// live daemon has authority and callers may use their offline cache fallback.
 /// A live daemon without a projection is an ambiguous read and fails closed.
@@ -514,6 +540,54 @@ pub fn publish_event_with_timeout(
 // Liveness probe shared with `cli::daemon` and `main`; see
 // `crate::process::is_process_alive`.
 use crate::process::is_process_alive as is_alive;
+
+/// Issue #4131: the canvas publish must reach the transport on every host the
+/// daemon runs on, Windows included. Kept out of the `unix`-only module below
+/// on purpose — that is exactly the gate this regression is about.
+#[cfg(test)]
+mod window_snapshot_publish_tests {
+    use gwt_core::test_support::ScopedEnvVar;
+    use tempfile::TempDir;
+
+    use crate::runtime_daemon_events::IssueMonitorControlPublishError;
+
+    /// Without a daemon the publish must report a real transport outcome. A
+    /// platform where it silently does nothing leaves the Issue Monitor's idle
+    /// classifier blind and its slots leaked (Issue #4131 AC-1).
+    #[test]
+    fn window_snapshot_publish_reaches_the_transport_on_every_platform() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().expect("project tempdir");
+        let home = TempDir::new().expect("home tempdir");
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: "2026-09-08T01:11:27Z".to_string(),
+            windows: vec![crate::IssueMonitorWindowObservation {
+                window_id: "tab-1::agent-149".to_string(),
+                issue_number: Some(4009),
+                status: crate::WindowState::Stopped,
+                review_dispatch: false,
+            }],
+        };
+
+        let error = super::publish_issue_monitor_window_snapshot(project.path(), &snapshot)
+            .expect_err("no daemon is running for this project root");
+
+        assert!(
+            matches!(
+                &error,
+                IssueMonitorControlPublishError::TransportUnavailable(message)
+                    if message.contains("daemon not running")
+            ),
+            "the publish must be attempted, not skipped: {error:?}"
+        );
+    }
+}
 
 // The fixtures below stand up a fake daemon on a raw `std` Unix listener;
 // the transport-neutral publisher path is exercised end-to-end through
