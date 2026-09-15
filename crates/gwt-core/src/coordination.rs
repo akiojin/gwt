@@ -2456,22 +2456,30 @@ fn reminders_path(worktree_root: &Path, agent_session_id: &str) -> PathBuf {
     reminders_dir(worktree_root).join(format!("{agent_session_id}.json"))
 }
 
-fn gwt_core_project_coordination_root(repo_hash: &str) -> PathBuf {
-    crate::paths::gwt_projects_dir()
-        .join(repo_hash)
-        .join("coordination")
-}
-
-fn migrated_project_coordination_root(repo_hash: Option<&str>) -> Option<PathBuf> {
-    repo_hash
-        .filter(|value| {
-            value.len() == 16
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+fn migrated_project_coordination_root(
+    worktree_root: &Path,
+    _repo_hash: Option<&str>,
+) -> Option<PathBuf> {
+    // A persisted Session hash can predate an origin change. Resolve the
+    // current common repository from local files for both Board and sidecar
+    // reads, without the git subprocess used by coordination_repo_root.
+    let repository_path = worktree_root
+        .ancestors()
+        .find(|path| {
+            path.join(".git").exists()
+                || (path.join("HEAD").is_file() && path.join("config").is_file())
         })
-        .map(gwt_core_project_coordination_root)
-        .filter(|root| coordination_migration_marker_path(root).is_file())
+        .unwrap_or(worktree_root);
+    let common_dir = crate::repo_hash::repository_common_dir(repository_path)?;
+    let repo_root = if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+        common_dir.parent()?
+    } else {
+        &common_dir
+    };
+    let root = gwt_project_dir_for_repo_path(repo_root).join("coordination");
+    coordination_migration_marker_path(&root)
+        .is_file()
+        .then_some(root)
 }
 
 fn reminders_path_for_repo_hash(
@@ -2479,7 +2487,7 @@ fn reminders_path_for_repo_hash(
     repo_hash: Option<&str>,
     agent_session_id: &str,
 ) -> PathBuf {
-    migrated_project_coordination_root(repo_hash)
+    migrated_project_coordination_root(worktree_root, repo_hash)
         .unwrap_or_else(|| coordination_dir(worktree_root))
         .join("reminders")
         .join(format!("{agent_session_id}.json"))
@@ -2632,7 +2640,7 @@ pub fn load_prompt_reminder_for_repo_hash(
     status_kind: &BoardEntryKind,
     status_since: DateTime<Utc>,
 ) -> Result<PromptBoardRead> {
-    let prepared = migrated_project_coordination_root(repo_hash)
+    let prepared = migrated_project_coordination_root(worktree_root, repo_hash)
         .map(prepare_coordination_read_root_at)
         .transpose()?;
     let Some(prepared) = prepared else {
@@ -5089,6 +5097,102 @@ mod tests {
             prompt_board_read_test_counters().coordination_root_resolutions,
             0
         );
+    }
+
+    #[test]
+    fn prompt_reminder_stale_repo_hash_keeps_board_and_sidecar_in_current_scope() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/old/repo.git",
+            ],
+        );
+        ensure_repo_local_files(&repo).unwrap();
+        let stale_hash = crate::paths::project_scope_hash(&repo);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.com/current/repo.git",
+            ],
+        );
+        ensure_repo_local_files(&repo).unwrap();
+        let expected = RemindersState {
+            last_injected_at: DateTime::<Utc>::from_timestamp(42, 0),
+            ..RemindersState::default()
+        };
+        write_reminders_state(&repo, "session-1", &expected).unwrap();
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "current scope",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        post_entry(&repo, entry.clone()).unwrap();
+        let since = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let board = load_prompt_reminder_for_repo_hash(
+            &repo,
+            Some(stale_hash.as_str()),
+            since,
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            since,
+        )
+        .unwrap();
+        assert_eq!(board.recent_entries, vec![entry]);
+        assert!(board.has_recent_own_status);
+        assert_eq!(
+            load_reminders_state_for_repo_hash(&repo, Some(stale_hash.as_str()), "session-1",)
+                .unwrap(),
+            expected
+        );
+        let nested = repo.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            migrated_project_coordination_root(&nested, Some(stale_hash.as_str())),
+            migrated_project_coordination_root(&repo, Some(stale_hash.as_str())),
+            "nested cwd must use the same read-only resolver, without git fallback",
+        );
+        let bare = repo.join("cache/repo.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        run_git(&bare, &["init", "--bare", "--quiet"]);
+        ensure_repo_local_files(&bare).unwrap();
+        assert_eq!(
+            migrated_project_coordination_root(&bare, Some(stale_hash.as_str())),
+            Some(coordination_dir(&bare)),
+            "a nested bare repository must not inherit the outer repository scope",
+        );
+        let updated = RemindersState {
+            last_injected_at: Some(Utc::now()),
+            ..expected
+        };
+        write_reminders_state_for_repo_hash(
+            &repo,
+            Some(stale_hash.as_str()),
+            "session-1",
+            &updated,
+        )
+        .unwrap();
+        assert_eq!(load_reminders_state(&repo, "session-1").unwrap(), updated);
     }
 
     #[test]
