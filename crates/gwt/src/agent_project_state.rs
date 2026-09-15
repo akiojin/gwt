@@ -21,6 +21,63 @@ pub const AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionAdoptionRequest {
+    pub schema_version: u32,
+    pub claimed_session_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionAdoptionReceipt {
+    pub schema_version: u32,
+    pub execution_binding: SessionExecutionBinding,
+}
+
+/// The Host holds the exact capability grant until this operation returns.
+/// Adoption revalidates this Session snapshot under its existing durable CAS.
+pub fn adopt_authenticated_execution(
+    project_root: &Path,
+    session_id: &str,
+    binding: &SessionExecutionBinding,
+    request: AgentExecutionAdoptionRequest,
+    publisher: &mut dyn crate::cli::execution_state::ExecutionAdoptionPublisher,
+) -> std::result::Result<(), AgentWorkspaceUpdateError> {
+    if request.schema_version != 1 || request.reason.trim().is_empty() {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "execution.adopt requires schema version 1 and a non-empty reason",
+        ));
+    }
+    if request.claimed_session_id != session_id {
+        return Err(execution_binding_error(
+            "execution_adoption_session_mismatch",
+        ));
+    }
+    // Validate structure/epoch, not current ownership: taking over the previous
+    // writer is the purpose of adoption. The existing adoption evaluator owns
+    // the generation, lifecycle, liveness and transfer checks.
+    let (_, worktree, _) =
+        validate_execution_binding_authority_structure(project_root, session_id, binding)?;
+    let context = resolve_execution_recovery_context(&worktree, session_id)
+        .map_err(|_| execution_binding_error("execution_adoption_scope_mismatch"))?;
+    if context.session().runtime_target != LaunchRuntimeTarget::Host
+        || context.session().execution_binding.as_ref() != Some(binding)
+    {
+        return Err(execution_binding_error(
+            "execution_adoption_session_changed",
+        ));
+    }
+    crate::cli::execution_state::adopt_for_authenticated_host(
+        &worktree,
+        context.session(),
+        &request.reason,
+        publisher,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionContinuationRequest {
@@ -183,13 +240,19 @@ pub enum AgentWorkspaceUpdateErrorCode {
 pub struct AgentWorkspaceUpdateError {
     pub code: AgentWorkspaceUpdateErrorCode,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mismatched_fields: Vec<String>,
 }
 
 impl AgentWorkspaceUpdateError {
-    fn new(code: AgentWorkspaceUpdateErrorCode, message: impl Into<String>) -> Self {
+    pub fn new(code: AgentWorkspaceUpdateErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
+            diagnostic_reason: None,
+            mismatched_fields: Vec::new(),
         }
     }
 }
@@ -1193,7 +1256,75 @@ fn validate_execution_binding_authority_structure(
         || session.linked_issue_number != Some(authenticated_binding.owner_number)
         || session.execution_binding.as_ref() != Some(authenticated_binding)
     {
-        return Err(execution_binding_error("session_binding_identity_mismatch"));
+        let mut error = execution_binding_error("session_binding_identity_mismatch");
+        if session.id != authenticated_session_id
+            || authenticated_binding.session_id != authenticated_session_id
+        {
+            error.mismatched_fields.push("session_id".into());
+        }
+        if authenticated_binding.schema_version != SessionExecutionBinding::CURRENT_SCHEMA_VERSION {
+            error.mismatched_fields.push("schema_version".into());
+        }
+        if session.repo_hash.as_deref() != Some(authenticated_binding.repo_hash.as_str()) {
+            error.mismatched_fields.push("repo_hash".into());
+        }
+        if session.linked_issue_number != Some(authenticated_binding.owner_number) {
+            error.mismatched_fields.push("owner_number".into());
+        }
+        if let Some(durable) = session.execution_binding.as_ref() {
+            for (field, differs) in [
+                (
+                    "schema_version",
+                    durable.schema_version != authenticated_binding.schema_version,
+                ),
+                (
+                    "session_id",
+                    durable.session_id != authenticated_binding.session_id,
+                ),
+                (
+                    "repo_hash",
+                    durable.repo_hash != authenticated_binding.repo_hash,
+                ),
+                (
+                    "owner_kind",
+                    durable.owner_kind != authenticated_binding.owner_kind,
+                ),
+                (
+                    "owner_number",
+                    durable.owner_number != authenticated_binding.owner_number,
+                ),
+                (
+                    "generation_id",
+                    durable.identity.generation_id != authenticated_binding.identity.generation_id,
+                ),
+                (
+                    "binding_id",
+                    durable.identity.binding_id != authenticated_binding.identity.binding_id,
+                ),
+                (
+                    "ledger_head_hash",
+                    durable.identity.ledger_head_hash
+                        != authenticated_binding.identity.ledger_head_hash,
+                ),
+                (
+                    "capability_generation",
+                    durable.capability_generation != authenticated_binding.capability_generation,
+                ),
+            ] {
+                if differs
+                    && !error
+                        .mismatched_fields
+                        .iter()
+                        .any(|existing| existing == field)
+                {
+                    error.mismatched_fields.push(field.into());
+                }
+            }
+        } else {
+            error.diagnostic_reason = Some("session_binding_missing".into());
+        }
+        tracing::warn!(mismatched_fields = ?error.mismatched_fields, "Host and durable Session binding differ");
+        return Err(error);
     }
 
     let mut structural_validation = session.clone();
@@ -2226,10 +2357,12 @@ fn execution_binding_error(reason: &'static str) -> AgentWorkspaceUpdateError {
         reason,
         "authenticated Host operation rejected an execution binding"
     );
-    AgentWorkspaceUpdateError::new(
+    let mut error = AgentWorkspaceUpdateError::new(
         AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
         "Execution binding is missing, stale, or no longer current; relaunch the Session before retrying",
-    )
+    );
+    error.diagnostic_reason = Some(reason.into());
+    error
 }
 
 fn workspace_revalidation_error(code: AgentWorkspaceUpdateErrorCode) -> AgentWorkspaceUpdateError {
@@ -5540,6 +5673,12 @@ mod tests {
     fn split_root_exact_unbound_adopt_is_rejected_byte_identically() {
         with_split_root_exact_unbound_fixture(
             |project_state_root, worktree, nested, _sibling, session| {
+                let _forward_url = gwt_core::test_support::ScopedEnvVar::unset(
+                    gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+                );
+                let _forward_token = gwt_core::test_support::ScopedEnvVar::unset(
+                    gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+                );
                 let before = ExecutionBindingAuthoritySnapshot::capture(
                     project_state_root,
                     worktree,
@@ -7198,14 +7337,14 @@ mod tests {
             session_id.session_id = "foreign-session".to_string();
 
             for (label, candidate) in [
-                ("generation", generation),
-                ("binding", binding_id),
-                ("head", head),
-                ("capability", capability),
-                ("repository", repository),
-                ("owner-kind", owner_kind),
-                ("owner-number", owner_number),
-                ("session", session_id),
+                ("generation_id", generation),
+                ("binding_id", binding_id),
+                ("ledger_head_hash", head),
+                ("capability_generation", capability),
+                ("repo_hash", repository),
+                ("owner_kind", owner_kind),
+                ("owner_number", owner_number),
+                ("session_id", session_id),
             ] {
                 let operation_id = format!("secret-operation-{label}");
                 let nonce = format!("secret-nonce-{label}");
@@ -7219,6 +7358,10 @@ mod tests {
                 )
                 .expect_err("mismatched binding identity must be denied");
                 assert_execution_binding_denial(&error);
+                assert_eq!(
+                    serde_json::to_value(&error).unwrap()["mismatched_fields"],
+                    serde_json::json!([label])
+                );
                 for secret in [&operation_id, &nonce, &host_instance_id] {
                     assert!(
                         !error.message.contains(secret),

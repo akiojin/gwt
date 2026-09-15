@@ -133,7 +133,7 @@ pub(super) fn provider_usage_limit_failure(
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        evidence,
+        evidence: evidence.map(Box::new),
     }
 }
 
@@ -794,6 +794,7 @@ impl AppRuntime {
         // some other reason and the text is stale.
         let quota_notice = self
             .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
+            .filter(|notice| self.released_provider_quota_notices.get(&id) != Some(notice))
             .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
         match quota_notice.as_ref() {
             Some(notice) => {
@@ -1122,8 +1123,13 @@ impl AppRuntime {
         });
         let Some(notice) = notice else {
             self.provider_quota_candidates.remove(window_id);
+            self.released_provider_quota_notices.remove(window_id);
             return Vec::new();
         };
+        if self.released_provider_quota_notices.get(window_id) == Some(&notice) {
+            return Vec::new();
+        }
+        self.released_provider_quota_notices.remove(window_id);
         let agent_id = self.pane_agent_id(window_id);
         let first_seen = self
             .provider_quota_candidates
@@ -1427,6 +1433,7 @@ impl AppRuntime {
         // fires a hook well inside the settle window.
         self.provider_quota_holds.remove(&window_id);
         self.provider_quota_candidates.remove(&window_id);
+        self.released_provider_quota_notices.remove(&window_id);
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
         if !hook_state_changed && !approval_wait_cleared {

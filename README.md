@@ -333,8 +333,11 @@ an explicit action in the GUI. Idle agent windows free their slot on
 their own: each scan classifies every launched window as
 `review_verdict_published`, `execution_settled`, `binding_dead`, or
 `stuck_unknown` (visible per row and in `idle_windows` in
-`issue.monitor.status`), releases the first three without requeueing the Issue,
-and closes their panes. Only `stuck_unknown` — a window that is idle while its
+`issue.monitor.status`), releases the first three and closes their panes. A
+released Issue stays out of the queue, except when its window died before the
+agent settled its execution — an app restart that took the pane with it, for
+example — in which case the Issue is requeued so the next scan relaunches it
+on its existing branch. Only `stuck_unknown` — a window that is idle while its
 execution record is still active — stays for a human, and it asks for a
 decision once it has been idle for twice the stuck timeout.
 `issue.monitor.release_idle` runs the same release by hand for one Issue or
@@ -855,6 +858,38 @@ JSON
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### macOS filesystem activity and Spotlight
+
+The per-worktree index watcher excludes the root `target/` directory's
+descendants from its own macOS FSEvents stream, including when `target/` is
+created after watching starts. A change to the directory entry itself can
+still arrive from its parent and is filtered by the index path policy.
+This controls only that gwt stream; it does not disable system-wide FSEvents
+or other applications' subscriptions. The index watcher currently has no
+production startup caller, so this exclusion alone does not establish the
+cause of high `fseventsd` CPU usage.
+
+For an existing worktree, open **System Settings → Spotlight → Search Privacy**
+and add its `target` directory. For a new worktree, add `target` after the
+first build creates it. Follow Apple's
+[Spotlight privacy instructions](https://support.apple.com/en-gb/guide/mac-help/mchl1bb43b84/mac)
+for your macOS version. gwt does not change Spotlight settings automatically.
+
+To inspect host CPU alongside gwt diagnostics:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"diagnostics.cpu","params":{}}
+JSON
+```
+
+The `host_cpu` result includes the latest `fseventsd` process sample and the
+sampling count and interval. On macOS, it samples three times one second apart
+and warns when the same process exceeds 100% CPU in all three samples. Missing
+processes or unavailable samples do not imply low CPU usage. A warning is an
+observation, not proof that a particular worktree caused the load; inspect
+active filesystem consumers and Spotlight privacy settings before attributing it.
+
 ## Development
 
 ### Build
@@ -888,23 +923,11 @@ cargo test -p gwt-core -p gwt --all-features
 
 ### Serializing heavy verification
 
-Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
-Playwright, `verify.run`) contends for host CPU. Running two of them at once
-on the same machine makes wall-clock fixtures fail for no reason and pollutes
-coverage numbers, so gwt serializes them behind a host-wide lease — one
-holder per machine, across every repository and worktree.
-
-Take the lease before the heavy command and release it afterwards:
-
-```bash
-gwtd <<'JSON'
-{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
-JSON
-```
-
-The answer is immediate. `verification lease: granted` returns a `lease_id`
-to release with; `verification lease: unavailable` returns the current holder
-and its remaining TTL, so nothing has to watch another process:
+Only canonical `verify.run` acquires the host-wide verification lease.
+Register the verification matrix with `verify.plan`, then run it with
+`verify.run`; each run manages its own admission and release. A `deferred`
+result means admission timed out without a verification record. Inspect the
+holder before retrying:
 
 ```bash
 gwtd <<'JSON'
@@ -912,16 +935,32 @@ gwtd <<'JSON'
 JSON
 ```
 
+Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
+lint, coverage, direct headed browser checks, and pre-push checks run
+directly without a verification lease. Completion still requires canonical
+verification evidence.
+
+The `pre-push` hook deliberately runs only checks that do not compile the
+workspace: `cargo fmt --all -- --check`, Markdownlint, and the SKILL.md
+frontmatter validation. A Git hook runs under `git push` rather than under
+`gwtd`, so it cannot take the verification lease, and a heavy Cargo job
+started there saturates the host while another worktree holds the lease.
+Clippy, the test suites, and the 90% coverage threshold are enforced per
+pull request by the Lint, Test, and Coverage workflows instead.
+
+**Migration:** `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` now return an error without creating a holder or
+reservation. Replace manual acquisition around canonical verification with
+`verify.run`; remove acquisition around ordinary Cargo commands. Existing
+legacy holders can be drained explicitly without killing their processes:
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
 JSON
 ```
 
-Use `verify.lease.extend` with the same `lease_id` when a run outlasts its
-TTL. The default TTL is 45 minutes; a lease that lapses is released
-automatically, and a holder that is killed releases immediately. Lease
-transitions are recorded in
+Lease transitions are recorded in
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
 
 ### GitHub API budget
@@ -934,8 +973,21 @@ light, and `statusCheckRollup` / `body` are fetched per PR only when that PR
 changed. Pass `params.refresh:true` when a decision needs the live state and
 `params.include` (`["checks","body"]`, default `["checks"]`) to choose the
 heavy fields. Every answer reports `source`, `cache_age_secs`, `throttled`,
-and `github_calls`; when the budget is below its reserve the last snapshot is
+`github_calls`, `hydrated` (successful per-PR fetches), and `skipped_unchanged`
+(unchanged PRs skipped during a live read; zero on cache hits); when the budget is below its reserve the last snapshot is
 served and `throttled` says why.
+
+Empty checks on unchanged Draft/CI-not-started PRs are reused after snapshot
+expiry too. Changes to `updatedAt` or the head commit invalidate their data;
+running checks are polled every 10 minutes by default. Hydration runs with at
+most five concurrent requests and 30 requests per read. Configure both refresh
+intervals independently in `~/.gwt/config.toml` (zero disables that interval):
+
+```toml
+[pr_inventory]
+cache_ttl_secs = 300
+checks_refresh_secs = 600
+```
 
 Observe the budget with a free endpoint:
 

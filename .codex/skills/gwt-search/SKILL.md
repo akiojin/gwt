@@ -36,6 +36,24 @@ then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
 command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 `gwtd not found` error.
 
+### gwtd bootstrap order
+
+The `search` operation is read-only, so it never waits for a checkout
+build or a verification lease.
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
+
 ## Quick Reference
 
 `gwt-search` is a skill, not a PATH executable. Never resolve it with
