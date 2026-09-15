@@ -135,12 +135,16 @@ test.describe("Agent-prioritized focus cycling", () => {
 
     // Focus cycling is navigation-only. The existing frameWindow path may
     // persist its camera and frame-clamp geometry, but it must not emit any
-    // Agent/process/window lifecycle command.
+    // Agent/process/window lifecycle command. Startup telemetry (#3808) is an
+    // observation, not a command: activating a hidden tab fits its terminal
+    // for the first time, which reports input readiness once per terminal.
     const navigationKinds = new Set([
       "activate_window_tab",
       "focus_window",
       "update_viewport",
       "update_window_geometry",
+      "startup_first_frame",
+      "startup_terminal_ready",
     ]);
     expect(
       messages
