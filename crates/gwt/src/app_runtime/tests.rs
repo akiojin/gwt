@@ -27885,7 +27885,10 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     let launch = |cwd: PathBuf| {
         let (command, args) = if cfg!(windows) {
@@ -27932,7 +27935,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             worktree_one.display().to_string().into(),
         )),
     );
-    let second_events = runtime.handle_launch_complete(
+    let launch_events = runtime.handle_launch_complete(
         combined_window_id("tab-1", "agent-2"),
         Ok((
             launch(worktree_two.clone()),
@@ -27949,6 +27952,15 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             worktree_two.display().to_string().into(),
         )),
     );
+    // Issue #3752: launch completion replays the cache as a patch and rebuilds
+    // on the worker; the authoritative view is the background build result.
+    assert!(
+        launch_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
+        "launch completion replays the cached projection immediately: {launch_events:?}"
+    );
+    let second_events = drain_background_projection_builds(&mut runtime, &tasks, &user_events);
 
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
         .expect("load projection")
@@ -37026,7 +37038,8 @@ fn late_runtime_hook_stop_preserves_same_session_successor_generation() {
         WindowPreset::Codex,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "codex-1");
     runtime.register_window("tab-1", "codex-1");
     insert_test_pane_runtime(&mut runtime, &window_id);
@@ -37065,14 +37078,28 @@ fn late_runtime_hook_stop_preserves_same_session_successor_generation() {
     assert!(runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.runtimes.contains_key(&window_id));
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
-    assert_eq!(
-        finalizers
+    // Issue #3752: the Stop path queues the (non-destructive) background
+    // projection build. Run everything that was queued: the only thing it may
+    // report back is a finished projection build, never a close finalizer.
+    let queued = std::mem::take(
+        &mut *finalizers
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        0,
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+    assert!(
+        user_events
+            .lock()
+            .expect("user events")
+            .iter()
+            .all(|event| matches!(event, UserEvent::ActiveWorkProjectionBuilt { .. })),
         "a generationless Stop must not queue a destructive finalizer"
     );
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
     assert!(
         pty.try_wait().expect("probe child").is_none(),
         "hook dispatch must not kill the PTY inline"
@@ -50996,11 +51023,13 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
                 .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
             "expected WindowCanvasState broadcast from Board path so pane heading refreshes on reconnect: {events:?}"
         );
+    // Issue #3752: the Board path replays the cached view as a patch and
+    // rebuilds the authoritative view on the blocking worker.
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "expected ActiveWorkProjection broadcast from Board path: {events:?}"
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
+        "expected ActiveWorkProjectionPatch broadcast from Board path: {events:?}"
     );
 }
 
@@ -51158,11 +51187,13 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
                 .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
             "second Board post with identical current_focus must not duplicate WindowCanvasState: {second:?}"
         );
+    // Issue #3752: the cached projection patch still fires on an identical
+    // resync; the authoritative rebuild runs on the blocking worker.
     assert!(
         second
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "ActiveWorkProjection should still broadcast on identical resync: {second:?}"
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
+        "ActiveWorkProjectionPatch should still broadcast on identical resync: {second:?}"
     );
 }
 
