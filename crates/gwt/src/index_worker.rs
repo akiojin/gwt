@@ -2817,6 +2817,9 @@ detached
         // Issue #4398 AC-3: the startup probe reuses the inventory the startup
         // path already listed; `coverage.total_worktrees` keeps its value
         // (the bare main entry stays excluded).
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env_guard = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
