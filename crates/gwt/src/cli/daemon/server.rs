@@ -2239,7 +2239,7 @@ fn try_apply_typed_issue_monitor_failure(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
             )
@@ -2455,7 +2455,7 @@ fn apply_routine_issue_monitor_control(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
