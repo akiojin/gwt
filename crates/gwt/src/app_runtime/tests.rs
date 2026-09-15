@@ -60760,7 +60760,8 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
 
     for session_id in std::iter::once(registered).chain(orphans) {
         let mut session =
@@ -60778,7 +60779,9 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
     )
     .expect("register one PM");
 
-    let events = runtime.restore_open_project_windows("tab-current");
+    runtime.restore_open_project_windows("tab-current");
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "the registered PM must still restore");
     assert_eq!(
@@ -62723,6 +62726,14 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::Codex);
     session.agent_session_id = Some("pm-conversation-resume".to_string());
+    // Issue #4394 AC-1: only the registered PM's Session may resume from the
+    // PM worktree.
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        pm_registration_fixture(&session.id, &pm_worktree),
+        |_| false,
+    )
+    .expect("register the resuming PM");
 
     runtime.spawn_restored_agent_session(
         "tab-1",
