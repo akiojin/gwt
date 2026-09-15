@@ -138,6 +138,16 @@ impl<C: IssueClient> SpecOps<C> {
             .cache
             .load_entry(number)
             .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)))?;
+        // Issue #4392: an unparseable SPEC surfaces with an empty section
+        // map. Routing from it would rewrite the index and orphan every
+        // comment-resident section, so the body must be repaired first.
+        if let Some(error) = &entry.spec_parse_error {
+            return Err(SpecOpsError::Validation(format!(
+                "issue #{} has a gwt-spec header whose SPEC structure cannot be parsed ({error}); \
+                 repair the body with issue.edit before editing sections",
+                number.0
+            )));
+        }
         let canonical = crate::sections::trim_surrounding_newlines(content).to_string();
         let mut spec_body = entry.spec_body.clone();
         spec_body.splice(name.clone(), canonical.clone());
