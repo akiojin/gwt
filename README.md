@@ -976,8 +976,21 @@ light, and `statusCheckRollup` / `body` are fetched per PR only when that PR
 changed. Pass `params.refresh:true` when a decision needs the live state and
 `params.include` (`["checks","body"]`, default `["checks"]`) to choose the
 heavy fields. Every answer reports `source`, `cache_age_secs`, `throttled`,
-and `github_calls`; when the budget is below its reserve the last snapshot is
+`github_calls`, `hydrated` (successful per-PR fetches), and `skipped_unchanged`
+(unchanged PRs skipped during a live read; zero on cache hits); when the budget is below its reserve the last snapshot is
 served and `throttled` says why.
+
+Empty checks on unchanged Draft/CI-not-started PRs are reused after snapshot
+expiry too. Changes to `updatedAt` or the head commit invalidate their data;
+running checks are polled every 10 minutes by default. Hydration runs with at
+most five concurrent requests and 30 requests per read. Configure both refresh
+intervals independently in `~/.gwt/config.toml` (zero disables that interval):
+
+```toml
+[pr_inventory]
+cache_ttl_secs = 300
+checks_refresh_secs = 600
+```
 
 Observe the budget with a free endpoint:
 

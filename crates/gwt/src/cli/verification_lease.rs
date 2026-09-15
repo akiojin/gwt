@@ -381,6 +381,37 @@ mod tests {
         );
     }
 
+    /// Issue #4352 AC-2: the retired manual acquire never reserves a lease
+    /// and tells the caller that bootstrap builds run without one.
+    #[test]
+    fn manual_acquire_is_retired_and_exempts_bootstrap_builds() {
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let mut out = String::new();
+        let err = run(
+            &mut env,
+            VerificationLeaseCommand::Acquire {
+                ttl_minutes: DEFAULT_TTL_MINUTES,
+                reason: Some("cargo build -p gwt --bin gwtd".to_string()),
+            },
+            &mut out,
+        )
+        .expect_err("manual acquire must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("bootstrap builds directly without a lease"),
+            "retired acquire must name bootstrap builds as lease-free: {message}"
+        );
+        assert!(
+            message.contains("use `verify.run` for canonical verification"),
+            "retired acquire must route to verify.run: {message}"
+        );
+        assert!(
+            out.is_empty(),
+            "a refused acquire must not render a lease: {out}"
+        );
+    }
+
     #[test]
     fn legacy_granted_outcome_remains_readable() {
         let parsed: LeaseOutcome =
