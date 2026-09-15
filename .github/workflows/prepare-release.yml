@@ -13,12 +13,23 @@ name: Prepare Release
 # main->develop sync. This workflow avoids all three: relative-tag version
 # calc via scripts/compute_release_version.py, structured edits via
 # cargo set-version + cargo update + git-cliff, and no main->develop sync.
+#
+# Issue #4373: a breaking marker in a commit (`type!:` / `BREAKING CHANGE:`)
+# never decides the version. `bump=auto` caps at minor; the markers are
+# logged below and listed in the Release PR body so the information is not
+# lost. A major release happens only when the person triggering this
+# workflow chooses `bump=major` explicitly.
 
 on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump level"
+        # Issue #4373 AC-3: the default stays `auto`. `auto` can no longer
+        # return major, so it is safe by construction, and it keeps the
+        # commit-derived patch/minor distinction that a fixed `minor`
+        # default would lose (fix-only ranges become patch releases).
+        # `major` is reachable only by choosing it here.
+        description: "Version bump level (auto never returns major; choose major explicitly)"
         type: choice
         options:
           - auto
@@ -89,6 +100,27 @@ jobs:
           echo "Previous tag: ${PREV_TAG:-<none>}"
           echo "Next version: ${NEW_VERSION} (bump=${BUMP})"
 
+          # Issue #4373 AC-2: breaking markers no longer raise the version,
+          # but their detection must not be lost. Log every marked commit
+          # and hand the list to the Release PR body step.
+          BREAKING_FILE="${RUNNER_TEMP}/breaking-commits.txt"
+          python3 scripts/compute_release_version.py --list-breaking > "$BREAKING_FILE"
+          echo "breaking_file=${BREAKING_FILE}" >> "$GITHUB_OUTPUT"
+          if [ -s "$BREAKING_FILE" ]; then
+            echo "::warning::Breaking markers found in ${PREV_TAG:-<none>}..HEAD but NOT applied to the version (bump=${BUMP} -> ${NEW_VERSION}). A major release requires bump=major explicitly (Issue #4373)."
+            while IFS= read -r line; do
+              echo "::warning::breaking marker: ${line}"
+            done < "$BREAKING_FILE"
+            {
+              echo "## Breaking markers (not applied to the version)"
+              echo ""
+              sed 's/^/- /' "$BREAKING_FILE"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No breaking markers in range."
+          fi
+
       - name: Guard against existing tag
         run: |
           set -euo pipefail
@@ -155,6 +187,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUMP: ${{ inputs.bump }}
           TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          BREAKING_FILE: ${{ steps.version.outputs.breaking_file }}
         run: |
           set -euo pipefail
           PREV_TAG="${{ steps.version.outputs.prev_tag }}"
@@ -171,8 +204,11 @@ jobs:
           # one survives. Issues are settled by the Issue Monitor when their
           # work merges into develop (Issue #3917).
           BODY_FILE="${RUNNER_TEMP}/release-pr-body.md"
+          # Issue #4373 AC-2: `--breaking-file` renders `## Breaking Changes`
+          # (informational; the version was not raised for them).
           python3 scripts/release_issue_refs.py --range "$RANGE" --format pr-body \
-            --version "$TAG_NAME" --bump "$BUMP" > "$BODY_FILE"
+            --version "$TAG_NAME" --bump "$BUMP" --breaking-file "$BREAKING_FILE" > "$BODY_FILE"
+          rm -f "$BREAKING_FILE"
           echo "file=${BODY_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Create or update Release PR

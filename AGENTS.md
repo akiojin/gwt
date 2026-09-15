@@ -258,7 +258,8 @@
 - バージョン判定とリリースノート生成を Conventional Commits から自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
 - コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。バージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
 - ローカルでは `bunx commitlint --from HEAD~1 --to HEAD` などで必ず自己検証し、CI の commitlint に丸投げしない。エラーが出た状態で push しない。
-- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、破壊的変更を認識させる。
+- `feat:` はマイナーバージョン、`fix:` はパッチになる。**`type!:` と本文の `BREAKING CHANGE:` footer はバージョンを決めない**（Issue #4373）。marker を付けても `bump=auto` は minor 止まりで、marker は Prepare Release のログと Release PR 本文に情報として残るだけである。
+- **メジャーバージョン昇格はユーザー（リリース起動者）が Prepare Release で `bump=major` を明示した場合のみ。** agent（PM を含む）が独断で `!` や `BREAKING CHANGE:` を書いてメジャーを狙ってはならない。互換性に影響する変更は commit 本文・PR 本文に説明として書き、昇格の要否はユーザーの裁定に委ねる。
 - 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、解析精度を担保する。
 - `chore:` や `docs:` などリリース対象外のタイプでも必ずプレフィックスを付け、曖昧な自然文だけのコミットメッセージを禁止する。
 - コミット前に commitlint ルール（subject 空欄禁止・100文字以内など）を自己確認し、CI での差し戻しを防止する。

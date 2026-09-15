@@ -349,6 +349,32 @@ class ReleasePrBodyTests(unittest.TestCase):
         self.assertIn("fixes `#3527`", body)
         self.assertIsNone(GITHUB_CLOSING_RE.search(body))
 
+    def test_body_lists_breaking_commits_without_bumping(self) -> None:
+        # Issue #4373 AC-2: breaking markers are reported in the Release PR
+        # body even though they no longer raise the bump level.
+        body = release_issue_refs.render_release_pr_body(
+            self.report([1], []),
+            version="v9.98.0",
+            bump="auto",
+            breaking_commits=[
+                "aaa1111 feat!: drop old API",
+                "bbb2222 fix(verification): closes #3527",
+            ],
+        )
+
+        self.assertIn("## Breaking Changes", body)
+        self.assertIn("- aaa1111 feat!: drop old API", body)
+        self.assertIn("- bbb2222 fix(verification): closes `#3527`", body)
+        self.assertIn("not applied to the version", body)
+        self.assertIsNone(GITHUB_CLOSING_RE.search(body))
+
+    def test_body_omits_breaking_section_when_none(self) -> None:
+        body = release_issue_refs.render_release_pr_body(
+            self.report([1], []), version="v9.98.0", bump="auto", breaking_commits=[]
+        )
+
+        self.assertNotIn("## Breaking Changes", body)
+
     def test_render_text_has_no_closing_keywords(self) -> None:
         text = release_issue_refs.render_text(self.report([3527], [3540], ["w"]))
 
