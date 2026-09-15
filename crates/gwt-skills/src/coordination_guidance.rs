@@ -259,6 +259,17 @@ gwtd binary:
 
 There is no standalone `gwt-search` executable.
 
+## GitHub reads and mutations
+
+Read-only `gh` commands are allowed and recorded on the shared GitHub budget
+ledger. This includes Issue, PR, and Actions inspection, REST GET requests,
+and GraphQL queries. Prefer gwtd `pr.list` and `issue.view` when cached data
+or workflow lifecycle context is useful.
+
+Mutations must use gwtd JSON-envelope operations, including `pr.merge` and
+`actions.rerun`; direct `gh` writes and API mutations are blocked. Read
+permission does not bypass PR gates or the long PR/CI polling restriction.
+
 ## Canonical verification admission
 
 Only canonical `verify.run` acquires the host-wide lease, in-process for
