@@ -69,9 +69,11 @@ pub fn enumerate_worktrees_with_sessions_dir(
     let main_root = main_worktree_root(repo_root).ok();
     let list_root = main_root.as_deref().unwrap_or(repo_root);
     let manager = WorktreeManager::new(list_root);
-    let infos = manager
-        .list()
-        .map_err(|err| InventoryError::List(err.to_string()))?;
+    let listed_at = std::time::Instant::now();
+    let infos = manager.list();
+    // Issue #4378 AC-4: `perf.startup` counts the listings a startup runs.
+    crate::perf::startup::record_worktree_inventory(listed_at);
+    let infos = infos.map_err(|err| InventoryError::List(err.to_string()))?;
 
     let canonical_main = main_root.map(|path| canonicalize_or(path.as_path()));
     let canonical_active = active_root.map(canonicalize_or);

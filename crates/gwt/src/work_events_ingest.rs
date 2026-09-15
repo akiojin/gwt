@@ -304,12 +304,31 @@ fn load_pending_sources_for_rebuild(
 /// `state_path`. Source discovery/read failures are logged and skipped during
 /// incremental intake. An authoritative rebuild is deferred unless every
 /// discovered source was readable, so a partial snapshot cannot erase history.
+#[cfg(test)]
 pub fn ingest_project_work_events_paths(
     project_root: &Path,
     work_items_path: &Path,
     state_path: &Path,
 ) -> WorkEventsIngestSummary {
-    ingest_project_work_events_paths_inner(project_root, work_items_path, state_path, || {}, |_| {})
+    ingest_project_work_events_paths_with_inventory(project_root, work_items_path, state_path, None)
+}
+
+/// Issue #4378 AC-1: `inventory` is a worktree listing the caller already
+/// holds (startup lists once and shares it); `None` lists the worktrees here.
+pub fn ingest_project_work_events_paths_with_inventory(
+    project_root: &Path,
+    work_items_path: &Path,
+    state_path: &Path,
+    inventory: Option<&[gwt::worktree_inventory::WorktreeEntry]>,
+) -> WorkEventsIngestSummary {
+    ingest_project_work_events_paths_inner(
+        project_root,
+        work_items_path,
+        state_path,
+        inventory,
+        || {},
+        |_| {},
+    )
 }
 
 #[cfg(test)]
@@ -326,6 +345,7 @@ where
         project_root,
         work_items_path,
         state_path,
+        None,
         before_intake,
         |_| {},
     )
@@ -345,6 +365,7 @@ where
         project_root,
         work_items_path,
         state_path,
+        None,
         || {},
         before_source_read,
     )
@@ -354,6 +375,7 @@ fn ingest_project_work_events_paths_inner<F, R>(
     project_root: &Path,
     work_items_path: &Path,
     state_path: &Path,
+    inventory: Option<&[gwt::worktree_inventory::WorktreeEntry]>,
     before_intake: F,
     mut before_source_read: R,
 ) -> WorkEventsIngestSummary
@@ -397,15 +419,22 @@ where
 
     // 1) Local worktree filesystems (base/main checkout included): committed
     //    or not, the working copy is the freshest view of each branch's log.
-    let worktree_entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!(%error, "work events ingest: worktree enumeration failed");
-            source_discovery_failed = true;
-            Vec::new()
+    let listed;
+    let worktree_entries = match inventory {
+        Some(entries) => entries,
+        None => {
+            listed = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!(%error, "work events ingest: worktree enumeration failed");
+                    source_discovery_failed = true;
+                    Vec::new()
+                }
+            };
+            &listed
         }
     };
-    let worktree_sources = match worktree_event_sources(&worktree_entries) {
+    let worktree_sources = match worktree_event_sources(worktree_entries) {
         Ok(sources) => sources,
         Err(error) => {
             tracing::warn!(%error, "work events ingest: worktree event source discovery failed");
@@ -707,7 +736,7 @@ where
     let intake = if rebuild_required {
         rebuild_work_events_with_shared_loader(
             work_items_path,
-            || load_pending_sources_for_rebuild(&pending_sources, &worktree_entries),
+            || load_pending_sources_for_rebuild(&pending_sources, worktree_entries),
             close_path.as_deref(),
         )
     } else if pending_local_lifecycle.is_some() {
@@ -1122,6 +1151,64 @@ mod tests {
             },
         })
         .to_string()
+    }
+
+    /// Issue #4378 AC-1: startup already listed the worktrees, so the ingest
+    /// reads its worktree sources from that inventory instead of running
+    /// `git worktree list` again. The worktree below is a plain directory that
+    /// only the inventory names, so a listing of its own would never find it.
+    #[test]
+    fn ingest_reads_worktree_sources_from_the_startup_inventory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let worktree = temp.path().join("inventory-only");
+        std::fs::create_dir_all(worktree.join(".gwt/work")).expect("mk .gwt/work");
+        std::fs::write(
+            worktree.join(".gwt/work/events.jsonl"),
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-inventory-1",
+                    "work-inventory-cccc3333",
+                    "inventory work",
+                    "2026-06-03T10:00:00Z"
+                )
+            ),
+        )
+        .expect("write inventory worktree events");
+        let inventory = vec![gwt::worktree_inventory::WorktreeEntry {
+            id: "inventory-only".to_string(),
+            kind: gwt::worktree_inventory::WorktreeEntryKind::Workspace,
+            path: worktree.clone(),
+            label: "work/inventory-only".to_string(),
+            branch: Some("work/inventory-only".to_string()),
+            session_ids: Vec::new(),
+            is_active: false,
+        }];
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+
+        let summary = ingest_project_work_events_paths_with_inventory(
+            &repo,
+            &work_items_path,
+            &state_path,
+            Some(&inventory),
+        );
+
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load")
+                .expect("projection");
+        assert!(
+            projection
+                .work_items
+                .iter()
+                .any(|item| item.id == "work-inventory-cccc3333"),
+            "the inventory worktree's events must be ingested: {summary:?}"
+        );
     }
 
     /// SC-258: events committed on another branch (visible only as a fetched
