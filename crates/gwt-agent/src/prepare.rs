@@ -704,11 +704,25 @@ impl HostRunnerProbeSingleFlight {
         key: ProbeSingleFlightKey,
         run: impl FnOnce() -> HostRunnerProbeOutcome,
     ) -> (HostRunnerProbeOutcome, ProbeShare) {
+        self.run_persisted(key, None, run)
+    }
+
+    /// Issue #4283: the same admission, backed by a persisted store for the
+    /// registry-facing probe kinds. A persisted success is replayed exactly
+    /// like an in-memory one (`ProbeShare::Reused`) and is promoted into the
+    /// in-memory slot so the file is read once per process, not per launch.
+    pub fn run_persisted(
+        &self,
+        key: ProbeSingleFlightKey,
+        store: Option<&PersistedProbeStore>,
+        run: impl FnOnce() -> HostRunnerProbeOutcome,
+    ) -> (HostRunnerProbeOutcome, ProbeShare) {
         enum Admission {
             Lead(Arc<ProbeSlot>),
             Join(Arc<ProbeSlot>),
             Reuse(HostRunnerProbeOutcome),
         }
+        let store = store.filter(|_| PersistedProbeStore::persists(key.kind));
         let admission = {
             let mut slots = lock_ignoring_poison(&self.slots);
             let existing =
@@ -724,11 +738,23 @@ impl HostRunnerProbeSingleFlight {
                         }
                         ProbeSlotState::Done { .. } => None,
                     });
-            existing.unwrap_or_else(|| {
-                let slot = ProbeSlot::in_flight();
-                slots.insert(key, Arc::clone(&slot));
-                Admission::Lead(slot)
-            })
+            let persisted = existing
+                .is_none()
+                .then(|| store.and_then(|store| store.lookup(&key, std::time::SystemTime::now())));
+            match (existing, persisted) {
+                (Some(admission), _) => admission,
+                (None, Some(Some(outcome))) => {
+                    let slot = ProbeSlot::in_flight();
+                    slot.complete(outcome.clone());
+                    slots.insert(key.clone(), slot);
+                    Admission::Reuse(outcome)
+                }
+                (None, _) => {
+                    let slot = ProbeSlot::in_flight();
+                    slots.insert(key.clone(), Arc::clone(&slot));
+                    Admission::Lead(slot)
+                }
+            }
         };
         match admission {
             Admission::Reuse(outcome) => (outcome, ProbeShare::Reused),
@@ -740,6 +766,13 @@ impl HostRunnerProbeSingleFlight {
                 let outcome = run();
                 slot.complete(outcome.clone());
                 guard.completed = true;
+                if let Some(store) = store {
+                    if outcome.success {
+                        store.record(&key, &outcome, std::time::SystemTime::now());
+                    } else {
+                        store.invalidate(&key);
+                    }
+                }
                 (outcome, ProbeShare::Led)
             }
             Admission::Join(slot) => {
@@ -760,6 +793,176 @@ impl HostRunnerProbeSingleFlight {
 fn host_runner_probe_single_flight() -> &'static HostRunnerProbeSingleFlight {
     static REGISTRY: std::sync::OnceLock<HostRunnerProbeSingleFlight> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(HostRunnerProbeSingleFlight::default)
+}
+
+/// Issue #4283: how long a persisted package-runner probe success is replayed.
+///
+/// The in-memory reuse above lives five minutes and dies with the process.
+/// Real pane-create intervals are longer than that and gwt restarts on every
+/// auto-update, so a cold targeted Windows Host launch paid
+/// `npm view <pkg>@latest` and `npx --yes <pkg>@<exact> --version` again —
+/// two child processes and a registry round trip before the PTY, which is the
+/// p50 of `route:pane.create`. One day matches the project-index probe cache
+/// (FR-393) and npm's own update-notifier cadence: `latest` re-resolves at
+/// most once a day per host.
+pub const PERSISTED_PROBE_REUSE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const PERSISTED_PROBE_CACHE_FILE: &str = "host_runner_probe_cache.json";
+const PERSISTED_PROBE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedProbeEntry {
+    kind: String,
+    command: String,
+    args: Vec<String>,
+    path: String,
+    stdout: String,
+    verified_at_ms: u64,
+}
+
+impl PersistedProbeEntry {
+    fn matches(&self, key: &ProbeSingleFlightKey) -> bool {
+        self.kind == format!("{:?}", key.kind)
+            && self.command == key.command
+            && self.args == key.args
+            && self.path == key.path
+    }
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct PersistedProbeFile {
+    schema_version: u32,
+    entries: Vec<PersistedProbeEntry>,
+}
+
+/// Successful registry-facing probe results persisted across gwt restarts.
+///
+/// Only the metadata and exact-package kinds are persisted: they answer
+/// "which exact version is `latest`" and "does npx run that exact package",
+/// both of which stay true for a day and cost seconds to re-ask. The direct
+/// runner probe is cheap and answers "is the CLI still installed", which must
+/// not be replayed. Failures and timeouts never persist, and a failure drops
+/// any stale success for the same key (FR-393 precedent: invalidate on
+/// failure). Every file operation is fail-open — a missing, unreadable or
+/// malformed store is a cache miss, never a launch error.
+#[derive(Debug, Clone)]
+pub struct PersistedProbeStore {
+    path: PathBuf,
+}
+
+impl PersistedProbeStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// The host-wide store under `~/.gwt/runtime/`.
+    pub fn host_default() -> Self {
+        Self::new(gwt_core::paths::gwt_runtime_dir().join(PERSISTED_PROBE_CACHE_FILE))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn persists(kind: HostRunnerProbeKind) -> bool {
+        matches!(
+            kind,
+            HostRunnerProbeKind::Metadata | HostRunnerProbeKind::Package
+        )
+    }
+
+    fn read(&self) -> PersistedProbeFile {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<PersistedProbeFile>(&raw).ok())
+            .filter(|file| file.schema_version == PERSISTED_PROBE_SCHEMA_VERSION)
+            .unwrap_or_default()
+    }
+
+    fn write(&self, file: &PersistedProbeFile) {
+        let Ok(payload) = serde_json::to_vec_pretty(file) else {
+            return;
+        };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let staged = self
+            .path
+            .with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&staged, payload).is_ok() && std::fs::rename(&staged, &self.path).is_err()
+        {
+            let _ = std::fs::remove_file(&staged);
+        }
+    }
+
+    /// A persisted success for `key` that is still inside the reuse window.
+    pub fn lookup(
+        &self,
+        key: &ProbeSingleFlightKey,
+        now: std::time::SystemTime,
+    ) -> Option<HostRunnerProbeOutcome> {
+        if !Self::persists(key.kind) {
+            return None;
+        }
+        let now_ms = unix_millis(now);
+        let entry = self
+            .read()
+            .entries
+            .into_iter()
+            .find(|entry| entry.matches(key))?;
+        let age_ms = now_ms.checked_sub(entry.verified_at_ms)?;
+        (age_ms < PERSISTED_PROBE_REUSE_TTL.as_millis() as u64).then(|| HostRunnerProbeOutcome {
+            success: true,
+            exit_code: Some(0),
+            stdout: entry.stdout,
+            stderr: String::new(),
+            timed_out: false,
+            error: None,
+        })
+    }
+
+    /// Persist a successful probe, replacing any earlier entry for `key`.
+    pub fn record(
+        &self,
+        key: &ProbeSingleFlightKey,
+        outcome: &HostRunnerProbeOutcome,
+        verified_at: std::time::SystemTime,
+    ) {
+        if !Self::persists(key.kind) || !outcome.success {
+            return;
+        }
+        let mut file = self.read();
+        file.schema_version = PERSISTED_PROBE_SCHEMA_VERSION;
+        file.entries.retain(|entry| !entry.matches(key));
+        file.entries.push(PersistedProbeEntry {
+            kind: format!("{:?}", key.kind),
+            command: key.command.clone(),
+            args: key.args.clone(),
+            path: key.path.clone(),
+            stdout: outcome.stdout.clone(),
+            verified_at_ms: unix_millis(verified_at),
+        });
+        self.write(&file);
+    }
+
+    /// Drop the persisted result for `key`, if any.
+    pub fn invalidate(&self, key: &ProbeSingleFlightKey) {
+        if !self.path.exists() {
+            return;
+        }
+        let mut file = self.read();
+        let before = file.entries.len();
+        file.entries.retain(|entry| !entry.matches(key));
+        if file.entries.len() != before {
+            file.schema_version = PERSISTED_PROBE_SCHEMA_VERSION;
+            self.write(&file);
+        }
+    }
+}
+
+fn unix_millis(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2204,18 +2407,22 @@ fn probe_host_runner_outcome(
     cwd: Option<PathBuf>,
 ) -> HostRunnerProbeOutcome {
     let key = ProbeSingleFlightKey::new(kind, command, &args, env_vars);
-    let (outcome, share) = host_runner_probe_single_flight().run(key, || {
-        probe_host_runner_with_timeout(
-            kind,
-            command,
-            args,
-            env_vars,
-            remove_env,
-            cwd,
-            host_runner_probe_timeout(kind),
-            Duration::from_millis(50),
-        )
-    });
+    // Issue #4283: registry-facing probes replay a persisted success across
+    // restarts; see `PersistedProbeStore` for the kinds and the window.
+    let store = PersistedProbeStore::host_default();
+    let (outcome, share) =
+        host_runner_probe_single_flight().run_persisted(key, Some(&store), || {
+            probe_host_runner_with_timeout(
+                kind,
+                command,
+                args,
+                env_vars,
+                remove_env,
+                cwd,
+                host_runner_probe_timeout(kind),
+                Duration::from_millis(50),
+            )
+        });
     if share != ProbeShare::Led {
         tracing::info!(
             target: "gwt.process.summary",
@@ -9268,5 +9475,144 @@ fi
             ProbeShare::Led,
             "a failure is re-probed, not replayed"
         );
+    }
+
+    fn metadata_key() -> ProbeSingleFlightKey {
+        ProbeSingleFlightKey {
+            kind: HostRunnerProbeKind::Metadata,
+            command: "npm.cmd".to_string(),
+            args: vec![
+                "view".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "version".to_string(),
+                "--json".to_string(),
+            ],
+            path: "C:\\Program Files\\nodejs".to_string(),
+        }
+    }
+
+    #[test]
+    fn persisted_probe_result_is_reused_by_a_fresh_registry_without_a_process() {
+        // Issue #4283 AC-1 / AC-6: the 300s in-memory reuse never survives a
+        // gwt restart, so every cold launch paid `npm view` + `npx --version`
+        // again. A successful package-runner probe is persisted and a fresh
+        // registry (= a restarted gwt) replays it without spawning anything.
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        let first_registry = HostRunnerProbeSingleFlight::default();
+        let (led, share) =
+            first_registry.run_persisted(metadata_key(), Some(&store), || HostRunnerProbeOutcome {
+                stdout: "\"2.1.0\"\n".to_string(),
+                ..HostRunnerProbeOutcome::success()
+            });
+        assert_eq!(share, ProbeShare::Led);
+        assert!(led.success);
+
+        let restarted_registry = HostRunnerProbeSingleFlight::default();
+        let started = Instant::now();
+        let (reused, share) =
+            restarted_registry.run_persisted(metadata_key(), Some(&store), || {
+                panic!("a persisted success must be replayed, not re-probed")
+            });
+        assert_eq!(share, ProbeShare::Reused);
+        assert!(reused.success);
+        assert_eq!(reused.stdout, "\"2.1.0\"\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "warm admission must not pay a process start"
+        );
+    }
+
+    #[test]
+    fn persisted_probe_result_expires_after_the_reuse_ttl() {
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        let stale =
+            std::time::SystemTime::now() - PERSISTED_PROBE_REUSE_TTL - Duration::from_secs(60);
+        store.record(&metadata_key(), &HostRunnerProbeOutcome::success(), stale);
+
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) = registry.run_persisted(
+            metadata_key(),
+            Some(&store),
+            HostRunnerProbeOutcome::success,
+        );
+        assert_eq!(
+            share,
+            ProbeShare::Led,
+            "a stale persisted result is re-probed"
+        );
+    }
+
+    #[test]
+    fn a_failed_probe_invalidates_the_persisted_result() {
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        store.record(
+            &metadata_key(),
+            &HostRunnerProbeOutcome::success(),
+            std::time::SystemTime::now(),
+        );
+
+        // An expired success is not replayed, so the probe runs; when it
+        // fails, the expired entry is dropped rather than left behind.
+        let expired_at =
+            std::time::SystemTime::now() - PERSISTED_PROBE_REUSE_TTL - Duration::from_secs(60);
+        store.record(
+            &single_flight_key("0.153.2"),
+            &HostRunnerProbeOutcome::success(),
+            expired_at,
+        );
+        assert!(store
+            .lookup(
+                &single_flight_key("0.153.2"),
+                expired_at + Duration::from_secs(1)
+            )
+            .is_some());
+        let failing_registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) =
+            failing_registry.run_persisted(single_flight_key("0.153.2"), Some(&store), || {
+                HostRunnerProbeOutcome::failure_with_stderr("E404 not found")
+            });
+        assert_eq!(share, ProbeShare::Led);
+        assert!(
+            store
+                .lookup(
+                    &single_flight_key("0.153.2"),
+                    expired_at + Duration::from_secs(1)
+                )
+                .is_none(),
+            "a failure never persists and drops the stale success"
+        );
+
+        store.invalidate(&metadata_key());
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) = registry.run_persisted(
+            metadata_key(),
+            Some(&store),
+            HostRunnerProbeOutcome::success,
+        );
+        assert_eq!(share, ProbeShare::Led, "an invalidated result is re-probed");
+    }
+
+    #[test]
+    fn direct_runner_probes_are_never_persisted() {
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        let key = ProbeSingleFlightKey {
+            kind: HostRunnerProbeKind::Direct,
+            command: "claude".to_string(),
+            args: vec!["--version".to_string()],
+            path: "/usr/local/bin".to_string(),
+        };
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) =
+            registry.run_persisted(key.clone(), Some(&store), HostRunnerProbeOutcome::success);
+        assert_eq!(share, ProbeShare::Led);
+        assert!(
+            store.lookup(&key, std::time::SystemTime::now()).is_none(),
+            "only package-runner probes (metadata / exact package) are persisted"
+        );
+        assert!(!store.path().exists(), "nothing persisted, nothing written");
     }
 }
