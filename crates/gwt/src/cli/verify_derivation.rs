@@ -260,11 +260,11 @@ fn changed_paths_since(worktree: &Path, base: &str) -> Result<Vec<String>, Strin
     let mut paths: BTreeSet<String> = BTreeSet::new();
     paths.extend(checked_git_lines(
         worktree,
-        &["diff", "--name-only", base, "HEAD"],
+        &["diff", "--no-renames", "--name-only", base, "HEAD"],
     )?);
     paths.extend(checked_git_lines(
         worktree,
-        &["diff", "--name-only", "HEAD"],
+        &["diff", "--no-renames", "--name-only", "HEAD"],
     )?);
     paths.extend(checked_git_lines(
         worktree,
@@ -586,6 +586,28 @@ mod tests {
         assert_eq!(
             derive(dir.path()).unwrap().trivial_reason,
             Some(TrivialReason::IntegrationBranch)
+        );
+
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(dir.path(), &["config", "diff.renames", "true"]);
+        git(
+            dir.path(),
+            &["mv", "crates/gwt/web/styles/test.css", "archived-style.txt"],
+        );
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a staged rename must retain the removed frontend surface"
+        );
+        git(
+            dir.path(),
+            &["commit", "-qm", "chore: archive frontend fixture"],
+        );
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a committed rename must retain the removed frontend surface"
         );
     }
 

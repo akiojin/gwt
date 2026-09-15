@@ -182,7 +182,7 @@ The handoff is **automatically skipped** (no user prompt) when:
 - The caller passed `--skip-user-check` for an explicit non-interactive
   run.
 
-In every skip case, the reason is recorded as
+In every non-autonomous skip case, the reason is recorded as
 `User Verification: skipped(<reason>)` so reviewers can audit why no user
 confirmation was requested.
 

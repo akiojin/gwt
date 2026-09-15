@@ -323,7 +323,10 @@ fn ready_verification(
         Err(error) if autonomous => return Err(format!(
             "PR handoff refused: cannot classify autonomous UI changes: {error}. Restore the Git integration base and rerun verify.plan / verify.run."
         )),
-        Err(_) => false,
+        Err(_) if user_result == "confirmed" => true,
+        Err(error) => return Err(format!(
+            "PR handoff refused: cannot classify manual UI changes: {error}. Restore the Git integration base and rerun verify.plan / verify.run, or complete the user verification handoff."
+        )),
     };
     if !autonomous {
         if (ui_surface || user_result.starts_with("deferred")) && user_result != "confirmed" {
@@ -1660,7 +1663,7 @@ mod tests {
                     base: s("develop"),
                     head: None,
                     title: s("ready"),
-                    body: s("body"),
+                    body: s("User Verification Result: confirmed\n"),
                     labels: vec![],
                     draft: false,
                 },
@@ -1721,7 +1724,7 @@ mod tests {
                     base: s("develop"),
                     head: None,
                     title: s("completed handoff"),
-                    body: s("body"),
+                    body: s("User Verification Result: confirmed\n"),
                     labels: vec![],
                     draft: false,
                 },
@@ -3220,6 +3223,15 @@ mod tests {
                 "{value}: {out}"
             );
         }
+        env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
+            "User Verification Result: n/a\n".to_string();
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            2,
+            "an unreadable Git base cannot prove UI verification is unnecessary: {out}"
+        );
+        assert!(out.contains("cannot classify manual UI changes"), "{out}");
         assert_eq!(env.pr_ready_call_log, vec![7]);
     }
 
@@ -3409,7 +3421,10 @@ mod tests {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
         env.repo_path = repo.clone();
-        env.files.insert("body.md".to_string(), "Body".to_string());
+        env.files.insert(
+            "body.md".to_string(),
+            "User Verification Result: confirmed\n".to_string(),
+        );
         env.seed_created_pr(gwt_git::PrStatus {
             number: 2540,
             head_ref_name: String::new(),
