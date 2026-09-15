@@ -928,6 +928,9 @@ pub struct UnlandedBranchProbe {
     pub branch: String,
     pub ahead: usize,
     pub last_commit_at: Option<DateTime<Utc>>,
+    /// Whether a projected merge changes files outside `.gwt`. `None` means
+    /// the local probe could not reach a safe conclusion.
+    pub has_non_gwt_changes: Option<bool>,
 }
 
 /// A branch whose commits have nowhere to land: unique work against
@@ -944,6 +947,10 @@ pub struct UnlandedBranch {
     pub ahead: usize,
     pub last_commit_at: Option<DateTime<Utc>>,
     pub has_open_pr: bool,
+    /// `false` identifies residue confined to gwt's bookkeeping. Unknown
+    /// results stay visible to avoid hiding potentially unlanded source.
+    #[serde(default)]
+    pub has_non_gwt_changes: Option<bool>,
 }
 
 /// Keep the branches a PM must triage, oldest residue first.
@@ -968,6 +975,7 @@ pub fn classify_unlanded_branches(
             ahead: probe.ahead,
             last_commit_at: probe.last_commit_at,
             has_open_pr: false,
+            has_non_gwt_changes: probe.has_non_gwt_changes,
         })
         .collect();
     rows.sort_by(|left, right| {
@@ -976,6 +984,93 @@ pub fn classify_unlanded_branches(
             .then_with(|| left.branch.cmp(&right.branch))
     });
     rows
+}
+
+/// Return whether merging `branch_ref` into `base_ref` changes anything
+/// outside gwt's `.gwt` bookkeeping directory.
+///
+/// The merge is projected with `merge-tree`, so neither the index nor the
+/// working tree is changed. Conflicts outside `.gwt` are conservatively
+/// treated as potential source changes; an unparseable conflicted projection
+/// is an error rather than a bookkeeping-only result.
+pub fn branch_has_non_gwt_changes(
+    repo_path: &Path,
+    base_ref: &str,
+    branch_ref: &str,
+) -> std::result::Result<bool, String> {
+    let merge = gwt_core::process::run_git_logged(
+        &[
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "-z",
+            base_ref,
+            branch_ref,
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| error.to_string())?;
+    let exit_code = merge.status.code();
+    if !matches!(exit_code, Some(0 | 1)) {
+        let detail = String::from_utf8_lossy(&merge.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("git merge-tree failed with status {}", merge.status)
+        } else {
+            detail
+        });
+    }
+
+    let mut fields = merge.stdout.split(|byte| *byte == 0);
+    let projected_tree = fields
+        .next()
+        .and_then(|tree| std::str::from_utf8(tree).ok())
+        .filter(|tree| {
+            matches!(tree.len(), 40 | 64) && tree.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| "git merge-tree did not return a valid projected tree".to_string())?;
+
+    if exit_code == Some(1) {
+        let conflict_paths: Vec<&[u8]> = fields
+            .by_ref()
+            .take_while(|path| !path.is_empty())
+            .collect();
+        if conflict_paths.is_empty() {
+            return Err("git merge-tree reported conflicts without conflict paths".to_string());
+        }
+        if conflict_paths
+            .iter()
+            .any(|path| *path != b".gwt" && !path.starts_with(b".gwt/"))
+        {
+            return Ok(true);
+        }
+    }
+
+    let diff = gwt_core::process::run_git_logged(
+        &[
+            "diff",
+            "--quiet",
+            base_ref,
+            projected_tree,
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**",
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| error.to_string())?;
+    match diff.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => {
+            let detail = String::from_utf8_lossy(&diff.stderr).trim().to_string();
+            Err(if detail.is_empty() {
+                format!("git diff failed with status {}", diff.status)
+            } else {
+                detail
+            })
+        }
+    }
 }
 
 /// Parse `git for-each-ref --format=%(refname:short)%09%(committerdate:iso-strict)`
@@ -1031,6 +1126,12 @@ pub fn collect_unlanded_work_branches(
             continue;
         };
         probes.push(UnlandedBranchProbe {
+            has_non_gwt_changes: branch_has_non_gwt_changes(
+                repo_path,
+                base_ref,
+                &format!("origin/{branch}"),
+            )
+            .ok(),
             branch,
             ahead: divergence.ahead,
             last_commit_at,
@@ -4333,7 +4434,92 @@ mod tests {
             branch: branch.to_string(),
             ahead,
             last_commit_at: Some(last_commit_at.parse().expect("commit date")),
+            has_non_gwt_changes: Some(true),
         }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = gwt_core::process::run_git_logged(args, Some(repo)).expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_merge_projection_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-b", "develop"]);
+        git(tmp.path(), &["config", "user.email", "tests@example.com"]);
+        git(tmp.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(tmp.path().join("source.txt"), "initial\n").expect("write source");
+        std::fs::create_dir_all(tmp.path().join(".gwt")).expect("create .gwt");
+        std::fs::write(tmp.path().join(".gwt/state"), "initial\n").expect("write state");
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "initial"]);
+        tmp
+    }
+
+    #[test]
+    fn merge_projection_detects_source_changes() {
+        let tmp = init_merge_projection_repo();
+        git(tmp.path(), &["switch", "-c", "work/issue-4314"]);
+        std::fs::write(tmp.path().join("source.txt"), "feature\n").expect("write feature");
+        git(tmp.path(), &["add", "source.txt"]);
+        git(tmp.path(), &["commit", "-m", "feature"]);
+
+        assert_eq!(
+            branch_has_non_gwt_changes(tmp.path(), "develop", "work/issue-4314"),
+            Ok(true)
+        );
+        let nested = tmp.path().join("crates/example");
+        std::fs::create_dir_all(&nested).expect("create nested cwd");
+        assert_eq!(
+            branch_has_non_gwt_changes(&nested, "develop", "work/issue-4314"),
+            Ok(true),
+            "the source comparison is anchored at the repository root"
+        );
+    }
+
+    #[test]
+    fn merge_projection_ignores_squash_equivalent_source_and_gwt_only_residue() {
+        let tmp = init_merge_projection_repo();
+        git(tmp.path(), &["switch", "-c", "work/issue-4314"]);
+        std::fs::write(tmp.path().join("source.txt"), "landed\n").expect("write branch source");
+        std::fs::write(tmp.path().join(".gwt/state"), "branch bookkeeping\n")
+            .expect("write branch state");
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "branch change"]);
+
+        git(tmp.path(), &["switch", "develop"]);
+        std::fs::write(tmp.path().join("source.txt"), "landed\n").expect("write landed source");
+        git(tmp.path(), &["add", "source.txt"]);
+        git(tmp.path(), &["commit", "-m", "squash landed source"]);
+
+        assert_eq!(
+            branch_has_non_gwt_changes(tmp.path(), "develop", "work/issue-4314"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn merge_projection_ignores_conflicts_confined_to_gwt() {
+        let tmp = init_merge_projection_repo();
+        git(tmp.path(), &["switch", "-c", "work/issue-4314"]);
+        std::fs::write(tmp.path().join(".gwt/state"), "branch\n").expect("write branch state");
+        git(tmp.path(), &["add", ".gwt/state"]);
+        git(tmp.path(), &["commit", "-m", "branch bookkeeping"]);
+
+        git(tmp.path(), &["switch", "develop"]);
+        std::fs::write(tmp.path().join(".gwt/state"), "base\n").expect("write base state");
+        git(tmp.path(), &["add", ".gwt/state"]);
+        git(tmp.path(), &["commit", "-m", "base bookkeeping"]);
+
+        assert_eq!(
+            branch_has_non_gwt_changes(tmp.path(), "develop", "work/issue-4314"),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -4371,6 +4557,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["work/issue-3551", "work/issue-4069"]
         );
+    }
+
+    #[test]
+    fn unlanded_inventory_keeps_unknown_source_status_visible() {
+        let mut probe = unlanded_probe("work/issue-4314", 1, "2026-09-14T00:00:00Z");
+        probe.has_non_gwt_changes = None;
+
+        let rows = classify_unlanded_branches(vec![probe], &[]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].has_non_gwt_changes, None);
     }
 
     #[test]
