@@ -750,6 +750,14 @@ fn run_monitor_launch_now<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // Issue #4161 AC-5: same fence as `issue.monitor.requeue`. Promoting a row
+    // whose every launch is refused only moves the same failure to the head of
+    // the queue.
+    if let Some(refusal) = monitor_prepared_generation_fence_refusal(&project_root, number) {
+        out.push_str(&refusal.to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order.retain(|existing| *existing != number);
         prefs.priority_order.insert(0, number);
@@ -852,9 +860,9 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
 ///
 /// The recovery the incident needed was six live panes against three slots,
 /// where the fix could not be "close something": all six were working. So this
-/// only ever *adds* tracking back — it re-adopts the launches whose windows the
-/// canvas still shows, and never revokes, prunes, or closes anything. That also
-/// makes it safe without the daemon control lane: additive bindings and
+/// re-adopts the launches whose windows the canvas still shows, and never
+/// revokes or closes a live launch. Closed-Issue bindings are removed on load.
+/// Binding recovery is safe without the daemon control lane: additive bindings and
 /// launches are union-merged by every cross-process rebase, so a daemon that
 /// owns the state absorbs this commit instead of racing it.
 ///
@@ -876,7 +884,7 @@ fn run_monitor_reconcile<E: CliEnv>(
             prefs.clone(),
         );
         let readopted = monitor.readopt_live_launch_bindings(&live_window_ids);
-        if !readopted.is_empty() {
+        if !readopted.is_empty() || monitor.prefs().launch_bindings != prefs.launch_bindings {
             *prefs = monitor.prefs();
         }
         readopted
@@ -884,6 +892,10 @@ fn run_monitor_reconcile<E: CliEnv>(
     .map_err(io_as_api_error)?;
     let monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    // The driver's inbox is not persisted. Ask its next scan to recover
+    // untracked Launched rows using fresh canvas and execution evidence,
+    // rather than pretending a prefs-only mutation changed that projection.
+    let delivery = issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
     out.push_str(
         &serde_json::json!({
             "readopted": readopted,
@@ -891,11 +903,14 @@ fn run_monitor_reconcile<E: CliEnv>(
             "max_active": prefs.max_active_agents,
             "live_windows": live_window_ids.len(),
             "source": "live_canvas",
+            "scan_requested": delivery.scan_requested,
+            "scan_delivery": delivery.scan_delivery,
+            "scan_error": delivery.scan_error,
         })
         .to_string(),
     );
     out.push('\n');
-    Ok(0)
+    Ok(if delivery.scan_requested { 0 } else { 1 })
 }
 
 /// Issue #4084 AC-5: release the idle launched windows the live classification
@@ -945,6 +960,10 @@ fn run_monitor_release_idle<E: CliEnv>(
                 "idle_since": idle.idle_since,
                 "bound": idle.bound,
                 "releasable": idle.idle_kind != crate::IssueMonitorIdleKind::StuckUnknown,
+                // Issue #4131: releasing this row also puts its Issue back on
+                // the queue, because the execution it was launched for never
+                // settled. The operator should see that before asking.
+                "requeue_on_release": idle.requeue_on_release,
             })
         })
         .collect::<Vec<_>>();
@@ -1405,6 +1424,16 @@ fn run_monitor_requeue<E: CliEnv>(
     let stranded_launch = projection
         .as_ref()
         .is_some_and(|status| agent_status_launch_is_stranded(status, number));
+    // Issue #4161 AC-5: a Prepared successor/takeover fences the owner's
+    // execution generation and refuses every launch, and nothing clears it on
+    // its own. Releasing the failure hold here would answer `requeued` and let
+    // the next scan fail with the same message forever, so refuse now and name
+    // the operation that actually clears the fence.
+    if let Some(refusal) = monitor_prepared_generation_fence_refusal(&project_root, number) {
+        out.push_str(&refusal.to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let (prefs, (outcome, completion_hold_cleared)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -1547,6 +1576,46 @@ fn run_monitor_requeue<E: CliEnv>(
     // The release itself is committed even when the follow-up scan authority is
     // unavailable; scan delivery is reported truthfully in the JSON fields.
     Ok(0)
+}
+
+/// Issue #4161 AC-5: the refusal an operation that puts an issue back in the
+/// launch queue owes its caller while a Prepared transaction fences the
+/// owner's execution generation.
+///
+/// Only a fence that can no longer clear itself refuses: a launch that is
+/// materializing right now holds a Prepared transaction too, and the scan it
+/// is already running is exactly what the caller wants. A stale fence, by
+/// contrast, refuses every launch forever, so answering "queued" is a lie the
+/// caller can only discover one scan later. `None` means nothing durable
+/// fences the owner and the caller may proceed; an unreadable ledger also
+/// answers `None`, because a diagnosis that cannot be made is not evidence
+/// that the launch will fail.
+fn monitor_prepared_generation_fence_refusal(
+    project_root: &std::path::Path,
+    number: u64,
+) -> Option<serde_json::Value> {
+    let now = chrono::Utc::now();
+    let fence: Vec<_> = crate::cli::execution_state::blocking_prepared_transactions_for_project(
+        project_root,
+        number,
+    )
+    .ok()?
+    .into_iter()
+    .filter(|transaction| transaction.is_stale_at(now))
+    .collect();
+    if fence.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "number": number,
+        "status": "refused",
+        "refusal": "prepared_generation_fence",
+        "detail": format!(
+            "{} Prepared execution transaction(s) fence issue #{number}'s generation and refuse every launch; clear them with the execution.release_prepared JSON operation, then requeue",
+            fence.len()
+        ),
+        "blocking_prepared_transactions": fence,
+    }))
 }
 
 /// Issue #4077 AC-3: the claim a `BlockedByClaim` row is waiting on.
@@ -3487,6 +3556,8 @@ mod tests {
         }))
         .expect("projection wire format deserializes");
 
+        assert_eq!(status.gui_status, None);
+        assert_eq!(status.auto_apply_updates_effective, None);
         assert!(agent_status_blocked_by_claim(&status, 42).is_some());
         assert!(agent_status_blocked_by_claim(&status, 7).is_none());
         assert!(agent_status_blocked_by_claim(&status, 99).is_none());
@@ -4635,7 +4706,10 @@ mod tests {
             active_launches: vec![2338],
             max_active: 1,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -4654,6 +4728,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4668,7 +4743,10 @@ mod tests {
             active_launches: Vec::new(),
             max_active: 1,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -4701,6 +4779,9 @@ mod tests {
                 idle_kind: None,
                 idle_since: None,
                 duplicate_launch_refusal: None,
+                attempts: 0,
+                last_failure_message: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
@@ -4711,6 +4792,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4776,7 +4858,10 @@ mod tests {
                 active_launches: Vec::new(),
                 max_active: 1,
                 enabled: true,
+                gui_status: None,
                 autonomous_mode: true,
+                auto_apply_updates: None,
+                auto_apply_updates_effective: None,
                 has_launch_profile: true,
                 quota_hold: None,
                 update_drain: None,
@@ -4809,6 +4894,9 @@ mod tests {
                     idle_kind: None,
                     idle_since: None,
                     duplicate_launch_refusal: None,
+                    attempts: 0,
+                    last_failure_message: None,
+                    failure_kind: None,
                 }],
                 closure_held: Vec::new(),
                 last_error: None,
@@ -4819,6 +4907,7 @@ mod tests {
                 disk_space: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
+                failure_surge: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -4858,7 +4947,10 @@ mod tests {
             active_launches: Vec::new(),
             max_active: 1,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -4877,6 +4969,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -5004,6 +5097,22 @@ mod tests {
                 "the offline fallback reports {attached} too: {out}"
             );
         }
+        let gui_status = status
+            .as_object_mut()
+            .expect("status object")
+            .remove("gui_status")
+            .expect("GUI projection");
+        assert_eq!(gui_status["state"], "launching");
+        assert_eq!(gui_status["last_error"], serde_json::Value::Null);
+        assert_eq!(
+            gui_status["queue_len"],
+            status["queue"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            gui_status["active_count"],
+            status["active_launches"].as_array().unwrap().len()
+        );
+        assert_eq!(gui_status["max_active_agents"], status["max_active"]);
         assert_eq!(
             status,
             serde_json::json!({
@@ -5012,6 +5121,8 @@ mod tests {
                 "max_active": 3,
                 "enabled": true,
                 "autonomous_mode": false,
+                "auto_apply_updates": null,
+                "auto_apply_updates_effective": false,
                 "has_launch_profile": false,
                 "launch_profile_summary": "configure before auto start",
                 "launch_profile_candidates": [],
@@ -5760,7 +5871,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -6497,7 +6608,10 @@ mod tests {
             active_launches: Vec::new(),
             max_active: 3,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -6530,6 +6644,9 @@ mod tests {
                 idle_since: None,
                 steering: None,
                 duplicate_launch_refusal: None,
+                attempts: 0,
+                last_failure_message: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: None,
@@ -6541,6 +6658,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             issue_cache: None,
         };
 
@@ -6691,6 +6809,136 @@ mod tests {
         .expect("requeue runs");
         assert_eq!(code, 1);
         assert!(out.contains("not_held"), "{out}");
+    }
+
+    /// Issue #4161 AC-5: a Prepared execution transaction refuses every launch
+    /// and never expires, so releasing the failure hold would answer
+    /// `requeued` and let the next scan record the identical failure. The
+    /// operation has to refuse now and name the release route instead.
+    #[test]
+    fn monitor_requeue_refuses_while_a_prepared_transaction_fences_the_generation() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        crate::cli::execution_state::save(
+            &repo,
+            &crate::cli::execution_state::ExecutionControlRecord {
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                primary_session_id: "fenced-holder".to_string(),
+                entrypoint: "$gwt-execute".to_string(),
+                bundled_required_owners: Vec::new(),
+                status: crate::cli::execution_state::ExecutionControlStatus::Active,
+                blocked_reason: None,
+                missing_verification: None,
+                launched_at: chrono::Utc::now(),
+                settled_at: None,
+                completion_evidence: None,
+                transfers: Vec::new(),
+                recoveries: Vec::new(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save execution record");
+        crate::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize the owner ledger");
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &repo,
+            owner,
+            &crate::cli::execution_state::SuccessorRequest {
+                operation_id: "fence-operation".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "fence-binding".to_string(),
+                initial_session_id: "fence-candidate".to_string(),
+                entrypoint: "continue-work".to_string(),
+                // Old enough that the launch which prepared it has had every
+                // chance to activate or abort; its candidate Session never
+                // materialized, so nothing will clear this on its own.
+                requested_at: chrono::Utc::now() - chrono::Duration::hours(2),
+            },
+        )
+        .expect("leave a Prepared transaction behind");
+
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![42],
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: "manual successor refuses while a Prepared successor or takeover targets the current generation".to_string(),
+                    window_id: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+        assert_eq!(code, 1, "{out}");
+        let response: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("refusal is JSON");
+        assert_eq!(response["status"], "refused");
+        assert_eq!(response["refusal"], "prepared_generation_fence");
+        assert_eq!(
+            response["blocking_prepared_transactions"][0]["operation_id"],
+            "fence-operation"
+        );
+        assert!(
+            response["detail"]
+                .as_str()
+                .expect("detail text")
+                .contains("execution.release_prepared"),
+            "{out}"
+        );
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused recovery must be zero-mutation"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: Some(repo),
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now runs");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("prepared_generation_fence"), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "promoting a fenced row must not reorder the queue either"
+        );
     }
 
     #[test]
@@ -7465,7 +7713,7 @@ mod tests {
                     version: None,
                     session_mode: Default::default(),
                     skip_permissions: true,
-                    codex_fast_mode: false,
+                    fast_mode: false,
                     runtime_target: Default::default(),
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),
@@ -7495,7 +7743,10 @@ mod tests {
         .expect("config set");
         assert_eq!(code, 0, "output: {out}");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
-        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        assert_eq!(
+            result["launch_profile"],
+            "claude / default / auto / host / fast:off"
+        );
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         let profile = prefs.launch_profile.expect("profile survives");
         assert_eq!(profile.agent_id, "claude");
