@@ -4,8 +4,8 @@
 //! directory is generated — it is never part of a clone or a `git worktree add`.
 //! Every fresh worktree therefore inherited a `core.hooksPath` aimed at an
 //! empty path, and Git silently ran no hook at all: commitlint, the commit-time
-//! backend tests, and the pre-push Clippy/coverage gate were all bypassed
-//! without a single warning.
+//! backend tests, and the pre-push checks were all bypassed without a single
+//! warning.
 //!
 //! gwt owns worktree materialization, so it also owns making that directory
 //! real. Each required hook becomes a small POSIX shim that forwards to the
