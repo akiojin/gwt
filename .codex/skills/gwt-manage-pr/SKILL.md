@@ -12,8 +12,12 @@ Single skill for the full PR lifecycle: create, check status, fix blockers, and 
 Use the current user's language for decision summaries, blocker reports, and
 next-step guidance returned from this workflow.
 
-Canonical agent-facing surface is gwtd JSON operations `pr.*` and
-`actions.*` for PR inspection, create/update, and fix flows. The current
+Read-only `gh` commands are allowed and recorded on the shared GitHub budget
+ledger. Prefer gwtd JSON operations such as `pr.list` and `issue.view` when
+cached data or workflow lifecycle context is needed. GitHub mutations must
+use JSON-envelope operations, including `pr.merge` for merge actions and
+`actions.rerun` for rerunning CI. All verification and Ready PR gates still
+apply. The current
 implementation may still use GitHub REST / `gh` internally as transport, while
 GraphQL remains the transport for unresolved review threads and thread
 reply/resolve.
@@ -396,7 +400,8 @@ Blocking items: <N>
 - After preparing the reply body, use JSON operation
   `pr.review_threads.reply_and_resolve` to reply to and resolve all unresolved
   threads on the PR.
-- If that surface is unavailable, fall back to internal GraphQL transport with `resolveReviewThread`.
+- If that surface is unavailable, report the missing operation; do not bypass
+  the mutation gate with direct GraphQL writes.
 - **Verification:** After resolving, re-check that no unresolved
   threads remain. Unresolved threads block the Merge Verdict.
 
@@ -447,7 +452,7 @@ last human checkpoint:
   Chromium results for dark and light themes.
 - the PR is a releaseable slice with no known blockers, and is not a Draft
 
-If verification is `pending`, do **not** run `gh pr merge --auto`. Stop and
+If verification is `pending`, do **not** enable auto-merge through `pr.merge`. Stop and
 route the failure for repair (back to the TDD loop, `gwt-verify`, or
 `gwt-discussion`). Never downgrade a `pending` result to `skipped` to pass the
 gate.
@@ -457,7 +462,7 @@ gate.
 Auto-merge may be armed **only** when the PR is fully clear (no blocking CI, no
 conflict/BEHIND, no unresolved thread, no open CHANGES_REQUESTED) **and** the
 Hard PR Gate is satisfied. Before **any** code-changing push, **disable**
-auto-merge first (`gh pr merge --disable-auto <number>`); after the push,
+auto-merge first through JSON operation `pr.merge`; after the push,
 **re-run the Hard PR Gate** and only then **re-arm**. This makes GitHub merge
 only a snapshot that passed verification, and inherits the skill's rule that
 every code-changing re-push needs a fresh `gwt-verify --mode pre-pr` PASS — it
@@ -473,16 +478,14 @@ does not override it.
    Re-gate per the Core invariant on each code-changing push.
 3. Select a merge method allowed by the repository (`gh repo view --json
    ...,viewerDefaultMergeMethod`); never hardcode `--squash`.
-4. Arm auto-merge **only on a clear snapshot**: `gh pr merge --auto --merge
-   <number>` (transport exception — there is no `pr.merge` JSON operation;
-   `gh pr merge` is allowed). `--auto` waits only for required checks; on repos
+4. Arm auto-merge **only on a clear snapshot** through JSON operation `pr.merge`
+   using the selected merge method. Auto-merge waits only for required checks; on repos
    that do not enforce conversation-resolution/approval branch protection,
-   prefer poll-then-merge (`gh pr merge --merge <number>` after re-reading
-   `pr.view` CLEAN) over `--auto`.
+   prefer poll-then-merge (`pr.merge` after re-reading `pr.view` CLEAN).
 5. Poll `pr.view` ~30s. On any **new** blocker (BEHIND, new failing check, new
-   thread/CHANGES_REQUESTED): `gh pr merge --disable-auto`, resolve, re-gate,
+   thread/CHANGES_REQUESTED): disable auto-merge through `pr.merge`, resolve, re-gate,
    **re-arm**. Re-run only **infrastructure-transient** CI failures with
-   `gh run rerun <run-id> --failed` (max 3); a test/build timeout or compile/
+   JSON operation `actions.rerun` for the failed jobs (max 3); a test/build timeout or compile/
    test failure is code, not transient — fix it. The poll is bounded (~20 polls
    / ~10 min) then hands off via `board.post`.
 6. Continue until `pr.view` shows `[MERGED]` (GitHub `merged_at` set), then

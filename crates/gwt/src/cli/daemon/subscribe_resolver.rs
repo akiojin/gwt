@@ -1017,7 +1017,7 @@ mod tests {
     async fn stale_socket_and_reused_pid_do_not_create_false_ambiguity() {
         use std::time::Duration;
 
-        use super::super::{broadcast::BroadcastHub, server};
+        use super::super::{broadcast::BroadcastHub, client::DaemonClient, server};
 
         let fixture = Fixture::new();
         let live_socket = fixture.temp.path().join("live-daemon.sock");
@@ -1052,6 +1052,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(live_socket.exists(), "daemon socket did not appear");
+        // Binding precedes synchronous daemon initialization. Complete a real
+        // handshake before measuring sibling reachability with its probe budget.
+        drop(
+            DaemonClient::connect(&live)
+                .await
+                .expect("live daemon ready"),
+        );
 
         let resolved = resolve(
             &fixture.gwt_home,
@@ -1076,7 +1083,7 @@ mod tests {
             time::Duration,
         };
 
-        use super::super::{broadcast::BroadcastHub, server};
+        use super::super::{broadcast::BroadcastHub, client::DaemonClient, server};
 
         let fixture = Fixture::new();
         let healthy_socket = fixture.temp.path().join("healthy.sock");
@@ -1121,6 +1128,11 @@ mod tests {
         assert!(
             healthy_socket.exists(),
             "healthy daemon socket did not appear"
+        );
+        drop(
+            DaemonClient::connect(&healthy)
+                .await
+                .expect("healthy daemon ready"),
         );
 
         let (release_slow, await_resolver) = mpsc::channel();
@@ -1208,6 +1220,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(socket_path.exists(), "daemon socket did not appear");
+        drop(
+            DaemonClient::connect(&endpoint)
+                .await
+                .expect("sibling daemon ready"),
+        );
 
         let resolved = resolve(
             &fixture.gwt_home,

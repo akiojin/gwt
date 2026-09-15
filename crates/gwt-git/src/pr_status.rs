@@ -85,28 +85,31 @@ pub const USER_VERIFICATION_RESULT_LABEL: &str = "User Verification Result:";
 /// autonomous runs record `n/a (autonomous)` and deliver through CI auto-merge.
 pub const DEFERRED_USER_VERIFICATION_RESULT: &str = "deferred (autonomous execution)";
 
-/// Read the recorded result, including the Markdown forms used in PR bodies.
+/// Read the first recorded result, including Markdown forms used in PR bodies.
 #[must_use]
 pub fn user_verification_result(body: &str) -> Option<String> {
-    body.lines().find_map(|line| {
-        line.trim_start()
-            .trim_start_matches(['-', '*', '#', '>', ' '])
-            .strip_prefix(USER_VERIFICATION_RESULT_LABEL)
-            .map(|value| {
-                value
-                    .trim()
-                    .trim_matches(['*', '`', ' '])
-                    .to_ascii_lowercase()
-            })
-    })
+    user_verification_results(body)
+        .next()
+        .map(|value| value.trim_matches(['*', '`', ' ']).to_ascii_lowercase())
 }
 
 /// Autonomous verification is no longer waiting on a human (#4326).
 /// Other deferred results retain their existing inventory meaning.
 #[must_use]
 pub fn body_defers_user_verification(body: &str) -> bool {
-    user_verification_result(body).is_some_and(|value| {
+    user_verification_results(body).any(|value| {
+        let value = value.trim_matches(['*', '`', ' ']).to_ascii_lowercase();
         value.starts_with("deferred") && !value.starts_with(DEFERRED_USER_VERIFICATION_RESULT)
+    })
+}
+
+/// Recorded verification values, excluding prose that merely mentions the label.
+pub fn user_verification_results(body: &str) -> impl Iterator<Item = &str> {
+    body.lines().filter_map(|line| {
+        line.trim_start()
+            .trim_start_matches(['-', '*', '#', '>', ' '])
+            .strip_prefix(USER_VERIFICATION_RESULT_LABEL)
+            .map(str::trim)
     })
 }
 
