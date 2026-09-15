@@ -28459,6 +28459,61 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
     }
 }
 
+/// Issue #3808 AC-4: the worktree-wide managed hook self-heal audited 203
+/// worktrees for 191 s on the startup path, ahead of the embedded server
+/// bind. Launches refresh the managed assets of the worktree they start in,
+/// so the sweep is a repair rather than a launch precondition: it runs on the
+/// blocking worker and never delays the first frame.
+#[test]
+fn bootstrap_runs_managed_hook_self_heal_off_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, &["init", "-q"]);
+    let missing_pin = temp
+        .path()
+        .join(format!("missing/gwtd{}", std::env::consts::EXE_SUFFIX));
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+    let config = repo.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let legacy = r#"{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"/repo/target/debug/gwtd hook event SessionStart"}]}]}}"#;
+    fs::write(&config, legacy).unwrap();
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        legacy,
+        "the self-heal sweep must not run synchronously inside bootstrap"
+    );
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    assert!(
+        !queued.is_empty(),
+        "bootstrap must schedule the sweep on the blocking worker"
+    );
+    for task in queued {
+        task();
+    }
+    let healed = fs::read_to_string(&config).unwrap();
+    assert!(
+        healed.contains("GWT_BIN_PATH"),
+        "the deferred sweep must still heal the worktree: {healed}"
+    );
+    assert!(repo.join(".gwt/managed-hook-self-healed").exists());
+}
+
 #[test]
 fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
     let _env_lock = crate::env_test_lock()
