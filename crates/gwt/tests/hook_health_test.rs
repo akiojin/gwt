@@ -1624,7 +1624,11 @@ fn shared_snapshot_resolves_each_bare_hook_binary_once() {
     let worktrees = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
     for worktree in &worktrees {
         fs::create_dir_all(worktree.path().join(".codex")).unwrap();
-        fs::write(worktree.path().join(".codex/hooks.json"), &bare_fallback_hooks).unwrap();
+        fs::write(
+            worktree.path().join(".codex/hooks.json"),
+            &bare_fallback_hooks,
+        )
+        .unwrap();
     }
 
     let snapshot = ManagedHookFailureSnapshot::default();
