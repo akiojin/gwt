@@ -3014,13 +3014,46 @@ impl ClaimProbeOutcome {
     }
 }
 
+/// Issue #4413: which authority produced an [`IssueMonitorAgentStatus`].
+///
+/// With nothing live to answer, `issue.monitor.status` rebuilds the projection
+/// from preferences and the local Issue cache. That answer describes what one
+/// process can read off disk, not what the fleet is doing, and it arrives in
+/// exactly the shape of a monitor that lost every candidate. Twice a running
+/// fleet was reported as fully stopped from it, so the provenance has to
+/// travel with the numbers rather than be inferred from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorStatusSource {
+    /// A live Issue Monitor published this projection.
+    #[default]
+    Daemon,
+    /// Rebuilt from preferences and the local Issue cache because nothing
+    /// answered. Every count is a lower bound on what exists, never a census.
+    DegradedCache,
+}
+
 /// Atomic agent-facing projection of the live Issue Monitor driver state.
 /// Unlike [`IssueMonitorStatusView`], this includes the ordered queue itself so
 /// callers never have to reconstruct transient claim outcomes from cache.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorAgentStatus {
+    /// Issue #4413 AC-1: where these numbers came from. See
+    /// [`IssueMonitorStatusSource`]; absent in pre-#4413 publications, which
+    /// only a live monitor could have written.
+    #[serde(default)]
+    pub source: IssueMonitorStatusSource,
     pub queue: Vec<u64>,
     pub active_launches: Vec<u64>,
+    /// Issue #4413 AC-3: whether `active_launches` is known to be partial.
+    ///
+    /// It lists the launches recorded in durable preferences, and preferences
+    /// are what a monitor stops maintaining when it stops. Under a degraded
+    /// projection an empty list therefore means "none recorded here" and never
+    /// "none running" — the incident read `[]` while thirteen agent windows
+    /// were committing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub active_launches_incomplete: bool,
     pub max_active: usize,
     pub enabled: bool,
     /// Issue #4273: the authoritative GUI projection; absent in older daemons.
@@ -9635,8 +9668,12 @@ impl IssueMonitorState {
         let status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         let failure_surge = self.failure_surge();
         IssueMonitorAgentStatus {
+            // Issue #4413: this is the live driver talking about itself. Only
+            // a reader that failed to reach one may downgrade the provenance.
+            source: IssueMonitorStatusSource::Daemon,
             queue: self.queued_issue_numbers(),
             active_launches: self.active_issue_numbers(),
+            active_launches_incomplete: false,
             max_active: self.config.max_active.max(1),
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),
@@ -15625,6 +15662,8 @@ mod tests {
         assert_eq!(
             monitor.agent_status(),
             IssueMonitorAgentStatus {
+                source: IssueMonitorStatusSource::Daemon,
+                active_launches_incomplete: false,
                 queue: Vec::new(),
                 active_launches: Vec::new(),
                 max_active: 3,
