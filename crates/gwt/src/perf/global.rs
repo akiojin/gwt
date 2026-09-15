@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_detector_keeps_an_unverified_sample_without_waiting() {
+    fn a_busy_detector_keeps_an_unverified_sample_after_a_bounded_wait() {
         let home = tempfile::tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(home.path());
         let mut runtime = PerfRuntime::from_config(&PerfConfig::default()).expect("runtime");

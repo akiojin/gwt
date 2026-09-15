@@ -2,6 +2,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::PathBuf,
+    thread,
+    time::{Duration, Instant},
 };
 
 use chrono::{NaiveDate, Utc};
@@ -15,6 +17,10 @@ use super::{
 
 const PERF_FILE_NAME_PREFIX: &str = "perf-";
 const PERF_DATE_SUFFIX_FORMAT: &str = "%Y-%m-%d.jsonl";
+
+/// Longest a sample waits for another collector's detector update before it
+/// is written unmarked.
+const DETECTOR_LOCK_WAIT: Duration = Duration::from_millis(25);
 
 pub(crate) trait UtcDateClock {
     fn today_utc(&self) -> NaiveDate;
@@ -90,21 +96,12 @@ impl<C: UtcDateClock> PerfStore<C> {
         self.file_for_date(date)?.write_all(&line)
     }
 
-    /// Share detection across GUI and short-lived CLI processes. A busy or
-    /// unavailable detector never delays the measured operation: its sample
-    /// remains unmarked so readers can see that detection was not performed.
+    /// Share detection across GUI and short-lived CLI processes. A detector
+    /// that stays busy past `DETECTOR_LOCK_WAIT`, or is unavailable, never
+    /// holds the caller longer: its sample remains unmarked so readers can see
+    /// that detection was not performed.
     pub(crate) fn append_budgeted(&mut self, sample: &PerfRecord, budget: f64) -> io::Result<()> {
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.log_dir.join("detector.lock"));
-        let lock = lock.and_then(|file| {
-            FileExt::try_lock_exclusive(&file)?;
-            Ok(file)
-        });
-        let Ok(_lock) = lock else {
+        let Ok(_lock) = self.lock_detector() else {
             return self.append(sample);
         };
 
@@ -117,6 +114,26 @@ impl<C: UtcDateClock> PerfStore<C> {
             self.append(&sample.as_violation(details))?;
         }
         Ok(())
+    }
+
+    /// Contention is one small state read and write, or a child process forked
+    /// while the lock was held and not yet exec'd; both clear within
+    /// milliseconds, so a single non-blocking attempt would drop detection.
+    fn lock_detector(&self) -> io::Result<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.log_dir.join("detector.lock"))?;
+        let deadline = Instant::now() + DETECTOR_LOCK_WAIT;
+        loop {
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => return Ok(file),
+                Err(error) if Instant::now() >= deadline => return Err(error),
+                Err(_) => thread::sleep(Duration::from_millis(1)),
+            }
+        }
     }
 
     fn observe_shared(
@@ -247,6 +264,34 @@ mod tests {
                 .count();
             assert_eq!(violations, usize::from(step == 4));
         }
+    }
+
+    /// Issue #4292 CI: a lock held for a moment (a concurrent collector, or a
+    /// forked child that has not exec'd yet) must not drop detection.
+    #[test]
+    fn a_briefly_held_detector_still_evaluates_the_sample() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let day = date(2026, 9, 15);
+        let mut store = PerfStore::with_clock(30, FixedUtcDateClock::new(day)).expect("store");
+        let lock = fs::File::create(gwt_logs_dir().join("perf/detector.lock")).expect("lock file");
+        fs2::FileExt::lock_exclusive(&lock).expect("hold detector");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            drop(lock);
+        });
+
+        store
+            .append_budgeted(&sample(day, "route:search", 5000.0), 2000.0)
+            .expect("record");
+        release.join().expect("release the detector");
+
+        let records = read_json_lines(&gwt_logs_dir().join("perf/perf-2026-09-15.jsonl"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["detector_version"], 1,
+            "a detector released within the wait bound must still evaluate the sample"
+        );
     }
 
     #[test]
