@@ -103,6 +103,17 @@ fresh Active record, so the same execution lifetime can continue. Diagnose
 first with `execution.status` — its `available_recoveries` names the exact
 operation to run.
 
+When a launch is refused with `... refuses while a Prepared successor or
+takeover targets the current generation`, an operation that prepared a
+successor died before settling it and its intent still fences the owner. Read
+the owner with `execution.status` and `params.issue` / `params.spec`: the
+fence is listed under `blocking_prepared_transactions` and
+`recommended_recovery` names `execution.release_prepared`. Release it with
+that operation, the same owner parameter, a non-empty `params.reason`, and
+`params.operation_id` for the exact transaction the diagnosis reported; then
+launch. It is owner-addressed rather than session-bound, so a PM agent that
+cannot reach the GUI can clear the fence.
+
 ## Mode detection
 
 1. If the invocation includes `#N` or an Issue URL, read the Issue with JSON
