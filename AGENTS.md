@@ -11,6 +11,10 @@
 
 ## エージェント運用原則
 
+- **Classify before acting:** ユーザーの指摘・指示・修正を受けたら、着手前に「gwt 機能」か「このリポジトリ固有の運用」かを判定し、結果と根拠を報告に明記する。
+  「他プロジェクトを gwt で開いたときにも必要か」「`gwt-pm` / `gwt-coordination` や skill / hooks / runtime / `gwtd` operation の契約に影響するか」を判定基準とする。
+  gwt 機能の Issue 化・恒久実装は、既存の「gwt 専用機能は『機能』として実装する」と「Report gwt Friction to the PM」に従う。判断に迷う場合も gwt 機能として PM に提示する。
+  gwt リポジトリの CI・レビュー・リリース慣習に限定される運用は AGENTS.md、仕様は該当 SPEC、利用者向け説明は「ドキュメント管理」に従い README.md / README.ja.md に記載する（運用ルールは README に入れない）。
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
 - **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd` JSON operation `memory.add` でマシンローカルの work-notes memory（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`、SPEC-3214）に記録し、同種の作業を始める前に確認する。repo-local `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は読み取り fallback / legacy alias として扱う。
 - **Report gwt Friction to the PM:** gwt 自体の摩擦・機能ギャップは Board で PM に報告し、PM が `gwt-register-issue` で起票する。agent は自分で upstream に Issue を作らない（詳細な投稿手順は generated `gwt-coordination` SKILL.md が配信する）。
@@ -262,7 +266,9 @@
 ### ローカル検証/実行ルール（Rust）
 
 - このリポジトリのローカル検証・実行は Cargo を使用する
-- 現在の checkout で `gwtd` の JSON operation を実行する場合は、タスクまたはセッションの初回実行前に checkout root で `cargo build -p gwt --bin gwtd` を実行し、以後は `<checkout-root>/target/debug/gwtd` を明示的に使用する。`GWT_BIN_PATH` や `PATH` 上のバイナリは、version が一致する場合や checkout より新しい場合も checkout source と同じ実装であることを保証しないため使用しない
+- checkout のコードを実行する `gwtd` JSON operation（`execution.*` / `workspace.*` / `build.*` / `verify.*` / checkout で追加した operation）は、タスクまたはセッションの初回実行前に checkout root で `cargo build -p gwt --bin gwtd` を実行し、以後は `<checkout-root>/target/debug/gwtd` を明示的に使用する。`GWT_BIN_PATH` や `PATH` 上のバイナリは、version が一致する場合や checkout より新しい場合も checkout source と同じ実装であることを保証しないため、これらの operation には使用しない
+- 読み取りの `issue.*` / `pr.*` / `board.*` / `search` は installed gwtd（`GWT_BIN_PATH` / PATH）で実行してよい。Issue / PR / Board の状態を知るためだけに build や lease を待たない
+- 初回の `cargo build -p gwt --bin gwtd` は lease 不要の bootstrap step であり heavy な検証コマンドではない。順序は build → `verify.plan` → `verify.run` とし、lease を保持・待機したまま build しない（正本は `coordination_guidance.rs` の「gwtd bootstrap order」、生成 gwt-coordination / gwt-verify / gwt-search SKILL.md と同一文面）
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`
 - テスト: `cargo test -p gwt-core -p gwt --all-features`
