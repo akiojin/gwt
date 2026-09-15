@@ -7,6 +7,7 @@ pub mod codex_managed_config;
 pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
+pub mod git_hooks;
 pub mod hooks;
 pub mod pm_guidance;
 pub mod provider_hooks;
@@ -43,6 +44,10 @@ pub use distribute::{
     ManagedAssetTarget, TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
+pub use git_hooks::{
+    materialize_managed_git_hooks, missing_managed_git_hooks, plan_managed_git_hooks, GitHookPlan,
+    GitHookPlanEntry,
+};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
@@ -928,12 +933,11 @@ mod tests {
                 "params.derive:true",
                 "execution.repair",
                 "execution.status",
-                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
-                // the host-wide lease, and verify.run's own admission is
-                // documented where the loop is defined.
-                "verify.lease.acquire",
-                "verify.lease.release",
-                "issue.monitor.wait",
+                // SPEC #3576 AC-C6: bootstrap and TDD remain independent
+                // from canonical verification admission.
+                "Only canonical `verify.run` acquires the host-wide lease",
+                "cargo build -p gwt --bin gwtd",
+                "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
             ] {
@@ -948,8 +952,7 @@ mod tests {
             );
         }
 
-        // Issue #3913 AC-2: the verification skill's serialization section
-        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        // SPEC #3576 AC-C6: verification admission belongs to verify.run.
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
@@ -960,8 +963,8 @@ mod tests {
                 "## Heavy verification serialization",
                 "`cargo test`",
                 "`cargo clippy`",
-                "verify.lease.acquire",
-                "issue.monitor.wait",
+                "Only canonical `verify.run` acquires the host-wide lease",
+                "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
             ] {
@@ -1518,6 +1521,69 @@ mod tests {
                     "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
                 ),
                 "{relative} must require scoped abort-before-blocked order"
+            );
+        }
+    }
+
+    /// Issue #4352 AC-1 / AC-3: gwt-verify, gwt-search, and AGENTS.md carry
+    /// the same bootstrap order as the canonical coordination guidance.
+    #[test]
+    fn gwtd_bootstrap_contract_is_mirrored_in_verify_search_and_agents_md() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let shared = [
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`GWT_BIN_PATH`",
+        ];
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-search/SKILL.md",
+            ".codex/skills/gwt-search/SKILL.md",
+        ] {
+            let skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in shared.iter().chain(["lease-free bootstrap step"].iter()) {
+                assert!(
+                    skill.contains(required),
+                    "expected gwtd bootstrap contract in {relative}: {required}"
+                );
+            }
+        }
+        for pair in [
+            (
+                ".claude/skills/gwt-verify/SKILL.md",
+                ".codex/skills/gwt-verify/SKILL.md",
+            ),
+            (
+                ".claude/skills/gwt-search/SKILL.md",
+                ".codex/skills/gwt-search/SKILL.md",
+            ),
+        ] {
+            let claude = std::fs::read_to_string(workspace_root.join(pair.0)).unwrap();
+            let codex = std::fs::read_to_string(workspace_root.join(pair.1)).unwrap();
+            assert_eq!(
+                claude, codex,
+                "{} and {} must be byte-identical",
+                pair.0, pair.1
+            );
+        }
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in shared
+            .iter()
+            .chain(["lease \u{4e0d}\u{8981}\u{306e} bootstrap step"].iter())
+        {
+            assert!(
+                agents.contains(required),
+                "expected AGENTS.md local verification rule to match canonical guidance: {required}"
             );
         }
     }
@@ -2760,7 +2826,7 @@ mod tests {
         for required in [
             "Deliver",
             "drive to merge",
-            "gh pr merge --auto",
+            "JSON operation `pr.merge`",
             "merged_at",
             "Ready PR Gate",
             "Loop Safety Guard",
@@ -2860,12 +2926,12 @@ mod tests {
 
             for required in [
                 "drive-to-merge",
-                "gh pr merge --auto",
+                "JSON operation `pr.merge`",
                 "merged_at",
                 "Loop Safety Guard",
                 // Re-gate invariant: never keep auto-merge armed across a
                 // code-changing push.
-                "--disable-auto",
+                "disable auto-merge through `pr.merge`",
                 "re-arm",
             ] {
                 assert!(
@@ -2900,8 +2966,8 @@ mod tests {
                 // Hard PR gate before enabling auto-merge.
                 "Ready PR Gate",
                 "pending",
-                // Auto-merge enablement via the allowed gh command.
-                "gh pr merge --auto",
+                // Auto-merge enablement via the canonical JSON operation.
+                "JSON operation `pr.merge`",
                 // Project-agnostic merge-method selection (no hardcoded method).
                 "viewerDefaultMergeMethod",
                 // Merged-state watch surface and completion signal.
@@ -2909,13 +2975,13 @@ mod tests {
                 "merged_at",
                 // Transient CI classification + bounded re-run, like /release.
                 "transient",
-                "gh run rerun",
+                "`actions.rerun`",
                 // Bounded drive loop.
                 "Loop Safety Guard",
                 // Safety invariant: auto-merge must never stay armed across a
                 // code-changing push. Disable, re-gate, and re-arm per push so
                 // GitHub only ever merges a verified, gated snapshot.
-                "gh pr merge --disable-auto",
+                "**disable auto-merge** through JSON operation",
                 "re-arm",
             ] {
                 assert!(

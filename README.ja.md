@@ -880,23 +880,10 @@ cargo test -p gwt-core -p gwt --all-features
 
 ### 重量級検証の直列化
 
-重量級検証（`cargo test --all-features` / `cargo llvm-cov` / headed
-Playwright / `verify.run`）はホストの CPU を奪い合います。同じマシンで 2 つ
-同時に走らせると wall-clock に依存する fixture が理由なく失敗し、カバレッジ
-計測も汚れるため、gwt はホスト単位の lease で直列化します。保持者はマシン
-あたり 1 つで、リポジトリや worktree をまたいで共有されます。
-
-重量級コマンドの前に lease を取得し、終わったら解放します。
-
-```bash
-gwtd <<'JSON'
-{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
-JSON
-```
-
-応答は即時です。`verification lease: granted` の場合は解放に使う `lease_id`
-が返り、`verification lease: unavailable` の場合は現在の保持者と残り TTL が
-返るため、他プロセスを監視する必要はありません。
+ホスト全体の verification lease を取得するのは canonical `verify.run`
+だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
+各 run が取得と解放を管理します。`deferred` は取得待機が時間切れになり、
+検証記録が生成されなかったことを示します。再試行前に保持者を確認してください。
 
 ```bash
 gwtd <<'JSON'
@@ -904,15 +891,32 @@ gwtd <<'JSON'
 JSON
 ```
 
+初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
+lint、coverage、直接の headed browser 確認、pre-push 確認は verification
+lease なしでそのまま実行します。完了判定には引き続き canonical な検証証跡が
+必要です。
+
+`pre-push` hook は、ワークスペースをコンパイルしない検査だけを実行します
+（`cargo fmt --all -- --check`、Markdownlint、SKILL.md frontmatter の検証）。
+Git hook は `gwtd` ではなく `git push` の配下で動くため verification lease を
+取得できず、そこで重量級の Cargo ジョブを起動すると、別の worktree が lease を
+保持している間にホストを飽和させてしまいます。Clippy・テスト・カバレッジ 90%
+閾値は、代わりに Lint / Test / Coverage workflow が pull request ごとに強制
+します。
+
+**移行方法:** `verify.lease.acquire`、`verify.lease.hold`、
+`verify.lease.extend` は holder や予約を作らずエラーを返すようになりました。
+canonical 検証を囲む手動取得は `verify.run` に置き換え、通常の Cargo 操作を
+囲む手動取得は削除してください。既存の旧 holder はプロセスを kill せず、
+明示的に解放できます。
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
 JSON
 ```
 
-TTL より実行が長引く場合は、同じ `lease_id` で `verify.lease.extend` を
-使います。既定 TTL は 45 分で、満了した lease は自動的に解放され、保持者が
-kill された場合も即座に解放されます。lease の遷移は
+lease の遷移は
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
 
 ### GitHub API 予算
@@ -924,8 +928,20 @@ cache-first で、`~/.gwt/projects/<hash>/pr-inventory-cache.json` の
 `statusCheckRollup` / `body` は変更のあった PR だけ個別に取得します。判断に
 ライブ状態が必要なときだけ `params.refresh:true` を渡し、重いフィールドは
 `params.include`（`["checks","body"]`、既定は `["checks"]`）で選びます。応答には
-`source` / `cache_age_secs` / `throttled` / `github_calls` が含まれ、予算が
+`source` / `cache_age_secs` / `throttled` / `github_calls` に加え、
+`hydrated`（個別取得に成功したPR数）と `skipped_unchanged`（ライブ読み取りで変更なしと判定したPR数、キャッシュ応答では0）が含まれ、予算が
 予備域を下回ると最後のスナップショットが返り `throttled` に理由が入ります。
+
+変更のない Draft / CI 未起動 PR の空チェック結果は、スナップショットの期限後も再利用します。
+`updatedAt` または head commit が変わると再取得し、実行中のチェックは既定で10分ごとに再取得します。
+個別取得は同時最大5件、1回の読み取りで最大30件です。`~/.gwt/config.toml` で
+それぞれの間隔を独立して設定できます（0を指定するとその待ち時間を無効にします）。
+
+```toml
+[pr_inventory]
+cache_ttl_secs = 300
+checks_refresh_secs = 600
+```
 
 予算の観測は無料エンドポイントで行います:
 

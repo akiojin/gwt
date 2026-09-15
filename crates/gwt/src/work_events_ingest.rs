@@ -8,8 +8,9 @@
 //! idempotent gwt-core intake into the home works projection. A fingerprint
 //! cache (`work-events-intake.json`) skips unchanged sources; deleting it is
 //! always safe (dedup is event-id based, SC-260). After first validation,
-//! immutable local shards use size/mtime/container metadata to avoid payload
-//! I/O on the 30-second unchanged poll; metadata changes force revalidation.
+//! immutable local shards and the frozen legacy logs use size/mtime/container
+//! metadata to avoid payload I/O on the 30-second unchanged poll; metadata
+//! changes force revalidation.
 //!
 //! Git blob contents are OID-deduplicated and read in one `cat-file --batch`;
 //! tree enumeration is checkout-free and unique-commit deduplicated. Callers
@@ -39,8 +40,7 @@ const SOURCE_LIST: &str = "source-list:v1";
 
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
-const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str =
-    "source-context-v9-bucketed-event-shard-fixed-spawn-metadata-cache";
+const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v10-legacy-log-metadata-cache";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
@@ -287,13 +287,12 @@ fn load_pending_sources_for_rebuild(
             Ok(false) => continue,
             Err(error) => return Err(error.into()),
         }
+        // Metadata before content: a write racing this read leaves the older
+        // fingerprint behind, so the next pass reads the source again.
+        let fingerprint =
+            local_immutable_source_fingerprint(&source.events_path, source.container.as_ref())?;
         let content = read_work_event_source(&source.events_path, source.kind)?;
         let key = format!("{SOURCE_WORKTREE}{}", source.events_path.display());
-        let fingerprint = if matches!(source.kind, WorkEventsSourceKind::Shard) {
-            local_immutable_source_fingerprint(&source.events_path, source.container.as_ref())?
-        } else {
-            source_fingerprint(&content_fingerprint(&content), source.container.as_ref())
-        };
         fingerprints.push((key, fingerprint));
         contents.push(SharedWorkEventsSource::new(content, source.container));
     }
@@ -425,51 +424,25 @@ where
             }
         }
         let key = format!("{SOURCE_WORKTREE}{}", events_path.display());
-        if matches!(source.kind, WorkEventsSourceKind::Shard) {
-            match local_immutable_source_fingerprint(&events_path, source.container.as_ref()) {
-                Ok(fingerprint) => {
-                    local_immutable_sources.push(LocalImmutableSource {
-                        source,
-                        key,
-                        fingerprint,
-                    });
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree shard metadata read failed");
-                    source_discovery_failed = true;
-                    continue;
-                }
+        // Issue #4371: the frozen legacy log is judged by metadata like a
+        // shard. Reading all 239 of them (398.5 MB) on every trigger only to
+        // hash them was the largest cost of an unchanged pass.
+        match local_immutable_source_fingerprint(&events_path, source.container.as_ref()) {
+            Ok(fingerprint) => local_immutable_sources.push(LocalImmutableSource {
+                source,
+                key,
+                fingerprint,
+            }),
+            Err(error) => {
+                tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source metadata read failed");
+                source_discovery_failed = true;
             }
         }
-        before_source_read(&events_path);
-        let content = match read_work_event_source(&events_path, source.kind) {
-            Ok(content) => content,
-            Err(error) => {
-                tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source read failed");
-                source_discovery_failed = true;
-                continue;
-            }
-        };
-        let source_container = source.container.as_ref();
-        let fingerprint = source_fingerprint(&content_fingerprint(&content), source_container);
-        pending_sources.push(PendingWorkEventsSource {
-            key,
-            fingerprint,
-            content,
-            container: source.container.clone(),
-            reload_from_worktree: true,
-        });
     }
 
-    let local_sources_by_key = pending_sources
+    let local_sources_by_key = local_immutable_sources
         .iter()
         .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
-        .chain(
-            local_immutable_sources
-                .iter()
-                .map(|source| (source.key.as_str(), source.fingerprint.as_str())),
-        )
         .collect::<HashMap<_, _>>();
     if state.sources.iter().any(|(key, fingerprint)| {
         key.starts_with(SOURCE_WORKTREE)
@@ -1354,6 +1327,81 @@ mod tests {
         assert_eq!(second.events_applied, 0);
         assert_eq!(second.sources_ingested, 0);
         assert!(second.sources_skipped >= 1, "{second:?}");
+    }
+
+    fn write_legacy_log(repo: &Path, events: &[(&str, &str)]) {
+        let legacy = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(legacy.parent().expect("work dir")).expect("work dir");
+        let content = events
+            .iter()
+            .map(|(event_id, work_id)| {
+                event_line(event_id, work_id, "Legacy work", "2026-08-12T02:30:00Z") + "\n"
+            })
+            .collect::<String>();
+        std::fs::write(legacy, content).expect("legacy log");
+    }
+
+    /// Issue #4371: every trigger read all 239 frozen legacy logs (398.5 MB)
+    /// in full only to hash them. Like a shard, an unchanged legacy log is
+    /// judged by its metadata, and the rebuild records that same fingerprint.
+    #[test]
+    fn unchanged_pass_does_not_read_legacy_log_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_legacy_log(&repo, &[("evt-legacy-cache", "work-legacy-cache")]);
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(first.projection_rebuilt, "{first:?}");
+
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let second = ingest_project_work_events_paths_with_source_read_hook(
+            &repo,
+            &work_items_path,
+            &state_path,
+            |_| {
+                reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+        );
+
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(!second.projection_rebuilt, "{second:?}");
+        assert_eq!(second.sources_ingested, 0);
+    }
+
+    /// Issue #4371: judging legacy logs by metadata must not hide a change.
+    #[test]
+    fn changed_legacy_log_is_read_on_the_next_pass() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_legacy_log(&repo, &[("evt-legacy-first", "work-legacy-first")]);
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        write_legacy_log(
+            &repo,
+            &[
+                ("evt-legacy-first", "work-legacy-first"),
+                ("evt-legacy-second", "work-legacy-second"),
+            ],
+        );
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load")
+                .expect("projection");
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-legacy-second"));
     }
 
     #[test]

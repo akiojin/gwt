@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "dirs 7.0.0",
  "serde",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "gwt-core",
  "serde",
@@ -1450,7 +1450,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.96.1"
+version = "9.99.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -3331,9 +3331,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -3355,9 +3355,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",

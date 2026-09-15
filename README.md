@@ -923,23 +923,11 @@ cargo test -p gwt-core -p gwt --all-features
 
 ### Serializing heavy verification
 
-Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
-Playwright, `verify.run`) contends for host CPU. Running two of them at once
-on the same machine makes wall-clock fixtures fail for no reason and pollutes
-coverage numbers, so gwt serializes them behind a host-wide lease — one
-holder per machine, across every repository and worktree.
-
-Take the lease before the heavy command and release it afterwards:
-
-```bash
-gwtd <<'JSON'
-{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
-JSON
-```
-
-The answer is immediate. `verification lease: granted` returns a `lease_id`
-to release with; `verification lease: unavailable` returns the current holder
-and its remaining TTL, so nothing has to watch another process:
+Only canonical `verify.run` acquires the host-wide verification lease.
+Register the verification matrix with `verify.plan`, then run it with
+`verify.run`; each run manages its own admission and release. A `deferred`
+result means admission timed out without a verification record. Inspect the
+holder before retrying:
 
 ```bash
 gwtd <<'JSON'
@@ -947,16 +935,32 @@ gwtd <<'JSON'
 JSON
 ```
 
+Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
+lint, coverage, direct headed browser checks, and pre-push checks run
+directly without a verification lease. Completion still requires canonical
+verification evidence.
+
+The `pre-push` hook deliberately runs only checks that do not compile the
+workspace: `cargo fmt --all -- --check`, Markdownlint, and the SKILL.md
+frontmatter validation. A Git hook runs under `git push` rather than under
+`gwtd`, so it cannot take the verification lease, and a heavy Cargo job
+started there saturates the host while another worktree holds the lease.
+Clippy, the test suites, and the 90% coverage threshold are enforced per
+pull request by the Lint, Test, and Coverage workflows instead.
+
+**Migration:** `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` now return an error without creating a holder or
+reservation. Replace manual acquisition around canonical verification with
+`verify.run`; remove acquisition around ordinary Cargo commands. Existing
+legacy holders can be drained explicitly without killing their processes:
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
 JSON
 ```
 
-Use `verify.lease.extend` with the same `lease_id` when a run outlasts its
-TTL. The default TTL is 45 minutes; a lease that lapses is released
-automatically, and a holder that is killed releases immediately. Lease
-transitions are recorded in
+Lease transitions are recorded in
 `~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
 
 ### GitHub API budget
@@ -969,8 +973,21 @@ light, and `statusCheckRollup` / `body` are fetched per PR only when that PR
 changed. Pass `params.refresh:true` when a decision needs the live state and
 `params.include` (`["checks","body"]`, default `["checks"]`) to choose the
 heavy fields. Every answer reports `source`, `cache_age_secs`, `throttled`,
-and `github_calls`; when the budget is below its reserve the last snapshot is
+`github_calls`, `hydrated` (successful per-PR fetches), and `skipped_unchanged`
+(unchanged PRs skipped during a live read; zero on cache hits); when the budget is below its reserve the last snapshot is
 served and `throttled` says why.
+
+Empty checks on unchanged Draft/CI-not-started PRs are reused after snapshot
+expiry too. Changes to `updatedAt` or the head commit invalidate their data;
+running checks are polled every 10 minutes by default. Hydration runs with at
+most five concurrent requests and 30 requests per read. Configure both refresh
+intervals independently in `~/.gwt/config.toml` (zero disables that interval):
+
+```toml
+[pr_inventory]
+cache_ttl_secs = 300
+checks_refresh_secs = 600
+```
 
 Observe the budget with a free endpoint:
 

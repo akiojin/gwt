@@ -147,6 +147,7 @@ fn format_perf_help() -> String {
         "",
         "Operations:",
         "  perf.summary                            p50 / p95 / worst per stream and target",
+        "  perf.startup                            Latest startup phases and first-frame budget",
         "  perf.violations                         Sustained budget violations of the period",
         "",
         "Key params:",
@@ -267,7 +268,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
-        "  issue.monitor.wait",
+        "  issue.monitor.wait | issue.monitor.wait.invalidate",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
         "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
@@ -288,6 +289,9 @@ fn format_issue_help() -> String {
         "  reason, resume_condition, clear       issue.monitor.wait declares that the",
         "                                        current launch is waiting (stuck detection",
         "                                        pauses, max 3h); clear=true when resumed",
+        "  number, reason, by?                   issue.monitor.wait.invalidate: the PM",
+        "                                        voids a wait whose condition no longer",
+        "                                        holds; stuck detection resumes next scan",
         "  provider, reason                      issue.monitor.quota_hold.clear releases a",
         "                                        provider-wide quota hold (e.g. codex / claude;",
         "                                        any agent id the hold is keyed by)",
@@ -536,7 +540,7 @@ fn format_execution_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen",
+        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen | execution.release_prepared",
         "",
         "Notes:",
         "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
@@ -552,6 +556,10 @@ fn format_execution_help() -> String {
         "  post-block matrix through verify.run, then call execution.reopen",
         "  with a non-empty params.reason. Reopen returns to Active; it does",
         "  not claim completion.",
+        "  When execution.status reports blocking_prepared_transactions for an",
+        "  owner, every launch is refused until they are released. Clear them",
+        "  with execution.release_prepared and params.issue or params.spec plus",
+        "  a non-empty params.reason; params.operation_id releases exactly one.",
         "",
     ]
     .join("\n")
@@ -1143,6 +1151,9 @@ mod tests {
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",
+            // Issue #4286: the only way the PM can void a wait whose condition
+            // its ruling removed, short of waiting out the 3h cap.
+            "issue.monitor.wait.invalidate",
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",
