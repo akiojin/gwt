@@ -250,6 +250,8 @@ pub fn begin(started: Instant) {
         .is_ok()
     {
         record(StartupPhase::ProcessStart, started, 0.0);
+        // Issue #4378 AC-4: every `git worktree list`, whichever caller runs it.
+        gwt_git::worktree::set_worktree_list_observer(record_worktree_inventory);
     }
 }
 

@@ -34875,6 +34875,50 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
     );
 }
 
+thread_local! {
+    static WORKTREE_LISTINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_worktree_listing(_started: Instant) {
+    WORKTREE_LISTINGS.with(|count| count.set(count.get() + 1));
+}
+
+/// `git worktree list` runs made on the calling thread (Issue #4378 AC-1).
+/// The observer is per process; counting per thread keeps parallel tests
+/// from seeing each other's listings.
+fn worktree_listings_on_this_thread() -> u64 {
+    gwt_git::worktree::set_worktree_list_observer(count_worktree_listing);
+    WORKTREE_LISTINGS.with(std::cell::Cell::get)
+}
+
+/// Issue #4378 AC-1: bootstrap lists each project's worktrees once on the
+/// startup path. The orphan intake prune plan used to list them a second time
+/// on the GUI thread; the ingest and reconcile reuse is pinned above.
+#[test]
+fn bootstrap_lists_the_worktrees_once_on_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let before = worktree_listings_on_this_thread();
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        worktree_listings_on_this_thread() - before,
+        1,
+        "bootstrap must list the worktrees exactly once"
+    );
+}
+
 /// Issue #4378 AC-2: bootstrap no longer runs the generation reaper on the
 /// startup path. It runs on the blocking worker and reports back with an
 /// event. Issue Monitor launch deliveries that arrive first wait for that

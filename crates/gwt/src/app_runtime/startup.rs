@@ -28,11 +28,11 @@ use super::continuation::ActiveOwnerLiveness;
 use super::terminal_convergence::{RestoreAdmission, TerminalCloseReason};
 use super::{
     combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
-    plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
-    workspace_resume_context_for_work_item, AgentCapabilityIssuer, AppRuntime,
-    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession,
-    PreparedProjectWindowRestore, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceResumeContext,
+    plan_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune_from_inventory,
+    same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
+    AgentCapabilityIssuer, AppRuntime, OrphanIntakePrunePlan, OutboundEvent,
+    PendingStartupAutoResumeSession, PreparedProjectWindowRestore, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -635,7 +635,11 @@ impl AppRuntime {
                 .iter()
                 .find(|(project_root, _)| project_root == &tab.project_root)
                 .and_then(|(_, inventory)| inventory.clone());
-            self.spawn_work_events_ingest_with_inventory(tab.project_root.clone(), true, inventory);
+            self.spawn_work_events_ingest_with_inventory(
+                tab.project_root.clone(),
+                true,
+                inventory.clone(),
+            );
             // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
             // clear of legacy prompt-derived title_summary / current_focus so
             // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
@@ -648,7 +652,13 @@ impl AppRuntime {
             // Snapshot candidates before the GUI becomes interactive, then
             // inspect/remove only that fixed set on a recovery worker. A new
             // intake launched after startup can never enter this plan.
-            if let Some(plan) = plan_orphan_intake_worktree_prune(&tab.project_root) {
+            let plan = match inventory.as_deref() {
+                Some(entries) => {
+                    plan_orphan_intake_worktree_prune_from_inventory(&tab.project_root, entries)
+                }
+                None => plan_orphan_intake_worktree_prune(&tab.project_root),
+            };
+            if let Some(plan) = plan {
                 orphan_intake_prune_plans.push((tab.project_root.clone(), plan));
             }
         }

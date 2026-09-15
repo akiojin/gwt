@@ -114,7 +114,8 @@ pub(crate) use launch_runtime::{
 pub(crate) use launch_runtime::{
     apply_windows_host_shell_wrapper, build_shell_process_launch,
     ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
-    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune, resolve_launch_worktree,
+    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune,
+    plan_orphan_intake_worktree_prune_from_inventory, resolve_launch_worktree,
     resolve_shell_launch_worktree, OrphanIntakePrunePlan,
 };
 #[cfg(test)]
