@@ -47,9 +47,20 @@ fn child_of_a_below_normal_launcher_runs_at_normal_priority() {
 #[cfg(unix)]
 #[test]
 fn child_of_a_niced_launcher_reports_its_effective_nice() {
+    // The launcher may already be niced: run inside a gwt pane, the launch
+    // policy has put this process at nice 10 (SPEC #1921 Phase 86), and an
+    // unprivileged process can only ever raise. Raising to an absolute 5
+    // would then be a *lowering* and fail with EACCES — which is how this
+    // very test used to fail under the load the issue describes. Raise from
+    // wherever the launcher actually sits.
     // SAFETY: plain syscalls on this process with no memory preconditions.
-    let raised = unsafe { libc::setpriority(libc::PRIO_PROCESS as _, 0, 5) };
-    assert_eq!(raised, 0, "raising our own nice value is always permitted");
+    let launcher_nice = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+    let target = (launcher_nice + 5).min(19);
+    let raised = unsafe { libc::setpriority(libc::PRIO_PROCESS as _, 0, target) };
+    assert_eq!(
+        raised, 0,
+        "raising our own nice from {launcher_nice} to {target} is always permitted"
+    );
 
     let mut command = gwt_core::process::hidden_command("sleep");
     command.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
