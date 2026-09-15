@@ -237,15 +237,6 @@ pub fn record_operation(operation: &str, elapsed: Duration, read_only: bool) {
     with_runtime(|runtime| runtime.record_operation(operation, elapsed, read_only));
 }
 
-/// Hand the installed sink to `action`, or do nothing when uninstalled.
-///
-/// For samples that carry no latency budget (Issue #4371: the GUI's own
-/// resident size), so they bypass smoothing and the self-budget governor. The
-/// kill switch still applies: a disabled sink persists nothing.
-pub(crate) fn with_sink(action: impl FnOnce(&mut PerfSink)) {
-    with_runtime(|runtime| action(&mut runtime.sink));
-}
-
 /// Scope guard recording a route measurement when it drops.
 ///
 /// Instrumented routes are full of early returns and `?` propagation; a guard
