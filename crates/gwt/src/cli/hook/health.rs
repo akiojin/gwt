@@ -1,6 +1,7 @@
 //! Managed hook health read model.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
     ffi::OsString,
     fs, io,
@@ -141,6 +142,33 @@ pub struct ManagedHookFailureSnapshot {
     by_worktree: HashMap<PathBuf, WorktreeHookFailures>,
     /// Surface audits this snapshot refreshed or reused (Issue #4370).
     surface_audits: Arc<SurfaceAuditCounters>,
+    /// Issue #4257: bare hook binaries resolved during this projection.
+    hook_binaries: HookBinaryResolutionCache,
+}
+
+/// Memo of bare hook-binary resolution for one projection.
+///
+/// Issue #4257: resolving a bare fallback such as `gwtd` walks the whole
+/// PATH (~11ms per lookup on a 59-entry Windows PATH) and depends only on
+/// process-wide state, yet every managed command of every event of every
+/// Work row asked again. The GUI builds the projection on its event loop,
+/// so that repetition held pane replies for tens of seconds.
+#[derive(Debug, Clone, Default)]
+struct HookBinaryResolutionCache {
+    bare_resolved: RefCell<HashMap<String, Option<PathBuf>>>,
+}
+
+impl HookBinaryResolutionCache {
+    fn resolve_bare_hook_binary(&self, actual: &str) -> Option<PathBuf> {
+        if let Some(resolved) = self.bare_resolved.borrow().get(actual) {
+            return resolved.clone();
+        }
+        let resolved = resolve_bare_hook_binary(actual);
+        self.bare_resolved
+            .borrow_mut()
+            .insert(actual.to_string(), resolved.clone());
+        resolved
+    }
 }
 
 /// Surface audit cache activity for one [`ManagedHookFailureSnapshot`].
@@ -194,7 +222,13 @@ impl ManagedHookFailureSnapshot {
         Self {
             by_worktree,
             surface_audits: Arc::default(),
+            hook_binaries: HookBinaryResolutionCache::default(),
         }
+    }
+
+    /// Number of distinct bare hook binaries this projection resolved.
+    pub fn resolved_hook_binaries(&self) -> usize {
+        self.hook_binaries.bare_resolved.borrow().len()
     }
 
     /// Project managed hook health for one worktree out of this snapshot.
@@ -238,7 +272,7 @@ fn read_managed_hook_health_with(
         issues: Vec::new(),
     };
 
-    let surface = cached_surface_audit(input, &failures.surface_audits);
+    let surface = cached_surface_audit(input, failures);
     health.status = surface.status;
     health.issues = surface.issues;
     audit_hook_profile(input, &mut health);
@@ -496,8 +530,9 @@ struct FileStamp {
 
 fn cached_surface_audit(
     input: &ManagedHookHealthInput,
-    counters: &SurfaceAuditCounters,
+    snapshot: &ManagedHookFailureSnapshot,
 ) -> SurfaceAudit {
+    let counters = &snapshot.surface_audits;
     let cache = SURFACE_AUDITS.get_or_init(Mutex::default);
     let key = SurfaceAuditKey {
         worktree: input.worktree_root.clone(),
@@ -529,7 +564,12 @@ fn cached_surface_audit(
         issues: Vec::new(),
     };
     let mut dependencies = Vec::new();
-    audit_managed_hook_configs(input, &mut scratch, &mut dependencies);
+    audit_managed_hook_configs(
+        input,
+        &snapshot.hook_binaries,
+        &mut scratch,
+        &mut dependencies,
+    );
     fingerprint
         .files
         .extend(dependencies.iter().map(|path| file_stamp(path)));
@@ -570,10 +610,7 @@ fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
 
 fn surface_fingerprint(surface: &[PathBuf], dependencies: &[PathBuf]) -> SurfaceFingerprint {
     SurfaceFingerprint {
-        env: SURFACE_AUDIT_ENV
-            .iter()
-            .map(|name| std::env::var_os(name))
-            .collect(),
+        env: SURFACE_AUDIT_ENV.iter().map(std::env::var_os).collect(),
         files: surface
             .iter()
             .chain(dependencies)
@@ -610,6 +647,7 @@ fn provider_hook_surfaces(worktree: &Path) -> [(PathBuf, PathBuf); 3] {
 
 fn audit_managed_hook_configs(
     input: &ManagedHookHealthInput,
+    binaries: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
@@ -656,17 +694,29 @@ fn audit_managed_hook_configs(
 
     let expected_hook_bin = input.expected_hook_bin.as_deref();
     if claude_settings.exists() {
-        audit_hook_json_config(&claude_settings, expected_hook_bin, health, dependencies);
+        audit_hook_json_config(
+            &claude_settings,
+            expected_hook_bin,
+            binaries,
+            health,
+            dependencies,
+        );
     }
     for hooks in &codex_hooks_paths {
         if hooks.exists() {
-            audit_hook_json_config(hooks, expected_hook_bin, health, dependencies);
+            audit_hook_json_config(hooks, expected_hook_bin, binaries, health, dependencies);
         }
     }
 
     for (root, artifact) in provider_hooks {
         if artifact.exists() {
-            audit_provider_hook_config(&artifact, expected_hook_bin, health, dependencies);
+            audit_provider_hook_config(
+                &artifact,
+                expected_hook_bin,
+                binaries,
+                health,
+                dependencies,
+            );
         } else if root.exists() {
             needs_attention(
                 health,
@@ -728,6 +778,7 @@ fn expected_hook_bin_for_config_path<'a>(
 fn audit_hook_json_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
+    binaries: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
@@ -787,7 +838,14 @@ fn audit_hook_json_config(
                 let Some(actual) = hook_command_binary_fallback(&command) else {
                     continue;
                 };
-                audit_hook_binary(path, &actual, Some(expected), health, dependencies);
+                audit_hook_binary(
+                    path,
+                    &actual,
+                    Some(expected),
+                    binaries,
+                    health,
+                    dependencies,
+                );
             }
         } else {
             for command in commands {
@@ -795,7 +853,7 @@ fn audit_hook_json_config(
                     continue;
                 }
                 if let Some(actual) = hook_command_binary_fallback(&command) {
-                    audit_hook_binary(path, &actual, None, health, dependencies);
+                    audit_hook_binary(path, &actual, None, binaries, health, dependencies);
                 }
             }
         }
@@ -805,6 +863,7 @@ fn audit_hook_json_config(
 fn audit_provider_hook_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
+    binaries: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
@@ -829,13 +888,21 @@ fn audit_provider_hook_config(
         );
         return;
     };
-    audit_hook_binary(path, &actual, expected_hook_bin, health, dependencies);
+    audit_hook_binary(
+        path,
+        &actual,
+        expected_hook_bin,
+        binaries,
+        health,
+        dependencies,
+    );
 }
 
 fn audit_hook_binary(
     path: &Path,
     actual: &str,
     expected_hook_bin: Option<&str>,
+    binaries: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
@@ -886,7 +953,7 @@ fn audit_hook_binary(
                 ),
             );
         }
-    } else if let Some(resolved) = resolve_bare_hook_binary(actual) {
+    } else if let Some(resolved) = binaries.resolve_bare_hook_binary(actual) {
         dependencies.push(resolved);
     } else {
         degraded(

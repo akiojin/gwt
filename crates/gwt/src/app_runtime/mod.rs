@@ -219,7 +219,7 @@ mod launch_output_mirror;
 mod loaders;
 mod migration;
 pub(crate) mod persist_dispatcher;
-mod pm;
+pub(crate) mod pm;
 mod profile;
 mod project_tabs;
 mod pty_io;
@@ -1253,6 +1253,12 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
+    /// Issue #4375: repositories whose PM worktree preparation is running on a
+    /// blocking worker. Preparing the worktree is Git work that used to run on
+    /// the GUI event loop, where it was atomic; this gate keeps a second ensure
+    /// from starting a duplicate preparation — and therefore a second PM pane —
+    /// while the first one is still in flight.
+    pub(crate) pending_pm_worktree_preparations: HashSet<PathBuf>,
     /// Issue #4038 (AC-4): tab ids whose project was open when the update
     /// apply began. Their sessions bypass the 24h startup auto-resume
     /// freshness gate on the launch that settles the resume marker.
@@ -2807,6 +2813,9 @@ impl AppRuntime {
         attachment_uploads: AttachmentUploadStore,
         blocking_tasks: BlockingTaskSpawner,
     ) -> std::io::Result<Self> {
+        let _startup_phase = gwt::perf::startup::PhaseTimer::start(
+            gwt::perf::startup::StartupPhase::WorkspaceRestore,
+        );
         let session_state_path = gwt_core::paths::gwt_session_state_path();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let log_dir = gwt_core::paths::gwt_project_logs_dir_for_project_path(&launch_dir);
@@ -2871,6 +2880,7 @@ impl AppRuntime {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            pending_pm_worktree_preparations: HashSet::new(),
             update_resume_tab_ids: HashSet::new(),
             update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
             update_drain_released_projects: Vec::new(),
@@ -7049,6 +7059,15 @@ impl AppRuntime {
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady { bounds } => {
                 self.startup_auto_resume_ready_events(bounds)
+            }
+            FrontendEvent::StartupFirstFrame { navigation_ms } => {
+                gwt::perf::startup::first_frame(navigation_ms);
+                gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::ShellInteractive);
+                Vec::new()
+            }
+            FrontendEvent::StartupTerminalReady { id } => {
+                gwt::perf::startup::terminal_ready(&id);
+                Vec::new()
             }
             // SPEC-3431 FR-018/FR-019: one click always lands the user on the
             // PM — existing pane gets framed, a missing one is started first.

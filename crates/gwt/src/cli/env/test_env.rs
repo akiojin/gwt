@@ -323,6 +323,8 @@ impl CliEnv for TestEnv {
             cache_age_secs: Some(0),
             throttled: None,
             github_calls: 1,
+            hydrated: 0,
+            skipped_unchanged: self.pr_list.len(),
             unlanded_branches: self.pr_unlanded_branches.clone(),
         })
     }
