@@ -46,7 +46,7 @@ require_code_not_contains() {
 
 require_file "$PRE_PUSH"
 require_contains "$PRE_PUSH" "cargo fmt --all -- --check"
-require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md"
+require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks"
 require_contains "$PRE_PUSH" "bash scripts/validate-skill-frontmatter.sh"
 
 # SPEC #3576: `git push` must never start a heavy Cargo job. Those jobs compile

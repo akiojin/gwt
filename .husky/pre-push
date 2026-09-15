@@ -34,7 +34,10 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX \
 echo "Running fast pre-push checks..."
 
 cargo fmt --all -- --check
-bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md
+# `tasks/` はリポジトリの info/exclude で git 無視されるローカル作業領域
+# （AGENTS.md が tasks/todo.md の使用を指示している）。追跡対象でない
+# scratch を lint して push を止めないよう、ディレクトリごと除外する。
+bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks
 bash scripts/validate-skill-frontmatter.sh
 
 echo "All pre-push checks passed."
