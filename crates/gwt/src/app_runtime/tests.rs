@@ -7620,7 +7620,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: true,
+        fast_mode: true,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -7674,6 +7674,7 @@ fn issue_monitor_autonomous_record(
         needs_human_kind: None,
         steering: None,
         review_dispatch_hold: None,
+        last_failure_message: None,
     }
 }
 
@@ -34191,52 +34192,58 @@ fn startup_reaper_reclaims_a_durably_running_holder_with_no_runtime() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    init_git_clone_with_origin(&repo);
-    let worktree = temp.path().join("worktrees").join("running-owner");
-    run_git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "work/running-owner",
-            worktree.to_str().expect("worktree path"),
-        ],
-    );
-    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        number: 3964,
-    };
-    let session_id = "startup-running-holder-without-runtime";
-    let worktrees = seed_defunct_active_owner(
-        &runtime.sessions_dir,
-        &repo,
-        &worktree,
-        "work/running-owner",
-        owner,
-        session_id,
+    for status in [
         gwt_agent::AgentStatus::Running,
-    );
+        gwt_agent::AgentStatus::WaitingInput,
+        gwt_agent::AgentStatus::Unknown,
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("running-owner");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/running-owner",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 3964,
+        };
+        let session_id = "startup-running-holder-without-runtime";
+        let worktrees = seed_defunct_active_owner(
+            &runtime.sessions_dir,
+            &repo,
+            &worktree,
+            "work/running-owner",
+            owner,
+            session_id,
+            status,
+        );
 
-    let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
+        let summary = runtime.reap_startup_defunct_active_generations(&worktrees);
 
-    assert_eq!(
-        summary.reaped, 1,
-        "a Running holder with no runtime anywhere is not running: {summary:?}"
-    );
-    assert_eq!(
-        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
-            .expect("load ledger")
-            .expect("ledger")
-            .current_effective_status(),
-        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
-    );
+        assert_eq!(
+            summary.reaped, 1,
+            "a {status:?} holder with no runtime anywhere is not running: {summary:?}"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+                .expect("load ledger")
+                .expect("ledger")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked)
+        );
+    }
 }
 
 /// Issue #3964 AC-1: a refused relaunch materializes the worktree again but
@@ -43218,6 +43225,7 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -47065,7 +47073,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -47082,7 +47090,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -47506,7 +47514,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         version: Some("latest".to_string()),
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -49258,7 +49266,7 @@ fn app_runtime_issue_monitor_status_reports_last_settings_source() {
     );
     assert_eq!(
         status.launch_profile_summary,
-        "codex / gpt-5.5 / high / host"
+        "codex / gpt-5.5 / high / host / fast:off"
     );
 }
 
@@ -49408,7 +49416,7 @@ fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
         version: None,
         session_mode: Default::default(),
         skip_permissions: false,
-        codex_fast_mode: false,
+        fast_mode: false,
         runtime_target: Default::default(),
         docker_service: None,
         docker_lifecycle_intent: Default::default(),
@@ -53219,13 +53227,120 @@ fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0")),
         Some(CodexHookDiscoveryMode::WorkspaceHome)
     );
+    // Issue #3481 AC-1: `latest` is an alias, not a capability. It must defer
+    // to the probe evidence for the executable that will actually be spawned,
+    // exactly like `installed` does.
     assert_eq!(
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("latest")),
-        Some(CodexHookDiscoveryMode::WorkspaceHome)
+        None
     );
     assert_eq!(
         super::codex_hook_discovery_mode_from_selected_codex_version(Some("installed")),
         None
+    );
+}
+
+/// Issue #3481 AC-1/AC-2/AC-4: the `codex@latest` matrix. The launch-argument
+/// snapshot (`bunx --yes @openai/codex@latest`) and the resume-readiness
+/// decision both read the same runner-probe evidence, and only an absent
+/// snapshot falls back to a diagnosable superset.
+#[test]
+fn codex_latest_hook_discovery_mode_follows_runner_probe_evidence() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+
+    let old = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.130.0".to_string()),
+        ..Default::default()
+    };
+    let current = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.133.0".to_string()),
+        ..Default::default()
+    };
+    let unparseable = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("unexpected output".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&old)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&current)),
+        CodexHookDiscoveryMode::WorkspaceHome,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&unparseable)),
+        CodexHookDiscoveryMode::Both,
+    );
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, None),
+        CodexHookDiscoveryMode::Both,
+    );
+}
+
+/// Issue #3481 AC-2: measured evidence outranks the "we switched to the latest
+/// package, so it must be new" heuristic. A fallback that probed an old Codex
+/// still has to materialize the hooks where that Codex looks for them.
+#[test]
+fn codex_latest_fallback_evidence_outranks_the_fallback_heuristic() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+    let report = gwt_agent::HostRunnerHealthReport {
+        switched_to_fallback: true,
+        version_output: Some("codex-cli 0.130.0".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&config, Some(&report)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+}
+
+/// Issue #3481 AC-4/AC-5: an explicitly pinned version is already the exact
+/// identity of the package that will be materialized, so it stays
+/// selector-derived and never depends on a probe; non-Codex agents keep their
+/// unconditional mode.
+#[test]
+fn codex_explicit_version_and_other_agents_keep_their_existing_modes() {
+    use gwt_skills::CodexHookDiscoveryMode;
+
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let pinned = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(temp.path())
+        .version("0.130.0")
+        .build();
+    let stale_evidence = gwt_agent::HostRunnerHealthReport {
+        version_output: Some("0.133.0".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&pinned, Some(&stale_evidence)),
+        CodexHookDiscoveryMode::WorktreeLocal,
+    );
+
+    let claude = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+        .working_dir(temp.path())
+        .version("latest")
+        .build();
+    assert_eq!(
+        super::codex_hook_discovery_mode_for_launch_config(&claude, None),
+        CodexHookDiscoveryMode::WorkspaceHome,
     );
 }
 
@@ -58892,6 +59007,92 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
     );
 }
 
+/// Issue #4328: a queued scan's canvas predates a legitimate launch ACK.
+/// Reading newer prefs must not turn that old absence into an exact close.
+#[test]
+fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo_without_origin(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled monitor");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-51",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.issue_monitor_scheduled_tick_events_at("2026-09-14T13:43:32Z");
+
+    let fresh = runtime
+        .tab_mut("tab-1")
+        .expect("project tab")
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    assert_ne!(fresh.id, "agent-51", "the second specimen uses a fresh id");
+    runtime.register_window("tab-1", &fresh.id);
+    runtime.set_window_status("tab-1", &fresh.id, WindowProcessStatus::Running);
+    let window_id = combined_window_id("tab-1", &fresh.id);
+    runtime.issue_monitor_launch_succeeded_events(&repo, 4258, &window_id);
+    let before = gwt::load_issue_monitor_prefs(&prefs_path).expect("ACKed prefs");
+    assert_eq!(
+        before.launched_issues.len(),
+        1,
+        "normal ACK reserves the slot"
+    );
+
+    tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued scheduled worker")();
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs after scan");
+    assert_eq!(
+        persisted.launched_issues, before.launched_issues,
+        "a stale canvas cannot release the fresh #4258 launch"
+    );
+    assert!(runtime.tracked_window_exists(&window_id));
+    let mut monitor =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    monitor.set_gui_connected(true);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 4328,
+        title: "Next queued issue".to_string(),
+        labels: vec!["auto-improve".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(
+        monitor
+            .next_launch_request("2026-09-14T13:44:37Z")
+            .is_none(),
+        "the live launch leaves no capacity for #4328"
+    );
+}
+
 /// Issue #3627 (companion to the release above): the reclaim must not fire on
 /// a live agent. Everything an agent can stall on — an approval prompt, a
 /// provider rate limit, a genuine hang — leaves the window in place, and
@@ -63606,6 +63807,159 @@ fn pm_wake_suppression_during_active_loop_retries_on_the_next_snapshot() {
     );
 }
 
+/// Issue #4258 AC-1/AC-2/AC-3: a quiet loop clock is not enough — a PM pane
+/// that is mid-turn (Running) or at a prompt (Waiting) holds the delta wake,
+/// and the held signals fire together once the pane is Idle.
+#[test]
+fn pm_wake_holds_the_delta_while_the_pm_pane_is_busy_and_fires_once_idle() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            last_continued_at: Some("2026-08-08T01:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop state");
+    assert!(runtime
+        .pm_wake_decision_at(&repo, &[], "2026-08-08T01:01:30Z")
+        .is_none());
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Running);
+    let first = [pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &first, "2026-08-08T01:02:00Z")
+            .is_none(),
+        "a Running PM pane must not be interrupted by a delta wake"
+    );
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Waiting);
+    let second = [
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
+        pm_wake_inbox_item(43, gwt::MonitorInboxState::NeedsHuman),
+    ];
+    assert!(
+        runtime
+            .pm_wake_decision_at(&repo, &second, "2026-08-08T01:02:30Z")
+            .is_none(),
+        "a Waiting PM pane would read the wake as its prompt answer"
+    );
+    assert!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("loop state")
+            .last_wake_at
+            .is_none(),
+        "a held wake must not stamp the wake clock"
+    );
+
+    runtime.window_hook_states.remove(&pm_window_id);
+    let decision = runtime
+        .pm_wake_decision_at(&repo, &second, "2026-08-08T01:02:40Z")
+        .expect("the held delta fires once the PM pane is Idle");
+    assert_eq!(decision.window_id, pm_window_id);
+    assert!(
+        decision.prompt.contains("needs_human:42") && decision.prompt.contains("needs_human:43"),
+        "signals held across the busy period arrive as one prompt: {}",
+        decision.prompt
+    );
+}
+
+/// Issue #4258 AC-1/AC-3: the periodic wake is held by a busy PM pane the
+/// same way, and fires on the first tick after the pane is Idle.
+#[test]
+fn periodic_wake_holds_while_the_pm_pane_is_busy_and_fires_once_idle() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    seed_quiet_standing_supervision(&repo);
+    // Quiet for the 60s interval, but well inside the busy-deferral bound.
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            last_continued_at: Some("2026-08-10T00:58:30Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed recently quiet loop");
+
+    for busy in [WindowProcessStatus::Running, WindowProcessStatus::Waiting] {
+        runtime
+            .window_hook_states
+            .insert(pm_window_id.clone(), busy);
+        assert!(
+            runtime
+                .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+                .is_none(),
+            "a {busy:?} PM pane must not receive the scheduled tick"
+        );
+    }
+    assert!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("loop state")
+            .last_wake_at
+            .is_none(),
+        "a held tick must not stamp the wake clock"
+    );
+
+    runtime.window_hook_states.remove(&pm_window_id);
+    let decision = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:10Z")
+        .expect("the first tick after the pane is Idle wakes the PM");
+    assert_eq!(decision.window_id, pm_window_id);
+}
+
+/// Issue #4258 AC-4: a pane stuck on Running (a missed Stop hook, #3809)
+/// cannot hold wakes forever — past the bound the wake fires anyway. A
+/// Waiting pane never gets that override: the injected text would answer
+/// its prompt.
+#[test]
+fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    // Last loop activity an hour ago: far past the deferral bound.
+    seed_quiet_standing_supervision(&repo);
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Waiting);
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_none(),
+        "a Waiting PM pane is never overridden"
+    );
+
+    runtime
+        .window_hook_states
+        .insert(pm_window_id.clone(), WindowProcessStatus::Running);
+    let decision = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .expect("a Running pane past the deferral bound is woken anyway");
+    assert_eq!(decision.window_id, pm_window_id);
+}
+
 #[test]
 fn pm_wake_next_decision_reloads_updated_loop_interval() {
     let _env_lock = env_test_lock()
@@ -64011,6 +64365,100 @@ fn periodic_wake_rearms_a_quiet_pm_with_standing_work() {
     );
 }
 
+/// SPEC #4320 AC-3/AC-7: an unresolved Concern is standing supervision work
+/// even after the Monitor owner queue and active-launch inventory are empty.
+#[test]
+fn periodic_wake_rearms_a_quiet_pm_with_an_unresolved_concern() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+
+    gwt_core::concern::ConcernStore::for_repo(&repo)
+        .create(
+            serde_json::from_value(serde_json::json!({
+                "summary": "restored windows remain visible",
+                "symptom_measurement": {
+                    "kind": "shell_command",
+                    "command": "printf '{\"count\":1}'"
+                },
+                "baseline": {"count": 1},
+                "verification_predicate": {
+                    "pointer": "/count",
+                    "op": "eq",
+                    "expected": 0
+                },
+                "owner_issues": [42]
+            }))
+            .expect("valid NewConcern fixture"),
+        )
+        .expect("create unresolved Concern");
+    assert!(
+        gwt_core::concern::has_unresolved_concerns(&repo).expect("read valid Concern store"),
+        "fixture must exercise the readable unresolved-Concern path"
+    );
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop");
+
+    let decision = runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+        .expect("an unresolved Concern must periodically wake a quiet PM");
+    assert_eq!(decision.window_id, pm_window_id);
+}
+
+/// A transient Concern-store read failure must retain supervision eligibility;
+/// treating it as an empty store could park the only process that can repair or
+/// report the unobservable Concern state.
+#[test]
+fn periodic_wake_remains_eligible_when_the_concern_store_is_unreadable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+
+    let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+    let concerns_path = gwt_core::paths::gwt_project_dir(&repo_hash)
+        .join("project-state")
+        .join("concerns.json");
+    fs::create_dir_all(concerns_path.parent().expect("project-state directory"))
+        .expect("create project-state directory");
+    fs::write(&concerns_path, b"{ malformed concern store")
+        .expect("write malformed Concern fixture");
+
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed quiet loop");
+
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_some(),
+        "an unreadable Concern store must keep periodic supervision eligible"
+    );
+}
+
 #[test]
 fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
     let _env_lock = env_test_lock()
@@ -64161,8 +64609,30 @@ fn assert_wake_prompt_reports_only_on_change(prompt: &str, label: &str) {
         "{label} must still drive one full reconcile cycle (FR-3); got: {prompt}"
     );
     assert!(
-        prompt.contains(gwt::pm_registry::PM_GWTD_EXECUTION_CLAUSE),
+        prompt.contains(gwt::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE),
         "{label} must carry the canonical gwtd execution-isolation clause verbatim; got: {prompt}"
+    );
+    assert!(
+        !prompt.contains("contract's 10-second outer deadline"),
+        "{label} must not retain the superseded ten-second ceiling; got: {prompt}"
+    );
+    // Issue #3825 AC-1 / AC-4: the supervision tick must not hand the PM a
+    // subscribe that blocks for the whole loop interval. Five seconds is the
+    // ceiling for one call, and the tick never waits on it at all.
+    for phrase in [
+        "contract's 5-second outer deadline",
+        "`params.timeout_seconds:5`",
+        "background task",
+        "do not wait for it",
+    ] {
+        assert!(
+            prompt.contains(phrase),
+            "{label} must carry the nonblocking subscribe contract `{phrase}`; got: {prompt}"
+        );
+    }
+    assert!(
+        !prompt.contains("`params.timeout_seconds:60`"),
+        "{label} must not restore the 60-second blocking subscribe (#3825); got: {prompt}"
     );
     assert!(
         prompt.contains("`pr.list`"),

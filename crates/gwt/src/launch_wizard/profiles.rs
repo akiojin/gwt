@@ -140,7 +140,7 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
         }),
         session_mode: session.session_mode,
         skip_permissions: session.skip_permissions,
-        codex_fast_mode: fast_mode,
+        fast_mode,
         runtime_target: session.runtime_target,
         docker_service: session.docker_service,
         docker_lifecycle_intent: session.docker_lifecycle_intent,
