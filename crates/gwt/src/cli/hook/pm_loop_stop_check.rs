@@ -278,7 +278,8 @@ fn handle_at(
     let unchanged_clause = if snapshot_unchanged {
         " The monitor snapshot is unchanged since the previous cycle: do not spend live GitHub \
          reads on it (no `pr.list refresh:true`, no `issue.view refresh:true`); reuse the cached \
-         inventory and end the cycle unless the stalled-item inventory names an action."
+         inventory, finish the Concern duties above, and end the cycle unless the stalled-item \
+         inventory names an action."
     } else {
         ""
     };
@@ -295,6 +296,8 @@ fn handle_at(
          `escalation_due` rows are digest escalations — never auto-close them. \
          A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change \
          cycle: advance one or escalate with the reason. \
+         Run `concern.list`, execute the stored measurement for every `open` and `fix_landed` \
+         Concern, and submit its structured result and owner progress with `concern.measure`. \
          Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, \
          red or escalation-due PRs, and quiet agents; advance at least one item with a concrete \
          action or user handoff. \
@@ -1074,7 +1077,8 @@ mod tests {
         )
         .expect("prepare receipt");
         let input = serde_json::json!({
-            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+            "prompt": pm_registry::protected_pm_delivery_prompt(operation_id, body)
+                .expect("protected PM prompt")
         })
         .to_string();
 
@@ -1499,10 +1503,22 @@ mod tests {
             Some(FIXTURE_PM_SESSION),
         );
         match &second {
-            HookOutput::StopBlock { reason, .. } => assert!(
-                reason.contains("snapshot is unchanged since the previous cycle"),
-                "the PM is told to skip live GitHub reads: {reason}"
-            ),
+            HookOutput::StopBlock { reason, .. } => {
+                assert!(
+                    reason.contains("snapshot is unchanged since the previous cycle"),
+                    "the PM is told to skip live GitHub reads: {reason}"
+                );
+                let concern_duty = reason
+                    .find("concern.list")
+                    .expect("an unchanged Monitor snapshot still requires Concern supervision");
+                let early_end = reason
+                    .find("end the cycle unless")
+                    .expect("fixture must exercise the unchanged-snapshot early-end clause");
+                assert!(
+                    concern_duty < early_end,
+                    "Concern duties must run before the unchanged-snapshot early end: {reason}"
+                );
+            }
             other => panic!("second identical cycle still continues once: {other:?}"),
         }
         let state = pm_registry::load_pm_loop_state(&state_path).expect("state");
