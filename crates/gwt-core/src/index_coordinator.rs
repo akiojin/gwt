@@ -732,13 +732,14 @@ impl IndexCoordinator {
     /// Snapshot the host-wide heavy lease without joining the queue
     /// (SPEC #3576 US-1). Probing the kernel lock — not the ticket — decides
     /// whether the lease is held, so a ticket left behind by a crashed holder
-    /// reads as free.
+    /// reads as free and is reconciled while the probe owns the lock.
     pub fn heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
         let queue = published_heavy_queue(&self.heavy_pending_dir())?;
         let pending = queue.len();
         let probe = open_lock_file(&self.heavy_lock_path())?;
         match fs2::FileExt::try_lock_exclusive(&probe) {
             Ok(()) => {
+                reconcile_orphaned_heavy_ticket(&self.root);
                 let _ = fs2::FileExt::unlock(&probe);
                 return Ok(HeavyLeaseStatus {
                     pending,
@@ -1091,6 +1092,7 @@ fn acquire_heavy_at(
         if !must_defer {
             match fs2::FileExt::try_lock_exclusive(&heavy_file) {
                 Ok(()) => {
+                    reconcile_orphaned_heavy_ticket(root);
                     let acquired_at_ms = now_ms();
                     let ticket = Ticket {
                         schema_version: COORDINATOR_SCHEMA_VERSION,
@@ -1486,6 +1488,50 @@ fn read_state(path: &Path) -> Option<JobState> {
 fn read_ticket(path: &Path) -> Option<Ticket> {
     let raw = fs::read(path).ok()?;
     serde_json::from_slice(&raw).ok()
+}
+
+/// The caller must own `heavy.lock` exclusively. A remaining ticket then
+/// describes an unsettled former holder, regardless of PID or TTL. Keeping
+/// the lock through ledger append and removal prevents status/acquire races
+/// from deleting a successor's ticket.
+fn reconcile_orphaned_heavy_ticket(root: &Path) {
+    let path = root.join("heavy.ticket.json");
+    if let Some(ticket) = read_ticket(&path) {
+        if let Some(lease_id) = ticket
+            .lease_id
+            .as_ref()
+            .filter(|_| HeavyHolderKind::of_target(&ticket.target) == HeavyHolderKind::Verification)
+        {
+            // Settlement may have appended its event before the process died
+            // or ticket removal failed. Do not record that transition twice.
+            let already_settled = fs::read_to_string(root.join(LEASE_EVENT_LOG_NAME))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<LeaseEvent>(line).ok())
+                .any(|event| {
+                    event.lease_id == *lease_id
+                        && matches!(
+                            event.kind,
+                            LeaseEventKind::Released | LeaseEventKind::Expired
+                        )
+                });
+            if !already_settled {
+                append_lease_event(
+                    root,
+                    &LeaseEvent {
+                        schema_version: COORDINATOR_SCHEMA_VERSION,
+                        at_ms: now_ms(),
+                        lease_id: lease_id.clone(),
+                        kind: LeaseEventKind::Released,
+                        target: ticket.target,
+                        owner: ticket.owner,
+                        reason: Some("holder lock released without settlement".to_string()),
+                    },
+                );
+            }
+        }
+    }
+    let _ = fs::remove_file(path);
 }
 
 /// Append one lease transition to `lease-events.jsonl` under an exclusive

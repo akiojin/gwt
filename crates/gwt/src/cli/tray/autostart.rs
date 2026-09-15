@@ -232,7 +232,7 @@ fn windows_run_command(executable: &str) -> String {
 mod windows_current_user_autostart {
     use super::{startup_approved_value_is_enabled, windows_run_command, AutostartError, APP_NAME};
     use windows_registry::{Type, CURRENT_USER};
-    use windows_result::HRESULT;
+    use windows_result::{HRESULT, WIN32_ERROR};
 
     const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
     const STARTUP_APPROVED_KEY: &str =
@@ -240,7 +240,7 @@ mod windows_current_user_autostart {
     const STARTUP_APPROVED_ENABLED: [u8; 12] = [
         0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    const E_FILE_NOT_FOUND: HRESULT = HRESULT::from_win32(0x80070002_u32);
+    const E_FILE_NOT_FOUND: HRESULT = WIN32_ERROR(2).to_hresult();
 
     pub(super) fn install() -> Result<(), AutostartError> {
         let exe = std::env::current_exe().map_err(AutostartError::ExecutablePathUnavailable)?;

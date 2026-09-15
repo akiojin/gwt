@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     # Issue #4055 / #4191: the step budgets below are the operative limits;
     # this cap only bounds the job as a whole and must cover their sum
-    # (5+18+25+10+10) plus checkout / toolchain / cache setup.
-    timeout-minutes: 75
+    # (5+18+25+10+10+10) plus checkout / toolchain / cache setup.
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v7
       # Issue #4191 AC-2: restoring the .deb archive before the install means a
@@ -50,6 +50,11 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features
         timeout-minutes: 25
+      # Issue #4346: repeat the exact lock check with three concurrent cargo
+      # workers held until completion; reject zero tests and worker failures.
+      - name: Run managed asset lock concurrency regression
+        run: python3 scripts/test-managed-assets-lock-stress.py
+        timeout-minutes: 10
       # Issue #4134 AC-4: four tests cost 226s here and 3.9s on macOS for the
       # same nine spawn/stop cycles, so the wait is inside one `gwt` lifetime
       # under Xvfb rather than in the serialization. The instrumented run showed

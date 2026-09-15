@@ -45,17 +45,32 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
      output only if nothing changed and no open PR is CI-RED, CONFLICTED, or escalation_due.";
 
-/// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
-/// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm
-/// guidance owns the detailed timeout, retry, readback, and lifecycle rules;
-/// this clause only prevents injected prompts from silently restoring direct
-/// long-running execution.
+/// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
+/// and subscribe-ordering reminder for the Stop-gate continuation. The
+/// generated gwt-pm guidance owns the full retry, readback, and lifecycle
+/// rules; this clause keeps every injected prompt aligned on the five-second,
+/// nonblocking path. The two PTY wake prompts carry
+/// [`PM_GWTD_EXECUTION_WAKE_CLAUSE`] instead, for the byte reason documented
+/// there.
 pub const PM_GWTD_EXECUTION_CLAUSE: &str =
     "Keep the PM turn responsive: run only short read-only gwtd operations directly with the \
-     contract's 10-second outer deadline. Delegate `daemon.subscribe`, batch mutations, repeated \
-     `pane.read`, and every long-running or hang-risk operation to exactly one background task or \
-     in-session sub-agent; collect the result only from its task-completion notification, and \
-     never duplicate an operation while it is pending.";
+     contract's 5-second outer deadline. Launch `daemon.subscribe` only as one background task \
+     with `params.timeout_seconds:5`; do not wait for it, and immediately reconcile a fresh \
+     `issue.monitor.status` snapshot. Delegate batch mutations, repeated `pane.read`, and every \
+     long-running or hang-risk operation to exactly one background task or in-session sub-agent; \
+     collect the result only from its task-completion notification, and never duplicate an \
+     operation while it is pending.";
+
+/// Issue #3825 AC-1 / AC-4: the same execution budget for the two PTY wake
+/// prompts. Kept terse on purpose — those prompts must stay under the
+/// 1024-byte PTY canonical queue (#3868), and the wake text already orders the
+/// fresh `issue.monitor.status` reconcile that the full clause spells out, so
+/// only the per-call ceiling and the "never wait on the subscribe" rule need
+/// repeating here.
+pub const PM_GWTD_EXECUTION_WAKE_CLAUSE: &str =
+    "Keep the turn responsive: run gwtd reads directly only within the contract's 5-second outer \
+     deadline; start `daemon.subscribe` with `params.timeout_seconds:5` as a background task and \
+     do not wait for it.";
 
 /// Issue #3767 AC-1〜AC-3: compact steering obligation shared by the delta
 /// wake, the periodic wake, the Stop-gate continuation, and the PM's
@@ -161,8 +176,10 @@ pub struct PmSettings {
     /// FR-026: absent until the user chooses; see [`PmSettings::launch_profile_or_default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<PmLaunchProfile>,
-    /// SPEC-3431 FR-132: resident-loop cycle interval in seconds. Both the
-    /// Stop-gate floor and the subscribe timeout the PM is told to use.
+    /// SPEC-3431 FR-132 / Issue #3825: resident-loop cycle interval in
+    /// seconds. This is the scheduling cadence and the Stop-gate floor only;
+    /// it is never an operation timeout, because a cadence that becomes
+    /// foreground waiting time makes the PM unresponsive to the user.
     /// Missing values default to 60s and effective values are at least 10s.
     #[serde(default = "default_loop_interval_secs")]
     pub loop_interval_secs: u64,
@@ -4682,6 +4699,42 @@ mod tests {
         }
         assert!(PM_STEERING_CLAUSE.contains("before you judge the cycle unchanged"));
         assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
+
+    /// Issue #3825 AC-1 / AC-4: the terse wake clause and the full Stop-gate
+    /// clause must agree that one resident `daemon.subscribe` blocks for at
+    /// most five seconds and is never awaited. The two wordings differ only in
+    /// length, because one of them rides a 1024-byte PTY queue.
+    #[test]
+    fn execution_clauses_cap_the_resident_subscribe_at_five_seconds() {
+        for clause in [PM_GWTD_EXECUTION_CLAUSE, PM_GWTD_EXECUTION_WAKE_CLAUSE] {
+            for phrase in [
+                "contract's 5-second outer deadline",
+                "`daemon.subscribe`",
+                "`params.timeout_seconds:5`",
+                "background task",
+                "do not wait for it",
+            ] {
+                assert!(
+                    clause.contains(phrase),
+                    "execution clause is missing {phrase}: {clause}"
+                );
+            }
+            assert!(
+                !clause.contains("10-second"),
+                "the superseded ten-second ceiling must not survive: {clause}"
+            );
+            assert!(
+                !clause.contains("`params.timeout_seconds:60`"),
+                "the loop cadence must never become the subscribe budget: {clause}"
+            );
+        }
+        // The wake variant exists only to fit the PTY queue; if it ever grew
+        // past the full clause it would have no reason to exist.
+        assert!(
+            PM_GWTD_EXECUTION_WAKE_CLAUSE.len() < PM_GWTD_EXECUTION_CLAUSE.len(),
+            "the wake clause must stay the terse one"
+        );
     }
 
     #[cfg(unix)]

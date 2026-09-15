@@ -1537,7 +1537,7 @@ mod tests {
             version: Some("latest".to_string()),
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: true,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,

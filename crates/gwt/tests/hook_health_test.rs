@@ -314,6 +314,56 @@ fn managed_hook_health_detects_missing_managed_configs_and_repair_recreates_them
     assert!(worktree.path().join(".codex/hooks.json").exists());
 }
 
+/// Issue #4339 AC-2 / AC-4: a `core.hooksPath` whose directory holds no hook
+/// makes Git skip commitlint and the commit/push gates in silence. Health has
+/// to say so, and repair has to materialize them.
+#[test]
+fn managed_hook_health_detects_empty_git_hooks_path_and_repair_materializes_it() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let root = worktree.path();
+    init_git_repo(root);
+    run_git(root, &["config", "core.hooksPath", ".husky/_"]);
+    fs::create_dir_all(root.join(".husky")).expect("husky dir");
+    fs::write(
+        root.join(".husky/commit-msg"),
+        "#!/usr/bin/env sh\nexit 0\n",
+    )
+    .expect("write commit-msg source");
+    // A gwt surface makes this a managed worktree; the Git hooks themselves
+    // belong to the repository, not to any agent provider.
+    fs::create_dir_all(root.join(".claude")).expect("claude dir");
+
+    let health = read_managed_hook_health(&ManagedHookHealthInput::new(root));
+
+    assert_eq!(health.status, ManagedHookHealthStatus::NeedsAttention);
+    assert!(
+        health
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed git hook missing")
+                && issue.contains("commit-msg")),
+        "an empty core.hooksPath directory must be reported: {:?}",
+        health.issues
+    );
+
+    let outcome = repair_managed_hook_configs(root).expect("repair");
+
+    assert!(outcome.repaired);
+    assert!(root.join(".husky/_/commit-msg").is_file());
+    let repaired = read_managed_hook_health(&ManagedHookHealthInput::new(root));
+    assert!(
+        !repaired
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed git hook missing")),
+        "repair must clear the missing-hook issue: {:?}",
+        repaired.issues
+    );
+}
+
 #[test]
 fn managed_hook_health_detects_missing_provider_artifacts_and_repair_recreates_them() {
     let _env_lock = env_test_lock()

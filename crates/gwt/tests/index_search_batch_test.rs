@@ -65,11 +65,26 @@ printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
 /// Fake runner script that additionally parks any `index-issues` rebuild
 /// until the release file exists, so concurrent repair admissions stay
 /// observable while the first coordinated job is still in flight.
+///
+/// Issue #4247: the parked rebuild holds the host heavy lease, so it keeps
+/// the real runner's FR-389 yield contract. When an interactive search is
+/// pending on that lease it answers `yielded` (logged as a `yielded` line);
+/// the job owner hands the lease over and re-invokes the runner under the
+/// same admission. Without this, a search arriving behind the parked
+/// rebuild waited out its admission deadline instead of being served.
 const FAKE_RUNNER_BLOCKING_ISSUE_REBUILD: &str = "#!/bin/sh\n\
 echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
 case \"$*\" in\n\
   *\"--action index-issues\"*)\n\
-    while [ ! -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; do sleep 0.05; done\n\
+    while [ ! -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; do\n\
+      if grep -qs '\"priority\": *\"interactive-search\"' \
+\"$HOME\"/.gwt/runtime/index-coordinator/heavy.pending/*.json; then\n\
+        echo yielded >> \"$GWT_FAKE_RUNNER_LOG\"\n\
+        printf '%s\\n' '{\"ok\": true, \"yielded\": true}'\n\
+        exit 0\n\
+      fi\n\
+      sleep 0.05\n\
+    done\n\
     ;;\n\
 esac\n\
 printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
@@ -791,23 +806,21 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
     let fixture = setup_search_fixture_with_blocking_rebuild(
         r#"{"ok": true, "scopes": {"issues": {"state": "missing"}}}"#,
     );
-
-    let handles: Vec<_> = (0..4)
-        .map(|caller| {
-            let repo = fixture.repo.clone();
-            std::thread::spawn(move || {
-                gwt::search_project_index(
-                    &repo,
-                    &format!("missing issues scope caller {caller}"),
-                    &[IndexSearchScope::Issues],
-                    None,
-                    IndexSearchMatchMode::Semantic,
-                    false,
-                )
-            })
+    let search = |repo: std::path::PathBuf, caller: usize| {
+        std::thread::spawn(move || {
+            gwt::search_project_index(
+                &repo,
+                &format!("missing issues scope caller {caller}"),
+                &[IndexSearchScope::Issues],
+                None,
+                IndexSearchMatchMode::Semantic,
+                false,
+            )
         })
-        .collect();
-    for handle in handles {
+    };
+    fn expect_not_ready<T: std::fmt::Debug>(
+        handle: std::thread::JoinHandle<Result<T, IndexSearchError>>,
+    ) {
         let error = handle
             .join()
             .expect("search caller thread")
@@ -818,27 +831,52 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
         );
     }
 
-    // The first queued repair becomes the coordinator job owner and parks on
-    // the blocked fake runner; every other caller's repair request must
-    // coalesce into that in-flight job instead of admitting a second runner.
+    // Issue #4247: pin the ordering a loaded CI runner produces. The first
+    // caller's repair becomes the coordinator job owner and parks on the
+    // blocked fake runner while holding the host heavy lease; only then do
+    // the remaining callers arrive. On a fast host they used to enroll
+    // before the repair took the lease, which hid this ordering.
+    expect_not_ready(search(fixture.repo.clone(), 0));
     wait_for_rebuild_invocations(
         &fixture.runner_log,
         "--action index-issues",
         1,
         Duration::from_secs(15),
     );
-    // Give the remaining detached repair threads time to reach admission
-    // while the owner is still parked, then release the runner.
+    let late_callers: Vec<_> = (1..4)
+        .map(|caller| search(fixture.repo.clone(), caller))
+        .collect();
+    for handle in late_callers {
+        expect_not_ready(handle);
+    }
+
+    // Every late caller's repair request must coalesce into the in-flight
+    // job instead of admitting a second one. Give the remaining detached
+    // repair threads time to reach admission while the owner is still
+    // parked, then release the runner.
     std::thread::sleep(Duration::from_secs(3));
     fs::write(&fixture.release, b"go").expect("release parked rebuild");
     std::thread::sleep(Duration::from_secs(2));
 
+    // A yielded runner is re-invoked under the same admission, so each
+    // `yielded` line accounts for one extra `index-issues` invocation.
     let repairs = rebuild_invocations(&fixture.runner_log, "--action index-issues");
+    let yields = fs::read_to_string(&fixture.runner_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| *line == "yielded")
+        .count();
+    assert!(
+        yields >= 1,
+        "the late callers must have been served by the parked repair \
+         yielding the heavy lease: {repairs:#?}"
+    );
     assert_eq!(
-        repairs.len(),
+        repairs.len().saturating_sub(yields),
         1,
         "concurrent non-blocking searches must share exactly one \
-         host-coordinated repair admission (FR-097): {repairs:#?}"
+         host-coordinated repair admission (FR-097): {yields} yield(s), \
+         {repairs:#?}"
     );
 }
 

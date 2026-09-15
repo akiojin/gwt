@@ -483,7 +483,9 @@ pub struct LaunchWizardPreviousProfile {
     pub version: Option<String>,
     pub session_mode: gwt_agent::SessionMode,
     pub skip_permissions: bool,
-    pub codex_fast_mode: bool,
+    /// Issue #4228: Fast Mode for `agent_id`. The wizard restores it only onto
+    /// that same agent, so a Codex opt-in can never decide a Claude launch.
+    pub fast_mode: bool,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
