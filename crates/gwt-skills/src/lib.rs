@@ -2763,7 +2763,7 @@ mod tests {
         for required in [
             "Deliver",
             "drive to merge",
-            "gh pr merge --auto",
+            "JSON operation `pr.merge`",
             "merged_at",
             "Ready PR Gate",
             "Loop Safety Guard",
@@ -2863,12 +2863,12 @@ mod tests {
 
             for required in [
                 "drive-to-merge",
-                "gh pr merge --auto",
+                "JSON operation `pr.merge`",
                 "merged_at",
                 "Loop Safety Guard",
                 // Re-gate invariant: never keep auto-merge armed across a
                 // code-changing push.
-                "--disable-auto",
+                "disable auto-merge through `pr.merge`",
                 "re-arm",
             ] {
                 assert!(
@@ -2903,8 +2903,8 @@ mod tests {
                 // Hard PR gate before enabling auto-merge.
                 "Ready PR Gate",
                 "pending",
-                // Auto-merge enablement via the allowed gh command.
-                "gh pr merge --auto",
+                // Auto-merge enablement via the canonical JSON operation.
+                "JSON operation `pr.merge`",
                 // Project-agnostic merge-method selection (no hardcoded method).
                 "viewerDefaultMergeMethod",
                 // Merged-state watch surface and completion signal.
@@ -2912,13 +2912,13 @@ mod tests {
                 "merged_at",
                 // Transient CI classification + bounded re-run, like /release.
                 "transient",
-                "gh run rerun",
+                "`actions.rerun`",
                 // Bounded drive loop.
                 "Loop Safety Guard",
                 // Safety invariant: auto-merge must never stay armed across a
                 // code-changing push. Disable, re-gate, and re-arm per push so
                 // GitHub only ever merges a verified, gated snapshot.
-                "gh pr merge --disable-auto",
+                "**disable auto-merge** through JSON operation",
                 "re-arm",
             ] {
                 assert!(

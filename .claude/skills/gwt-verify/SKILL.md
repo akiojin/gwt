@@ -16,6 +16,12 @@ delegates to `gwt-verify --mode full`; `gwt-manage-pr` requires `gwt-verify --mo
 before opening or updating a PR; users may also invoke it directly through
 `/gwt:gwt-verify`.
 
+Read-only `gh` commands are allowed during verification, and allowed calls
+are recorded on the shared GitHub budget ledger. Prefer gwtd JSON operations
+such as `pr.list` and `issue.view` when cached data or workflow lifecycle
+context is needed. GitHub mutations must use JSON-envelope operations;
+direct `gh` writes do not satisfy verification, audit, or Ready PR gates.
+
 ## Contract overview
 
 `gwt-verify` is **project-agnostic**. It does not own a fixed cargo / pnpm /
