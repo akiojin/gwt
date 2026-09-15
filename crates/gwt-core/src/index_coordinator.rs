@@ -241,6 +241,19 @@ pub struct Ticket {
     /// long as its holder, which is how index jobs have always behaved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
+    /// Nice value of the holding process (Issue #4409 AC-4).
+    ///
+    /// A waiter reading the status needs this to tell a holder that is slow
+    /// from a holder that is *starved*: a degraded holder will take far longer
+    /// than its history suggests, and that changes whether waiting is the
+    /// right call. `None` on platforms without nice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_nice: Option<i32>,
+    /// Where the holder launches its verification commands — `daemon` when it
+    /// escaped the agent process tree, `inherit` when it did not need to, and
+    /// `refused` when it needed to and could not (Issue #4409 AC-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_spawn_host: Option<String>,
 }
 
 impl Ticket {
@@ -253,6 +266,8 @@ impl Ticket {
             acquired_at_ms: now_ms(),
             lease_id: None,
             expires_at_ms: None,
+            holder_nice: None,
+            holder_spawn_host: None,
         }
     }
 }
@@ -338,6 +353,10 @@ pub struct HeavyLeaseStatus {
     pub queue: Vec<HeavyQueueEntry>,
     /// Issue #4086 AC-4: what kind of job holds the lease.
     pub holder_kind: Option<HeavyHolderKind>,
+    /// Issue #4409 AC-4: the holder's nice value, and whether it launches
+    /// verification inside or outside the agent process tree.
+    pub holder_nice: Option<i32>,
+    pub holder_spawn_host: Option<String>,
     /// Index holders only: batches left according to the runner's progress.
     pub remaining_batches: Option<u64>,
     /// Best-effort wait estimate: the TTL remainder for a verification
@@ -817,6 +836,8 @@ impl IndexCoordinator {
             pending,
             queue,
             holder_kind: Some(holder_kind),
+            holder_nice: ticket.holder_nice,
+            holder_spawn_host: ticket.holder_spawn_host,
             remaining_batches,
             estimated_remaining_ms,
         })
@@ -1133,6 +1154,10 @@ fn acquire_heavy_at(
                         lease_id: Some(uuid::Uuid::new_v4().to_string()),
                         expires_at_ms: ttl
                             .map(|ttl| acquired_at_ms.saturating_add(ttl.as_millis() as u64)),
+                        holder_nice: crate::verification_priority::LauncherPriority::current().nice,
+                        // Filled in by the holder once it knows: the
+                        // coordinator has no opinion about daemons.
+                        holder_spawn_host: None,
                     };
                     let _ = write_json_atomic(&root.join("heavy.ticket.json"), &ticket);
                     cleanup_pending(pending_file, &pending_path);
@@ -1251,6 +1276,19 @@ impl HeavyLease {
     /// The published diagnostic ticket.
     pub fn ticket(&self) -> &Ticket {
         &self.ticket
+    }
+
+    /// Publish where this holder launches its verification commands from
+    /// (Issue #4409 AC-4).
+    ///
+    /// Set by the holder rather than at acquisition because the coordinator
+    /// has no notion of daemons or process trees, and a lease is taken by
+    /// index jobs too. A failed rewrite is not fatal: the ticket is
+    /// diagnostics, and losing a diagnostic field must not cost a lease that
+    /// was legitimately granted.
+    pub fn record_spawn_host(&mut self, spawn_host: impl Into<String>) {
+        self.ticket.holder_spawn_host = Some(spawn_host.into());
+        let _ = write_json_atomic(&self.ticket_path, &self.ticket);
     }
 
     pub fn acquired_at_ms(&self) -> u64 {

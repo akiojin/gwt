@@ -2408,34 +2408,130 @@ fn apply_child_environment_contract(process: &mut std::process::Command) {
     }
 }
 
-fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
-    execute_command_with_isolation(worktree, command, false)
+use crate::cli::daemon::verification_host::VerificationHost;
+
+fn execute_command(
+    worktree: &Path,
+    command: &str,
+    host: &VerificationHost,
+) -> Result<(i32, String), String> {
+    execute_command_with_isolation(worktree, command, false, host)
+}
+
+/// The exact environment a `verify.run` child receives, as a complete list.
+///
+/// The daemon clears its own environment and applies this, so a delegated
+/// child sees precisely what an in-process one would. Both paths read the
+/// overrides from [`child_environment_contract`], which is why the contract
+/// stays a single list.
+fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> {
+    let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    for (key, value) in child_environment_contract() {
+        match value {
+            Some(value) => {
+                env.insert(key.to_string(), value.to_string());
+            }
+            None => {
+                env.remove(key);
+            }
+        }
+    }
+    if isolated_baseline {
+        for key in gwt_core::process::GIT_ENV_SCRUB_KEYS {
+            env.remove(key);
+        }
+        env.remove("CARGO_TARGET_DIR");
+    }
+    env.into_iter().collect()
 }
 
 fn execute_command_with_isolation(
     worktree: &Path,
     command: &str,
     isolated_baseline: bool,
+    host: &VerificationHost,
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
-    let mut process = gwt_core::process::hidden_command(&args[0]);
-    process.args(&args[1..]).current_dir(worktree);
-    apply_child_environment_contract(&mut process);
-    if isolated_baseline {
-        gwt_core::process::scrub_git_env(&mut process);
-        process.env_remove("CARGO_TARGET_DIR");
-    }
-    let output = match process.output() {
-        Ok(output) => output,
-        Err(err) => {
-            let diagnostic = format!("failed to spawn '{command}': {err}");
-            let clipped = bounded_output_tail(diagnostic.as_bytes());
-            return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
+    match host {
+        VerificationHost::Daemon(endpoint) => {
+            execute_command_on_daemon(worktree, command, &args, isolated_baseline, endpoint)
         }
+        VerificationHost::Inherit => {
+            let mut process = gwt_core::process::hidden_command(&args[0]);
+            process.args(&args[1..]).current_dir(worktree);
+            apply_child_environment_contract(&mut process);
+            if isolated_baseline {
+                gwt_core::process::scrub_git_env(&mut process);
+                process.env_remove("CARGO_TARGET_DIR");
+            }
+            let output = match process.output() {
+                Ok(output) => output,
+                Err(err) => return Ok(spawn_failure_result(command, &err.to_string())),
+            };
+            let exit_code = output.status.code().unwrap_or(-1);
+            Ok((
+                exit_code,
+                render_streams(&[("stdout", &output.stdout), ("stderr", &output.stderr)]),
+            ))
+        }
+    }
+}
+
+/// Run one command through the daemon and read back what it produced.
+fn execute_command_on_daemon(
+    worktree: &Path,
+    command: &str,
+    args: &[String],
+    isolated_baseline: bool,
+    endpoint: &gwt_core::daemon::DaemonEndpoint,
+) -> Result<(i32, String), String> {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let stdout_path = temp.path().join("stdout");
+    let stderr_path = temp.path().join("stderr");
+    let request = gwt_core::daemon::VerificationSpawnRequest {
+        program: args[0].clone(),
+        args: args[1..].to_vec(),
+        cwd: worktree.to_path_buf(),
+        env: resolved_child_environment(isolated_baseline),
+        stdout_path: stdout_path.clone(),
+        stderr_path: stderr_path.clone(),
     };
-    let exit_code = output.status.code().unwrap_or(-1);
+    let delegated = match crate::cli::daemon::verification_host::run(endpoint, &request) {
+        Ok(delegated) => delegated,
+        // A daemon that cannot take the command is a spawn failure like any
+        // other: the record must be written with the partial transcript, not
+        // abandoned. It is emphatically *not* a reason to retry in-process —
+        // that is the implicit fallback AC-5 forbids.
+        Err(error) => return Ok(spawn_failure_result(command, &error)),
+    };
     let mut tail = String::new();
-    for (label, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+    // AC-6: what the child actually got, recorded even when it is not
+    // baseline. An environment that refuses nice 0 is not the caller's to fix,
+    // so the run continues and says so.
+    if let Some(reason) = &delegated.accepted.nice_reason {
+        tail.push_str(&format!("--- priority ---\n{reason}\n"));
+    }
+    if delegated.reclaimed_survivors {
+        tail.push_str(
+            "--- reclaimed ---\nthe command left descendants running after it exited; the \
+             daemon killed its process group (Issue #3845)\n",
+        );
+    }
+    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+    tail.push_str(&render_streams(&[("stdout", &stdout), ("stderr", &stderr)]));
+    Ok((delegated.exit_code, tail))
+}
+
+fn spawn_failure_result(command: &str, error: &str) -> (i32, String) {
+    let diagnostic = format!("failed to spawn '{command}': {error}");
+    let clipped = bounded_output_tail(diagnostic.as_bytes());
+    (-1, format!("--- spawn error ---\n{clipped}\n"))
+}
+
+fn render_streams(streams: &[(&str, &[u8])]) -> String {
+    let mut tail = String::new();
+    for (label, bytes) in streams {
         if bytes.is_empty() {
             continue;
         }
@@ -2444,7 +2540,7 @@ fn execute_command_with_isolation(
             tail.push_str(&format!("--- {label} ---\n{clipped}\n"));
         }
     }
-    Ok((exit_code, tail))
+    tail
 }
 
 fn git_command(worktree: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
@@ -2481,6 +2577,7 @@ fn measure_baseline(
     worktree: &Path,
     merge_base_sha: &str,
     request: &VerificationQuarantineRequest,
+    host: &VerificationHost,
 ) -> Result<(i32, String), String> {
     request.validate()?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -2504,7 +2601,7 @@ fn measure_baseline(
         ],
     )?;
     let (exit_code, output) =
-        execute_command_with_isolation(&checkout, &request.baseline_command, true)?;
+        execute_command_with_isolation(&checkout, &request.baseline_command, true, host)?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
     }
@@ -2613,7 +2710,21 @@ pub fn run_verification(
     session_id: &str,
     commands: &[String],
 ) -> Result<(VerificationRunRecord, String), String> {
-    run_verification_inner(worktree, session_id, commands, None, &[], None, || {})
+    // Fixtures launch in place. Where a verification workload is hosted is a
+    // property of the caller-facing operation — it is decided from the
+    // launcher's inherited priority and the daemon it can reach, neither of
+    // which a fixture is exercising — and it is tested on its own in
+    // `gwt_core::verification_priority` and `daemon::verification_host`.
+    run_verification_inner(
+        worktree,
+        session_id,
+        commands,
+        None,
+        &[],
+        None,
+        VerificationHost::Inherit,
+        || {},
+    )
 }
 
 fn run_verification_for_caller(
@@ -2623,6 +2734,7 @@ fn run_verification_for_caller(
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
     user_verification_result: Option<&str>,
+    host: VerificationHost,
 ) -> Result<(VerificationRunRecord, String), String> {
     run_verification_inner(
         worktree,
@@ -2631,6 +2743,7 @@ fn run_verification_for_caller(
         Some(authority),
         prepared_quarantines,
         user_verification_result,
+        host,
         || {},
     )
 }
@@ -2642,6 +2755,7 @@ fn run_verification_inner<F>(
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
     user_verification_result: Option<&str>,
+    host: VerificationHost,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
@@ -2695,7 +2809,7 @@ where
     }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
-        let (exit_code, tail) = execute_command(worktree, command)?;
+        let (exit_code, tail) = execute_command(worktree, command, &host)?;
         transcript.push_str(&tail);
         transcript.push_str(&format!("exit: {exit_code}\n"));
         results.push(VerificationCommandResult {
@@ -2741,7 +2855,7 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request) {
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &host) {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
                             "quarantine: {test_identity} is typed non-blocking via owner #{} and PR #{}; merge-base {merge_base_sha} reported exact PASS\n",
@@ -3995,6 +4109,11 @@ pub(super) fn run<E: CliEnv>(
                 out.push_str(&refusal);
                 return Ok(2);
             }
+            // Issue #4409: decided before admission so a run that cannot be
+            // given baseline priority is refused without first taking the
+            // host-wide lease away from a claimant that could have used it.
+            let (host, host_note) = crate::cli::daemon::verification_host::resolve(&worktree)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?;
             // SPEC #3576: the canonical runner owns its in-process lease.
             // Ordinary development processes do not delay admission. A budget overrun
             // answers `deferred` without writing a record.
@@ -4011,6 +4130,7 @@ pub(super) fn run<E: CliEnv>(
             })?;
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
+            out.push_str(&host_note);
             let run = run_verification_for_caller(
                 &worktree,
                 &session_id,
@@ -4018,6 +4138,7 @@ pub(super) fn run<E: CliEnv>(
                 &authority,
                 &prepared_quarantines,
                 user_verification_result.as_deref(),
+                host,
             );
             // Release the in-process lease before the (lease-free) evidence
             // evaluation so the next claimant starts as soon as the commands
@@ -5356,6 +5477,7 @@ mod tests {
             None,
             &[prepared],
             None,
+            VerificationHost::Inherit,
             || {},
         )
         .unwrap();
@@ -5577,6 +5699,7 @@ mod tests {
             None,
             &[],
             None,
+            VerificationHost::Inherit,
             || {
                 fs::create_dir_all(dir.path().join("artifacts")).unwrap();
                 fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
@@ -5692,12 +5815,20 @@ mod tests {
         )
         .unwrap();
 
-        let (record, _) =
-            run_verification_inner(dir.path(), "sess-mixed", &commands, None, &[], None, || {
+        let (record, _) = run_verification_inner(
+            dir.path(),
+            "sess-mixed",
+            &commands,
+            None,
+            &[],
+            None,
+            VerificationHost::Inherit,
+            || {
                 fs::write(dir.path().join("report.json"), "{}").unwrap();
                 fs::write(dir.path().join("src.txt"), "v2").unwrap();
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(
             record.worktree_fingerprint,
             "invalidated-by-concurrent-change"
@@ -5958,6 +6089,11 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #4409: these tests exercise the record and the settlement
+        // rules, not where verification is hosted. The placement decision
+        // reads the launcher's inherited priority, which a test runner cannot
+        // control, so the host is declared instead of discovered.
+        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
         let dir = tempfile::tempdir().unwrap();
         crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
@@ -6668,6 +6804,11 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #4409: these tests exercise the record and the settlement
+        // rules, not where verification is hosted. The placement decision
+        // reads the launcher's inherited priority, which a test runner cannot
+        // control, so the host is declared instead of discovered.
+        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -6736,6 +6877,11 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #4409: these tests exercise the record and the settlement
+        // rules, not where verification is hosted. The placement decision
+        // reads the launcher's inherited priority, which a test runner cannot
+        // control, so the host is declared instead of discovered.
+        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -6834,6 +6980,11 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Issue #4409: these tests exercise the record and the settlement
+        // rules, not where verification is hosted. The placement decision
+        // reads the launcher's inherited priority, which a test runner cannot
+        // control, so the host is declared instead of discovered.
+        let _spawn_host = ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit");
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -6915,6 +7066,7 @@ mod tests {
             Some(&authority),
             &[],
             None,
+            VerificationHost::Inherit,
             move || {
                 advance_generation_scoped_session_binding(&session_for_hook, current);
             },

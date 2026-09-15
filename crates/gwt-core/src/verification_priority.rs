@@ -79,10 +79,7 @@ pub enum SpawnPlacement {
 ///   caller cannot fix, so the run proceeds and records what it got. That case
 ///   is decided by the launching host, not here — see
 ///   [`crate::daemon::VerificationSpawnAccepted`].
-pub fn decide_placement(
-    launcher: LauncherPriority,
-    daemon: &DaemonAvailability,
-) -> SpawnPlacement {
+pub fn decide_placement(launcher: LauncherPriority, daemon: &DaemonAvailability) -> SpawnPlacement {
     if !launcher.is_degraded() {
         return SpawnPlacement::Inherit {
             reason: match launcher.nice {

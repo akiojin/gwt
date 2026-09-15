@@ -63,8 +63,7 @@ impl VerificationChild {
         // a `cargo test` that exits while a test binary is still winding down
         // is exactly the shape that hung the full suite in #3845.
         let reclaimed_survivors = reclaim_group(self.process_group);
-        self.reaped
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.reaped.store(true, std::sync::atomic::Ordering::SeqCst);
         (exit_code, reclaimed_survivors)
     }
 }
@@ -180,9 +179,11 @@ pub fn spawn(request: &VerificationSpawnRequest) -> Result<VerificationChild, St
 
 #[cfg(not(unix))]
 pub fn spawn(_request: &VerificationSpawnRequest) -> Result<VerificationChild, String> {
-    Err("daemon-hosted verification spawn is a Unix path; on Windows the launcher \
+    Err(
+        "daemon-hosted verification spawn is a Unix path; on Windows the launcher \
          escapes the agent's job object directly (Issue #4405)"
-        .to_string())
+            .to_string(),
+    )
 }
 
 /// Explain a child that did not reach baseline priority (AC-6).
@@ -423,7 +424,11 @@ mod tests {
     #[test]
     fn the_child_environment_comes_from_the_request() {
         let dir = temp_dir("env");
-        let mut req = request(&dir, "/bin/sh", &["-c", "echo \"${GWT_4409_MARKER:-unset}\""]);
+        let mut req = request(
+            &dir,
+            "/bin/sh",
+            &["-c", "echo \"${GWT_4409_MARKER:-unset}\""],
+        );
         req.env = vec![
             ("PATH".to_string(), "/usr/bin:/bin".to_string()),
             ("GWT_4409_MARKER".to_string(), "from-caller".to_string()),

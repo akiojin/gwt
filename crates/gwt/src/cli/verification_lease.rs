@@ -164,6 +164,12 @@ struct LeaseStatusSnapshot {
     queue: Vec<HeavyQueueEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     holder_kind: Option<String>,
+    /// Issue #4409 AC-4: the holder's own priority, and whether it launches
+    /// verification inside or outside the agent process tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_nice: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_spawn_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remaining_batches: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +190,8 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             pending: status.pending,
             queue: status.queue,
             holder_kind: status.holder_kind.map(|kind| kind.as_str().to_string()),
+            holder_nice: status.holder_nice,
+            holder_spawn_host: status.holder_spawn_host,
             remaining_batches: status.remaining_batches,
             estimated_remaining_ms: status.estimated_remaining_ms,
         }
@@ -296,6 +304,12 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     if let Some(kind) = &status.holder_kind {
         out.push_str(&format!("holder_kind: {kind}\n"));
     }
+    if let Some(nice) = status.holder_nice {
+        out.push_str(&format!("holder_nice: {nice}\n"));
+    }
+    if let Some(spawn_host) = &status.holder_spawn_host {
+        out.push_str(&format!("holder_spawn_host: {spawn_host}\n"));
+    }
     if let Some(batches) = status.remaining_batches {
         out.push_str(&format!("remaining_batches: {batches}\n"));
     }
@@ -386,12 +400,16 @@ mod tests {
                     },
                 ],
                 holder_kind: Some("verification".to_string()),
+                holder_nice: Some(10),
+                holder_spawn_host: Some("daemon".to_string()),
                 remaining_batches: None,
                 estimated_remaining_ms: Some(60_000),
             },
         );
         // Issue #4169 AC-2: the waiters are named in service order, each with
-        // the moment it joined and how long it has been waiting.
+        // the moment it joined and how long it has been waiting. Issue #4409
+        // AC-4 adds the holder's own priority and where it launches from, so a
+        // waiter can tell a slow holder from a starved one.
         assert_eq!(
             out,
             "verification lease: held\n\
@@ -403,6 +421,8 @@ mod tests {
              remaining_ms: 60000\n\
              expired: false\n\
              holder_kind: verification\n\
+             holder_nice: 10\n\
+             holder_spawn_host: daemon\n\
              estimated_remaining_ms: 60000\n\
              pending: 2\n\
              queue[0]: target=repo--verification--early priority=manual-rebuild \

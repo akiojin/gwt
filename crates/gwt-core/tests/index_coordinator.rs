@@ -602,6 +602,8 @@ fn write_stale_ticket(path: &Path, target: &TargetKey, pid: u32, start_id: &str)
         acquired_at_ms: 0,
         lease_id: None,
         expires_at_ms: None,
+        holder_nice: None,
+        holder_spawn_host: None,
     };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create ticket dir");

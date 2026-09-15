@@ -177,18 +177,29 @@ fn holder_notice(status: &HeavyLeaseStatus) -> HolderNotice {
         .estimated_remaining_ms
         .or(status.remaining_ms)
         .map(Duration::from_millis);
+    // Issue #4409 AC-4: a deferred caller is deciding whether to keep waiting,
+    // and a starved holder changes that answer.
+    let priority = match (status.holder_nice, status.holder_spawn_host.as_deref()) {
+        (None, None) => String::new(),
+        (nice, host) => format!(
+            ", nice {}, spawn-host {}",
+            nice.map(|nice| nice.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            host.unwrap_or("unknown")
+        ),
+    };
     match status.remaining_ms {
         Some(remaining_ms) => HolderNotice {
             detail: format!(
-                "verification lease held by {kind} {target} (pid {pid}, {}s left{progress})",
+                "verification lease held by {kind} {target} (pid {pid}{priority}, {}s left{progress})",
                 remaining_ms / 1000
             ),
             retry_after,
         },
         None => HolderNotice {
             detail: format!(
-                "verification lease held by {kind} {target} (pid {pid}, no TTL — it releases \
-                 only when its job finishes{progress})"
+                "verification lease held by {kind} {target} (pid {pid}{priority}, no TTL — it \
+                 releases only when its job finishes{progress})"
             ),
             retry_after,
         },
@@ -369,6 +380,13 @@ pub(crate) fn admit<E: CliEnv>(
             }
         }
     };
+    let mut lease = lease;
+    // Issue #4409 AC-4: a waiter needs to know whether this holder escaped the
+    // agent process tree, because a holder that did not will take far longer
+    // than its history suggests.
+    let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let (spawn_host, _) = crate::cli::daemon::verification_host::describe_for_lease(&worktree);
+    lease.record_spawn_host(spawn_host);
     let admission = Admission {
         guard: Some(guard),
         lease_id: lease.id().to_string(),
@@ -437,6 +455,46 @@ mod tests {
         );
         let err = resolve_max_wait(Some(MAX_WAIT_SECS + 1)).unwrap_err();
         assert!(err.to_string().contains("max_wait_secs"), "{err}");
+    }
+
+    /// Issue #4409 AC-4: a deferred caller is deciding whether waiting is
+    /// worth it, and a holder that is itself starved will take far longer than
+    /// its history suggests. The refusal has to say so.
+    #[test]
+    fn a_deferred_refusal_reports_the_holders_priority_and_spawn_host() {
+        let notice = holder_notice(&HeavyLeaseStatus {
+            held: true,
+            target: Some("repo--verification".to_string()),
+            owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                pid: 4242,
+                start_id: "start".to_string(),
+            }),
+            remaining_ms: Some(60_000),
+            holder_nice: Some(10),
+            holder_spawn_host: Some("inherit".to_string()),
+            ..HeavyLeaseStatus::default()
+        });
+        assert!(notice.detail.contains("nice 10"), "{}", notice.detail);
+        assert!(
+            notice.detail.contains("spawn-host inherit"),
+            "{}",
+            notice.detail
+        );
+    }
+
+    /// A pre-#4409 ticket carries neither field. The refusal must stay
+    /// readable rather than printing "nice unknown, spawn-host unknown" at
+    /// every caller that ever waits on an older holder.
+    #[test]
+    fn a_holder_that_published_no_priority_is_described_without_empty_fields() {
+        let notice = holder_notice(&HeavyLeaseStatus {
+            held: true,
+            target: Some("repo--verification".to_string()),
+            remaining_ms: Some(60_000),
+            ..HeavyLeaseStatus::default()
+        });
+        assert!(!notice.detail.contains("nice"), "{}", notice.detail);
+        assert!(!notice.detail.contains("spawn-host"), "{}", notice.detail);
     }
 
     /// Issue #4140 AC-3: a holder with a TTL must publish a usable ETA, and a
