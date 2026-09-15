@@ -52829,9 +52829,16 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
     );
     let mut runtime = sample_runtime(temp.path(), vec![matching_tab, other_tab], Some("tab-1"));
 
+    super::workspace_views::reset_full_active_work_projection_builds();
     let events = runtime.handle_board_projection_changed_events(&repo);
 
-    assert_eq!(events.len(), 3);
+    // Issue #4406: a post that is no Work milestone changes no Work row, so the
+    // refresh emits only the two Board windows and rebuilds no Active Work.
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0
+    );
     for expected_id in [
         combined_window_id("tab-1", "board-1"),
         combined_window_id("tab-1", "board-2"),
@@ -52854,6 +52861,55 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
             ..
         } if *id == combined_window_id("tab-2", "board-3")
     )));
+}
+
+#[test]
+fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_work() {
+    // Issue #4406 AC-1: applying a Board refresh is the only part of a Board
+    // change on the GUI event loop; a full Active Work rebuild there cost
+    // seconds per post.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let projection = apply_title_sync_sample_projection(
+        &repo,
+        &window_id,
+        Some("Board milestone title"),
+        Some("posted a decision"),
+    );
+    super::workspace_views::reset_full_active_work_projection_builds();
+
+    let events = runtime.apply_board_projection_refresh(super::BoardProjectionRefreshed {
+        events: Vec::new(),
+        milestone: Some((repo.clone(), projection)),
+    });
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "the milestone must still refresh the pane heading: {events:?}"
+    );
+    let tab = runtime.tab("tab-1").expect("tab");
+    assert_eq!(
+        tab.workspace
+            .window("agent-1")
+            .expect("agent window")
+            .dynamic_title
+            .as_deref(),
+        Some("Board milestone title")
+    );
 }
 
 fn migration_pending_tab(tab_id: &str, project_root: PathBuf) -> ProjectTabRuntime {
