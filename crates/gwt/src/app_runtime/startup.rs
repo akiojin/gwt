@@ -68,6 +68,7 @@ pub(super) enum RestoreRefusal {
     /// CLI, so restoring it can only produce an idle pane.
     NoResumeSession,
     DuplicateResumeSession,
+    LandedWorktree,
     AlreadyRunning,
     NoProjectTab,
     TabNotRestorable,
@@ -88,6 +89,7 @@ impl RestoreRefusal {
             Self::Stale => "stale".to_string(),
             Self::NoResumeSession => "no_resume_session".to_string(),
             Self::DuplicateResumeSession => "duplicate_resume_session".to_string(),
+            Self::LandedWorktree => "landed_worktree".to_string(),
             Self::AlreadyRunning => "already_running".to_string(),
             Self::NoProjectTab => "no_project_tab".to_string(),
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
@@ -766,6 +768,22 @@ impl AppRuntime {
         project_root: &Path,
         window_id: Option<&str>,
     ) -> Result<(), RestoreRefusal> {
+        // Reopened #4143 AC-5: retaining a stopped diagnostic does not
+        // authorize starting its process again after the branch has landed.
+        // Resolve only the local remote-tracking ref; startup never fetches.
+        if gwt_core::process::hidden_command("git")
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                "HEAD",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&session.worktree_path)
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return Err(RestoreRefusal::LandedWorktree);
+        }
         match self.restore_work_terminality(session, project_root, window_id) {
             RestoreAdmission::RefuseTerminal(reason) => {
                 return Err(RestoreRefusal::TerminalWork(reason))

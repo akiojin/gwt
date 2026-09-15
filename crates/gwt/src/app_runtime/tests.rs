@@ -66250,6 +66250,43 @@ not toml";
 // next generation.
 // ---------------------------------------------------------------------------
 
+/// Reopened #4143 AC-5/7/8: a landed branch must not spend a PTY even
+/// when diagnostic retention would keep its stopped placeholder.
+#[test]
+fn startup_restore_refuses_landed_worktree_before_launch() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let tab = restore_fixture_tab(
+        "tab-landed",
+        &repo,
+        &[("agent-landed".into(), "session-landed".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-landed"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-landed",
+        &repo,
+        Some("native-landed"),
+        Some(4143),
+    );
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    assert_eq!(
+        restore_admission_refusals(&logs)
+            .get("session-landed")
+            .map(String::as_str),
+        Some("landed_worktree")
+    );
+}
+
 fn restore_fixture_tab(
     tab_id: &str,
     repo: &Path,
