@@ -177,6 +177,25 @@ test("Issue Monitor panel presents and clears the quota-hold provider and reset"
   assert.match(quotaHoldText, /Reset 2026-09-04T09:30:00Z/i);
 });
 
+test("Issue Monitor renders the JSON gui_status contract and follows updated limits", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const response = {
+    queue: [42, 43], active_launches: [44], max_active: 4,
+    gui_status: {
+      enabled: true, state: "active", queue_len: 2, active_count: 1,
+      max_active_agents: 4, auto_apply_updates: true, last_error: null,
+    },
+  };
+  surface.applyIssueMonitorStatus(response.gui_status);
+  assert.match(body.querySelector(".knowledge-monitor-summary").textContent,
+    new RegExp(`Queue ${response.queue.length} \\| Active ${response.active_launches.length}/${response.max_active}`));
+  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "4");
+  assert.equal(body.querySelector('[data-action="monitor-auto-apply"]').dataset.enabled, "true");
+  surface.applyIssueMonitorStatus({ ...response.gui_status, max_active_agents: 5 });
+  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "5");
+});
+
 test("Issue Monitor panel preserves higher-priority states around quota-hold metadata", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -197,6 +216,7 @@ test("Issue Monitor panel preserves higher-priority states around quota-hold met
   });
 
   assert.equal(summary.textContent, "Error | Queue 3 | Active 0/2");
+  assert.equal(summary.title, "issue #3785: failed");
   // FR-017: the red monitor banner is gone and nothing replaces it in the
   // surface — the error is read in the notification center.
   assert.equal(body.querySelector(".knowledge-monitor-error"), null);
@@ -213,6 +233,7 @@ test("Issue Monitor panel preserves higher-priority states around quota-hold met
   });
 
   assert.equal(summary.textContent, "Stopped | Queue 3 | Active 0/2");
+  assert.equal(summary.title, "");
   assert.doesNotMatch(summary.textContent, /Quota hold|Provider|Reset/);
 
   for (const state of ["active", "launching"]) {
