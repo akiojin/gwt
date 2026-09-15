@@ -1570,6 +1570,15 @@ enum UserEvent {
         window_id: String,
         result: Box<AgentLaunchResult>,
     },
+    /// Issue #4375: one PM worktree preparation finished on a blocking worker.
+    /// The Git work it covers (`git worktree add`, `git fetch`) used to run
+    /// inside the canvas-ready restore drain and held the GUI event loop for
+    /// seconds on a repository with many worktrees; the spawn it gates resumes
+    /// from this event instead.
+    PmWorktreePrepared {
+        continuation: Box<crate::app_runtime::pm::PmWorktreeContinuation>,
+        result: Result<PathBuf, String>,
+    },
     ShellLaunchComplete {
         window_id: String,
         result: Box<Result<ProcessLaunch, String>>,
@@ -3403,6 +3412,7 @@ mod tests {
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             startup_worktree_inventories: HashMap::new(),
+            pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -9592,6 +9602,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::PmWorktreePrepared {
+                continuation,
+                result,
+            }) => {
+                let events = app.handle_pm_worktree_prepared(*continuation, result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {

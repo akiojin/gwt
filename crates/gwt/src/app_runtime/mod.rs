@@ -219,7 +219,7 @@ mod launch_output_mirror;
 mod loaders;
 mod migration;
 pub(crate) mod persist_dispatcher;
-mod pm;
+pub(crate) mod pm;
 mod profile;
 mod project_tabs;
 mod pty_io;
@@ -1257,6 +1257,12 @@ pub struct AppRuntime {
     /// until the startup index status probe takes the active project's one.
     pub(crate) startup_worktree_inventories:
         HashMap<PathBuf, std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
+    /// Issue #4375: repositories whose PM worktree preparation is running on a
+    /// blocking worker. Preparing the worktree is Git work that used to run on
+    /// the GUI event loop, where it was atomic; this gate keeps a second ensure
+    /// from starting a duplicate preparation — and therefore a second PM pane —
+    /// while the first one is still in flight.
+    pub(crate) pending_pm_worktree_preparations: HashSet<PathBuf>,
     /// Issue #4038 (AC-4): tab ids whose project was open when the update
     /// apply began. Their sessions bypass the 24h startup auto-resume
     /// freshness gate on the launch that settles the resume marker.
@@ -2879,6 +2885,7 @@ impl AppRuntime {
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             startup_worktree_inventories: HashMap::new(),
+            pending_pm_worktree_preparations: HashSet::new(),
             update_resume_tab_ids: HashSet::new(),
             update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
             update_drain_released_projects: Vec::new(),
