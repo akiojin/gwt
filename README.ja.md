@@ -909,7 +909,10 @@ JSON
 ```
 
 lease の遷移は
-`~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
+`~/.gwt/runtime/verification-coordinator/lease-events.jsonl` に記録されます。
+検証は専用の coordinator レーンを持ちます。semantic search と index build は
+従来どおり `~/.gwt/runtime/index-coordinator` 上で相互排他（model を load する
+runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### GitHub API 予算
 

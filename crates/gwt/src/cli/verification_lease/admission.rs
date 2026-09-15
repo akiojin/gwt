@@ -535,7 +535,7 @@ mod tests {
         fn new() -> Self {
             let home = tempfile::tempdir().unwrap();
             let _home_guard = ScopedGwtHome::set(home.path());
-            let coordinator = IndexCoordinator::open_default().unwrap();
+            let coordinator = IndexCoordinator::open_default_verification().unwrap();
             let root = Self {
                 coordinator,
                 home,
@@ -746,11 +746,92 @@ mod tests {
         lease_root.assert_free("the next run releases its own lease");
     }
 
+    /// Issue #4285 AC-1 / AC-3 / AC-4: a canonical verification holding its
+    /// lease must not stop a query encode, and the model lane must still
+    /// admit only one model-loaded runner tree (FR-417 / AS-30) while both
+    /// lanes are busy.
+    #[test]
+    fn search_and_index_keep_their_own_exclusion_while_verification_holds_its_lease() {
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let admission = admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap();
+        lease_root.assert_held("admission must hold the verification lease");
+
+        let model_lane = IndexCoordinator::open_default().unwrap();
+        assert_ne!(
+            model_lane.heavy_lock_path(),
+            lease_root.coordinator.heavy_lock_path(),
+            "verification and the model lane must not share heavy.lock"
+        );
+        // AC-1: the query encode is admitted while verification runs.
+        let search = model_lane
+            .acquire_interactive_search_heavy(
+                &TargetKey::search("repo", None),
+                Duration::from_millis(500),
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "search must not wait for canonical verification: {err} — {}",
+                    lease_root.describe()
+                )
+            });
+        // AC-3: a build cannot load a second model tree next to the search.
+        let JobAdmission::Owner(build) = model_lane
+            .request_job(
+                &TargetKey::repo_shared("repo", "issues"),
+                JobPriority::Background,
+                Duration::from_millis(250),
+            )
+            .unwrap()
+        else {
+            panic!("the build target must be free");
+        };
+        match build.acquire_heavy(Duration::from_millis(120)) {
+            Err(CoordinatorError::Timeout { .. }) => {}
+            Err(other) => panic!("expected a timeout on the model lane: {other:?}"),
+            Ok(_) => panic!("the model lane must stay exclusive next to a search"),
+        }
+        build.complete(JobOutcome::Completed).unwrap();
+        drop(search);
+        drop(admission);
+        lease_root.assert_free("dropping the admission must release the lease");
+    }
+
+    /// Issue #4285 AC-2: a query encode holding the model lane must not stop
+    /// canonical verification from being admitted.
+    #[test]
+    fn verification_is_admitted_while_a_search_holds_the_model_lease() {
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let model_lane = IndexCoordinator::open_default().unwrap();
+        let _search = model_lane
+            .acquire_interactive_search_heavy(
+                &TargetKey::search("repo", None),
+                Duration::from_millis(500),
+            )
+            .unwrap();
+
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let admission =
+            admit(&mut env, worktree.path(), Duration::from_secs(1)).unwrap_or_else(|err| {
+                panic!(
+                    "verification must not wait for a search: {err} — {}",
+                    lease_root.describe()
+                )
+            });
+        lease_root.assert_held("admission must hold the verification lease");
+        drop(admission);
+        lease_root.assert_free("dropping the admission must release the lease");
+    }
+
     #[test]
     fn admit_defers_when_another_target_holds_the_lease() {
         let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
-        let other = TargetKey::repo_shared("other-repo", "issues");
+        // Issue #4285: only another canonical verification contends on this
+        // lane; index builds and searches live on the model lane.
+        let other = TargetKey::verification("other-repo", "other-worktree");
         let JobAdmission::Owner(guard) = lease_root
             .coordinator
             .request_job(
