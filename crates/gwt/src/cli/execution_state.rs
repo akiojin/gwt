@@ -28866,7 +28866,7 @@ exit 1
                     base: "develop".to_string(),
                     head: None,
                     title: "fix: restore adopted authority".to_string(),
-                    body: "production-path authority acceptance".to_string(),
+                    body: "production-path authority acceptance\nUser Verification Result: confirmed\n".to_string(),
                     labels: Vec::new(),
                     draft: false,
                 }),

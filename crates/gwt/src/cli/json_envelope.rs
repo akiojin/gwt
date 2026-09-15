@@ -2279,10 +2279,7 @@ mod tests {
         let output = String::from_utf8_lossy(&env.stdout);
         assert_ne!(code, 0, "{output}");
         assert!(output.contains("autonomous"), "{output}");
-        assert!(
-            output.contains("deferred (autonomous execution)"),
-            "{output}"
-        );
+        assert!(output.contains("n/a (autonomous)"), "{output}");
         assert!(output.contains("verify.run"), "{output}");
         assert!(!repo.join("must-not-run").exists());
         assert_eq!(
@@ -2296,7 +2293,7 @@ mod tests {
             "verify.run",
             json!({
                 "commands": ["git --version"],
-                "user_verification_result": "deferred (autonomous execution)"
+                "user_verification_result": "n/a (autonomous)"
             }),
         );
         assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
@@ -2306,7 +2303,7 @@ mod tests {
                 .unwrap()
                 .user_verification_result
                 .as_deref(),
-            Some("deferred (autonomous execution)")
+            Some("n/a (autonomous)")
         );
 
         let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
