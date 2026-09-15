@@ -135,6 +135,32 @@ impl ProjectIndexBootstrapService {
         proxy: AppEventProxy,
         project_root: PathBuf,
     ) -> ProjectIndexBootstrapRequest {
+        self.spawn_background(proxy, project_root, current_worktree_status_probe)
+    }
+
+    /// Issue #4398 AC-3: the startup probe reuses the worktree inventory the
+    /// startup path already listed instead of running `git worktree list`
+    /// again to select one current-worktree status.
+    pub(crate) fn spawn_with_startup_inventory(
+        &self,
+        proxy: AppEventProxy,
+        project_root: PathBuf,
+        inventory: Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>,
+    ) -> ProjectIndexBootstrapRequest {
+        self.spawn_background(proxy, project_root, move |root: &Path| {
+            gwt::aggregate_current_worktree_index_status_with_inventory(root, &inventory)
+        })
+    }
+
+    fn spawn_background<S>(
+        &self,
+        proxy: AppEventProxy,
+        project_root: PathBuf,
+        status_probe: S,
+    ) -> ProjectIndexBootstrapRequest
+    where
+        S: FnOnce(&Path) -> gwt::ProjectIndexStatusView + Send + 'static,
+    {
         let disabled = gwt::index_worker::automatic_background_index_disabled();
         if !disabled {
             ensure_refresh_broker_drain(proxy.clone());
@@ -144,7 +170,7 @@ impl ProjectIndexBootstrapService {
             project_root,
             disabled,
             gwt::index_worker::bootstrap_project_index_for_path,
-            current_worktree_status_probe,
+            status_probe,
         )
     }
 
