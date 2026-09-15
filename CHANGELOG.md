@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.99.0] - 2026-09-15
+
+### Bug Fixes
+
+- **gui:** Work 行ごとの hook health 監査が GUI event loop を塞ぎ pane.* が応答しない問題を修正
+- **index-coordinator:** Heavy queue の到着順をミリ秒から連番へ移し newcomer の追い越しを塞ぐ
+
+### Miscellaneous Tasks
+
+- **work:** #4257 の Work event を記録
+- **work:** #4257 の Work event を記録
+- **work:** #4210 の Work イベントシャードを記録する
+- **work:** #4210 の終端 Work イベントを記録する
+
+### Styling
+
+- **test:** Hook_health_test の rustfmt 差分を解消
+
 ## [9.98.0] - 2026-09-15
 
 ### Bug Fixes
