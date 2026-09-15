@@ -61,6 +61,12 @@ jobs:
         run: bash scripts/check-frontend-bundle.sh
       - name: Check release flow contract
         run: bash scripts/check-release-flow.sh
+      # SPEC #3576: the Git hook contract, including the rule that `git push`
+      # starts no heavy Cargo job outside the host-wide verification lease.
+      # The script existed before but no workflow ran it, so the guard could
+      # not actually stop the regression it describes.
+      - name: Check Git hook contract
+        run: bash scripts/verify-husky-hooks.sh
       - name: Run Markdownlint
         uses: nosborn/github-action-markdown-cli@v3.5.0
         with:
