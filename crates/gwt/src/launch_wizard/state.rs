@@ -956,7 +956,7 @@ impl LaunchWizardState {
             self.version = version;
         }
         self.skip_permissions = entry.skip_permissions;
-        self.codex_fast_mode = entry.codex_fast_mode && self.current_agent_supports_fast_mode();
+        self.codex_fast_mode = self.restored_fast_mode(&entry.agent_id, entry.codex_fast_mode);
         if let Some(resume_session_id) = entry.resume_session_id.clone() {
             self.mode = "resume".to_string();
             self.resume_session_id = Some(resume_session_id);
@@ -1022,7 +1022,7 @@ impl LaunchWizardState {
             self.version = version;
         }
         self.skip_permissions = entry.skip_permissions;
-        self.codex_fast_mode = entry.codex_fast_mode && self.current_agent_supports_fast_mode();
+        self.codex_fast_mode = self.restored_fast_mode(&entry.agent_id, entry.codex_fast_mode);
         match mode {
             QuickStartLaunchMode::Resume => {
                 if let Some(window_id) = entry.live_window_id {
@@ -1092,7 +1092,7 @@ impl LaunchWizardState {
         self.mode = execution_mode_value_from_session_mode(profile.session_mode).to_string();
         self.resume_session_id = None;
         self.skip_permissions = profile.skip_permissions;
-        self.codex_fast_mode = profile.codex_fast_mode && self.current_agent_supports_fast_mode();
+        self.codex_fast_mode = self.restored_fast_mode(&profile.agent_id, profile.fast_mode);
         // Issue #3863 AC-7: Hermes-specific values. `set_hermes_option` is
         // agent-agnostic state, so these only carry values for Hermes profiles.
         let hermes = profile.hermes;
@@ -1660,6 +1660,19 @@ impl LaunchWizardState {
             && agent_id_from_key(self.effective_agent_id()).supports_fast_mode()
     }
 
+    /// Issue #4228: Fast Mode restored from a saved profile, quick-start entry,
+    /// or draft written by `source_agent_id`.
+    ///
+    /// `supports_fast_mode()` answers true for Claude *and* Codex, so guarding a
+    /// restore with it alone let a Codex opt-in decide a Claude launch. The
+    /// setting belongs to the agent that wrote it, so it is only honored when
+    /// that agent is the one being launched.
+    fn restored_fast_mode(&self, source_agent_id: &str, enabled: bool) -> bool {
+        enabled
+            && agent_id_from_key(source_agent_id) == agent_id_from_key(self.effective_agent_id())
+            && self.current_agent_supports_fast_mode()
+    }
+
     /// SPEC-3152: whether the current agent exposes Hermes-style launch
     /// options (provider / profile / free-text model / advanced) in the
     /// Settings form.
@@ -2044,8 +2057,11 @@ impl LaunchWizardState {
         self.version = draft.version;
         self.mode = draft.mode;
         self.resume_session_id = draft.resume_session_id;
+        // The draft map is keyed by agent, so the key this draft was read under
+        // is the agent that wrote it (Issue #4228).
+        let source_agent_id = self.agent_id.clone();
         self.skip_permissions = draft.skip_permissions;
-        self.codex_fast_mode = draft.codex_fast_mode && self.current_agent_supports_fast_mode();
+        self.codex_fast_mode = self.restored_fast_mode(&source_agent_id, draft.codex_fast_mode);
     }
 
     fn reset_agent_draft_defaults(&mut self) {
@@ -2196,7 +2212,7 @@ impl LaunchWizardState {
             self.version = version;
         }
         self.skip_permissions = entry.skip_permissions;
-        self.codex_fast_mode = entry.codex_fast_mode && self.current_agent_supports_fast_mode();
+        self.codex_fast_mode = self.restored_fast_mode(&entry.agent_id, entry.codex_fast_mode);
 
         match selected_action {
             QuickStartAction::ReuseEntry { .. } => {
@@ -2597,7 +2613,7 @@ mod tests {
             version: Some("0.110.0".to_string()),
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2797,7 +2813,7 @@ mod tests {
             version: Some("installed".to_string()),
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2857,7 +2873,7 @@ mod tests {
             version: Some("0.110.0".to_string()),
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3037,7 +3053,7 @@ mod tests {
                 version: Some("0.110.0".to_string()),
                 session_mode: gwt_agent::SessionMode::Continue,
                 skip_permissions: true,
-                codex_fast_mode: true,
+                fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3094,7 +3110,7 @@ mod tests {
                 version: None,
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
-                codex_fast_mode: false,
+                fast_mode: false,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3144,7 +3160,7 @@ mod tests {
                 version: None,
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
-                codex_fast_mode: false,
+                fast_mode: false,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("missing".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3178,7 +3194,7 @@ mod tests {
                 version: Some("0.110.0".to_string()),
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
-                codex_fast_mode: false,
+                fast_mode: false,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3215,7 +3231,7 @@ mod tests {
                 version: Some("0.110.0".to_string()),
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
-                codex_fast_mode: false,
+                fast_mode: false,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("worker".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3402,7 +3418,7 @@ mod tests {
                 version: Some("0.110.0".to_string()),
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: true,
-                codex_fast_mode: true,
+                fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("missing".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3429,7 +3445,7 @@ mod tests {
                 version: Some("0.110.0".to_string()),
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: true,
-                codex_fast_mode: true,
+                fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3463,7 +3479,7 @@ mod tests {
                 version: Some("0.110.0".to_string()),
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: true,
-                codex_fast_mode: true,
+                fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3494,7 +3510,7 @@ mod tests {
                 version: Some("0.110.0".to_string()),
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: true,
-                codex_fast_mode: true,
+                fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3560,7 +3576,7 @@ mod tests {
                     version: None,
                     session_mode: gwt_agent::SessionMode::Normal,
                     skip_permissions: false,
-                    codex_fast_mode: false,
+                    fast_mode: false,
                     runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                     docker_service: None,
                     docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::CreateAndStart,
