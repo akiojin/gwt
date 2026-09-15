@@ -806,7 +806,9 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
     let fixture = setup_search_fixture_with_blocking_rebuild(
         r#"{"ok": true, "scopes": {"issues": {"state": "missing"}}}"#,
     );
-    let search = |repo: std::path::PathBuf, caller: usize| {
+
+    let search = |caller| {
+        let repo = fixture.repo.clone();
         std::thread::spawn(move || {
             gwt::search_project_index(
                 &repo,
@@ -818,11 +820,48 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
             )
         })
     };
-    fn expect_not_ready<T: std::fmt::Debug>(
-        handle: std::thread::JoinHandle<Result<T, IndexSearchError>>,
-    ) {
-        let error = handle
-            .join()
+
+    // Pin the CI ordering: repair holds the heavy lease before the late
+    // queries arrive. Starting all queries together can hide a fake runner
+    // that never yields (Issues #4247 / #4281).
+    let first = search(0).join();
+    wait_for_rebuild_invocations(
+        &fixture.runner_log,
+        "--action index-issues",
+        1,
+        Duration::from_secs(15),
+    );
+    let late_callers: Vec<_> = (1..4).map(search).collect();
+    let results: Vec<_> = std::iter::once(first)
+        .chain(late_callers.into_iter().map(|caller| caller.join()))
+        .collect();
+
+    // Admission is synchronous in each caller. Once they return there is
+    // nothing left to admit. Release and drain before asserting their results
+    // so a failure cannot leave the fake runner parked after fixture teardown.
+    fs::write(&fixture.release, b"go").expect("release parked rebuild");
+
+    let coordinator = gwt_core::index_coordinator::IndexCoordinator::open_default()
+        .expect("isolated coordinator");
+    let repo_hash = gwt::index_worker::detect_repo_hash(&fixture.repo).expect("repo hash");
+    let key = gwt_core::index_coordinator::TargetKey::repo_shared(repo_hash.as_str(), "issues");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(coordinator.target_state_path(&key)).expect("repair state"),
+        )
+        .expect("parse repair state");
+        assert_eq!(state["epoch"], 1, "exactly one repair admission: {state}");
+        if state["status"] != "running" {
+            assert_eq!(state["status"], "completed", "repair must finish: {state}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "repair did not finish: {state}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    for result in results {
+        let error = result
             .expect("search caller thread")
             .expect_err("every concurrent caller gets the typed not-ready");
         assert!(
@@ -831,38 +870,9 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
         );
     }
 
-    // Issue #4247: pin the ordering a loaded CI runner produces. The first
-    // caller's repair becomes the coordinator job owner and parks on the
-    // blocked fake runner while holding the host heavy lease; only then do
-    // the remaining callers arrive. On a fast host they used to enroll
-    // before the repair took the lease, which hid this ordering.
-    expect_not_ready(search(fixture.repo.clone(), 0));
-    wait_for_rebuild_invocations(
-        &fixture.runner_log,
-        "--action index-issues",
-        1,
-        Duration::from_secs(15),
-    );
-    let late_callers: Vec<_> = (1..4)
-        .map(|caller| search(fixture.repo.clone(), caller))
-        .collect();
-    for handle in late_callers {
-        expect_not_ready(handle);
-    }
-
-    // Every late caller's repair request must coalesce into the in-flight
-    // job instead of admitting a second one. Give the remaining detached
-    // repair threads time to reach admission while the owner is still
-    // parked, then release the runner.
-    std::thread::sleep(Duration::from_secs(3));
-    fs::write(&fixture.release, b"go").expect("release parked rebuild");
-    std::thread::sleep(Duration::from_secs(2));
-
-    // A yielded runner is re-invoked under the same admission, so each
-    // `yielded` line accounts for one extra `index-issues` invocation.
     let repairs = rebuild_invocations(&fixture.runner_log, "--action index-issues");
     let yields = fs::read_to_string(&fixture.runner_log)
-        .unwrap_or_default()
+        .expect("runner log")
         .lines()
         .filter(|line| *line == "yielded")
         .count();
