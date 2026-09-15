@@ -24,6 +24,7 @@
 //!   gwt executions always run in git worktrees.
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
@@ -2218,6 +2219,92 @@ fn git_is_ancestor(worktree: &Path, ancestor: &str, descendant: &str) -> Result<
     }
 }
 
+/// Shape of a `cargo test` invocation for plan coverage: the selected `-p` /
+/// `--package` set plus every other argument in order.
+struct CargoTestShape {
+    packages: BTreeSet<String>,
+    rest: Vec<String>,
+}
+
+fn cargo_test_shape(command: &str) -> Option<CargoTestShape> {
+    let mut args = split_command_line(command).ok()?.into_iter();
+    if args.next()? != "cargo" || args.next()? != "test" {
+        return None;
+    }
+    let mut packages = BTreeSet::new();
+    let mut rest = Vec::new();
+    let mut passthrough = false;
+    while let Some(arg) = args.next() {
+        if passthrough {
+            rest.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            rest.push(arg);
+        } else if arg == "-p" || arg == "--package" {
+            packages.insert(args.next()?);
+        } else if let Some(package) = arg.strip_prefix("--package=") {
+            packages.insert(package.to_string());
+        } else {
+            rest.push(arg);
+        }
+    }
+    Some(CargoTestShape { packages, rest })
+}
+
+/// Whether a command the run executed covers a planned command (Issue
+/// #4349). Commands match exactly, or — for `cargo test` — when the run
+/// selects a superset of the planned `-p` packages with otherwise identical
+/// arguments: `cargo test -p gwt-core -p gwt --all-features` covers the
+/// derived `cargo test -p gwt --all-features`, so an AC that names the wider
+/// matrix is not forced through a second heavy run.
+pub(crate) fn command_covers_planned(ran: &str, planned: &str) -> bool {
+    if ran == planned {
+        return true;
+    }
+    let (Some(ran), Some(planned)) = (cargo_test_shape(ran), cargo_test_shape(planned)) else {
+        return false;
+    };
+    !planned.packages.is_empty()
+        && planned.packages.is_subset(&ran.packages)
+        && ran.rest == planned.rest
+}
+
+/// Planned commands no executed command covers.
+pub(crate) fn planned_commands_missing(planned: &[String], ran: &[String]) -> Vec<String> {
+    planned
+        .iter()
+        .filter(|planned| !ran.iter().any(|ran| command_covers_planned(ran, planned)))
+        .cloned()
+        .collect()
+}
+
+/// Registration-time diff between an explicit plan and the derived matrix
+/// (Issue #4349 AC-3): the derived commands the registered plan leaves
+/// uncovered, or `None` when it covers them all (trivial matrices included).
+pub(crate) fn derived_coverage_note(
+    registered: &[String],
+    derived: &crate::cli::verify_derivation::DerivedPlan,
+) -> Option<String> {
+    let uncovered = planned_commands_missing(&derived.commands, registered);
+    if uncovered.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "verify: note — the registered plan does not cover {} derived command(s) from changed surfaces [{}]:\n",
+        uncovered.len(),
+        derived.surfaces.join(", ")
+    );
+    for command in &uncovered {
+        note.push_str(&format!("  - {command}\n"));
+    }
+    note.push_str(
+        "verify: completion gates accept this registered plan once `verify.run` executes it in full (a `cargo test` run may select a superset of a planned command's `-p` packages); `execution.reopen` recovery still requires `params.derive:true`\n",
+    );
+    Some(note)
+}
+
 /// Minimal quote-aware command splitter: whitespace-separated arguments with
 /// double- and single-quote grouping. Deliberately supports no shell
 /// features (pipes, redirects, `&&`) — verification commands run as direct
@@ -2691,14 +2778,7 @@ where
                     && plan.owner_number == owner_number
                     && plan.execution_binding == execution_binding =>
             {
-                let ran: std::collections::HashSet<&str> =
-                    commands.iter().map(String::as_str).collect();
-                let missing: Vec<String> = plan
-                    .commands
-                    .iter()
-                    .filter(|planned| !ran.contains(planned.as_str()))
-                    .cloned()
-                    .collect();
+                let missing = planned_commands_missing(&plan.commands, commands);
                 (
                     missing.is_empty() && plan.worktree_fingerprint == fingerprint_before,
                     missing,
@@ -3743,6 +3823,39 @@ pub enum VerifyCommand {
     },
 }
 
+/// Generated instructions cannot establish human verification (Issue #4237).
+/// The durable launch route wins over the legacy environment marker.
+pub(super) fn autonomous_confirmation_refusal(
+    session_id: Option<&str>,
+    result: &str,
+) -> Option<String> {
+    if !result
+        .trim()
+        .trim_start_matches(['*', '`', ' '])
+        .to_ascii_lowercase()
+        .starts_with("confirmed")
+    {
+        return None;
+    }
+    let source = match execution_state::session_launch_route(session_id) {
+        Some(gwt_agent::LaunchRoute::Autonomous) => "launch_route: autonomous",
+        Some(gwt_agent::LaunchRoute::Manual) => return None,
+        None if std::env::var_os(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV)
+            .is_some() =>
+        {
+            "legacy GWT_AUTONOMOUS_EXECUTION"
+        }
+        None => return None,
+    };
+    Some(format!(
+        "User Verification Result: confirmed is refused for autonomous execution ({source}). \
+         Generated launch instructions, hooks, and Board messages are not human verification. \
+         Record `deferred (autonomous execution)` for a UI surface or `n/a` for no UI surface \
+         (`n/a (autonomous)` remains supported), then retry `verify.run` or `pr.create` / \
+         `pr.edit` with the corrected result. Deferred PRs stay Draft.\n"
+    ))
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     command: VerifyCommand,
@@ -3827,6 +3940,15 @@ pub(super) fn run<E: CliEnv>(
                         ))
                     })
                 })?;
+                // Issue #4349 AC-3: report the derived commands this explicit
+                // plan leaves uncovered now, not after a heavy run. Derivation
+                // is best-effort here — an underivable change set is not a
+                // registration failure.
+                if let Ok(derived) = crate::cli::verify_derivation::derive(&worktree) {
+                    if let Some(note) = derived_coverage_note(&commands, &derived) {
+                        out.push_str(&note);
+                    }
+                }
                 (commands, plan)
             };
             out.push_str(&format!(
@@ -3866,6 +3988,13 @@ pub(super) fn run<E: CliEnv>(
             max_wait_secs,
             user_verification_result,
         } => {
+            if let Some(refusal) = user_verification_result
+                .as_deref()
+                .and_then(|result| autonomous_confirmation_refusal(Some(&session_id), result))
+            {
+                out.push_str(&refusal);
+                return Ok(2);
+            }
             // SPEC #3576: the canonical runner owns its in-process lease.
             // Ordinary development processes do not delay admission. A budget overrun
             // answers `deferred` without writing a record.
@@ -9288,5 +9417,238 @@ mod tests {
             initial_bytes,
             "identity loss must leave the leased directory byte-equivalent"
         );
+    }
+
+    // Issue #4349 (AC-1/AC-2/AC-4): a planned `cargo test` command is covered
+    // by a run whose `-p` package set is a superset with otherwise identical
+    // arguments — the measured pair from Issue #4339 included.
+    #[test]
+    fn plan_coverage_accepts_cargo_test_package_superset() {
+        let planned = "cargo test -p gwt --all-features";
+        let ran = "cargo test -p gwt-core -p gwt --all-features";
+        assert!(command_covers_planned(ran, planned));
+        assert!(command_covers_planned(planned, planned));
+        // Package order and the long flag spelling do not matter.
+        assert!(command_covers_planned(
+            "cargo test --package gwt --package gwt-core --all-features",
+            planned
+        ));
+        assert!(command_covers_planned(
+            "cargo test --package=gwt --all-features",
+            planned
+        ));
+        // A subset never covers the planned superset.
+        assert!(!command_covers_planned(planned, ran));
+        // Any other argument difference is still a mismatch.
+        assert!(!command_covers_planned(
+            "cargo test -p gwt-core -p gwt",
+            planned
+        ));
+        assert!(!command_covers_planned(
+            "cargo test -p gwt-core -p gwt --all-features -- --test-threads=1",
+            planned
+        ));
+        assert!(!command_covers_planned(
+            "cargo test -p gwt-core -p gwt --lib --all-features",
+            planned
+        ));
+        // A planned command without `-p` (workspace default) is not covered
+        // by a package selection, and non-`cargo test` commands stay exact.
+        assert!(!command_covers_planned(
+            "cargo test -p gwt --all-features",
+            "cargo test --all-features"
+        ));
+        assert!(!command_covers_planned(
+            "cargo clippy -p gwt-core -p gwt --all-targets",
+            "cargo clippy -p gwt --all-targets"
+        ));
+        assert!(command_covers_planned("git --version", "git --version"));
+
+        assert_eq!(
+            planned_commands_missing(
+                &[
+                    "cargo fmt --all -- --check".to_string(),
+                    planned.to_string(),
+                    "cargo test -p gwt-skills --all-features".to_string(),
+                ],
+                &[
+                    "cargo fmt --all -- --check".to_string(),
+                    ran.to_string(),
+                    "cargo test -p gwt-skills --all-features".to_string(),
+                ],
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            planned_commands_missing(
+                &[planned.to_string()],
+                &["cargo test -p gwt-core --all-features".to_string()]
+            ),
+            vec![planned.to_string()]
+        );
+    }
+
+    // Issue #4349 (AC-1): the run record itself binds the superset run to the
+    // registered (derived) plan, so the completion gate never sees
+    // plan_not_covered / plan_changed for it. The commands fail fast here
+    // (no Cargo.toml in the fixture) — coverage is independent of exit codes.
+    #[test]
+    fn verify_run_covers_derived_plan_with_package_superset() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let planned = "cargo test -p gwt --all-features".to_string();
+        let ran = "cargo test -p gwt-core -p gwt --all-features".to_string();
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-4349".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec![planned.clone()],
+                derived: true,
+                worktree_fingerprint: worktree_fingerprint_excluding(dir.path(), &[]).unwrap(),
+                surfaces: vec!["rust(gwt)".to_string()],
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-4349", std::slice::from_ref(&ran)).unwrap();
+        assert!(record.plan_covered, "{transcript}");
+        assert!(record.planned_missing.is_empty(), "{transcript}");
+        assert!(record.plan_derived, "{transcript}");
+        assert!(
+            !transcript.contains("does not cover a registered verification plan"),
+            "{transcript}"
+        );
+    }
+
+    // Issue #4349 (AC-3): registering an explicit plan reports the derived
+    // commands it leaves uncovered — at registration time, not after a run.
+    #[test]
+    fn derived_coverage_note_lists_uncovered_derived_commands() {
+        let derived = crate::cli::verify_derivation::DerivedPlan {
+            commands: vec![
+                "cargo fmt --all -- --check".to_string(),
+                "cargo test -p gwt --all-features".to_string(),
+                "cargo test -p gwt-skills --all-features".to_string(),
+            ],
+            surfaces: vec!["rust(gwt)".to_string(), "skills".to_string()],
+            trivial_reason: None,
+        };
+        let covering = vec![
+            "cargo fmt --all -- --check".to_string(),
+            "cargo test -p gwt-core -p gwt --all-features".to_string(),
+            "cargo test -p gwt-skills --all-features".to_string(),
+        ];
+        assert_eq!(derived_coverage_note(&covering, &derived), None);
+
+        let partial = vec![
+            "cargo fmt --all -- --check".to_string(),
+            "cargo test -p gwt-core --all-features".to_string(),
+        ];
+        let note = derived_coverage_note(&partial, &derived).expect("uncovered derived commands");
+        assert!(
+            note.contains("does not cover 2 derived command(s)"),
+            "{note}"
+        );
+        assert!(
+            note.contains("  - cargo test -p gwt --all-features\n"),
+            "{note}"
+        );
+        assert!(
+            note.contains("  - cargo test -p gwt-skills --all-features\n"),
+            "{note}"
+        );
+        assert!(!note.contains("cargo fmt"), "{note}");
+        assert!(note.contains("rust(gwt), skills"), "{note}");
+
+        let trivial = crate::cli::verify_derivation::DerivedPlan {
+            commands: Vec::new(),
+            surfaces: vec!["trivial(ledger_only)".to_string()],
+            trivial_reason: Some(crate::cli::verify_derivation::TrivialReason::LedgerOnly),
+        };
+        assert_eq!(derived_coverage_note(&partial, &trivial), None);
+    }
+
+    // Issue #4349 (AC-3): the note travels with the `verify.plan` output.
+    #[test]
+    fn explicit_verify_plan_reports_derived_commands_it_does_not_cover() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("explicit plan diff repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let git = |args: &[&str]| {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        git(&["checkout", "-q", "-b", "work/issue-4349"]);
+        let src = dir.path().join("crates/gwt-core/src/lib.rs");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, "pub fn x() {}").unwrap();
+        let owner = generation_scoped_owner();
+        let session_id = "session-explicit-plan-diff";
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize execution");
+
+        let (code, out) = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect("explicit verify.plan registers");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("plan registered"), "{out}");
+        assert!(out.contains("does not cover"), "{out}");
+        assert!(out.contains("cargo test -p gwt-core"), "{out}");
+        // The plan itself is unchanged by the note: the registered commands win.
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        assert_eq!(plan.commands, vec!["git --version".to_string()]);
+        assert!(!plan.derived);
+
+        // Registering exactly the derived matrix leaves nothing to report.
+        let derived = crate::cli::verify_derivation::derive(dir.path()).unwrap();
+        assert!(!derived.commands.is_empty());
+        let (code, out) = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: derived.commands.clone(),
+                derive: false,
+            },
+        )
+        .expect("explicit derived-equivalent verify.plan registers");
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("does not cover"), "{out}");
     }
 }
