@@ -3792,8 +3792,8 @@ pub(crate) mod tests {
     use crate::cli::env::TestEnv;
     use gwt_core::workspace_projection::{
         load_workspace_projection, load_workspace_work_items, record_workspace_work_event,
-        save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
-        WorkspaceProjection,
+        save_workspace_projection, GitDetails, WorkspaceAgentAffiliationStatus,
+        WorkspaceAgentSummary, WorkspaceProjection,
     };
     use std::{
         io::{Read, Write},
@@ -4850,6 +4850,86 @@ pub(crate) mod tests {
         assert_eq!(saved.title, "Work coordination");
         assert_eq!(saved.status_category, WorkspaceStatusCategory::Blocked);
         assert_eq!(saved.owner.as_deref(), Some("Issue #3412"));
+    }
+
+    #[test]
+    fn workspace_update_copies_pr_metadata_onto_work_event() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut env = TestEnv::new(repo.clone());
+        seed_valid_update_target(&repo, "session-pr-metadata");
+        let mut projection = load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/20260601-0934".to_string()),
+            worktree_path: Some(repo.clone()),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: Some(3672),
+            pr_state: Some("OPEN".to_string()),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/3672".to_string()),
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: Utc::now(),
+        });
+        save_workspace_projection(&repo, &projection).expect("save git details");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-pr-metadata",
+        );
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: Some("Work event PR metadata".to_string()),
+                status: Some("active".to_string()),
+                status_text: None,
+                summary: Some("Opened PR #3672".to_string()),
+                progress_summary: Some("PR #3672 opened for review".to_string()),
+                next_action: None,
+                owner: None,
+                agent_session: None,
+                current_focus: Some("Waiting on review".to_string()),
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect("update workspace");
+
+        assert_eq!(code, 0, "{out}");
+        let work_items = load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-session")
+            .expect("work item");
+        let latest = item
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.kind == WorkEventKind::Update)
+            .expect("update event");
+        let container = latest
+            .execution_container
+            .as_ref()
+            .expect("execution container");
+        assert_eq!(container.pr_number, Some(3672));
+        assert_eq!(
+            container.pr_url.as_deref(),
+            Some("https://github.com/akiojin/gwt/pull/3672")
+        );
+        assert_eq!(container.pr_state.as_deref(), Some("OPEN"));
+        assert_eq!(
+            latest.progress_summary.as_deref(),
+            Some("PR #3672 opened for review")
+        );
     }
 
     #[test]
