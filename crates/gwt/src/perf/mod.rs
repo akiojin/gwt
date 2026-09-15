@@ -4,6 +4,7 @@ mod record;
 pub mod route;
 pub mod self_budget;
 pub mod smoothing;
+pub mod startup;
 mod store;
 pub mod summary;
 
