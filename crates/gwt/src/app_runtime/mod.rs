@@ -1414,6 +1414,8 @@ pub struct AppRuntime {
     /// what keeps an agent whose own output *contains* the sentence from being
     /// released out from under itself.
     pub(crate) provider_quota_candidates: HashMap<String, ProviderQuotaCandidate>,
+    pub(crate) released_provider_quota_notices:
+        HashMap<String, gwt_core::usage::ProviderLimitNotice>,
     /// Issue #3616: the newest account-level usage snapshot, used only to
     /// corroborate a screen notice. Never a trigger on its own: the poller is
     /// silent while no client is connected and Claude's account read is opt-in.
@@ -2933,6 +2935,7 @@ impl AppRuntime {
             recoverable_agent_error_windows: HashSet::new(),
             provider_quota_holds: HashMap::new(),
             provider_quota_candidates: HashMap::new(),
+            released_provider_quota_notices: HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
             agent_capability_issuer: None,
@@ -4661,7 +4664,7 @@ impl AppRuntime {
                                     provider,
                                     message.to_string(),
                                     resets_at.as_deref(),
-                                    evidence.clone(),
+                                    evidence.as_deref().cloned(),
                                     &now,
                                 ) {
                                     gwt::IssueMonitorProviderUsageLimitOutcome::Held => {
@@ -8890,6 +8893,7 @@ impl AppRuntime {
         self.window_approval_waiting.clear();
         self.recoverable_agent_error_windows.clear();
         self.provider_quota_holds.clear();
+        self.released_provider_quota_notices.clear();
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
@@ -8954,6 +8958,7 @@ impl AppRuntime {
         self.recoverable_agent_error_windows.remove(window_id);
         self.provider_quota_holds.remove(window_id);
         self.provider_quota_candidates.remove(window_id);
+        self.released_provider_quota_notices.remove(window_id);
         self.board_all_view_windows.remove(window_id);
     }
 
@@ -8969,8 +8974,77 @@ impl AppRuntime {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<OutboundEvent> {
+        let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let prefs_paths = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .map(|tab| gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root))
+            .collect::<HashSet<_>>();
+        for prefs_path in prefs_paths {
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
+            );
+            if let Err(error) =
+                gwt::issue_monitor::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                    let mut monitor = gwt::IssueMonitorState::with_prefs(
+                        gwt::IssueMonitorConfig::default(),
+                        prefs.clone(),
+                    );
+                    let mut changed = false;
+                    for account in &accounts {
+                        changed |= monitor.reconcile_provider_usage(account, &timestamp);
+                    }
+                    if changed {
+                        *prefs = monitor.prefs();
+                    }
+                    Ok(())
+                })
+            {
+                tracing::warn!(%error, "provider usage recovery could not be persisted; next poll retries");
+            }
+        }
+        let released = self
+            .provider_quota_holds
+            .iter()
+            .filter_map(|(window_id, failure)| {
+                let gwt::IssueMonitorFailure::ProviderUsageLimit {
+                    provider,
+                    evidence: Some(evidence),
+                    ..
+                } = failure
+                else {
+                    return None;
+                };
+                let account = accounts.iter().find(|account| {
+                    Some(account.provider) == gwt::issue_monitor::usage_provider_for_agent(provider)
+                })?;
+                evidence
+                    .contradicted_by(account, now)
+                    .then(|| (window_id.clone(), evidence.screen_text.clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for (window_id, screen) in released {
+            if let Some(notice) = screen.as_deref().and_then(|screen| {
+                gwt_core::usage::detect_provider_limit_notice(
+                    screen,
+                    &now.with_timezone(&chrono::Local),
+                )
+            }) {
+                self.released_provider_quota_notices
+                    .insert(window_id.clone(), notice);
+            }
+            self.provider_quota_holds.remove(&window_id);
+            self.provider_quota_candidates.remove(&window_id);
+            self.window_details.remove(&window_id);
+            if let Some(state) = self.recompute_window_state(&window_id) {
+                events.extend(Self::status_events(window_id, state, None));
+            }
+        }
         self.provider_usage_accounts = accounts;
-        self.sweep_provider_quota_candidates(now)
+        events.extend(self.sweep_provider_quota_candidates(now));
+        events
     }
 
     #[cfg(test)]
