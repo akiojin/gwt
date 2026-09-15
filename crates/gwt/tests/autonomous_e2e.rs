@@ -457,6 +457,11 @@ mod idle_windows {
     };
     use std::collections::BTreeMap;
 
+    /// Issue #4328: the launch ACK carries the instant it was confirmed, and a
+    /// canvas observation only judges a binding it was captured after. So the
+    /// fixture launches first and observes the canvas a minute later, the
+    /// order production sees.
+    const LAUNCHED_AT: &str = "2026-09-07T03:59:00Z";
     const NOW: &str = "2026-09-07T04:00:00Z";
 
     fn idle_monitor() -> IssueMonitorState {
@@ -500,9 +505,9 @@ mod idle_windows {
         gwt::scan_issue_monitor_candidates(
             &mut monitor,
             &[auto_issue(launched), auto_issue(queued)],
-            NOW,
+            LAUNCHED_AT,
         );
-        monitor.complete_active_launch(launched, window_id);
+        monitor.complete_active_launch_at(launched, window_id, LAUNCHED_AT);
         assert_eq!(monitor.active_count(), 1);
         assert_eq!(monitor.queued_issue_numbers(), vec![queued]);
         assert!(
