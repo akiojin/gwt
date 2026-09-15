@@ -273,9 +273,16 @@ ledger. This includes Issue, PR, and Actions inspection, REST GET requests,
 and GraphQL queries. Prefer gwtd `pr.list` and `issue.view` when cached data
 or workflow lifecycle context is useful.
 
-Mutations must use gwtd JSON-envelope operations, including `pr.merge` and
-`actions.rerun`; direct `gh` writes and API mutations are blocked. Read
-permission does not bypass PR gates or the long PR/CI polling restriction.
+Mutations must use gwtd JSON-envelope operations, such as `pr.ready`,
+`pr.draft`, and `actions.rerun`; direct `gh` writes and API mutations are
+blocked. Read permission does not bypass PR gates or the long PR/CI polling
+restriction.
+
+gwtd has no merge operation. A PR is merged by the repository's own merge
+automation (GitHub auto-merge, or a workflow that merges non-Draft PRs) or by
+a human. To hold a PR back from merging, for example before a code-changing
+push, convert it to Draft with `pr.draft`: a Draft PR cannot be merged. Hand
+it back with `pr.ready` only after the Ready PR Gate passes again.
 
 ## Canonical verification admission
 

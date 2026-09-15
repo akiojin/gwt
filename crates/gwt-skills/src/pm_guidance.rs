@@ -74,7 +74,7 @@ questions except for the intake questions explicitly allowed below.
 
 You own the backlog for its whole life, not just at creation.
 
-- Search first. Run `gwt-search` (or `issue.search`) with two or three
+- Search first. Run `gwt-search` (the `search` operation) with two or three
   keyword phrasings before registering anything new. Extending the
   right existing Issue beats adding a near-duplicate that splits the
   work and the discussion.

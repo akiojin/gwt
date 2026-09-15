@@ -2159,6 +2159,223 @@ mod tests {
         );
     }
 
+    /// Issue #4396: guidance, managed skills, and refusal messages name only
+    /// operations this dispatcher accepts. gwt told agents to run `pr.merge`
+    /// and `workspace.prune` while neither existed, so an agent that followed
+    /// the text hit `unknown subcommand` and stopped.
+    mod guidance_operation_names {
+        use super::{envelope, parse};
+        use crate::cli::CliParseError;
+        use serde_json::json;
+        use std::collections::BTreeSet;
+        use std::path::{Path, PathBuf};
+
+        /// Suffixes that share the `<family>.<segment>` shape without being
+        /// operations: file names and hosts.
+        const NOT_OPERATIONS: &[&str] = &[
+            "md", "json", "jsonl", "rs", "toml", "yml", "yaml", "lock", "log", "txt", "exe", "com",
+            "gradle", "kts",
+        ];
+
+        /// The operation names of the dispatcher's match arms, read from this
+        /// file so a new operation family is covered without a second list.
+        fn dispatched_operations() -> BTreeSet<String> {
+            let source = include_str!("json_envelope.rs");
+            let body = source
+                .split("fn parse(input")
+                .nth(1)
+                .and_then(|rest| rest.split("#[cfg(test)]").next())
+                .expect("parse() precedes the test module");
+            body.lines()
+                .filter_map(|line| line.split_once("=>").map(|(arm, _)| arm.trim()))
+                .filter(|arm| arm.starts_with('"') || arm.starts_with('|'))
+                .flat_map(|arm| arm.split('|'))
+                .filter_map(|alt| alt.trim().strip_prefix('"')?.strip_suffix('"'))
+                .filter(|name| name.contains('.'))
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn is_dispatched(name: &str) -> bool {
+            !matches!(
+                parse(&envelope(name, json!({}))),
+                Err(CliParseError::UnknownSubcommand(_))
+            )
+        }
+
+        /// The `<family>.<op>` names in `text` that no operation implements.
+        /// A namespace such as `verify.lease` or `issue.spec.*` is not a claim
+        /// that one operation exists, so it is skipped.
+        fn unresolved_operation_names(
+            text: &str,
+            operations: &BTreeSet<String>,
+        ) -> BTreeSet<String> {
+            let families: BTreeSet<&str> = operations
+                .iter()
+                .filter_map(|op| op.split('.').next())
+                .collect();
+            text.replace("\\n", " ")
+                .split(|c: char| {
+                    !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*' | '/' | '-'))
+                })
+                .map(|token| token.trim_end_matches('.'))
+                .filter(|token| {
+                    let mut segments = token.split('.');
+                    families.contains(segments.next().unwrap_or_default())
+                        && token.contains('.')
+                        && token.split('.').all(|segment| {
+                            !segment.is_empty()
+                                && segment.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                        })
+                        && !NOT_OPERATIONS.contains(&token.rsplit('.').next().unwrap_or_default())
+                        && !operations
+                            .iter()
+                            .any(|op| op.starts_with(&format!("{token}.")))
+                        && !is_dispatched(token)
+                })
+                .map(str::to_string)
+                .collect()
+        }
+
+        /// The contents of the string literals in Rust `source`. Comments and
+        /// char literals are skipped so code never reads as prose.
+        fn string_literals(source: &str) -> Vec<&str> {
+            let bytes = source.as_bytes();
+            let mut literals = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                        while i < bytes.len() && bytes[i] != b'\n' {
+                            i += 1;
+                        }
+                    }
+                    b'\'' if bytes.get(i + 1) == Some(&b'\\') => {
+                        i = source[i + 2..]
+                            .find('\'')
+                            .map_or(bytes.len(), |p| i + 3 + p);
+                    }
+                    b'\'' if bytes.get(i + 2) == Some(&b'\'') => i += 3,
+                    b'r' if (i == 0
+                        || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+                        && matches!(bytes.get(i + 1), Some(b'"' | b'#')) =>
+                    {
+                        let hashes = bytes[i + 1..].iter().take_while(|&&b| b == b'#').count();
+                        let open = i + 1 + hashes;
+                        if bytes.get(open) != Some(&b'"') {
+                            i += 1;
+                            continue;
+                        }
+                        let close = format!("\"{}", "#".repeat(hashes));
+                        let end = source[open + 1..]
+                            .find(&close)
+                            .map_or(bytes.len(), |p| open + 1 + p);
+                        literals.push(&source[open + 1..end]);
+                        i = end + close.len();
+                    }
+                    b'"' => {
+                        let mut end = i + 1;
+                        while end < bytes.len() && bytes[end] != b'"' {
+                            end += if bytes[end] == b'\\' { 2 } else { 1 };
+                        }
+                        let end = end.min(bytes.len());
+                        literals.push(&source[i + 1..end]);
+                        i = end + 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            literals
+        }
+
+        fn collect_files(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
+            let entries =
+                std::fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    collect_files(&path, extension, out);
+                } else if path.extension().is_some_and(|ext| ext == extension) {
+                    out.push(path);
+                }
+            }
+        }
+
+        #[test]
+        fn guidance_operation_names_flag_an_operation_that_does_not_exist() {
+            let operations = dispatched_operations();
+            assert!(operations.contains("pr.draft"), "{operations:?}");
+            let text = "Disable auto-merge through `pr.merge`, or run workspace.prune. \
+                Keep `pr.draft`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
+                holder, and github.com.";
+            assert_eq!(
+                unresolved_operation_names(text, &operations),
+                BTreeSet::from(["pr.merge".to_string(), "workspace.prune".to_string()])
+            );
+            assert_eq!(
+                string_literals("let q = '\"'; // \"pr.merge\"\nlet s = \"run `pr.merge`\";"),
+                vec!["run `pr.merge`"]
+            );
+        }
+
+        /// The success criterion of Issue #4396: every operation name that
+        /// managed skills, generated guidance, or a production message names
+        /// is one an agent can run.
+        #[test]
+        fn guidance_operation_names_are_all_dispatched() {
+            let operations = dispatched_operations();
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let mut unresolved = Vec::new();
+
+            let mut markdown = Vec::new();
+            collect_files(&root.join(".claude/skills"), "md", &mut markdown);
+            collect_files(&root.join(".claude/commands"), "md", &mut markdown);
+            for path in markdown {
+                // Materialized from coordination_guidance.rs, which is scanned
+                // below; a stale local copy must not decide this test.
+                if path
+                    .components()
+                    .any(|c| c.as_os_str() == "gwt-coordination")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read skill");
+                for name in unresolved_operation_names(&text, &operations) {
+                    unresolved.push(format!("{}: {name}", path.display()));
+                }
+            }
+
+            let mut sources = Vec::new();
+            collect_files(&root.join("crates/gwt/src"), "rs", &mut sources);
+            collect_files(&root.join("crates/gwt-skills/src"), "rs", &mut sources);
+            for path in sources {
+                let is_test_file = path.components().any(|c| c.as_os_str() == "tests")
+                    || path
+                        .file_stem()
+                        .is_some_and(|stem| stem.to_string_lossy().ends_with("tests"));
+                if is_test_file {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read source");
+                let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+                for literal in string_literals(production) {
+                    if !literal.contains(' ') {
+                        continue;
+                    }
+                    for name in unresolved_operation_names(literal, &operations) {
+                        unresolved.push(format!("{}: {name}", path.display()));
+                    }
+                }
+            }
+
+            assert!(
+                unresolved.is_empty(),
+                "guidance names operations that no gwtd operation implements:\n{}",
+                unresolved.join("\n")
+            );
+        }
+    }
+
     /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
     #[test]
     fn verify_run_parses_max_wait_secs() {
