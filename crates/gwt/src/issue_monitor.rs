@@ -3022,6 +3022,12 @@ pub struct IssueMonitorAgentStatus {
     /// in daemon projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_space: Option<crate::disk_space::DiskSpaceStatus>,
+    /// Issue #4234 AC-5: resident size of every gwt GUI process on the host,
+    /// read from the OS at status time so a saturating instance is visible
+    /// before its pane WebSocket stops answering. `None` in daemon
+    /// projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_pressure: Option<crate::memory_pressure::MemoryPressureStatus>,
     /// Issue #4087 AC-1: the Issue cache full-refresh cadence — when it last
     /// completed and how far past its TTL it is — so a stopped refresh is
     /// read from the same snapshot as `scan_stall` instead of inferred from
@@ -9358,6 +9364,7 @@ impl IssueMonitorState {
             idle_windows: self.idle_windows(),
             idle_window_counts: self.idle_window_counts(),
             disk_space: None,
+            memory_pressure: None,
             failure_surge,
         }
     }
@@ -15241,6 +15248,7 @@ mod tests {
                 github_budget: None,
                 generation_reclaim: None,
                 disk_space: None,
+                memory_pressure: None,
                 issue_cache: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: BTreeMap::new(),
