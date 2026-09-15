@@ -171,11 +171,55 @@ pub fn spawn(request: &VerificationSpawnRequest) -> Result<VerificationChild, St
             pid,
             process_group: pid,
             nice,
-            nice_reason: nice_reason(nice),
+            nice_reason: priority_reason(nice, degraded_qos_class()),
         },
         reaped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
 }
+
+/// The scheduling class a macOS child inherits from the daemon, when that
+/// class is worse than the work deserves.
+///
+/// A child inherits the daemon's task QoS, and a `UTILITY` task has its timers
+/// coalesced aggressively: measured on this host, fifty 20ms sleeps took 7.2s
+/// from a `UTILITY` daemon against 1.3s from a `USER_INTERACTIVE` one. That is
+/// the same kind of inherited penalty as `nice` and a larger one, and it
+/// cannot be undone from inside the child — raising the spawning thread's
+/// class does not reach the child's task, and raising the child's own thread
+/// class leaves the task's timer coalescing in place. Both were measured.
+///
+/// So this is reported rather than corrected, for the same reason an
+/// unreachable nice value is (AC-6): it is a property of how the daemon was
+/// launched, which the caller cannot fix but does need to see. A daemon owned
+/// by the gwt GUI runs at `USER_INTERACTIVE` and needs none of this; one
+/// started by `launchctl submit` runs at `UTILITY` and silently makes every
+/// verification slower than it was before it escaped.
+#[cfg(target_os = "macos")]
+fn degraded_qos_class() -> Option<&'static str> {
+    // SAFETY: `qos_class_self` has no memory-safety preconditions.
+    let class = unsafe { qos_class_self() };
+    match class {
+        QOS_CLASS_BACKGROUND => Some("BACKGROUND"),
+        QOS_CLASS_UTILITY => Some("UTILITY"),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn degraded_qos_class() -> Option<&'static str> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn qos_class_self() -> u32;
+}
+
+/// `QOS_CLASS_UTILITY` / `QOS_CLASS_BACKGROUND` from `<sys/qos.h>`.
+#[cfg(target_os = "macos")]
+const QOS_CLASS_UTILITY: u32 = 0x11;
+#[cfg(target_os = "macos")]
+const QOS_CLASS_BACKGROUND: u32 = 0x09;
 
 #[cfg(not(unix))]
 pub fn spawn(_request: &VerificationSpawnRequest) -> Result<VerificationChild, String> {
@@ -186,18 +230,35 @@ pub fn spawn(_request: &VerificationSpawnRequest) -> Result<VerificationChild, S
     )
 }
 
-/// Explain a child that did not reach baseline priority (AC-6).
-fn nice_reason(nice: Option<i32>) -> Option<String> {
+/// Explain a child that did not inherit the scheduling treatment the work
+/// deserves (AC-6). `None` means it did.
+fn priority_reason(nice: Option<i32>, degraded_qos: Option<&str>) -> Option<String> {
+    let mut reasons = Vec::new();
     match nice {
-        Some(nice) if nice > BASELINE_NICE => Some(format!(
+        Some(nice) if nice > BASELINE_NICE => reasons.push(format!(
             "the daemon could not lower the child to nice {BASELINE_NICE}: it runs at nice \
              {nice} itself and setpriority(2) refuses to raise a process's priority without \
-             privilege. The workload runs at the inherited value; expect it to be descheduled \
-             under load"
+             privilege"
         )),
-        Some(_) => None,
-        None => Some("the child's nice value could not be read back".to_string()),
+        Some(_) => {}
+        None => reasons.push("the child's nice value could not be read back".to_string()),
     }
+    if let Some(class) = degraded_qos {
+        reasons.push(format!(
+            "the daemon runs in the {class} QoS class and the child inherits it, which coalesces \
+             its timers — measured at 5x longer short sleeps than a USER_INTERACTIVE parent. A \
+             daemon owned by the gwt GUI does not have this; one started by `launchctl submit` \
+             does. Restart the daemon from the GUI to clear it"
+        ));
+    }
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}. The workload runs anyway at what it inherited; expect it to be slower than a \
+         command started from a terminal",
+        reasons.join("; and ")
+    ))
 }
 
 #[cfg(unix)]
@@ -410,14 +471,31 @@ mod tests {
     /// whether they can do anything about it.
     #[test]
     fn an_unreachable_baseline_is_recorded_with_its_cause() {
-        assert_eq!(nice_reason(Some(BASELINE_NICE)), None);
-        let reason = nice_reason(Some(10)).expect("a degraded child explains itself");
+        assert_eq!(priority_reason(Some(BASELINE_NICE), None), None);
+        let reason = priority_reason(Some(10), None).expect("a degraded child explains itself");
         assert!(reason.contains("nice 10"), "{reason}");
         assert!(reason.contains("setpriority"), "{reason}");
         assert!(
-            reason.contains("runs at the inherited value"),
+            reason.contains("runs anyway at what it inherited"),
             "the record must say the run continued: {reason}"
         );
+    }
+
+    /// A degraded QoS class is the larger inherited penalty on macOS and
+    /// cannot be undone from inside the child, so it has to be visible in the
+    /// record rather than silently making every run slower.
+    #[test]
+    fn an_inherited_utility_qos_class_is_recorded_with_what_to_do_about_it() {
+        let reason = priority_reason(Some(BASELINE_NICE), Some("UTILITY"))
+            .expect("a child at baseline nice but degraded QoS still explains itself");
+        assert!(reason.contains("UTILITY"), "{reason}");
+        assert!(reason.contains("coalesces"), "{reason}");
+        assert!(
+            reason.contains("Restart the daemon from the GUI"),
+            "the record must name the next operation: {reason}"
+        );
+        let both = priority_reason(Some(10), Some("BACKGROUND")).expect("both penalties");
+        assert!(both.contains("nice 10") && both.contains("BACKGROUND"), "{both}");
     }
 
     /// The child must see the caller's environment, not the daemon's.
