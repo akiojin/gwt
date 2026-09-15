@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use super::state::{apply_staleness, DEFAULT_STALE_AFTER_SECS};
 use super::types::{
     ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
 };
@@ -35,7 +37,7 @@ pub struct CodexAccount {
     pub limit_reached: bool,
 }
 
-fn parse_reset(window: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn parse_reset(window: &Value, observed_at: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
     if let Some(epoch) = window.get("resets_at").and_then(Value::as_i64) {
         return DateTime::from_timestamp(epoch, 0);
     }
@@ -45,7 +47,7 @@ fn parse_reset(window: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         }
     }
     if let Some(rel) = window.get("resets_in_seconds").and_then(Value::as_i64) {
-        return Some(now + Duration::seconds(rel));
+        return Some(observed_at? + Duration::seconds(rel));
     }
     None
 }
@@ -66,7 +68,7 @@ fn classify_pool(key: &str, window_minutes: Option<u32>) -> WindowKind {
         .unwrap_or(WindowKind::Unknown)
 }
 
-fn window_from(key: &str, obj: &Value, now: DateTime<Utc>) -> Option<UsageWindow> {
+fn window_from(key: &str, obj: &Value, observed_at: Option<DateTime<Utc>>) -> Option<UsageWindow> {
     let used = obj.get("used_percent").and_then(Value::as_f64)? as f32;
     let window_minutes = obj
         .get("window_minutes")
@@ -76,7 +78,7 @@ fn window_from(key: &str, obj: &Value, now: DateTime<Utc>) -> Option<UsageWindow
         UsageWindow::new(
             classify_pool(key, window_minutes),
             used,
-            parse_reset(obj, now),
+            parse_reset(obj, observed_at),
         )
         .with_window_minutes(window_minutes),
     )
@@ -85,12 +87,19 @@ fn window_from(key: &str, obj: &Value, now: DateTime<Utc>) -> Option<UsageWindow
 /// Parse a `rate_limits` JSON object into account windows. Returns `None` when
 /// the value is `null` (Codex exec mode) or has no recognized windows.
 pub fn parse_rate_limits(rate_limits: &Value, now: DateTime<Utc>) -> Option<CodexAccount> {
+    parse_rate_limits_at(rate_limits, Some(now))
+}
+
+fn parse_rate_limits_at(
+    rate_limits: &Value,
+    observed_at: Option<DateTime<Utc>>,
+) -> Option<CodexAccount> {
     if rate_limits.is_null() {
         return None;
     }
     let windows: Vec<UsageWindow> = POOL_KEYS
         .iter()
-        .filter_map(|key| window_from(key, rate_limits.get(key)?, now))
+        .filter_map(|key| window_from(key, rate_limits.get(key)?, observed_at))
         .collect();
     if windows.is_empty() {
         return None;
@@ -111,8 +120,8 @@ pub fn parse_rate_limits(rate_limits: &Value, now: DateTime<Utc>) -> Option<Code
     })
 }
 
-/// Scan rollout JSONL text and return the last `token_count` payload value.
-fn last_token_count(jsonl: &str) -> Option<Value> {
+/// Preserve the source event time: rereading a rollout is not a new observation.
+fn last_token_count_event(jsonl: &str) -> Option<(Value, Option<DateTime<Utc>>)> {
     let mut last = None;
     for line in jsonl.lines() {
         let line = line.trim();
@@ -124,10 +133,19 @@ fn last_token_count(jsonl: &str) -> Option<Value> {
         };
         let payload = obj.get("payload").unwrap_or(&obj);
         if payload.get("type").and_then(Value::as_str) == Some("token_count") {
-            last = Some(payload.clone());
+            let observed_at = obj
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+                .map(|time| time.with_timezone(&Utc));
+            last = Some((payload.clone(), observed_at));
         }
     }
     last
+}
+
+fn last_token_count(jsonl: &str) -> Option<Value> {
+    last_token_count_event(jsonl).map(|(payload, _)| payload)
 }
 
 /// Extract the last `model`/`cli` model name seen in the rollout (session_meta
@@ -190,9 +208,67 @@ pub fn parse_auth_account_label(body: &str) -> Option<String> {
     })
 }
 
-fn read_auth_account_label(home: &Path) -> Option<String> {
-    let text = fs::read_to_string(home.join("auth.json")).ok()?;
-    parse_auth_account_label(&text)
+/// Fingerprint stable account claims when available, otherwise the credential.
+/// Credential refresh does not change an identity backed by a stable claim.
+pub fn parse_auth_account_identity(body: &str) -> Option<String> {
+    let auth: Value = serde_json::from_str(body).ok()?;
+    let tokens = auth.get("tokens").unwrap_or(&auth);
+    let token = tokens.get("id_token").and_then(Value::as_str);
+    let claims: Option<Value> = token
+        .and_then(|token| token.split('.').nth(1))
+        .and_then(decode_base64url)
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let stable = tokens
+        .get("account_id")
+        .or_else(|| {
+            claims
+                .as_ref()?
+                .get("https://api.openai.com/auth")?
+                .get("chatgpt_account_id")
+        })
+        .or_else(|| claims.as_ref()?.get("sub"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let (kind, value) = if let Some(stable) = stable {
+        ("account", stable)
+    } else {
+        (
+            "credential",
+            tokens
+                .get("access_token")
+                .and_then(Value::as_str)
+                .or(token)
+                .or_else(|| auth.get("OPENAI_API_KEY").and_then(Value::as_str))
+                .filter(|value| !value.is_empty())?,
+        )
+    };
+    Some(format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "codex:{kind}:{value}:{}",
+            claims
+                .as_ref()
+                .and_then(|claims| claims.get("sub"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        ))
+    ))
+}
+
+/// Read only local auth metadata; never contact the provider or expose tokens.
+pub fn read_auth_account_identity(home: &Path) -> Option<String> {
+    parse_auth_account_identity(&fs::read_to_string(home.join("auth.json")).ok()?)
+}
+
+/// On a stateless read, observations predating the current auth file cannot be
+/// safely attributed to its account. A live poller can retain this boundary
+/// across token refreshes while the stable account identity stays the same.
+pub fn auth_modified_at(home: &Path) -> Option<DateTime<Utc>> {
+    fs::metadata(home.join("auth.json"))
+        .ok()?
+        .modified()
+        .ok()
+        .map(Into::into)
 }
 
 /// Parse per-session usage from full rollout JSONL text.
@@ -348,24 +424,71 @@ pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
 /// the most recent one is the freshest account state. Returns degraded
 /// `NoData` when none have account data.
 pub fn read_codex_account(home: &Path, now: DateTime<Utc>) -> ProviderUsage {
-    let account_label = read_auth_account_label(home);
+    read_codex_account_since(home, now, auth_modified_at(home))
+}
+
+/// Read observations after an authentication boundary retained by the poller.
+pub fn read_codex_account_since(
+    home: &Path,
+    now: DateTime<Utc>,
+    authenticated_at: Option<DateTime<Utc>>,
+) -> ProviderUsage {
+    let auth = fs::read_to_string(home.join("auth.json")).ok();
+    let account_id = auth.as_deref().and_then(parse_auth_account_identity);
+    if account_id.is_none() {
+        return ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData);
+    }
+    let account_label = auth.as_deref().and_then(parse_auth_account_label);
+    let mut newest: Option<(CodexAccount, Option<DateTime<Utc>>)> = None;
     for path in recent_rollouts(home, 8) {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        if let Some(acc) = parse_codex_account(&text, now) {
-            return ProviderUsage {
-                provider: UsageProvider::Codex,
-                account_label,
-                plan: acc.plan,
-                windows: acc.windows,
-                limit_reached: acc.limit_reached,
-                state: UsageState::Ok,
-                fetched_at: Some(now),
-            };
+        let Some((payload, observed_at)) = last_token_count_event(&text) else {
+            continue;
+        };
+        if observed_at.is_some_and(|at| at > now)
+            || authenticated_at.is_some_and(|boundary| observed_at.is_none_or(|at| at < boundary))
+        {
+            continue;
+        }
+        let Some(acc) = payload
+            .get("rate_limits")
+            .and_then(|limits| parse_rate_limits_at(limits, observed_at))
+        else {
+            continue;
+        };
+        if newest
+            .as_ref()
+            .is_none_or(|(_, previous)| observed_at > *previous)
+        {
+            newest = Some((acc, observed_at));
         }
     }
-    ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData)
+    let Some((acc, observed_at)) = newest else {
+        return ProviderUsage {
+            account_id,
+            account_label,
+            ..ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData)
+        };
+    };
+    // Unknown observation time may supply a degraded display, never fresh
+    // evidence that can release a durable quota hold.
+    let fetched_at = observed_at.filter(|_| authenticated_at.is_some());
+    ProviderUsage {
+        provider: UsageProvider::Codex,
+        account_id,
+        account_label,
+        plan: acc.plan,
+        windows: acc.windows,
+        limit_reached: acc.limit_reached,
+        state: if let Some(at) = fetched_at {
+            apply_staleness(UsageState::Ok, Some(at), now, DEFAULT_STALE_AFTER_SECS)
+        } else {
+            UsageState::Stale { age_secs: 0 }
+        },
+        fetched_at,
+    }
 }
 
 /// Read per-session usage for the given session id from its rollout file.
@@ -381,6 +504,66 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    }
+
+    fn write_auth_fixture(home: &Path) {
+        let auth = home.join("auth.json");
+        fs::write(
+            &auth,
+            r#"{"tokens":{"account_id":"account-a","access_token":"fixture-token"}}"#,
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(auth)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified((now() - Duration::seconds(60)).into()))
+            .unwrap();
+    }
+
+    fn write_account_fixture(home: &Path, event_at: DateTime<Utc>) {
+        write_auth_fixture(home);
+        let sessions = home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("rollout-fixture.jsonl"),
+            serde_json::json!({
+                "timestamp": event_at.to_rfc3339(),
+                "payload": {"type":"token_count", "rate_limits": {
+                    "primary":{"used_percent":20.0,"window_minutes":300,"resets_in_seconds":600}
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rereading_rollout_does_not_refresh_observation_or_relative_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let event_at = now() - Duration::seconds(30);
+        write_account_fixture(dir.path(), event_at);
+        let first = read_codex_account(dir.path(), now());
+        let later = read_codex_account(dir.path(), now() + Duration::seconds(120));
+        assert_eq!(first.fetched_at, Some(event_at));
+        assert_eq!(later.fetched_at, Some(event_at));
+        assert_eq!(
+            first.windows[0].resets_at,
+            Some(event_at + Duration::seconds(600))
+        );
+        assert_eq!(later.windows[0].resets_at, first.windows[0].resets_at);
+        let aged = read_codex_account(dir.path(), now() + Duration::seconds(700));
+        assert!(matches!(aged.state, UsageState::Stale { .. }));
+        assert_eq!(aged.fetched_at, Some(event_at));
+    }
+
+    #[test]
+    fn account_does_not_attribute_pre_auth_rollout_to_current_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        write_account_fixture(dir.path(), now() - Duration::seconds(120));
+        let account = read_codex_account(dir.path(), now());
+        assert!(account.windows.is_empty());
+        assert!(account.fetched_at.is_none());
     }
 
     #[test]
@@ -600,13 +783,14 @@ mod tests {
     #[test]
     fn newest_rollout_picks_latest_by_mtime() {
         let dir = tempfile::tempdir().unwrap();
+        write_auth_fixture(dir.path());
         let day = dir.path().join("sessions/2026/06/02");
         fs::create_dir_all(&day).unwrap();
         let older = day.join("rollout-2026-06-02T08-00-00-aaaa.jsonl");
         let newer = day.join("rollout-2026-06-02T09-00-00-bbbb.jsonl");
-        fs::write(&older, r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":1.0}},"info":{}}}"#).unwrap();
+        fs::write(&older, serde_json::json!({"timestamp": (now() - Duration::seconds(1)).to_rfc3339(), "payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":1.0}},"info":{}}}).to_string()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        fs::write(&newer, r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":2.0}},"info":{}}}"#).unwrap();
+        fs::write(&newer, serde_json::json!({"timestamp": now().to_rfc3339(), "payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":2.0}},"info":{}}}).to_string()).unwrap();
         let picked = newest_rollout(dir.path()).unwrap();
         assert_eq!(picked, newer);
         let acc = read_codex_account(dir.path(), now());
@@ -620,6 +804,7 @@ mod tests {
     #[test]
     fn account_skips_newest_rollout_without_rate_limits() {
         let dir = tempfile::tempdir().unwrap();
+        write_auth_fixture(dir.path());
         let day = dir.path().join("sessions/2026/06/02");
         fs::create_dir_all(&day).unwrap();
         let older = day.join("rollout-2026-06-02T08-00-00-aaaa.jsonl");
@@ -627,7 +812,7 @@ mod tests {
         // Older has rate_limits; the newer (fresh session) has none yet.
         fs::write(
             &older,
-            r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":7.0}},"info":{}}}"#,
+            serde_json::json!({"timestamp": now().to_rfc3339(), "payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":7.0}},"info":{}}}).to_string(),
         )
         .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -649,11 +834,17 @@ mod tests {
             r#"{"tokens":{"id_token":"eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImNvZGV4QGV4YW1wbGUuY29tIiwibmFtZSI6IkNvZGV4IFVzZXIifQ.sig"}}"#,
         )
         .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(dir.path().join("auth.json"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified((now() - Duration::seconds(1)).into()))
+            .unwrap();
         let day = dir.path().join("sessions/2026/06/25");
         fs::create_dir_all(&day).unwrap();
         fs::write(
             day.join("rollout-2026-06-25T08-00-00-aaaa.jsonl"),
-            r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0},"plan_type":"pro"},"info":{}}}"#,
+            serde_json::json!({"timestamp": now().to_rfc3339(), "payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0},"plan_type":"pro"},"info":{}}}).to_string(),
         )
         .unwrap();
 
@@ -661,6 +852,63 @@ mod tests {
 
         assert_eq!(acc.account_label.as_deref(), Some("codex@example.com"));
         assert_eq!(acc.plan.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn account_identity_survives_token_refresh_but_changes_with_account() {
+        let identity = |id: &str, token: &str| {
+            parse_auth_account_identity(
+                &serde_json::json!({"tokens":{"account_id":id,"access_token":token}}).to_string(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            identity("account-a", "old-token"),
+            identity("account-a", "new-token")
+        );
+        assert_ne!(
+            identity("account-a", "new-token"),
+            identity("account-b", "new-token")
+        );
+        assert_eq!(identity("account-a", "new-token").len(), 64);
+    }
+
+    #[test]
+    fn newest_account_uses_event_time_instead_of_file_write_time() {
+        let dir = tempfile::tempdir().unwrap();
+        write_account_fixture(dir.path(), now());
+        fs::write(
+            dir.path().join("sessions/rollout-newer-file.jsonl"),
+            serde_json::json!({
+                "timestamp": (now() - Duration::seconds(10)).to_rfc3339(),
+                "payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":100.0}}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let account = read_codex_account(dir.path(), now());
+        assert_eq!(account.windows[0].used_percent, 20.0);
+        assert_eq!(account.fetched_at, Some(now()));
+    }
+
+    #[test]
+    fn unbound_or_undated_rollout_cannot_supply_fresh_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        write_account_fixture(dir.path(), now());
+        fs::remove_file(dir.path().join("auth.json")).unwrap();
+        let unbound = read_codex_account(dir.path(), now());
+        assert!(
+            unbound.windows.is_empty(),
+            "missing credentials must discard old quota windows"
+        );
+        assert!(unbound.fetched_at.is_none());
+        assert_eq!(unbound.state, UsageState::NoData);
+        write_auth_fixture(dir.path());
+        fs::write(dir.path().join("sessions/rollout-fixture.jsonl"),
+            r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":1.0,"resets_in_seconds":600}}}}"#).unwrap();
+        let undated = read_codex_account(dir.path(), now());
+        assert!(undated.fetched_at.is_none());
+        assert!(undated.windows.is_empty());
     }
 
     #[test]
