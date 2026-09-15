@@ -74,7 +74,7 @@ Refuse to arm auto-merge when any of these hold:
   owner sweeps it and the result becomes `confirmed`.
 - `gwt-verify --mode pre-pr` returns `Overall: FAIL` or `failed: tooling-missing`.
 
-On gate failure, stop. Do not run `gh pr merge --auto`. Route the failure for
+On gate failure, stop. Do not enable auto-merge through `pr.merge`. Route the failure for
 repair (back to the TDD loop, `gwt-verify`, or `gwt-discussion`) and report
 `NO ACTION` with the failing gate item. Never downgrade a `pending` result to
 `skipped` to get past the gate.
@@ -93,8 +93,8 @@ This same gate is re-run after every code-changing push during the drive loop
   `merge_state:` the merge-state status (`CLEAN` / `BEHIND` / `BLOCKED` /
   `DIRTY` / `UNKNOWN`). The merged signal is the `[MERGED]` state bracket
   (GitHub's `merged_at` being set); there is no literal `merged_at` / `isDraft`
-  field in the output. `gh pr view` is hook-blocked, so always read through
-  `pr.view`.
+  field in the output. Read-only `gh pr view` is also allowed; this flow uses
+  `pr.view` for its workflow lifecycle context and stable completion signal.
 
 ## Step 3: Resolve all blockers before arming (Fix flow)
 
@@ -116,39 +116,35 @@ blocking item remains.
 ## Step 4: Select the merge method (project-agnostic)
 
 Auto-merge requires a merge method allowed by the target repository. Do **not**
-hardcode `--squash`; managed skills run against many repositories with different
+hardcode squash merging; managed skills run against many repositories with different
 policies. Query the repository's allowed methods and default:
 
 ```bash
 gh repo view --json mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed,viewerDefaultMergeMethod
 ```
 
-- Use `viewerDefaultMergeMethod` when it is allowed (`MERGE` -> `--merge`,
-  `SQUASH` -> `--squash`, `REBASE` -> `--rebase`).
+- Use `viewerDefaultMergeMethod` when it is allowed (`MERGE`, `SQUASH`, or
+  `REBASE`).
 - If the default is disallowed, pick the single allowed method.
 - Never change branch protection or merge policy to force a method. If no method
   is allowed, report the policy blocker and stop.
 
-`gh repo view` is not hook-blocked, so this query is allowed.
+This read-only `gh repo view` query is allowed and recorded on the shared
+GitHub budget ledger.
 
 ## Step 5: Arm auto-merge on a clear snapshot
 
 Only once Step 3 leaves the PR fully clear (no blocking CI, no conflict/BEHIND,
 no unresolved thread, no open CHANGES_REQUESTED) and the only thing left is
-required checks still running, arm auto-merge with the selected method
-(transport exception: there is no `pr.merge` JSON operation, and `gh pr merge`
-is an allowed command — only `gh pr view/create/edit/ready/draft/comment/
-checks/reviews/review-threads` are blocked):
-
-```bash
-gh pr merge --auto --merge <number>   # method from Step 4
-```
+required checks still running, use JSON operation `pr.merge` to arm auto-merge
+with the method selected in Step 4. Merge actions must use the JSON-envelope
+operation so workflow gates and audit state see them.
 
 GitHub merges the PR once all **required** status checks pass.
 
-### Branch-protection dependency (read before relying on `--auto`)
+### Branch-protection dependency (read before relying on auto-merge)
 
-`gh pr merge --auto` waits only for **required status checks**. It does **not**
+Auto-merge waits only for **required status checks**. It does **not**
 block on unresolved review threads or `CHANGES_REQUESTED` reviews unless the
 repository's branch protection enforces *require conversation resolution* and/or
 *required approvals*. On repositories that do **not** enforce those rules, a
@@ -156,24 +152,21 @@ review filed after auto-merge is armed can be raced by server-side merge before
 the synchronous Fix loop processes it.
 
 - Preferred on protected repos (conversation-resolution + approvals enforced):
-  arm `--auto` from a clear snapshot as above.
+  arm auto-merge from a clear snapshot as above.
 - On repos **without** those protections: prefer the poll-then-merge path
-  (below) instead of `--auto`, so the agent — not the server — performs the
+  (below), so the agent performs the
   merge after re-confirming a clear state. Keep auto-merge disabled while any
   unresolved thread or open `CHANGES_REQUESTED` exists.
 
-### Poll-then-merge (no `--auto`)
+### Poll-then-merge (auto-merge disabled)
 
 Use this when repository auto-merge is disabled, or as the preferred path on
 unprotected repos. Run the watch loop (Step 6); when `pr.view` reports
 `mergeable: MERGEABLE` / `merge_state: CLEAN` with required checks green and no
 unresolved thread, **re-read `pr.view` immediately before merging** and require
 that clear state at that instant (guard against a base advance or check flip
-between read and merge), then merge directly:
-
-```bash
-gh pr merge --merge <number>
-```
+between read and merge), then use JSON operation `pr.merge` to merge with the
+selected method.
 
 The Hard PR Gate (Step 1) and the per-push re-gate (Core invariant) still apply
 — a direct merge is only allowed on a verified, gated snapshot.
@@ -188,11 +181,8 @@ Poll JSON operation `pr.view` to observe progress toward merge:
   is not "merged."
 - If a **new** blocker appears before merge — base advanced (`merge_state:
   BEHIND`), a required check fails, a new review thread, a new
-  `CHANGES_REQUESTED` — first **disable auto-merge**, then resolve it:
-
-  ```bash
-  gh pr merge --disable-auto <number>
-  ```
+  `CHANGES_REQUESTED` — first **disable auto-merge** through JSON operation
+  `pr.merge`, then resolve it.
 
   Resolve the blocker through the Fix flow (Step 3). For any code-changing push,
   **re-run the Hard PR Gate (Step 1)**, then **re-arm** auto-merge (Step 5) only
@@ -288,17 +278,19 @@ Report using the skill's Final Report Contract. When the PR reached the
 
 ## Command surface (allowed vs blocked)
 
-- **Allowed bash**: `gh pr merge` (`--auto`, `--disable-auto`, and direct),
-  `gh repo view`, `gh run list`, `gh run rerun`,
-  `gh release view`.
-- **Blocked bash** (use the JSON operation instead): `gh pr view` ->
-  `pr.view`; `gh pr ready` -> `pr.ready`; `gh pr ready --undo` -> `pr.draft`;
-  `gh pr checks` -> `pr.checks`; `gh pr comment` -> `pr.comment`;
-  `gh pr review-threads` -> `pr.review_threads`; `gh run view` ->
-  `actions.logs` / `actions.job_logs`.
-- There is **no** `pr.merge` JSON operation; auto-merge enable/disable is the
-  documented `gh pr merge` transport exception. Draft <-> Ready transitions go
-  through the JSON operations `pr.ready` / `pr.draft` (Issue #3201).
+- **Allowed Bash reads** include `gh pr view/list/checks/diff/status`,
+  `gh issue view/list/status`, `gh run view/list/watch`, `gh repo view`,
+  `gh release view`, and read-only `gh api` requests. Allowed calls are
+  recorded on the shared GitHub budget ledger. Prefer gwtd JSON operations
+  such as `pr.list` and `issue.view` for cached data and workflow lifecycle
+  context.
+- **Mutations require JSON-envelope operations**: `gh pr merge` -> `pr.merge`
+  for auto-merge enable/disable and merging; `gh pr ready` -> `pr.ready`;
+  `gh pr ready --undo` -> `pr.draft`; `gh pr comment` -> `pr.comment`;
+  `gh run rerun` -> `actions.rerun`. Other writes, including API mutations,
+  also require the corresponding JSON-envelope operation.
+- Read permission does not bypass the Hard PR Gate, Ready PR Gate, bounded
+  polling, or verification evidence requirements.
 
 ## Anti-patterns (prohibited)
 
@@ -306,10 +298,10 @@ Report using the skill's Final Report Contract. When the PR reached the
 |---|---|
 | Enable auto-merge on `pending` / `skipped` verification | Gate on `confirmed` or `n/a` (Step 1) |
 | Keep auto-merge armed across a code-changing push | Disable, re-gate, re-arm per push (Core invariant / Step 6) |
-| Arm `--auto` while a blocker still exists | Resolve all blockers first, arm from a clear snapshot (Step 5) |
-| Rely on `--auto` to block on threads on an unprotected repo | Prefer poll-then-merge; arm `--auto` only on protected repos (Step 5) |
+| Arm auto-merge while a blocker still exists | Resolve all blockers first, arm from a clear snapshot (Step 5) |
+| Rely on auto-merge to block on threads on an unprotected repo | Prefer poll-then-merge; arm auto-merge only on protected repos (Step 5) |
 | Auto-route into Deliver without an explicit request | Deliver is opt-in only |
 | Report "delivered" after enabling auto-merge | Report Delivered only when `pr.view` shows `[MERGED]` (`merged_at` set) |
-| Blindly `gh run rerun` a test/build timeout or compile/test failure | Classify infra-transient vs code (Step 7) |
-| Hardcode `--squash` | Use the repo's `viewerDefaultMergeMethod` (Step 4) |
+| Blindly rerun a test/build timeout or compile/test failure | Classify infra-transient vs code, then use `actions.rerun` only for infrastructure failures (Step 7) |
+| Hardcode squash merging | Use the repo's `viewerDefaultMergeMethod` (Step 4) |
 | Poll `merged_at` forever | Bounded poll + `board.post` blocked handoff or goal (Step 6/9) |
