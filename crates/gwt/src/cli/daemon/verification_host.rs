@@ -150,8 +150,14 @@ pub(crate) struct DelegatedRun {
 
 /// Find a daemon that can host verification for `worktree`.
 ///
-/// Returns the endpoint alongside the verdict so the caller does not have to
-/// resolve twice. A daemon that is running but too old is reported as
+/// The exact endpoint for this worktree is preferred, but any live daemon in
+/// the same project will do: the request carries its own working directory, so
+/// a daemon is a launcher for the project rather than for one checkout. That
+/// distinction is what makes the feature deliverable — one GUI owns a single
+/// daemon while a project can have hundreds of agent worktrees, and requiring
+/// a per-worktree daemon would refuse verification almost everywhere.
+///
+/// A running daemon that is too old is reported as
 /// [`DaemonAvailability::Incompatible`] rather than folded into "absent",
 /// because the two need different advice: one is started, the other upgraded.
 pub(crate) fn locate(worktree: &Path) -> (DaemonAvailability, Option<DaemonEndpoint>) {
@@ -159,32 +165,56 @@ pub(crate) fn locate(worktree: &Path) -> (DaemonAvailability, Option<DaemonEndpo
         return (DaemonAvailability::Absent, None);
     };
     let gwt_home = gwt_core::paths::gwt_home();
-    let endpoint_path = scope.endpoint_path(&gwt_home);
-    let Ok(payload) = std::fs::read(&endpoint_path) else {
+    let exact_path = scope.endpoint_path(&gwt_home);
+    let Ok(entries) = std::fs::read_dir(scope.daemon_dir(&gwt_home)) else {
         return (DaemonAvailability::Absent, None);
     };
-    let Ok(endpoint) = serde_json::from_slice::<DaemonEndpoint>(&payload) else {
-        return (DaemonAvailability::Absent, None);
-    };
-    // Liveness and scope are checked apart from the protocol version on
-    // purpose: a live daemon of the wrong version is a different answer from
-    // no daemon at all, and `is_usable` collapses the two.
-    if endpoint.scope != scope
-        || endpoint.bind.trim().is_empty()
-        || endpoint.auth_token.trim().is_empty()
-        || !endpoint.has_live_owner(crate::process::is_process_alive)
-    {
-        return (DaemonAvailability::Absent, None);
+
+    let mut best: Option<(bool, DaemonEndpoint)> = None;
+    let mut outdated: Option<DaemonEndpoint> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(payload) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(endpoint) = serde_json::from_slice::<DaemonEndpoint>(&payload) else {
+            continue;
+        };
+        // Liveness is checked apart from the protocol version on purpose: a
+        // live daemon of the wrong version is a different answer from no
+        // daemon at all, and `is_usable` collapses the two.
+        if endpoint.scope.repo_hash != scope.repo_hash
+            || endpoint.scope.target != scope.target
+            || endpoint.bind.trim().is_empty()
+            || endpoint.auth_token.trim().is_empty()
+            || !endpoint.has_live_owner(crate::process::is_process_alive)
+        {
+            continue;
+        }
+        if endpoint.protocol_version < VERIFICATION_SPAWN_MIN_PROTOCOL_VERSION {
+            outdated.get_or_insert(endpoint);
+            continue;
+        }
+        let exact = path == exact_path;
+        if exact {
+            return (DaemonAvailability::Available, Some(endpoint));
+        }
+        best.get_or_insert((exact, endpoint));
     }
-    if endpoint.protocol_version < VERIFICATION_SPAWN_MIN_PROTOCOL_VERSION {
-        return (
+
+    match (best, outdated) {
+        (Some((_, endpoint)), _) => (DaemonAvailability::Available, Some(endpoint)),
+        (None, Some(endpoint)) => (
             DaemonAvailability::Incompatible {
                 protocol_version: endpoint.protocol_version,
             },
             Some(endpoint),
-        );
+        ),
+        (None, None) => (DaemonAvailability::Absent, None),
     }
-    (DaemonAvailability::Available, Some(endpoint))
 }
 
 /// Run one verification command on the daemon and wait for it to finish.
@@ -285,5 +315,43 @@ mod tests {
         let (availability, endpoint) = locate(dir.path());
         assert_eq!(availability, DaemonAvailability::Absent);
         assert!(endpoint.is_none());
+    }
+
+    /// Measured on a live host before this was allowed: 455 agent worktrees
+    /// shared 2 daemon endpoints, because one GUI owns one daemon for the
+    /// project rather than one per checkout. Requiring the worktree's own
+    /// endpoint would have refused verification in every agent worktree, so a
+    /// daemon is a launcher for the project — the request carries its own
+    /// working directory.
+    #[test]
+    fn a_sibling_worktrees_daemon_can_host_this_worktree() {
+        let home = scratch();
+        let project = scratch();
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
+            .expect("project scope");
+        let mut sibling = scope.clone();
+        sibling.worktree_hash = "a-different-checkout".to_string();
+        let endpoint = DaemonEndpoint::new(
+            sibling.clone(),
+            std::process::id(),
+            "/tmp/sibling.sock".to_string(),
+            "token".to_string(),
+            "9.99.0".to_string(),
+        );
+        let gwt_home = home.path().join(".gwt");
+        std::fs::create_dir_all(sibling.daemon_dir(&gwt_home)).expect("daemon dir");
+        std::fs::write(
+            sibling.endpoint_path(&gwt_home),
+            serde_json::to_vec(&endpoint).expect("serialize endpoint"),
+        )
+        .expect("write sibling endpoint");
+
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (availability, found) = locate(project.path());
+        assert_eq!(availability, DaemonAvailability::Available);
+        assert_eq!(
+            found.expect("sibling endpoint").scope.worktree_hash,
+            "a-different-checkout"
+        );
     }
 }

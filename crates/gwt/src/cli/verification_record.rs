@@ -2748,6 +2748,10 @@ fn run_verification_for_caller(
     )
 }
 
+// The parameters are the run's inputs, each independently optional in a
+// different caller, so bundling them into a struct would move the same list
+// one indirection away without removing a single decision.
+#[allow(clippy::too_many_arguments)]
 fn run_verification_inner<F>(
     worktree: &Path,
     session_id: &str,

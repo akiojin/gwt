@@ -122,22 +122,25 @@ pub fn spawn(request: &VerificationSpawnRequest) -> Result<VerificationChild, St
     let stdout = open_transcript(&request.stdout_path)?;
     let stderr = open_transcript(&request.stderr_path)?;
 
-    let mut command = std::process::Command::new(&request.program);
+    // The caller sends its complete environment because the daemon's own is
+    // not the caller's, and a test runner that sees a different environment
+    // produces verdicts nobody can reproduce — hence `inherit_env(false)`.
+    let plan = request
+        .env
+        .iter()
+        .fold(
+            gwt_core::process::ProcessPlanRequest::new(&request.program)
+                .args(&request.args)
+                .current_dir(&request.cwd)
+                .inherit_env(false),
+            |plan, (key, value)| plan.env(key, value),
+        );
+    let mut command = gwt_core::process::resolved_command(plan)
+        .map_err(|err| format!("failed to resolve '{}': {err}", request.program))?;
     command
-        .args(&request.args)
-        .current_dir(&request.cwd)
         .stdin(std::process::Stdio::null())
         .stdout(stdout)
         .stderr(stderr);
-    // The caller sends its complete environment because the daemon's own is
-    // not the caller's, and a test runner that sees a different environment
-    // produces verdicts nobody can reproduce.
-    command.env_clear().envs(
-        request
-            .env
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-    );
 
     // SAFETY: only async-signal-safe calls run between fork and exec.
     unsafe {
