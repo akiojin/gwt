@@ -525,6 +525,7 @@ mod tests {
             held_ms: 7_260_000,
             cpu_percent: 1.4,
             processes: 3,
+            host_cpu_percent: Some(95.0),
         };
         let notice = holder_notice(&status, Some(&starved));
         assert!(notice.detail.contains("pid 21468"), "{}", notice.detail);
@@ -535,6 +536,7 @@ mod tests {
             held_ms: 600_000,
             cpu_percent: 380.0,
             processes: 5,
+            host_cpu_percent: Some(95.0),
         };
         let notice = holder_notice(&status, Some(&progressing));
         assert!(notice.detail.contains("progressing"), "{}", notice.detail);
