@@ -99,14 +99,29 @@ pub(crate) fn handle_with_input_for_session(
         return Ok(HookOutput::Silent);
     };
     if prompt_reminder_write_has_budget(event, gwt_core::operation_deadline::current()) {
-        timed_substage(event, "board-reminder/reminders-write", || {
+        let written = timed_substage(event, "board-reminder/reminders-write", || {
             write_reminders_state_for_repo_hash(
                 &session.worktree_path,
                 session.repo_hash.as_deref(),
                 &session.id,
                 &plan.next_reminders,
             )
-        })?;
+        });
+        // Issue #3777: the sidecar only throttles how often a reminder repeats,
+        // and its atomic replace now gives up at the prompt deadline instead of
+        // sleeping through it. Losing one update may repeat a reminder; failing
+        // the hook over it would cost the agent the whole prompt, so the write
+        // is fatal only outside the deadline-bounded prompt path.
+        match written {
+            Ok(()) => {}
+            Err(error) if event == "UserPromptSubmit" => {
+                tracing::warn!(
+                    ?error,
+                    "reminder sidecar write skipped within prompt budget"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     debug_assert_eq!(intent_event, plan_event(&plan.output));
     Ok(plan.output)

@@ -19,6 +19,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -2277,26 +2278,69 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     replace_path_with_temp(path, &tmp_path)
 }
 
+// The retry schedule only runs on Windows; the unit tests below keep it
+// honest on every platform, so the non-Windows build keeps the definitions
+// without complaining that nothing calls them.
+/// Longest a single atomic-replace retry may sleep.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPLACE_RETRY_MAX_DELAY: Duration = Duration::from_millis(25);
+/// Longest the whole retry schedule may sleep when no ambient deadline applies.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPLACE_RETRY_MAX_TOTAL: Duration = Duration::from_millis(500);
+
+/// Backoff delays for retrying an atomic replace, newest-first and never
+/// summing past `budget`.
+///
+/// Issue #3777: this used to be a flat 25ms repeated 20 times. A sharing
+/// violation that cleared in a few milliseconds still cost a full 25ms, and a
+/// contended `reminders` write measured 111.8ms on Windows against 5-6ms for
+/// the sibling atomic writes that have no retry loop at all — four sleeps'
+/// worth. UserPromptSubmit runs its whole hook under a 200ms deadline, so the
+/// schedule starts at 1ms and stops at whatever budget the caller has left.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn replace_retry_delays(budget: Duration) -> impl Iterator<Item = Duration> {
+    let mut remaining = budget;
+    let mut delay = Duration::from_millis(1);
+    std::iter::from_fn(move || {
+        if remaining.is_zero() {
+            return None;
+        }
+        let next = delay.min(remaining);
+        remaining -= next;
+        delay = (delay * 2).min(REPLACE_RETRY_MAX_DELAY);
+        Some(next)
+    })
+}
+
+/// The retry budget for one atomic replace: whatever the ambient operation
+/// deadline leaves, capped so a caller without a deadline still gives up.
+#[cfg_attr(any(not(windows), test), allow(dead_code))]
+fn replace_retry_budget() -> Duration {
+    let ceiling = REPLACE_RETRY_MAX_TOTAL;
+    match crate::operation_deadline::current() {
+        Some(deadline) => deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(ceiling),
+        None => ceiling,
+    }
+}
+
 fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
-        const MAX_RETRIES: usize = 20;
-        const SLEEP_MS: u64 = 25;
-
-        for attempt in 0..MAX_RETRIES {
+        let mut delays = replace_retry_delays(replace_retry_budget());
+        loop {
             match try_replace_path_with_temp(path, tmp_path) {
                 Ok(()) => return Ok(()),
-                Err(err)
-                    if err.kind() == std::io::ErrorKind::PermissionDenied
-                        && attempt + 1 < MAX_RETRIES =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err.into());
+                    };
+                    std::thread::sleep(delay);
                 }
                 Err(err) => return Err(err.into()),
             }
         }
-
-        unreachable!("Windows retry loop should always return or error");
     }
 
     #[cfg(not(windows))]
@@ -2306,16 +2350,16 @@ fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
     }
 }
 
+/// Replace `path` with `tmp_path`.
+///
+/// Issue #3777: this used to unlink `path` first on Windows. That is both
+/// unnecessary — `fs::rename` maps to `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING`, and the sibling atomic writers in
+/// `gwt_github::cache` and `gwt-agent` overwrite the same way on Windows all
+/// day — and harmful: it opened a window where the file did not exist at all,
+/// and the extra unlink is what kept losing the race with a concurrent reader
+/// and driving the retry loop above.
 fn try_replace_path_with_temp(path: &Path, tmp_path: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    if path.exists() {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-    }
-
     std::fs::rename(tmp_path, path)
 }
 
@@ -2927,6 +2971,58 @@ mod tests {
     use super::*;
     use crate::paths::gwt_project_dir_for_repo_path;
     use crate::test_support::{env_lock, ScopedEnvVar};
+
+    /// Issue #3777: on Windows the atomic-replace retry slept a flat 25ms up to
+    /// 20 times, so one contended `reminders` write could spend 500ms while
+    /// UserPromptSubmit runs under a 200ms budget — it measured 111.8ms against
+    /// 5-6ms for the sibling writes that have no retry loop. The schedule now
+    /// starts small and never outlives the ambient deadline.
+    #[test]
+    fn replace_retry_schedule_starts_small_and_grows() {
+        let delays = replace_retry_delays(Duration::from_millis(500)).collect::<Vec<_>>();
+        assert_eq!(
+            delays.first().copied(),
+            Some(Duration::from_millis(1)),
+            "the first retry must not cost more than the operation it retries"
+        );
+        // The final delay is truncated to whatever budget is left, so growth is
+        // monotonic over every delay that was not cut short.
+        let grown = &delays[..delays.len() - 1];
+        assert!(
+            grown.windows(2).all(|pair| pair[1] >= pair[0]),
+            "delays must grow monotonically: {delays:?}"
+        );
+        assert!(
+            delays.last().copied().unwrap_or_default() <= REPLACE_RETRY_MAX_DELAY,
+            "the truncated final delay must still respect the cap: {delays:?}"
+        );
+        assert!(
+            delays.iter().all(|delay| *delay <= REPLACE_RETRY_MAX_DELAY),
+            "no single delay may exceed the cap: {delays:?}"
+        );
+        assert!(
+            delays.iter().sum::<Duration>() <= Duration::from_millis(500),
+            "the schedule must fit the budget it was given: {delays:?}"
+        );
+    }
+
+    #[test]
+    fn replace_retry_schedule_is_empty_without_budget() {
+        assert_eq!(replace_retry_delays(Duration::ZERO).count(), 0);
+    }
+
+    #[test]
+    fn replace_retry_schedule_fits_a_prompt_sized_budget() {
+        // The UserPromptSubmit deadline leaves far less than 500ms by the time
+        // the reminder sidecar is written; the schedule must not overrun it.
+        let budget = Duration::from_millis(40);
+        let delays = replace_retry_delays(budget).collect::<Vec<_>>();
+        assert!(!delays.is_empty(), "a 40ms budget still allows retries");
+        assert!(
+            delays.iter().sum::<Duration>() <= budget,
+            "schedule {delays:?} overran the {budget:?} budget"
+        );
+    }
 
     #[test]
     fn committed_operation_result_wins_over_unlock_failure() {
