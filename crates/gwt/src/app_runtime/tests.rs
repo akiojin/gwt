@@ -3768,12 +3768,12 @@ fn sample_runtime_with_events(
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
         work_ai_summaries: HashMap::new(),
-        session_ledger_cache: std::cell::RefCell::new(
+        session_ledger_cache: Arc::new(Mutex::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
-        ),
-        work_items_cache: std::cell::RefCell::new(
+        )),
+        work_items_cache: Arc::new(Mutex::new(
             gwt_core::workspace_projection::WorkItemsCache::new(),
-        ),
+        )),
         active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
         last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
@@ -28185,7 +28185,21 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         .agents
         .iter()
         .all(gwt_core::workspace_projection::WorkspaceAgentSummary::is_unassigned));
-    assert!(second_events.iter().any(|event| matches!(
+    // Issue #4406 AC-6: the launch acknowledgement no longer rebuilds the rail
+    // on the GUI event loop, so the full projection arrives with the drained
+    // off-loop refresh. The same membership is asserted, not a weaker one.
+    assert!(
+        second_events.iter().all(|event| !matches!(
+            event,
+            OutboundEvent {
+                event: BackendEvent::ActiveWorkProjection { .. },
+                ..
+            }
+        )),
+        "launch completion must not rebuild the projection inline"
+    );
+    let refreshed = drain_active_work_projection_refresh(&mut runtime, &repo);
+    assert!(refreshed.iter().any(|event| matches!(
         event,
         OutboundEvent {
             target: DispatchTarget::Broadcast,
@@ -53001,9 +53015,16 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
     );
     let mut runtime = sample_runtime(temp.path(), vec![matching_tab, other_tab], Some("tab-1"));
 
+    super::workspace_views::reset_full_active_work_projection_builds();
     let events = runtime.handle_board_projection_changed_events(&repo);
 
-    assert_eq!(events.len(), 3);
+    // Issue #4406: a post that is no Work milestone changes no Work row, so the
+    // refresh emits only the two Board windows and rebuilds no Active Work.
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0
+    );
     for expected_id in [
         combined_window_id("tab-1", "board-1"),
         combined_window_id("tab-1", "board-2"),
@@ -53026,6 +53047,309 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
             ..
         } if *id == combined_window_id("tab-2", "board-3")
     )));
+}
+
+#[test]
+fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_work() {
+    // Issue #4406 AC-1: applying a Board refresh is the only part of a Board
+    // change on the GUI event loop; a full Active Work rebuild there cost
+    // seconds per post.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let projection = apply_title_sync_sample_projection(
+        &repo,
+        &window_id,
+        Some("Board milestone title"),
+        Some("posted a decision"),
+    );
+    super::workspace_views::reset_full_active_work_projection_builds();
+
+    let events = runtime.apply_board_projection_refresh(super::BoardProjectionRefreshed {
+        events: Vec::new(),
+        milestone: Some((repo.clone(), projection)),
+    });
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "the milestone must still refresh the pane heading: {events:?}"
+    );
+    let tab = runtime.tab("tab-1").expect("tab");
+    assert_eq!(
+        tab.workspace
+            .window("agent-1")
+            .expect("agent window")
+            .dynamic_title
+            .as_deref(),
+        Some("Board milestone title")
+    );
+}
+
+/// Issue #4406 AC-3/AC-4: a project whose Workspace rail has one recorded Work
+/// row, plus the event sink the off-loop refresh requests travel through.
+fn active_work_off_loop_setup(
+    temp_root: &Path,
+    repo: &Path,
+) -> (AppRuntime, Arc<Mutex<Vec<UserEvent>>>, String) {
+    fs::create_dir_all(repo).expect("create repo");
+    init_repo(repo);
+    gwt_core::workspace_projection::record_workspace_work_event(repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            // A Work-item id shaped title is not a purpose, so the row has no
+            // recorded summary and the tip-subject fallback — the AC-3 path —
+            // is the only thing that can fill it.
+            "work-offloop-a1b2c3",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/off-loop".to_string()),
+                worktree_path: None,
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+
+    let mut tab_workspace = empty_workspace_state();
+    let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+    agent.title = "Codex".to_string();
+    tab_workspace.windows.push(agent);
+    tab_workspace.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.to_path_buf(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (mut runtime, events) = sample_runtime_with_events(temp_root, vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id: window_id.clone(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/off-loop".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.to_path_buf(),
+            agent_project_root: repo.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+    (runtime, events, window_id)
+}
+
+/// The off-loop refresh requests recorded for `project_root` so far.
+fn active_work_refresh_requests(events: &Arc<Mutex<Vec<UserEvent>>>, project_root: &Path) -> usize {
+    events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                UserEvent::ActiveWorkProjectionChanged { project_root: root }
+                    if root == project_root
+            )
+        })
+        .count()
+}
+
+/// Issue #4406 AC-6: run the refresh the runtime just asked for and apply it,
+/// the way the GUI event loop does. Tests that used to read the rail straight
+/// out of a handler's return value drain it through here instead of weakening
+/// what they assert.
+fn drain_active_work_projection_refresh(
+    runtime: &mut AppRuntime,
+    project_root: &Path,
+) -> Vec<OutboundEvent> {
+    let Some(job) = runtime.active_work_projection_refresh_job(project_root) else {
+        return Vec::new();
+    };
+    let refreshed = super::run_active_work_projection_refresh(job);
+    runtime.apply_active_work_projection_refresh(refreshed)
+}
+
+#[test]
+fn background_work_scan_results_refresh_active_work_off_the_gui_event_loop() {
+    // Issue #4406 AC-3: `WorkTipSubjects` and `WorkMergeStatus` are background
+    // scan completions, and each rebuilt the disk-backed Active Work projection
+    // on the GUI event loop — 930,665ms and 796,705ms of stall over one 20
+    // minute window. They must only cache the result and ask for an off-loop
+    // refresh.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (mut runtime, events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let tip_events = runtime.apply_work_tip_subjects(
+        &repo,
+        [("work/off-loop".to_string(), "tip subject".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "WorkTipSubjects must not enter the disk-backed projection builder"
+    );
+    assert!(
+        tip_events.is_empty(),
+        "the rail update rides the off-loop refresh, not the handler return: {tip_events:?}"
+    );
+    assert_eq!(active_work_refresh_requests(&events, &repo), 1);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let merge_events = runtime.apply_work_merge_status(
+        &repo,
+        [("work/off-loop".to_string(), chrono::Utc::now())]
+            .into_iter()
+            .collect(),
+        HashMap::new(),
+        HashSet::new(),
+        HashSet::new(),
+        None,
+    );
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "WorkMergeStatus must not enter the disk-backed projection builder"
+    );
+    assert!(merge_events.is_empty());
+    assert_eq!(active_work_refresh_requests(&events, &repo), 2);
+
+    // AC-6: the drained refresh still carries both scan results, so nothing the
+    // rail showed before is lost by moving the build off the loop.
+    let applied = drain_active_work_projection_refresh(&mut runtime, &repo);
+    let projection = applied
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection.clone()),
+            _ => None,
+        })
+        .expect("the off-loop refresh broadcasts the rebuilt rail");
+    let row = projection
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/off-loop"))
+        .expect("row");
+    assert!(
+        row.merged_into_base,
+        "the merge scan result reached the row"
+    );
+    assert_eq!(row.work_summary.as_deref(), Some("tip subject"));
+}
+
+#[test]
+fn active_work_projection_refresh_off_the_loop_matches_the_on_loop_build() {
+    // Issue #4406 AC-6: the off-loop build is the same build. Applying its
+    // result on the event loop must install the cache and broadcast without
+    // rebuilding anything.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (mut runtime, _events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+
+    let expected = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("on-loop projection");
+
+    let job = runtime
+        .active_work_projection_refresh_job(&repo)
+        .expect("refresh job");
+    let refreshed = super::run_active_work_projection_refresh(job);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let applied = runtime.apply_active_work_projection_refresh(refreshed);
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "applying an off-loop refresh must not rebuild on the event loop"
+    );
+    let projection = applied
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection.clone()),
+            _ => None,
+        })
+        .expect("broadcast");
+    assert_eq!(
+        projection
+            .active_works
+            .iter()
+            .map(|work| work.id.clone())
+            .collect::<Vec<_>>(),
+        expected
+            .active_works
+            .iter()
+            .map(|work| work.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(projection.active_agents, expected.active_agents);
+}
+
+#[test]
+fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
+    // Issue #4406 AC-4: a `RuntimeHook` arrival that ends a pane rebuilt the
+    // whole disk-backed rail on the event loop, holding it for up to 35,982ms.
+    // The acknowledgement is served from the cache and the rebuild is requested.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (mut runtime, events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+    // Seed the cache the cache-only acknowledgement reads from.
+    let _ = runtime.active_work_projection_for_tab("tab-1", &runtime.tabs[0]);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let hook_events = runtime.handle_runtime_hook_event(runtime_hook_state("Error", "session-1"));
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "a runtime hook must not enter the disk-backed projection builder"
+    );
+    assert!(
+        hook_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
+        "the hook still acknowledges the rail from cache: {hook_events:?}"
+    );
+    assert_eq!(active_work_refresh_requests(&events, &repo), 1);
 }
 
 fn migration_pending_tab(tab_id: &str, project_root: PathBuf) -> ProjectTabRuntime {
@@ -58426,7 +58750,8 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
         ProjectKind::Git,
         &[WindowPreset::Shell],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     // Seed one Work record so the projection broadcast has content.
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
@@ -58444,10 +58769,25 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
         unchanged.is_empty(),
         "no-op ingest must not rebroadcast the projection"
     );
+    assert_eq!(
+        active_work_refresh_requests(&user_events, &repo),
+        0,
+        "a no-op ingest must not even ask for a rebuild"
+    );
 
-    let changed = runtime.handle_work_events_ingested(repo, true);
+    let changed = runtime.handle_work_events_ingested(repo.clone(), true);
     assert!(
         changed
+            .iter()
+            .all(|outbound| !matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
+        // Issue #4406 AC-3: the rebuild left the GUI event loop, so the
+        // rebroadcast arrives with the refresh instead of the handler return.
+        "the ingest handler must not rebuild the projection inline"
+    );
+    assert_eq!(active_work_refresh_requests(&user_events, &repo), 1);
+    let refreshed = drain_active_work_projection_refresh(&mut runtime, &repo);
+    assert!(
+        refreshed
             .iter()
             .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
         "changed ingest rebroadcasts the projection"
@@ -58507,6 +58847,13 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
     assert!(
         events.is_empty(),
         "an inactive project cache refresh must not broadcast into the active tab"
+    );
+    // Issue #4406 AC-6: the rebuild now runs off the GUI event loop, so the
+    // inactive project's cache is refreshed by draining it.
+    let refreshed = drain_active_work_projection_refresh(&mut runtime, &repo_b);
+    assert!(
+        refreshed.is_empty(),
+        "an inactive project rebuild must not broadcast into the active tab"
     );
 
     runtime.active_tab_id = Some("tab-b".to_string());
