@@ -204,6 +204,31 @@ drive them.
   why, because a live agent waiting on an approval prompt, blocked by a
   provider rate limit, or genuinely hung all look identical from here.
   Read its pane to find out which, then say so when you report it.
+  Know the clock's tolerance before you judge it: it advances on hook
+  arrivals (throttled to once a minute), never on pane output, so a
+  working agent inside one long tool call can lag it by fifteen minutes
+  or more. Stuck detection waits `stuck_timeout_secs` (30 minutes by
+  default); do not call a row dead on a shorter silence, and never on
+  `last_activity_at` alone.
+- Every row holding a slot with a bound window also carries `pane_state`
+  (the window's state as the canvas last observed it) and
+  `runtime_consistency`. Read them together: `consistent` with
+  `pane_state` `waiting` plus `retry_hold_reason` is a provider limit;
+  `consistent` with `waiting` and no hold is an approval prompt, so read
+  the pane; `consistent` with `idle` past the stuck timeout is an agent
+  that stopped responding; `terminal` (the pane reads `stopped` or
+  `error`) or `missing` (the pane is gone from a fresh canvas
+  observation) is a dead launch still holding a slot — the next scan
+  releases it, and `issue.monitor.stop` with the row's `claim_id`,
+  `delivery_id`, and `launched_window_id` releases it now;
+  `unavailable` means no fresh canvas observation covers the launch (no
+  GUI connected, or an observation older than the ACK), so judge nothing
+  from it and read the pane instead.
+- A `launched` row keeps its `claim_id`, `delivery_id`, and
+  `launched_window_id` after the GUI acknowledges the launch; copy those
+  three into `issue.monitor.stop` or `issue.monitor.failover` as they
+  are. A `launching` row has no window yet: send its `claim_id` and
+  `delivery_id` and omit `window_id`.
 - `retry_hold_reason` and `retry_not_before` on an inbox row say the
   issue is deliberately held out of the queue, and until when. A
   provider quota block sets both: the launch is already released, no
@@ -1321,6 +1346,15 @@ mod tests {
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",
+            // Issue #3712 AC-5: the clock's tolerance and the pane join are
+            // spelled out, so a working agent is never judged dead on a
+            // fifteen-minute silence.
+            "`last_activity_at` alone",
+            "`pane_state`",
+            "`runtime_consistency`",
+            "`stuck_timeout_secs`",
+            // Issue #3712 AC-1: the launched row's identity is copied as is.
+            "three into `issue.monitor.stop`",
             "Never run `pane.send`",
             // FR-010: the strong merge gate stays out of reach.
             "never submit a review verdict",

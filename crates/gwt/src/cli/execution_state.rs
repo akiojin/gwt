@@ -2945,7 +2945,7 @@ pub struct OwnerExecutionDiagnosis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_worktree: Option<String>,
     /// Exact runtime evidence for the holder: `live`, `terminal`, `defunct`,
-    /// `host_dead`, `absent`, `unknown`, or `not_evaluated`.
+    /// `host_dead`, `child_exited`, `absent`, `unknown`, or `not_evaluated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_runtime: Option<String>,
     /// Whether the generation reaper is allowed to release this generation as
@@ -18516,6 +18516,9 @@ mod tests {
         .unwrap();
 
         let held = diagnose_owner(worktree.path(), owner);
+        // Issue #3712 AC-3: the literal the PM reads for this shape, so a
+        // living GUI Host can never be mistaken for a living agent again.
+        assert_eq!(held.holder_runtime.as_deref(), Some("child_exited"));
         assert!(
             held.reclaimable,
             "a living GUI host does not keep its dead child alive"
