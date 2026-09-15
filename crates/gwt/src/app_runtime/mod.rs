@@ -2432,28 +2432,24 @@ fn run_scheduled_issue_monitor_scan(
 /// Issue #4084 AC-1: hand the canvas snapshot to the live daemon, which owns
 /// the scan in production. Failure is not an error: without a daemon this
 /// process is the driver and classifies against the same snapshot itself.
+///
+/// Issue #4131: this was `#[cfg(unix)]`, which made it a no-op on the one
+/// platform where it mattered most. The daemon runs on Windows too (named
+/// pipe, Issue #3526) and takes scan authority there, so it classified every
+/// scan against no canvas at all — and a launch whose pane an auto-update
+/// restart killed held its slot until a PM stopped it by hand.
 fn publish_issue_monitor_window_snapshot(
     project_root: &Path,
     snapshot: &gwt::IssueMonitorWindowSnapshot,
 ) {
-    #[cfg(unix)]
+    if let Err(error) =
+        gwt::daemon_publisher::publish_issue_monitor_window_snapshot(project_root, snapshot)
     {
-        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
-            "control",
-            serde_json::json!({ "window_snapshot": snapshot }),
-            std::process::id(),
+        tracing::debug!(
+            %error,
+            "Issue Monitor window snapshot stayed local; no daemon accepted it"
         );
-        if let Err(error) =
-            gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
-        {
-            tracing::debug!(
-                %error,
-                "Issue Monitor window snapshot stayed local; no daemon accepted it"
-            );
-        }
     }
-    #[cfg(not(unix))]
-    let _ = (project_root, snapshot);
 }
 
 /// The read/probe phase's own budget. Exceeding it degrades the scan's
@@ -2690,7 +2686,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 (expected_project_tab_id, live_window_ids)
             {
                 let reconciliation =
-                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids);
+                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids, now);
                 if !reconciliation.readopted.is_empty() {
                     tracing::warn!(
                         issues = ?reconciliation.readopted,
@@ -4990,6 +4986,7 @@ impl AppRuntime {
     fn finalize_issue_monitor_vanished_windows_in_background(
         project_root: &Path,
         live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
+        observed_at: &str,
         commit_timeout: std::time::Duration,
     ) -> Vec<String> {
         if live_windows_per_tab.is_empty() {
@@ -5008,7 +5005,7 @@ impl AppRuntime {
         let targets = live_windows_per_tab
             .iter()
             .flat_map(|(tab_id, live_window_ids)| {
-                monitor.vanished_launched_windows(tab_id, live_window_ids)
+                monitor.vanished_launched_windows(tab_id, live_window_ids, observed_at)
             })
             .filter_map(|window_id| {
                 let issue_number = monitor.launched_window_issue(&window_id)?;
@@ -6175,6 +6172,7 @@ impl AppRuntime {
                     Self::finalize_issue_monitor_vanished_windows_in_background(
                         &worker_project_root,
                         &live_windows_per_tab,
+                        &worker_now,
                         fallback_commit_timeout,
                     );
                 // Issue #3883: the scan owns the re-adoption, so it happens

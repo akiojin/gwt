@@ -448,53 +448,29 @@ prompting but keep the same three-option discipline. An autonomous session is
 not a runtime without a selection UI — it is a runtime where asking parks the
 Issue, so it never reaches this step at all.
 
-## Heavy verification serialization (Issue #3868 AC-30 / Issue #3913)
+## Heavy verification serialization (SPEC #3576)
 
-Heavy commands — `cargo test` (focused or full), `cargo clippy`,
-`cargo build`, coverage, headed Playwright, and `verify.run` — contend for
-host CPU with every other agent worktree. Serialize every one of them
-through JSON operation `verify.lease.acquire` (SPEC #3576); a raw `cargo`
-started without the lease is exactly the parallel run that saturates the
-host (Issue #3913). A contended acquire answers immediately with the
-current holder instead of queueing, so the wait loop is yours. A refusal
-also reserves your turn (Issue #4086): background index jobs defer to
-this worktree until a retry is granted or the reservation lapses, and the
-refusal names `holder_kind` (`verification` / `index` / `other`) plus
-`estimated_remaining_ms` (`remaining_batches` for an index holder), so you
-know whether to wait one batch or a whole verification run:
+Only canonical `verify.run` acquires the host-wide lease, in-process for
+its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+`cargo clippy`, `cargo build`, coverage, direct headed Playwright, and
+pre-push checks do not require a verification lease. Run them directly;
+they do not replace the canonical evidence required for completion.
 
-1. Run `verify.lease.acquire` with `params.reason` naming the Issue. On
-   success run the matrix, then `verify.lease.release` with the lease id.
-2. On refusal, declare the wait once with JSON operation
-   `issue.monitor.wait` (`params.reason`: `waiting for verification lease`,
-   `params.resume_condition`: `verify.lease.acquire is granted`) so stuck
-   detection skips your Issue instead of charging an attempt (Issue #3844),
-   then wait 3 minutes and retry. Record the holder for humans with JSON
-   operation `workspace.update`, `current_focus` set to
-   `waiting for verification lease (attempt N/15, holder: <holder>)`, when
-   the wait starts and whenever the holder changes — that is state, not a
-   liveness signal, so do not run it just to look alive. Clear the
-   declaration (`issue.monitor.wait` with `params.clear:true`) the moment
-   the lease is granted.
-3. Stop after 15 attempts (about 45 minutes). Post `kind:"blocked"` to the
-   Board mentioning the PM with the holder from `verify.lease.status` and
-   the host-wide heavy process list, and wait for the PM's arbitration.
-   Never run the heavy matrix without the lease, and never go idle at the
-   prompt without the Board post — an idle agent with a stale
-   `last_activity_at` is terminated as stuck.
+Register the matrix with `verify.plan`, then execute it through
+`verify.run`. Manual `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` are retired and return an error without acquiring or
+reserving a lease. Do not wrap Cargo commands or `verify.run` in a manual
+lease acquisition loop.
 
-`verify.run` admits itself (Issue #3913): a lease this worktree already
-holds is honored without waiting; otherwise it claims the lease
-in-process, then waits for `cargo` / `rustc` / `clippy-driver` / test
-binaries of other worktrees of the same repository to drain, bounded by
-`params.max_wait_secs` (default 300, hard cap 1500 — below the Issue
-Monitor's stuck timeout). While it waits, `verify.lease.status` lists it
-under `pending` and it posts one Board `status` entry. Its own wait is
-shorter than the Issue Monitor's stuck timeout, so it needs no
-declaration. A `deferred` answer means the budget ran out without a
-record: treat it as one refused attempt of the loop above and rerun
-`verify.run` — the rerun is a fresh tool call, and if the host stays busy
-the same `issue.monitor.wait` declaration covers the retries.
+`verify.run` owns its admission and bounded wait through
+`params.max_wait_secs` (default 300, hard cap 1500). While waiting,
+`verify.lease.status` lists the run under `pending`. A `deferred` response
+means admission timed out without a verification record. Inspect the
+reported holder and wait reason, then retry when contention is resolved;
+there is no fixed retry schedule. If a holder persists without a live
+verification workload, report its run / PID and timing evidence to the
+PM. `verify.lease.release` remains available to drain a legacy holder
+without killing its process.
 
 ## Stop Conditions
 
