@@ -22,6 +22,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     thread::JoinHandle,
+    time::Instant,
 };
 
 use super::continuation::ActiveOwnerLiveness;
@@ -38,6 +39,55 @@ use super::{
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
 /// startup so a pathological pile-up cannot stall boot.
 const MAX_STARTUP_INTAKE_PRUNE: usize = 32;
+
+/// Issue #4375 AC-4: a restore-drain phase that held the GUI event loop for at
+/// least this long is reported by name, so a startup stall is attributable to
+/// the phase that caused it instead of only to the dispatch total.
+const RESTORE_DRAIN_PHASE_STALL_MS: u64 = 100;
+
+/// The warning text for a restore drain whose phases blocked the GUI event
+/// loop, or `None` when every phase stayed inside the budget.
+///
+/// Split out from the logger so the threshold is directly testable, the same
+/// shape `gui_event_loop_stall_warning` uses for whole dispatches.
+pub(super) fn restore_drain_stall_warning(phases: &[(&str, u64)]) -> Option<String> {
+    let stalled = phases
+        .iter()
+        .filter(|(_, elapsed_ms)| *elapsed_ms >= RESTORE_DRAIN_PHASE_STALL_MS)
+        .map(|(phase, elapsed_ms)| format!("{phase} {elapsed_ms}ms"))
+        .collect::<Vec<_>>();
+    (!stalled.is_empty()).then(|| {
+        format!(
+            "restore_drain blocked the GUI event loop: {}",
+            stalled.join(", ")
+        )
+    })
+}
+
+/// Issue #4375 AC-4: record the restore drain's own breakdown on the same
+/// `gwt.frontend.timing` target the event-loop stall warnings use, so the
+/// dispatch total and the phases inside it read as one series.
+fn log_restore_drain_breakdown(resumed_sessions: usize, resume_ms: u64, pm_ensure_ms: u64) {
+    let phases = [("resume", resume_ms), ("pm_ensure", pm_ensure_ms)];
+    match restore_drain_stall_warning(&phases) {
+        Some(message) => tracing::warn!(
+            target: "gwt.frontend.timing",
+            event = "StartupAutoResumeReady",
+            resumed_sessions,
+            resume_ms,
+            pm_ensure_ms,
+            "{message}"
+        ),
+        None => tracing::debug!(
+            target: "gwt.frontend.timing",
+            event = "StartupAutoResumeReady",
+            resumed_sessions,
+            resume_ms,
+            pm_ensure_ms,
+            "restore_drain phase breakdown"
+        ),
+    }
+}
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
@@ -1067,11 +1117,8 @@ impl AppRuntime {
         // sink, so the bootstrap-time settle is recorded here, on the first
         // canvas-ready round trip, where a client is guaranteed to listen.
         let mut events = self.update_resume_notice_events();
-        if self.pending_startup_auto_resume_sessions.is_empty() {
-            events.extend(self.startup_pm_ensure_ready_events());
-            return events;
-        }
 
+        let resume_started = Instant::now();
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
         let total = pending.len();
         for (index, pending_session) in pending.into_iter().enumerate() {
@@ -1086,7 +1133,14 @@ impl AppRuntime {
             );
             events.append(&mut spawned);
         }
+        let resume_ms = resume_started.elapsed().as_millis() as u64;
+
+        let pm_ensure_started = Instant::now();
         events.extend(self.startup_pm_ensure_ready_events());
+        let pm_ensure_ms = pm_ensure_started.elapsed().as_millis() as u64;
+
+        // Issue #4375 AC-4: the drain's internals, not just its total.
+        log_restore_drain_breakdown(total, resume_ms, pm_ensure_ms);
         events
     }
 
@@ -1130,19 +1184,46 @@ impl AppRuntime {
         if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
             return Vec::new();
         }
+        // Issue #4375: refreshing the resident PM's worktree is Git work whose
+        // cost scales with the repository, and this path runs inside the
+        // canvas-ready restore drain. Prepare it off the event loop and resume
+        // the spawn from the completion event.
         if gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
-            if let Err(error) =
-                gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&session.worktree_path)
-            {
-                tracing::warn!(
-                    session_id = %session.id,
-                    worktree = %session.worktree_path.display(),
-                    %error,
-                    "failed to refresh the resident PM before resume"
-                );
+            let Some(project_root) = self.tab(tab_id).map(|tab| tab.project_root.clone()) else {
                 return Vec::new();
-            }
+            };
+            return self.spawn_pm_worktree_preparation(
+                super::pm::PmWorktreeContinuation::ResumeSession {
+                    tab_id: tab_id.to_string(),
+                    project_root,
+                    session: Box::new(session),
+                    workspace_resume_context,
+                    fallback_geometry,
+                    origin,
+                    register_pm_launch: false,
+                },
+            );
         }
+        self.spawn_prepared_restored_agent_session(
+            tab_id,
+            session,
+            workspace_resume_context,
+            fallback_geometry,
+            origin,
+        )
+    }
+
+    /// The part of [`Self::spawn_restored_agent_session`] that runs once the PM
+    /// worktree — when the Session lives in one — has been prepared off the
+    /// GUI event loop.
+    pub(super) fn spawn_prepared_restored_agent_session(
+        &mut self,
+        tab_id: &str,
+        session: gwt_agent::Session,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+        origin: RestoreOrigin,
+    ) -> Vec<OutboundEvent> {
         let mut config = launch_config_from_persisted_session(&session);
         if origin == RestoreOrigin::UserRequested {
             config.launch_route = gwt_agent::LaunchRoute::Manual;
@@ -1605,28 +1686,80 @@ impl AppRuntime {
             .unwrap_or_default()
     }
 
+    /// Issue #4377: read on the startup thread only the Sessions startup may
+    /// restore — one a paused placeholder still references, or one whose file
+    /// changed inside the freshness window (a file is never older than the
+    /// `last_activity_at` it records, and an older orphan is refused as
+    /// `Stale` anyway). Update-resumed projects bypass freshness, so they read
+    /// every Session. The rest get the same Interrupted judgement on the
+    /// blocking worker, keeping startup independent of the stopped-Session
+    /// count.
     pub(super) fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+        let started = std::time::Instant::now();
         let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
             return Vec::new();
         };
-        entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
-            .filter_map(|path| {
-                let session_id = path.file_stem()?.to_str()?;
-                gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
-                    if session.status != gwt_agent::AgentStatus::Interrupted
-                        && session.worktree_path.exists()
-                        && session.should_mark_interrupted_from_lifecycle()
-                    {
-                        session.update_status(gwt_agent::AgentStatus::Interrupted);
-                    }
-                    Ok(())
-                })
-                .ok()
-            })
-            .collect()
+        let fresh_after = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(
+            STARTUP_AUTO_RESUME_STALE_AFTER_SECS.unsigned_abs(),
+        ));
+        let read_all = !self.update_resume_tab_ids.is_empty();
+        let mut candidates = Vec::new();
+        let mut deferred = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let fresh = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .map_or(true, |modified| {
+                    fresh_after.is_none_or(|after| modified >= after)
+                });
+            if read_all
+                || fresh
+                || self
+                    .paused_placeholder_tab_for_session(session_id)
+                    .is_some()
+            {
+                candidates.push(session_id.to_string());
+            } else {
+                deferred.push(session_id.to_string());
+            }
+        }
+
+        let sessions = candidates
+            .iter()
+            .filter_map(|session_id| Self::load_recovery_session(&self.sessions_dir, session_id))
+            .collect();
+        gwt::perf::startup::session_load(started, candidates.len());
+        if !deferred.is_empty() {
+            let sessions_dir = self.sessions_dir.clone();
+            if let Err(error) = self.blocking_tasks.try_spawn(move || {
+                for session_id in &deferred {
+                    let _ = Self::load_recovery_session(&sessions_dir, session_id);
+                }
+            }) {
+                tracing::warn!(%error, "deferred Session recovery sweep could not be scheduled");
+            }
+        }
+        sessions
+    }
+
+    fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
+        gwt_agent::update_session_if_changed(sessions_dir, session_id, |session| {
+            if session.status != gwt_agent::AgentStatus::Interrupted
+                && session.worktree_path.exists()
+                && session.should_mark_interrupted_from_lifecycle()
+            {
+                session.update_status(gwt_agent::AgentStatus::Interrupted);
+            }
+            Ok(())
+        })
+        .ok()
     }
 
     pub(crate) fn set_agent_capability_issuer(&mut self, issuer: AgentCapabilityIssuer) {
