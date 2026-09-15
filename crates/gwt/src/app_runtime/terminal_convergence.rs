@@ -729,13 +729,12 @@ impl AppRuntime {
         }
     }
 
-    /// FR-047: persist the restore refusal (Session Stopped + restore
-    /// disabled) and drop the paused placeholder so nothing spawns.
-    pub(crate) fn refuse_terminal_session_restore(
+    /// Persist a terminal/empty restore refusal and remove its placeholder.
+    pub(crate) fn remove_refused_session_restore(
         &mut self,
         tab_id: &str,
         session_id: &str,
-        reason: TerminalCloseReason,
+        reason: &str,
     ) {
         match gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
             session.restore_window_on_startup = false;
@@ -747,8 +746,8 @@ impl AppRuntime {
             Ok(_) => tracing::info!(
                 target: "gwt.pane.teardown",
                 session_id,
-                reason = reason.as_str(),
-                "automatic restore refused: the linked Work is terminal"
+                reason,
+                "automatic restore refused: removing the stopped placeholder"
             ),
             Err(error) => tracing::warn!(
                 target: "gwt.pane.teardown",

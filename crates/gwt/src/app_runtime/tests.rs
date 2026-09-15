@@ -69287,6 +69287,65 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
 }
 
 #[test]
+fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let mut tab = restore_fixture_tab(
+        "tab-landed",
+        &repo,
+        &[
+            ("empty".into(), "session-empty".into()),
+            ("diagnostic".into(), "session-diagnostic".into()),
+            ("error".into(), "session-error".into()),
+        ],
+    );
+    tab.workspace
+        .set_status("error", WindowProcessStatus::Error);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-landed"));
+    for id in ["session-empty", "session-diagnostic", "session-error"] {
+        save_restore_fixture_session(&runtime.sessions_dir, id, &repo, Some(id), None);
+    }
+    runtime.window_details.insert(
+        combined_window_id("tab-landed", "diagnostic"),
+        "The previous launch failed; inspect its diagnostic.".into(),
+    );
+
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    let windows = &runtime
+        .tab("tab-landed")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(
+        windows.len(),
+        2,
+        "only the empty landed placeholder disappears"
+    );
+    assert!(windows.iter().all(|window| window.id != "empty"));
+    assert_eq!(
+        windows
+            .iter()
+            .find(|window| window.id == "error")
+            .unwrap()
+            .status,
+        WindowProcessStatus::Error
+    );
+    let empty = gwt_agent::Session::load(&runtime.sessions_dir.join("session-empty.toml"))
+        .expect("load removed session");
+    assert!(!empty.restore_window_on_startup);
+    runtime.restore_open_project_windows("tab-landed");
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(runtime
+        .window_details
+        .contains_key(&combined_window_id("tab-landed", "diagnostic")));
+}
+
+#[test]
 fn startup_restore_queues_only_one_session_per_worktree() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

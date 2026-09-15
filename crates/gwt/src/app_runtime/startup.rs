@@ -69,6 +69,8 @@ pub(super) enum RestoreRefusal {
     NoResumeSession,
     DuplicateResumeSession,
     LandedWorktree,
+    EmptyLandedWorktree,
+    DiagnosticWindow,
     WorktreeAlreadyRestoring,
     ClosedWorkDiagnostic,
     AlreadyRunning,
@@ -92,6 +94,8 @@ impl RestoreRefusal {
             Self::NoResumeSession => "no_resume_session".to_string(),
             Self::DuplicateResumeSession => "duplicate_resume_session".to_string(),
             Self::LandedWorktree => "landed_worktree".to_string(),
+            Self::EmptyLandedWorktree => "empty_landed_worktree".to_string(),
+            Self::DiagnosticWindow => "diagnostic_window_retained".to_string(),
             Self::WorktreeAlreadyRestoring => "worktree_already_restoring".to_string(),
             Self::ClosedWorkDiagnostic => "closed_work_diagnostic_retained".to_string(),
             Self::AlreadyRunning => "already_running".to_string(),
@@ -99,6 +103,14 @@ impl RestoreRefusal {
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
             Self::TerminalWork(reason) => format!("terminal_work:{}", reason.as_str()),
             Self::TerminalFactsUnreadable(cause) => format!("terminal_facts_unreadable:{cause}"),
+        }
+    }
+
+    fn removal_reason(self) -> Option<&'static str> {
+        match self {
+            Self::TerminalWork(reason) => Some(reason.as_str()),
+            Self::EmptyLandedWorktree => Some("empty_landed_worktree"),
+            _ => None,
         }
     }
 
@@ -788,8 +800,8 @@ impl AppRuntime {
                 self.restore_admission(&session, &project_root, placeholder_window_id.as_deref())
             {
                 admission.refuse(&session.id, refusal);
-                if let RestoreRefusal::TerminalWork(reason) = refusal {
-                    self.refuse_terminal_session_restore(&tab_id, &session.id, reason);
+                if let Some(reason) = refusal.removal_reason() {
+                    self.remove_refused_session_restore(&tab_id, &session.id, reason);
                 }
                 continue;
             }
@@ -831,6 +843,9 @@ impl AppRuntime {
         project_root: &Path,
         window_id: Option<&str>,
     ) -> Result<(), RestoreRefusal> {
+        if window_id.and_then(|id| self.window_status(id)) == Some(WindowProcessStatus::Error) {
+            return Err(RestoreRefusal::DiagnosticWindow);
+        }
         // Preserve terminal cleanup before applying spawn-only refusals.
         match self.restore_work_terminality(session, project_root, window_id) {
             RestoreAdmission::RefuseTerminal(reason) => {
@@ -888,6 +903,9 @@ impl AppRuntime {
             .output()
             .is_ok_and(|output| output.status.success())
         {
+            if self.restore_placeholder_is_known_empty(session, window_id) {
+                return Err(RestoreRefusal::EmptyLandedWorktree);
+            }
             return Err(RestoreRefusal::LandedWorktree);
         }
         if launch_config_from_persisted_session(session).session_mode
@@ -896,6 +914,53 @@ impl AppRuntime {
             return Err(RestoreRefusal::NoResumeSession);
         }
         Ok(())
+    }
+
+    /// Only discard a provably empty placeholder. An unknown execution,
+    /// prior failure, or any text/runtime belongs to the operator to inspect.
+    fn restore_placeholder_is_known_empty(
+        &self,
+        session: &gwt_agent::Session,
+        window_id: Option<&str>,
+    ) -> bool {
+        let Some(id) = window_id else { return false };
+        let Some(address) = self.window_lookup.get(id) else {
+            return false;
+        };
+        let Some(window) = self
+            .tab(&address.tab_id)
+            .and_then(|tab| tab.workspace.window(&address.raw_id))
+        else {
+            return false;
+        };
+        session.linked_issue_number.is_none()
+            && window.linked_issue_number.is_none()
+            && window.status == WindowProcessStatus::Stopped
+            && matches!(
+                session.status,
+                gwt_agent::AgentStatus::Idle | gwt_agent::AgentStatus::Stopped
+            )
+            && !session.last_exit_code.is_some_and(|code| code != 0)
+            && session.last_exit_signal.is_none()
+            && !self.runtimes.contains_key(id)
+            && !self
+                .window_details
+                .get(id)
+                .is_some_and(|text| !text.trim().is_empty())
+            && !self
+                .launch_error_terminal_details
+                .get(id)
+                .is_some_and(|text| !text.trim().is_empty())
+            && !window
+                .dynamic_title_detail
+                .as_ref()
+                .is_some_and(|text| !text.trim().is_empty())
+            && gwt::cli::execution_state::diagnose_for_projection(
+                &session.worktree_path,
+                Some(&session.id),
+            )
+            .ecr_status
+                == gwt::cli::execution_state::ExecutionDiagnosisState::Missing
     }
 
     /// Reap every integrity-valid stale Active owner visible in the fixed
@@ -1378,8 +1443,8 @@ impl AppRuntime {
                         self.restore_admission(&session, &project_root, Some(&combined))
                     {
                         admission.refuse(&session.id, refusal);
-                        if let RestoreRefusal::TerminalWork(reason) = refusal {
-                            self.refuse_terminal_session_restore(tab_id, &session.id, reason);
+                        if let Some(reason) = refusal.removal_reason() {
+                            self.remove_refused_session_restore(tab_id, &session.id, reason);
                             events.push(self.workspace_state_broadcast());
                         }
                         continue;
@@ -1420,8 +1485,10 @@ impl AppRuntime {
             .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
             .find(|tab| {
                 tab.workspace.persisted().windows.iter().any(|window| {
-                    window.status == WindowProcessStatus::Stopped
-                        && crate::runtime_support::window_is_agent_pane(window)
+                    matches!(
+                        window.status,
+                        WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    ) && crate::runtime_support::window_is_agent_pane(window)
                         && window.session_id.as_deref() == Some(session_id)
                 })
             })
