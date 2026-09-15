@@ -319,6 +319,56 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     assert!(exclude.contains(".codex/skills/gwt-*"));
 }
 
+/// Issue #4339 AC-1 / AC-3: a worktree inherits `core.hooksPath` through git
+/// config while the directory it names arrives empty, so worktree
+/// materialization has to make the required hooks real — without adding a
+/// tracked diff.
+#[test]
+fn refresh_managed_gwt_assets_materializes_the_configured_git_hook_directory() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    run_git(root, &["init", "-q"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "core.hooksPath", ".husky/_"]);
+    std::fs::create_dir_all(root.join(".husky")).expect("create .husky");
+    std::fs::write(
+        root.join(".husky/commit-msg"),
+        "#!/usr/bin/env sh\nexit 0\n",
+    )
+    .expect("write commit-msg source");
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-q", "-m", "feat: seed"]);
+    let cli_bin = root.join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+    assert!(
+        !root.join(".husky/_/commit-msg").exists(),
+        "the configured hook directory must start out empty"
+    );
+
+    refresh_managed_gwt_assets_for_worktree(root).expect("refresh managed assets");
+
+    assert!(
+        root.join(".husky/_/commit-msg").is_file(),
+        "materialization must create the hook core.hooksPath points at"
+    );
+    let status = hidden_command("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git status");
+    assert!(
+        String::from_utf8_lossy(&status.stdout)
+            .lines()
+            .all(|line| !line.contains(".husky")),
+        "materialized hooks must stay out of the tracked diff: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hooks() {
@@ -846,6 +896,45 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
         gwt_skills::pm_guidance::render_skill_md(),
         "a tampered or stale contract must be rewritten from the canonical source"
     );
+}
+
+/// Issue #3825 AC-5: both generated mirrors must be the canonical
+/// `pm_guidance` source verbatim, and both must carry the nonblocking resident
+/// loop. `.codex` was only ever asserted to exist, so a Codex PM could have
+/// been handed a mirror that disagreed with the Claude one about how long a
+/// cycle may block.
+#[test]
+fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
+    let canonical = gwt_skills::pm_guidance::render_skill_md();
+
+    for (agent, mirror) in [
+        (AgentId::ClaudeCode, ".claude/skills/gwt-pm/SKILL.md"),
+        (AgentId::Codex, ".codex/skills/gwt-pm/SKILL.md"),
+    ] {
+        let home = tempdir().expect("tempdir");
+        let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
+        let rendered = std::fs::read_to_string(worktree.join(mirror))
+            .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
+        assert_eq!(
+            rendered, canonical,
+            "{mirror} must be the canonical pm_guidance source verbatim"
+        );
+        for phrase in [
+            "`params.timeout_seconds:5`",
+            "as a background task",
+            "Do not await or synchronously poll it",
+            "outer wall-clock deadline of 5 seconds",
+        ] {
+            assert!(
+                rendered.contains(phrase),
+                "{mirror} must carry the nonblocking resident loop: {phrase}"
+            );
+        }
+        assert!(
+            !rendered.contains("`params.timeout_seconds:60`"),
+            "{mirror} must not restore the 60-second blocking subscribe"
+        );
+    }
 }
 
 /// Per-target isolation holds for gwt-pm exactly as it does for
