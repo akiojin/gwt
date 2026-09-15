@@ -125,16 +125,13 @@ pub fn spawn(request: &VerificationSpawnRequest) -> Result<VerificationChild, St
     // The caller sends its complete environment because the daemon's own is
     // not the caller's, and a test runner that sees a different environment
     // produces verdicts nobody can reproduce — hence `inherit_env(false)`.
-    let plan = request
-        .env
-        .iter()
-        .fold(
-            gwt_core::process::ProcessPlanRequest::new(&request.program)
-                .args(&request.args)
-                .current_dir(&request.cwd)
-                .inherit_env(false),
-            |plan, (key, value)| plan.env(key, value),
-        );
+    let plan = request.env.iter().fold(
+        gwt_core::process::ProcessPlanRequest::new(&request.program)
+            .args(&request.args)
+            .current_dir(&request.cwd)
+            .inherit_env(false),
+        |plan, (key, value)| plan.env(key, value),
+    );
     let mut command = gwt_core::process::resolved_command(plan)
         .map_err(|err| format!("failed to resolve '{}': {err}", request.program))?;
     command
