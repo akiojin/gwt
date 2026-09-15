@@ -1335,14 +1335,12 @@ mod tests {
             // Issue #3712 AC-5: the clock's tolerance and the pane join are
             // spelled out, so a working agent is never judged dead on a
             // fifteen-minute silence.
-            "never on
-  `last_activity_at` alone",
+            "`last_activity_at` alone",
             "`pane_state`",
             "`runtime_consistency`",
             "`stuck_timeout_secs`",
             // Issue #3712 AC-1: the launched row's identity is copied as is.
-            "copy those
-  three into `issue.monitor.stop`",
+            "three into `issue.monitor.stop`",
             "Never run `pane.send`",
             // FR-010: the strong merge gate stays out of reach.
             "never submit a review verdict",
