@@ -20,11 +20,25 @@ jobs:
       # changed package set can never be served the previous archive. The
       # extra packages passed below are not in that hash, so the key prefix
       # names them (Issue #4134 AC-4 adds `dbus` for `dbus-run-session`).
+      #
+      # Issue #4268: that prefix also put this job in its own cache namespace.
+      # With no restore-keys the key hit only on an exact match, so `Test
+      # (Rust)` could never reuse the archives `Build` / `Clippy` had already
+      # warmed under `gwt-apt-gtk-` even though `gtk-deps` is a strict subset of
+      # `gtk-deps xvfb dbus` — and its own key was written only by a run that
+      # succeeded, which is the run that kept failing. That is the asymmetry
+      # behind `Test (Rust)` failing while the other Linux jobs passed, and it
+      # is why a stalled mirror had all 59.2 MB to stall on. The second
+      # fallback reaches the shared namespace; only xvfb and dbus are then
+      # missing from it.
       - name: Cache Linux GTK dependency packages
         uses: actions/cache@v6
         with:
           path: ~/.cache/gwt-apt-archives
           key: gwt-apt-gtk-xvfb-dbus-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
+          restore-keys: |
+            gwt-apt-gtk-xvfb-dbus-${{ runner.os }}-
+            gwt-apt-gtk-${{ runner.os }}-
         timeout-minutes: 5
       # Issue #4191: measured over the last 60 green runs this step takes p50
       # 29s, p90 48s, p95 60s, max 106s, so the previous 5-minute cap sat at

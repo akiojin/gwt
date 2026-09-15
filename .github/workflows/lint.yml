@@ -29,6 +29,16 @@ jobs:
         with:
           path: ~/.cache/gwt-apt-archives
           key: gwt-apt-gtk-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
+          # Issue #4268: without a prefix fallback the key only ever hits on an
+          # unchanged scripts/ci-apt.sh, so editing the script guarantees one
+          # cold run that fetches all 59.2 MB from a mirror -- which is the run
+          # a stalled mirror kills. The fallback restores the previous archives
+          # and lets apt fetch only the delta. Correctness does not depend on
+          # it: apt uses an archive only when the filename and version match
+          # what it resolved, and the exact key above still decides what is
+          # saved.
+          restore-keys: |
+            gwt-apt-gtk-${{ runner.os }}-
         timeout-minutes: 5
       # Issue #4191: scripts/ci-apt.sh owns the deadline (900s) and retries
       # inside it; this cap is only the outer net and must stay above it, so
@@ -61,6 +71,12 @@ jobs:
         run: bash scripts/check-frontend-bundle.sh
       - name: Check release flow contract
         run: bash scripts/check-release-flow.sh
+      # SPEC #3576: the Git hook contract, including the rule that `git push`
+      # starts no heavy Cargo job outside the host-wide verification lease.
+      # The script existed before but no workflow ran it, so the guard could
+      # not actually stop the regression it describes.
+      - name: Check Git hook contract
+        run: bash scripts/verify-husky-hooks.sh
       - name: Run Markdownlint
         uses: nosborn/github-action-markdown-cli@v3.5.0
         with:
