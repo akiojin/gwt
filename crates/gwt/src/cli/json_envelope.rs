@@ -828,6 +828,54 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.release_prepared" => {
+            // Issue #4161: owner-addressed like `execution.status`, because the
+            // Session that left the Prepared fence behind is gone and the
+            // operator clearing it is somewhere else in the same repository.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            let reason = required_string(params, "reason")?;
+            let operation_id = optional_string(params, "operation_id")?;
+            reject_unknown_params(
+                params,
+                &["issue", "spec", "reason", "operation_id"],
+                "execution.release_prepared",
+            )?;
+            let owner = match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (None, None) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared requires params.issue or params.spec"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared owner number must be greater than zero"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                },
+                (None, Some(number)) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number,
+                },
+            };
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id,
+                    reason,
+                },
+            )
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -2163,6 +2211,87 @@ mod tests {
         serialized["user_verification_result"] = json!("confirmed");
         let tampered = serde_json::from_value(serialized).unwrap();
         assert!(!verification_record::integrity_ok(&tampered));
+    }
+
+    #[test]
+    fn verify_run_rejects_autonomous_confirmation_and_allows_correction() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
+        let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut session = gwt_agent::Session::new(&repo, "test", gwt_agent::AgentId::Codex);
+        session.id = "session-4237".to_string();
+        session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git --version"], "user_verification_result": "n/a"}),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let original = verification_record::load(&repo).unwrap().unwrap();
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git init must-not-run"],
+                "user_verification_result": "**Confirmed** (launch instructions)"
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        let output = String::from_utf8_lossy(&env.stdout);
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("autonomous"), "{output}");
+        assert!(
+            output.contains("deferred (autonomous execution)"),
+            "{output}"
+        );
+        assert!(output.contains("verify.run"), "{output}");
+        assert!(!repo.join("must-not-run").exists());
+        assert_eq!(
+            verification_record::load(&repo).unwrap().unwrap().record_id,
+            original.record_id,
+            "a rejected result must preserve the preceding record"
+        );
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": "deferred (autonomous execution)"
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert_eq!(
+            verification_record::load(&repo)
+                .unwrap()
+                .unwrap()
+                .user_verification_result
+                .as_deref(),
+            Some("deferred (autonomous execution)")
+        );
+
+        let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _unknown = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "legacy-4237");
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git init legacy-must-not-run"], "user_verification_result": "confirmed"}),
+        );
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!repo.join("legacy-must-not-run").exists());
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report
@@ -3776,6 +3905,61 @@ mod tests {
             ),
             CliParseError::InvalidJson(message)
                 if message.contains("only accepts params.operation_id")
+        ));
+        // Issue #4161: the release is owner-addressed, so the owner is
+        // required rather than inferred from the caller's own record.
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "the launch that prepared it is gone"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id: None,
+                    ..
+                }
+            ) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 4161,
+                }
+        ));
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"spec": 4161, "reason": "stale fence", "operation_id": "fresh-launch-7"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    operation_id: Some(operation_id),
+                    ..
+                }
+            ) if operation_id == "fresh-launch-7"
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"reason": "stale fence"})),
+            CliParseError::InvalidJson(message)
+                if message.contains("requires params.issue or params.spec")
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"issue": 4161})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "spec": 4161, "reason": "stale fence"})
+            ),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "stale fence", "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("does not accept the parameter unexpected")
         ));
     }
 
