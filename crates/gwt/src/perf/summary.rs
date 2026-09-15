@@ -58,6 +58,9 @@ pub struct PerfLogRecord {
     /// Wall-clock length of the over-budget run (violations only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<f64>,
+    /// Shared detector version; absent on legacy or unverified measurements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detector_version: Option<u32>,
 }
 
 impl PerfLogRecord {
@@ -174,6 +177,9 @@ pub struct PerfTargetSummary {
     /// Budget in force for this target, when one is defined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<f64>,
+    /// Whether the budget is route-specific or a shared class default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_source: Option<&'static str>,
     /// Whether `p95` exceeds `budget`.
     pub over_budget: bool,
     /// Sustained violations recorded for this target in the same period.
@@ -196,6 +202,10 @@ pub struct PerfSummary {
     pub missing_routes: Vec<String>,
     /// Per-target aggregates, worst p95 first.
     pub targets: Vec<PerfTargetSummary>,
+    /// Rules in force, including targets absent from this period.
+    pub monitoring_rules: Vec<PerfMonitoringRule>,
+    /// Distinguishes shared detection from legacy or unverified samples.
+    pub detector_coverage: PerfDetectorCoverage,
 }
 
 /// Full `perf.violations` payload.
@@ -210,6 +220,98 @@ pub struct PerfViolationsReport {
     pub count: usize,
     /// The violations themselves, oldest first.
     pub violations: Vec<PerfLogRecord>,
+    /// Zero violations alone do not prove that detection covered the period.
+    pub detector_coverage: PerfDetectorCoverage,
+}
+
+/// A route budget or the common budget applied to an operation class.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PerfMonitoringRule {
+    /// Stream to which this rule applies.
+    pub stream: &'static str,
+    /// Exact route target or the operation wildcard.
+    pub target: String,
+    /// Operation classification, absent for route rules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<&'static str>,
+    /// Effective ceiling in milliseconds.
+    pub budget: f64,
+    /// Identifies common class budgets that have not been tuned per operation.
+    pub budget_source: &'static str,
+}
+
+/// Detection coverage for the samples selected by the report filters.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PerfDetectorCoverage {
+    /// Includes legacy collectors and fail-open samples without shared detection.
+    pub legacy_sample_count: usize,
+    /// Samples marked as evaluated by the shared detector.
+    pub shared_sample_count: usize,
+    /// Explains why absence of violations is inconclusive for unverified samples.
+    pub note: &'static str,
+}
+
+impl PerfDetectorCoverage {
+    fn from_records(records: &[PerfLogRecord]) -> Self {
+        let mut coverage = Self {
+            legacy_sample_count: 0,
+            shared_sample_count: 0,
+            note: "Legacy or unverified samples may omit violations; zero violations does not establish compliance for them.",
+        };
+        for record in records.iter().filter(|record| record.is_sample()) {
+            if record.detector_version == Some(1) {
+                coverage.shared_sample_count += 1;
+            } else {
+                coverage.legacy_sample_count += 1;
+            }
+        }
+        coverage
+    }
+}
+
+fn route_budget_source(route: PerfRoute) -> &'static str {
+    match route {
+        PerfRoute::ProjectSwitch | PerfRoute::PaneClose | PerfRoute::PromptSend => {
+            "interaction_class_default"
+        }
+        _ => "route_specific",
+    }
+}
+
+fn budget_source(target: &str, role: Option<&str>) -> Option<&'static str> {
+    if let Some(route) = PerfRoute::from_target(target) {
+        return Some(route_budget_source(route));
+    }
+    match role {
+        Some(OPERATION_ROLE_READ | OPERATION_ROLE_MUTATION) => Some("operation_class_default"),
+        _ => None,
+    }
+}
+
+fn monitoring_rules(budgets: &PerfBudgets) -> Vec<PerfMonitoringRule> {
+    let mut rules: Vec<_> = PerfRoute::ALL
+        .into_iter()
+        .map(|route| PerfMonitoringRule {
+            stream: "ui",
+            target: route.target(),
+            role: None,
+            budget: route.budget_ms(budgets),
+            budget_source: route_budget_source(route),
+        })
+        .collect();
+    for (role, budget) in [
+        (OPERATION_ROLE_READ, budgets.gwtd_read_p95_ms),
+        (OPERATION_ROLE_MUTATION, budgets.gwtd_mutation_p95_ms),
+    ] {
+        rules.push(PerfMonitoringRule {
+            stream: "op",
+            target: "gwtd:*".to_string(),
+            role: Some(role),
+            budget,
+            budget_source: "operation_class_default",
+        });
+    }
+    rules
 }
 
 /// Budget in force for a target, or `None` when the target is unbudgeted.
@@ -301,6 +403,8 @@ pub fn summarize(
             .count(),
         missing_routes,
         targets,
+        monitoring_rules: monitoring_rules(budgets),
+        detector_coverage: PerfDetectorCoverage::from_records(records),
     }
 }
 
@@ -317,6 +421,7 @@ pub fn violations(records: &[PerfLogRecord], since: Option<DateTime<Utc>>) -> Pe
         since,
         count: violations.len(),
         violations,
+        detector_coverage: PerfDetectorCoverage::from_records(records),
     }
 }
 
@@ -343,6 +448,7 @@ impl Bucket {
 
     fn finish(self, budgets: &PerfBudgets) -> PerfTargetSummary {
         let budget = budget_for_target(&self.target, self.role.as_deref(), budgets);
+        let budget_source = budget_source(&self.target, self.role.as_deref());
         let p95 = percentile(&self.values, 0.95);
         let worst = self
             .values
@@ -360,6 +466,7 @@ impl Bucket {
             worst: if self.values.is_empty() { 0.0 } else { worst },
             over_budget: budget.is_some_and(|budget| p95 > budget) && !self.values.is_empty(),
             budget,
+            budget_source,
             violations: self.violations,
         }
     }
@@ -507,6 +614,7 @@ mod tests {
                 budget: None,
                 consecutive_count: None,
                 duration_seconds: None,
+                detector_version: None,
             })
             .collect();
         records.push(PerfLogRecord {
@@ -521,6 +629,7 @@ mod tests {
             budget: Some(100.0),
             consecutive_count: Some(3),
             duration_seconds: Some(1.5),
+            detector_version: None,
         });
 
         let summary = summarize(&records, &budgets, Some(at(9, 0)));
@@ -554,6 +663,7 @@ mod tests {
                 budget: None,
                 consecutive_count: None,
                 duration_seconds: None,
+                detector_version: None,
             })
             .collect();
 
@@ -576,6 +686,7 @@ mod tests {
             budget: None,
             consecutive_count: None,
             duration_seconds: None,
+            detector_version: None,
         }];
 
         let summary = summarize(&records, &PerfBudgets::default(), None);
@@ -605,6 +716,65 @@ mod tests {
     }
 
     #[test]
+    fn operation_summary_identifies_its_budget_as_an_untuned_class_default() {
+        let record: PerfLogRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "type": "sample",
+            "timestamp": at(10, 0),
+            "stream": "op",
+            "target": "gwtd:search",
+            "role": "read",
+            "value": 10_000.0,
+            "unit": "ms"
+        }))
+        .expect("operation sample");
+        let budgets = PerfBudgets {
+            gwtd_read_p95_ms: 250.0,
+            ..PerfBudgets::default()
+        };
+
+        let payload =
+            serde_json::to_value(summarize(&[record], &budgets, None)).expect("summary JSON");
+
+        assert_eq!(payload["targets"][0]["budget"], 250.0);
+        assert_eq!(
+            payload["targets"][0]["budget_source"], "operation_class_default",
+            "a class-wide override is still not an individually tuned operation budget"
+        );
+    }
+
+    #[test]
+    fn summary_lists_all_route_and_operation_rules_even_without_samples() {
+        let budgets = PerfBudgets::default();
+        let payload = serde_json::to_value(summarize(&[], &budgets, None)).expect("summary JSON");
+        let rules = payload["monitoring_rules"]
+            .as_array()
+            .expect("monitoring rules");
+
+        assert_eq!(rules.len(), PerfRoute::ALL.len() + 2);
+        for route in PerfRoute::ALL {
+            let rule = rules
+                .iter()
+                .find(|rule| rule["target"] == route.target())
+                .expect("every instrumented route has a rule even when unmeasured");
+            assert_eq!(rule["stream"], "ui");
+            assert_eq!(rule["budget"], route.budget_ms(&budgets));
+        }
+        let read = rules
+            .iter()
+            .find(|rule| rule["target"] == "gwtd:*" && rule["role"] == "read")
+            .expect("read-only operation rule");
+        let mutation = rules
+            .iter()
+            .find(|rule| rule["target"] == "gwtd:*" && rule["role"] == "mutation")
+            .expect("mutation operation rule");
+        assert_eq!(read["budget"], budgets.gwtd_read_p95_ms);
+        assert_eq!(mutation["budget"], budgets.gwtd_mutation_p95_ms);
+        assert_eq!(read["budget_source"], "operation_class_default");
+        assert_eq!(mutation["budget_source"], "operation_class_default");
+    }
+
+    #[test]
     fn violations_report_keeps_only_violation_records() {
         let records = vec![
             PerfLogRecord {
@@ -619,6 +789,7 @@ mod tests {
                 budget: None,
                 consecutive_count: None,
                 duration_seconds: None,
+                detector_version: None,
             },
             PerfLogRecord {
                 schema_version: 1,
@@ -632,6 +803,7 @@ mod tests {
                 budget: Some(2_000.0),
                 consecutive_count: Some(3),
                 duration_seconds: Some(4.0),
+                detector_version: None,
             },
         ];
 

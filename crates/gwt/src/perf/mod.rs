@@ -85,6 +85,13 @@ impl PerfSink {
         }
     }
 
+    pub(crate) fn append_budgeted(&mut self, record: &PerfRecord, budget: f64) -> io::Result<()> {
+        match self.store.as_mut() {
+            Some(store) => store.append_budgeted(record, budget),
+            None => Ok(()),
+        }
+    }
+
     /// Build and persist one sample record.
     pub fn record_sample(
         &mut self,

@@ -299,4 +299,39 @@ mod tests {
         assert!(parse_since("2026-09-08T10:00:00Z").is_ok());
         assert!(parse_since("yesterday").is_err());
     }
+
+    #[test]
+    fn both_reports_distinguish_legacy_and_shared_detection_without_rewriting_history() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let legacy = sample("route:search", "ui", 10_000.0);
+        let mut shared = sample("route:search", "ui", 11_000.0);
+        shared["detector_version"] = serde_json::json!(1);
+        let mut excluded = sample("route:startup", "ui", 12_000.0);
+        excluded["detector_version"] = serde_json::json!(1);
+        seed_perf_log(&[legacy, shared, excluded]);
+        let path = gwt_logs_dir().join("perf/perf-2026-09-08.jsonl");
+        let before = fs::read(&path).expect("original log");
+        let mut env = TestEnv::new(home.path().to_path_buf());
+
+        for command in [
+            PerfCommand::Summary {
+                since: None,
+                stream: Some("ui".to_string()),
+                target: Some("route:search".to_string()),
+            },
+            PerfCommand::Violations {
+                since: None,
+                stream: Some("ui".to_string()),
+                target: Some("route:search".to_string()),
+            },
+        ] {
+            let mut out = String::new();
+            assert_eq!(run(&mut env, command, &mut out).expect("report runs"), 0);
+            let payload: serde_json::Value = serde_json::from_str(&out).expect("report JSON");
+            assert_eq!(payload["detector_coverage"]["legacy_sample_count"], 1);
+            assert_eq!(payload["detector_coverage"]["shared_sample_count"], 1);
+        }
+        assert_eq!(fs::read(path).expect("unchanged log"), before);
+    }
 }

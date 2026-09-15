@@ -26,7 +26,6 @@ use super::{
     record::{PerfRecord, PerfStream, PerfUnit},
     route::PerfRoute,
     self_budget::SelfBudgetGovernor,
-    smoothing::ViolationSmoother,
     PerfSink, OPERATION_ROLE_MUTATION, OPERATION_ROLE_READ, OPERATION_TARGET_PREFIX,
 };
 
@@ -36,7 +35,6 @@ static GLOBAL: OnceLock<Mutex<PerfRuntime>> = OnceLock::new();
 pub struct PerfRuntime {
     sink: PerfSink,
     budgets: PerfBudgets,
-    smoother: ViolationSmoother,
     governor: SelfBudgetGovernor,
     last_collection_at: Option<Instant>,
 }
@@ -56,7 +54,6 @@ impl PerfRuntime {
         Ok(Self {
             sink,
             budgets: PerfBudgets::resolve(&config.budgets),
-            smoother: ViolationSmoother::new(),
             governor: SelfBudgetGovernor::new(config.self_budget_cpu_percent),
             last_collection_at: None,
         })
@@ -131,22 +128,7 @@ impl PerfRuntime {
                 PerfRecord::sample(now, stream, &target, value_ms, PerfUnit::Milliseconds),
                 role,
             );
-            let _ = self.sink.append(&sample);
-
-            if let Some(details) = self.smoother.observe(&target, value_ms, budget, now) {
-                let violation = with_role(
-                    PerfRecord::violation(
-                        now,
-                        stream,
-                        &target,
-                        value_ms,
-                        PerfUnit::Milliseconds,
-                        details,
-                    ),
-                    role,
-                );
-                let _ = self.sink.append(&violation);
-            }
+            let _ = self.sink.append_budgeted(&sample, budget);
         }
 
         self.governor
@@ -255,6 +237,20 @@ mod tests {
     fn read_all() -> Vec<crate::perf::summary::PerfLogRecord> {
         read_records_from_dir(&gwt_logs_dir().join("perf"), &PerfFilter::default())
             .expect("read perf records")
+    }
+
+    #[test]
+    fn a_busy_detector_keeps_an_unverified_sample_without_waiting() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let mut runtime = PerfRuntime::from_config(&PerfConfig::default()).expect("runtime");
+        let lock = fs::File::create(gwt_logs_dir().join("perf/detector.lock")).expect("lock file");
+        fs2::FileExt::lock_exclusive(&lock).expect("hold detector");
+        runtime.record_route(PerfRoute::Search, Duration::from_millis(5000));
+        let records = read_all();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].is_sample());
+        assert_eq!(records[0].detector_version, None);
     }
 
     #[test]
