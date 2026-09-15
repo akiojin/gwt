@@ -1158,7 +1158,6 @@ mod tests {
             path: worktree.clone(),
             label: "work/inventory-only".to_string(),
             branch: Some("work/inventory-only".to_string()),
-            session_ids: Vec::new(),
             is_active: false,
         }];
         let work_items_path = temp.path().join("state/works.json");
