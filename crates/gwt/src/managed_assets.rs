@@ -1935,31 +1935,34 @@ mod tests {
     #[test]
     fn pm_repoint_transaction_holds_materializer_lock_through_callback() {
         let asset = ".claude/commands/gwt-execute.md";
-        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt"));
         seed_repoint_collision(&worktree, asset, "original");
-        let (entered, receiver) = std::sync::mpsc::channel();
-        let mut worker = None;
-        super::with_pm_repoint_transaction(&worktree, &target, || {
-            let other = worktree.clone();
-            worker = Some(std::thread::spawn(move || {
-                super::with_managed_asset_lock(&other, || {
-                    entered.send(()).unwrap();
-                    Ok(())
-                })
-                .unwrap();
-            }));
-            assert!(matches!(
-                receiver.recv_timeout(std::time::Duration::from_millis(100)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ));
+        let identity_root = gwt_git::worktree::main_worktree_root(&worktree).unwrap();
+        let identity = gwt_core::repo_hash::compute_path_hash(&identity_root);
+        let lock_path = gwt_core::paths::gwt_home()
+            .join("locks/managed-assets")
+            .join(format!("{identity}.lock"));
+        let contender = super::with_pm_repoint_transaction(&worktree, &target, || {
+            // Probe the actual lock, not a worker's scheduling delay. Keeping
+            // both handles on this thread also preserves the isolated HOME.
+            let contender = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)?;
+            let error = fs2::FileExt::try_lock_exclusive(&contender)
+                .expect_err("the transaction must hold the materializer lock during its callback");
+            assert!(
+                gwt_core::operation_deadline::is_lock_contended(&error),
+                "{error}"
+            );
             assert!(!worktree.join(asset).exists());
-            Ok(())
+            Ok(contender)
         })
         .unwrap();
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
-        worker.unwrap().join().unwrap();
+        fs2::FileExt::try_lock_exclusive(&contender)
+            .expect("the transaction must release the materializer lock after its callback");
+        fs2::FileExt::unlock(&contender).unwrap();
     }
 
     #[test]
