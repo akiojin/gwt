@@ -114,7 +114,8 @@ pub(crate) use launch_runtime::{
 pub(crate) use launch_runtime::{
     apply_windows_host_shell_wrapper, build_shell_process_launch,
     ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
-    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune, resolve_launch_worktree,
+    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune,
+    plan_orphan_intake_worktree_prune_from_inventory, resolve_launch_worktree,
     resolve_shell_launch_worktree, OrphanIntakePrunePlan,
 };
 #[cfg(test)]
@@ -1436,7 +1437,13 @@ enum UserEvent {
     WorkEventsIngested {
         project_root: PathBuf,
         changed: bool,
+        /// Issue #4378 AC-1: the worktree listing the startup ingest reused,
+        /// handed back so the reconcile does not list the worktrees again.
+        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
     },
+    /// Issue #4378 AC-2: the startup generation reaper finished on the
+    /// blocking worker; Issue Monitor launch deliveries held meanwhile replay.
+    StartupGenerationReaperCompleted,
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -3407,6 +3414,7 @@ mod tests {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            deferred_issue_monitor_launches: None,
             pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             restore_launch_windows: HashMap::new(),
@@ -9337,8 +9345,14 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
+                worktree_inventory,
             }) => {
-                let events = app.handle_work_events_ingested(project_root, changed);
+                let events =
+                    app.handle_work_events_ingested(project_root, changed, worktree_inventory);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::StartupGenerationReaperCompleted) => {
+                let events = app.handle_startup_generation_reaper_completed();
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {
