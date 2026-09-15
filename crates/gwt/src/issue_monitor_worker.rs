@@ -570,10 +570,13 @@ where
 
         let number = IssueNumber(issue.number);
         let cached = cache.load_entry(number);
+        // Issue #4392: the cache surfaces an unparseable SPEC with an empty
+        // section map. That is not a usable readiness source, so it goes
+        // through the targeted refresh and reports the parse failure.
         let cache_matches_live = issue.updated_at.as_ref().is_some_and(|updated_at| {
-            cached
-                .as_ref()
-                .is_some_and(|entry| entry.snapshot.updated_at.0 == *updated_at)
+            cached.as_ref().is_some_and(|entry| {
+                entry.spec_parse_error.is_none() && entry.snapshot.updated_at.0 == *updated_at
+            })
         });
         let entry = if cache_matches_live {
             cached
@@ -589,6 +592,14 @@ where
                 Ok(()) => {
                     let refreshed = cache.load_entry(number);
                     match refreshed {
+                        Some(entry) if entry.spec_parse_error.is_some() => {
+                            errors.push(format!(
+                                "issue #{} targeted refresh parse failed: {}",
+                                issue.number,
+                                entry.spec_parse_error.as_deref().unwrap_or_default()
+                            ));
+                            None
+                        }
                         Some(entry)
                             if issue.updated_at.as_ref().is_some_and(|updated_at| {
                                 entry.snapshot.updated_at.0 == *updated_at
