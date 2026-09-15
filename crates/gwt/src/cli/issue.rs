@@ -750,6 +750,14 @@ fn run_monitor_launch_now<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // Issue #4161 AC-5: same fence as `issue.monitor.requeue`. Promoting a row
+    // whose every launch is refused only moves the same failure to the head of
+    // the queue.
+    if let Some(refusal) = monitor_prepared_generation_fence_refusal(&project_root, number) {
+        out.push_str(&refusal.to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let (prefs, hold_cleared) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order.retain(|existing| *existing != number);
         prefs.priority_order.insert(0, number);
@@ -1231,6 +1239,17 @@ fn issues_held_by_provider(
 /// and the issue is terminal — so the safe teardown the PM already has under
 /// FR-066 composes with this stop instead of needing a second, redundant
 /// daemon→GUI channel that could disagree with it.
+///
+/// Issue #4200: the launch row is only one of the two holds a launch takes on
+/// an Issue. The other is its execution generation, and revoking the launch is
+/// exactly the decision that its holder must not return, so this releases that
+/// too — see [`crate::cli::execution_state::release_revoked_launch_generation`]
+/// for why no liveness proof is asked for. The two results are reported
+/// separately: `status` is about the launch row, `generation_release` is about
+/// the generation. That is also the recovery route for an Issue whose launch
+/// row is already gone but whose generation still refuses every relaunch: the
+/// stop reports `refused` / `not_running` for the row it did not find, and
+/// `released` for the generation it did.
 fn run_monitor_stop<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -1267,15 +1286,29 @@ fn run_monitor_stop<E: CliEnv>(
             // Fail closed: nothing was written, nothing is torn down, and the
             // caller is told which component disagreed so it can re-read the
             // snapshot rather than retry blindly.
-            out.push_str(&issue_monitor_stop_refusal(number, *mismatch, &identity).to_string());
+            //
+            // Issue #4200: `not_running` is the exception. It says no launch of
+            // ours holds this Issue, which is the same conclusion a successful
+            // stop reaches, so the generation is released here too — that is
+            // the recovery route for an Issue already stranded by a launch
+            // whose row is long gone. Every other mismatch means the caller is
+            // talking about a different launch, and stays completely inert.
+            let mut payload = issue_monitor_stop_refusal(number, *mismatch, &identity);
+            if matches!(mismatch, crate::IssueMonitorStopMismatch::NotRunning) {
+                merge_generation_release(
+                    &mut payload,
+                    release_revoked_launch_generation(&project_root, number, reason),
+                );
+            }
+            out.push_str(&payload.to_string());
             out.push('\n');
             return Ok(1);
         }
     };
 
+    let release = release_revoked_launch_generation(&project_root, number, reason);
     let stopped_window_id = stopped_window_id.filter(|window_id| !window_id.is_empty());
-    out.push_str(
-        &serde_json::json!({
+    let mut payload = serde_json::json!({
             "number": number,
             "status": status,
             "reason": reason,
@@ -1286,11 +1319,113 @@ fn run_monitor_stop<E: CliEnv>(
             } else {
                 "none"
             },
-        })
-        .to_string(),
-    );
+    });
+    merge_generation_release(&mut payload, release);
+    out.push_str(&payload.to_string());
     out.push('\n');
     Ok(0)
+}
+
+/// Issue #4200: release the execution generation `number` still holds, if any.
+///
+/// The owner ledger is repository-scoped but its transaction publishes worktree
+/// authority, so the worktree has to be named. The inventory scan resolves it
+/// from the same owner-ledger inspection the startup and scan reapers use, so
+/// the three can never disagree about which worktree owns a generation.
+///
+/// Every failure here is reported, never fatal: revoking the launch row is the
+/// operation the caller asked for, and a repository that cannot be enumerated
+/// (a bare project directory in a test, a missing git dir) must not turn a
+/// successful stop into an error.
+fn release_revoked_launch_generation(
+    project_root: &std::path::Path,
+    number: u64,
+    reason: &str,
+) -> Result<crate::cli::execution_state::LaunchGenerationRelease, String> {
+    let worktrees = crate::worktree_inventory::enumerate_worktrees(project_root, None)
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|_| vec![project_root.to_path_buf()]);
+    let scan = crate::cli::execution_state::inspect_startup_active_generation_ledgers(&worktrees);
+    let Some(candidate) = scan
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.owner.number == number)
+    else {
+        // The inventory scan only reports Active generations, so "no candidate"
+        // covers both "there is nothing to release" and "someone already
+        // released it". The operator needs those told apart — the second one is
+        // the answer to "why is this Issue still refusing launches?" — and the
+        // repository-scoped hold reader answers it without a worktree.
+        return Ok(
+            match crate::cli::execution_state::owner_generation_hold_for_project(
+                project_root,
+                number,
+            )
+            .map_err(|error| error.to_string())?
+            {
+                Some(hold) => {
+                    crate::cli::execution_state::LaunchGenerationRelease::AlreadyTerminal {
+                        generation_id: hold.generation_id,
+                    }
+                }
+                None => crate::cli::execution_state::LaunchGenerationRelease::NotHeld,
+            },
+        );
+    };
+    crate::cli::execution_state::release_revoked_launch_generation(
+        &candidate.worktree,
+        candidate.owner,
+        &format!("the operator revoked this launch: {reason}"),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn merge_generation_release(
+    payload: &mut serde_json::Value,
+    release: Result<crate::cli::execution_state::LaunchGenerationRelease, String>,
+) {
+    use crate::cli::execution_state::LaunchGenerationRelease as Release;
+
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    match release {
+        Ok(Release::Released {
+            generation_id,
+            holder_session_id,
+        }) => {
+            object.insert("generation_release".to_string(), "released".into());
+            object.insert("released_generation_id".to_string(), generation_id.into());
+            object.insert(
+                "released_generation_holder".to_string(),
+                holder_session_id.into(),
+            );
+        }
+        Ok(Release::AlreadyTerminal { generation_id }) => {
+            object.insert("generation_release".to_string(), "already_terminal".into());
+            object.insert("released_generation_id".to_string(), generation_id.into());
+        }
+        Ok(Release::NotHeld) => {
+            object.insert("generation_release".to_string(), "not_held".into());
+        }
+        Ok(Release::Held {
+            generation_id,
+            detail,
+        }) => {
+            object.insert("generation_release".to_string(), "held".into());
+            object.insert("released_generation_id".to_string(), generation_id.into());
+            object.insert("generation_release_detail".to_string(), detail.into());
+        }
+        Err(error) => {
+            object.insert("generation_release".to_string(), "error".into());
+            object.insert("generation_release_detail".to_string(), error.into());
+        }
+    }
 }
 
 /// SPEC-3431 FR-029〜031 / T-081: revoke one launch and requeue its issue for
@@ -1416,6 +1551,16 @@ fn run_monitor_requeue<E: CliEnv>(
     let stranded_launch = projection
         .as_ref()
         .is_some_and(|status| agent_status_launch_is_stranded(status, number));
+    // Issue #4161 AC-5: a Prepared successor/takeover fences the owner's
+    // execution generation and refuses every launch, and nothing clears it on
+    // its own. Releasing the failure hold here would answer `requeued` and let
+    // the next scan fail with the same message forever, so refuse now and name
+    // the operation that actually clears the fence.
+    if let Some(refusal) = monitor_prepared_generation_fence_refusal(&project_root, number) {
+        out.push_str(&refusal.to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let (prefs, (outcome, completion_hold_cleared)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -1558,6 +1703,46 @@ fn run_monitor_requeue<E: CliEnv>(
     // The release itself is committed even when the follow-up scan authority is
     // unavailable; scan delivery is reported truthfully in the JSON fields.
     Ok(0)
+}
+
+/// Issue #4161 AC-5: the refusal an operation that puts an issue back in the
+/// launch queue owes its caller while a Prepared transaction fences the
+/// owner's execution generation.
+///
+/// Only a fence that can no longer clear itself refuses: a launch that is
+/// materializing right now holds a Prepared transaction too, and the scan it
+/// is already running is exactly what the caller wants. A stale fence, by
+/// contrast, refuses every launch forever, so answering "queued" is a lie the
+/// caller can only discover one scan later. `None` means nothing durable
+/// fences the owner and the caller may proceed; an unreadable ledger also
+/// answers `None`, because a diagnosis that cannot be made is not evidence
+/// that the launch will fail.
+fn monitor_prepared_generation_fence_refusal(
+    project_root: &std::path::Path,
+    number: u64,
+) -> Option<serde_json::Value> {
+    let now = chrono::Utc::now();
+    let fence: Vec<_> = crate::cli::execution_state::blocking_prepared_transactions_for_project(
+        project_root,
+        number,
+    )
+    .ok()?
+    .into_iter()
+    .filter(|transaction| transaction.is_stale_at(now))
+    .collect();
+    if fence.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "number": number,
+        "status": "refused",
+        "refusal": "prepared_generation_fence",
+        "detail": format!(
+            "{} Prepared execution transaction(s) fence issue #{number}'s generation and refuse every launch; clear them with the execution.release_prepared JSON operation, then requeue",
+            fence.len()
+        ),
+        "blocking_prepared_transactions": fence,
+    }))
 }
 
 /// Issue #4077 AC-3: the claim a `BlockedByClaim` row is waiting on.
@@ -3498,6 +3683,8 @@ mod tests {
         }))
         .expect("projection wire format deserializes");
 
+        assert_eq!(status.gui_status, None);
+        assert_eq!(status.auto_apply_updates_effective, None);
         assert!(agent_status_blocked_by_claim(&status, 42).is_some());
         assert!(agent_status_blocked_by_claim(&status, 7).is_none());
         assert!(agent_status_blocked_by_claim(&status, 99).is_none());
@@ -4646,7 +4833,10 @@ mod tests {
             active_launches: vec![2338],
             max_active: 1,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -4665,6 +4855,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4679,7 +4870,10 @@ mod tests {
             active_launches: Vec::new(),
             max_active: 1,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -4712,6 +4906,9 @@ mod tests {
                 idle_kind: None,
                 idle_since: None,
                 duplicate_launch_refusal: None,
+                attempts: 0,
+                last_failure_message: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
@@ -4722,6 +4919,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -4787,7 +4985,10 @@ mod tests {
                 active_launches: Vec::new(),
                 max_active: 1,
                 enabled: true,
+                gui_status: None,
                 autonomous_mode: true,
+                auto_apply_updates: None,
+                auto_apply_updates_effective: None,
                 has_launch_profile: true,
                 quota_hold: None,
                 update_drain: None,
@@ -4820,6 +5021,9 @@ mod tests {
                     idle_kind: None,
                     idle_since: None,
                     duplicate_launch_refusal: None,
+                    attempts: 0,
+                    last_failure_message: None,
+                    failure_kind: None,
                 }],
                 closure_held: Vec::new(),
                 last_error: None,
@@ -4830,6 +5034,7 @@ mod tests {
                 disk_space: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
+                failure_surge: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: std::collections::BTreeMap::new(),
             };
@@ -4869,7 +5074,10 @@ mod tests {
             active_launches: Vec::new(),
             max_active: 1,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -4888,6 +5096,7 @@ mod tests {
             disk_space: None,
             issue_cache: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
         };
@@ -5015,6 +5224,22 @@ mod tests {
                 "the offline fallback reports {attached} too: {out}"
             );
         }
+        let gui_status = status
+            .as_object_mut()
+            .expect("status object")
+            .remove("gui_status")
+            .expect("GUI projection");
+        assert_eq!(gui_status["state"], "launching");
+        assert_eq!(gui_status["last_error"], serde_json::Value::Null);
+        assert_eq!(
+            gui_status["queue_len"],
+            status["queue"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            gui_status["active_count"],
+            status["active_launches"].as_array().unwrap().len()
+        );
+        assert_eq!(gui_status["max_active_agents"], status["max_active"]);
         assert_eq!(
             status,
             serde_json::json!({
@@ -5023,6 +5248,8 @@ mod tests {
                 "max_active": 3,
                 "enabled": true,
                 "autonomous_mode": false,
+                "auto_apply_updates": null,
+                "auto_apply_updates_effective": false,
                 "has_launch_profile": false,
                 "launch_profile_summary": "configure before auto start",
                 "launch_profile_candidates": [],
@@ -5771,7 +5998,7 @@ mod tests {
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -6223,6 +6450,134 @@ mod tests {
         assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
     }
 
+    /// Issue #4200 AC-1 / AC-3 / AC-5: revoking a launch releases its execution
+    /// generation, so the Issue can be launched again.
+    ///
+    /// Before this, `issue.monitor.stop` only ever touched Issue Monitor prefs.
+    /// The generation stayed Active under a holder whose durable Session still
+    /// read `Running` — the state a launch that died before its agent ever ran
+    /// leaves behind — so every evidence-based release route refused and the
+    /// next launch was refused with `an execution generation already exists`.
+    /// The slot was freed; the Issue was not.
+    #[test]
+    fn monitor_stop_releases_the_revoked_launch_execution_generation() {
+        use crate::cli::execution_state::{
+            ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind, LegacyActiveDisposition,
+        };
+
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        // The handler resolves its caller's `project_root` to the worktree root
+        // before it touches anything, so the fixture has to be built on the same
+        // resolution or it would be testing two different projects.
+        let repo = gwt_core::paths::resolve_current_worktree_root(
+            &std::fs::canonicalize(&repo).expect("canonical repo"),
+        );
+
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        crate::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            "revoked-holder-session",
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize the launch execution record");
+        crate::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            LegacyActiveDisposition::Live,
+        )
+        .expect("owner generation ledger");
+
+        let held = crate::cli::execution_state::owner_generation_hold_for_project(&repo, 42)
+            .expect("read the owner hold")
+            .expect("the launch holds a generation");
+        assert_eq!(
+            held.status,
+            ExecutionControlStatus::Active,
+            "the fixture must reproduce the Active hold a live launch leaves"
+        );
+
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "codex never got past its directory-trust prompt".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("\"status\":\"stopped\""), "{out}");
+        assert!(
+            out.contains("\"generation_release\":\"released\""),
+            "the caller must be told the generation was released: {out}"
+        );
+
+        let after = crate::cli::execution_state::owner_generation_hold_for_project(&repo, 42)
+            .expect("read the owner hold")
+            .expect("the generation is still on record as audit evidence");
+        assert_eq!(
+            after.status,
+            ExecutionControlStatus::Blocked,
+            "AC-1: revoking the launch must release its generation"
+        );
+        assert_eq!(
+            after.generation_id, held.generation_id,
+            "the released generation stays the same immutable audit entry"
+        );
+
+        // AC-5: a second stop is idempotent and reports the terminal state
+        // rather than pretending it released something.
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo),
+                number: 42,
+                reason: "codex never got past its directory-trust prompt".to_string(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: Some("tab-1::agent-1".to_string()),
+            },
+            &mut out,
+        )
+        .expect("stop runs");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("\"generation_release\":\"already_terminal\""),
+            "{out}"
+        );
+    }
+
     /// SPEC-3431 FR-029〜031 / T-081: the failover the PM calls when a provider
     /// runs out of quota.
     #[test]
@@ -6508,7 +6863,10 @@ mod tests {
             active_launches: Vec::new(),
             max_active: 3,
             enabled: true,
+            gui_status: None,
             autonomous_mode: true,
+            auto_apply_updates: None,
+            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -6541,6 +6899,9 @@ mod tests {
                 idle_since: None,
                 steering: None,
                 duplicate_launch_refusal: None,
+                attempts: 0,
+                last_failure_message: None,
+                failure_kind: None,
             }],
             closure_held: Vec::new(),
             last_error: None,
@@ -6552,6 +6913,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             review_windows: Vec::new(),
+            failure_surge: None,
             issue_cache: None,
         };
 
@@ -6702,6 +7064,136 @@ mod tests {
         .expect("requeue runs");
         assert_eq!(code, 1);
         assert!(out.contains("not_held"), "{out}");
+    }
+
+    /// Issue #4161 AC-5: a Prepared execution transaction refuses every launch
+    /// and never expires, so releasing the failure hold would answer
+    /// `requeued` and let the next scan record the identical failure. The
+    /// operation has to refuse now and name the release route instead.
+    #[test]
+    fn monitor_requeue_refuses_while_a_prepared_transaction_fences_the_generation() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        let owner = crate::cli::execution_state::ExecutionOwnerKey {
+            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        crate::cli::execution_state::save(
+            &repo,
+            &crate::cli::execution_state::ExecutionControlRecord {
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                primary_session_id: "fenced-holder".to_string(),
+                entrypoint: "$gwt-execute".to_string(),
+                bundled_required_owners: Vec::new(),
+                status: crate::cli::execution_state::ExecutionControlStatus::Active,
+                blocked_reason: None,
+                missing_verification: None,
+                launched_at: chrono::Utc::now(),
+                settled_at: None,
+                completion_evidence: None,
+                transfers: Vec::new(),
+                recoveries: Vec::new(),
+                content_hash: String::new(),
+            },
+        )
+        .expect("save execution record");
+        crate::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            crate::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .expect("materialize the owner ledger");
+        crate::cli::execution_state::prepare_active_continuation_successor(
+            &repo,
+            owner,
+            &crate::cli::execution_state::SuccessorRequest {
+                operation_id: "fence-operation".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "fence-binding".to_string(),
+                initial_session_id: "fence-candidate".to_string(),
+                entrypoint: "continue-work".to_string(),
+                // Old enough that the launch which prepared it has had every
+                // chance to activate or abort; its candidate Session never
+                // materialized, so nothing will clear this on its own.
+                requested_at: chrono::Utc::now() - chrono::Duration::hours(2),
+            },
+        )
+        .expect("leave a Prepared transaction behind");
+
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                priority_order: vec![42],
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: "manual successor refuses while a Prepared successor or takeover targets the current generation".to_string(),
+                    window_id: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "operator recovery".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue runs");
+        assert_eq!(code, 1, "{out}");
+        let response: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("refusal is JSON");
+        assert_eq!(response["status"], "refused");
+        assert_eq!(response["refusal"], "prepared_generation_fence");
+        assert_eq!(
+            response["blocking_prepared_transactions"][0]["operation_id"],
+            "fence-operation"
+        );
+        assert!(
+            response["detail"]
+                .as_str()
+                .expect("detail text")
+                .contains("execution.release_prepared"),
+            "{out}"
+        );
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "a refused recovery must be zero-mutation"
+        );
+
+        out.clear();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorLaunchNow {
+                project_root: Some(repo),
+                number: 42,
+            },
+            &mut out,
+        )
+        .expect("launch_now runs");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("prepared_generation_fence"), "{out}");
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs bytes"),
+            before,
+            "promoting a fenced row must not reorder the queue either"
+        );
     }
 
     #[test]
@@ -7476,7 +7968,7 @@ mod tests {
                     version: None,
                     session_mode: Default::default(),
                     skip_permissions: true,
-                    codex_fast_mode: false,
+                    fast_mode: false,
                     runtime_target: Default::default(),
                     docker_service: None,
                     docker_lifecycle_intent: Default::default(),
@@ -7506,7 +7998,10 @@ mod tests {
         .expect("config set");
         assert_eq!(code, 0, "output: {out}");
         let result: serde_json::Value = serde_json::from_str(out.trim()).expect("result JSON");
-        assert_eq!(result["launch_profile"], "claude / default / auto / host");
+        assert_eq!(
+            result["launch_profile"],
+            "claude / default / auto / host / fast:off"
+        );
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         let profile = prefs.launch_profile.expect("profile survives");
         assert_eq!(profile.agent_id, "claude");
