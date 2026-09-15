@@ -1674,6 +1674,14 @@ enum IssueMonitorControl {
         issue_number: u64,
         at: String,
     },
+    /// Issue #4286 AC-1/AC-2: the PM ruled the wait condition void; record
+    /// who / when / why and hand the row back to ordinary stuck detection.
+    WaitInvalidated {
+        issue_number: u64,
+        by: String,
+        reason: String,
+        at: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
@@ -2231,7 +2239,7 @@ fn try_apply_typed_issue_monitor_failure(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
             )
@@ -2348,6 +2356,17 @@ fn apply_routine_issue_monitor_control(
             let _ = monitor.clear_autonomous_wait(issue_number, &at);
             false
         }
+        IssueMonitorControl::WaitInvalidated {
+            issue_number,
+            by,
+            reason,
+            at,
+        } => {
+            // Not agent liveness: the next scan applies the ordinary rule
+            // from the agent's own last heartbeat.
+            let _ = monitor.invalidate_autonomous_wait(issue_number, &by, &reason, &at);
+            false
+        }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents(max_active_agents);
             true
@@ -2436,7 +2455,7 @@ fn apply_routine_issue_monitor_control(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
@@ -2878,6 +2897,22 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .get("reason")
                     .and_then(serde_json::Value::as_str)?
                     .to_string();
+                if wait
+                    .get("invalidate")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    let by = wait
+                        .get("by")
+                        .and_then(serde_json::Value::as_str)?
+                        .to_string();
+                    return Some(IssueMonitorControl::WaitInvalidated {
+                        issue_number,
+                        by,
+                        reason,
+                        at,
+                    });
+                }
                 let resume_condition = wait
                     .get("resume_condition")
                     .and_then(serde_json::Value::as_str)?
@@ -7789,6 +7824,62 @@ exit 0
             monitor.stuck_autonomous_issues("2026-06-29T02:31:00Z"),
             vec![42],
             "ordinary detection resumes from the clearing heartbeat"
+        );
+    }
+
+    #[test]
+    fn issue_monitor_wait_control_invalidates_the_wait() {
+        // Issue #4286 AC-1/AC-2: `wait.invalidate:true` from the PM records
+        // who / when / why on the declaration and hands the row back to
+        // ordinary stuck detection without counting as agent liveness.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "host lease 待ち",
+            "verify.lease.acquire が granted を返す",
+            "2026-06-29T00:10:00Z",
+        );
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "wait": {
+                    "issue_number": 42,
+                    "invalidate": true,
+                    "by": "session:pm",
+                    "reason": "bootstrap build needs no lease",
+                    "at": "2026-06-29T00:20:00Z",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("invalidate decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, control),
+            "an invalidation does not request a scan"
+        );
+        let waiting = monitor.autonomous_wait(42).expect("declaration kept");
+        let invalidated = waiting.invalidated.as_ref().expect("invalidation recorded");
+        assert_eq!(invalidated.by, "session:pm");
+        assert_eq!(invalidated.reason, "bootstrap build needs no lease");
+        assert_eq!(invalidated.at, "2026-06-29T00:20:00Z");
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T00:41:00Z"),
+            vec![42],
+            "ordinary detection resumes from the agent's last heartbeat"
         );
     }
 
