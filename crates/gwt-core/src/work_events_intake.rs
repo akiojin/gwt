@@ -1087,6 +1087,13 @@ impl WorkEventsIntakeState {
         self.projection_version = Some(version);
     }
 
+    /// How many mutations are journalled but not yet persisted.
+    ///
+    /// Zero means nothing about this state has changed since it was loaded.
+    pub fn pending_mutations(&self) -> usize {
+        self.journal.len()
+    }
+
     fn apply(&mut self, delta: WorkEventsIntakeDelta) {
         match delta {
             WorkEventsIntakeDelta::Source { k, f } => {

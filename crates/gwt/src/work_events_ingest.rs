@@ -472,7 +472,19 @@ where
         }
         let mut derived = Vec::new();
         let mut scan_failed = false;
-        for source in group.sources {
+        let group_key = group.key.clone();
+        let group_generation = group.generation.clone();
+        let group_prefix = group.source_prefix.clone();
+        let group_direct_children_only = group.direct_children_only;
+        let members = match group.take_sources() {
+            Ok(sources) => sources,
+            Err(error) => {
+                tracing::warn!(%error, group = %group_key, "work events ingest: shard store listing failed");
+                source_discovery_failed = true;
+                continue;
+            }
+        };
+        for source in members {
             let events_path = source.events_path.clone();
             match events_path.try_exists() {
                 Ok(true) => {}
@@ -513,7 +525,7 @@ where
             .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
             .collect::<HashMap<_, _>>();
         let mut stale = Vec::new();
-        for key in group_member_keys(&state, &group.source_prefix, group.direct_children_only) {
+        for key in group_member_keys(&state, &group_prefix, group_direct_children_only) {
             let recorded = state.sources.get(&key).map(String::as_str);
             if derived_by_key.get(key.as_str()).copied() != recorded {
                 rebuild_required = true;
@@ -526,7 +538,7 @@ where
             state.remove_source(&key);
         }
         if !scan_failed {
-            settled_worktree_groups.push((group.key, group.generation, derived.len()));
+            settled_worktree_groups.push((group_key, group_generation, derived.len()));
         }
         local_immutable_sources.extend(derived);
     }
@@ -705,6 +717,9 @@ where
                         let prefix = format!("{SOURCE_REF}{refname}:");
                         let live = blobs
                             .iter()
+                            .filter(|blob| {
+                                !is_work_event_writer_temp_residue(Path::new(&blob.path))
+                            })
                             .map(|blob| format!("{SOURCE_REF}{refname}:{}", blob.path))
                             .collect::<HashSet<_>>();
                         for key in group_member_keys(&state, &prefix, false) {
@@ -828,7 +843,14 @@ where
     for (key, fingerprint) in unread_current_sources {
         state.record(key, fingerprint);
     }
-    let discovered_source_list_fingerprint = tracked_source_list_fingerprint(&state);
+    // A pass that recorded no change to the tracked set cannot have changed
+    // the snapshot digest either, so the fold is skipped entirely — the one
+    // step still proportional to the number of known sources never runs on a
+    // settled trigger.
+    let discovered_source_list_fingerprint = match state.sources.get(SOURCE_LIST) {
+        Some(recorded) if state.pending_mutations() == 0 => recorded.clone(),
+        _ => tracked_source_list_fingerprint(&state),
+    };
     let source_list_changed = !state.is_current(SOURCE_LIST, &discovered_source_list_fingerprint);
 
     if rebuild_required && source_discovery_failed {
@@ -852,11 +874,15 @@ where
             // pass just proved are exactly what lets the next one skip the
             // derivation. A settled pass that persisted nothing would re-derive
             // every source forever.
-            for (key, generation, members) in settled_worktree_groups {
-                state.record_group(key, generation, members);
-            }
-            for (key, generation, members) in settled_ref_groups {
-                state.record_group(key, generation, members);
+            // A pass that could not read every source must not certify a
+            // generation: the unread source would look settled forever.
+            if !source_discovery_failed {
+                for (key, generation, members) in settled_worktree_groups {
+                    state.record_group(key, generation, members);
+                }
+                for (key, generation, members) in settled_ref_groups {
+                    state.record_group(key, generation, members);
+                }
             }
             state.record(SOURCE_LIST, discovered_source_list_fingerprint);
             match save_work_events_intake_state_incremental(state_path, &mut state) {
@@ -929,11 +955,13 @@ where
                 state.clear_sources();
                 state.clear_groups();
             }
-            for (key, generation, members) in settled_worktree_groups {
-                state.record_group(key, generation, members);
-            }
-            for (key, generation, members) in settled_ref_groups {
-                state.record_group(key, generation, members);
+            if !source_discovery_failed {
+                for (key, generation, members) in settled_worktree_groups {
+                    state.record_group(key, generation, members);
+                }
+                for (key, generation, members) in settled_ref_groups {
+                    state.record_group(key, generation, members);
+                }
             }
             for (key, fingerprint) in shared_fingerprints {
                 state.record(key, fingerprint);
@@ -993,10 +1021,11 @@ fn validate_work_event_store_path(events_dir: &Path) -> gwt_core::Result<bool> {
 fn worktree_event_sources(
     entries: &[gwt::worktree_inventory::WorktreeEntry],
 ) -> gwt_core::Result<Vec<WorkEventsSource>> {
-    Ok(worktree_event_source_groups(entries)?
-        .into_iter()
-        .flat_map(|group| group.sources)
-        .collect())
+    let mut sources = Vec::new();
+    for group in worktree_event_source_groups(entries)? {
+        sources.extend(group.take_sources()?);
+    }
+    Ok(sources)
 }
 
 /// One set of worktree sources that a single directory generation covers.
@@ -1022,7 +1051,39 @@ struct WorkEventsSourceGroup {
     /// The group is re-derived on every trigger because its member can be
     /// rewritten in place — only the mutable legacy log is.
     always_derive: bool,
+    /// Shard-store directory whose members are listed on demand.
+    dir: Option<PathBuf>,
+    container: Option<WorkspaceExecutionContainerRef>,
     sources: Vec<WorkEventsSource>,
+}
+
+impl WorkEventsSourceGroup {
+    /// The group's members, listing the directory the first time it is asked.
+    fn take_sources(self) -> gwt_core::Result<Vec<WorkEventsSource>> {
+        let Some(dir) = self.dir else {
+            return Ok(self.sources);
+        };
+        let mut entries = std::fs::read_dir(&dir)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut sources = Vec::with_capacity(entries.len());
+        for shard in entries {
+            if !shard.file_type()?.is_file() {
+                return Err(gwt_core::GwtError::Other(format!(
+                    "work event bucket entry is not a regular file: {}",
+                    shard.path().display()
+                )));
+            }
+            if is_work_event_writer_temp_residue(&shard.path()) {
+                continue;
+            }
+            sources.push(WorkEventsSource {
+                events_path: shard.path(),
+                kind: WorkEventsSourceKind::Shard,
+                container: self.container.clone(),
+            });
+        }
+        Ok(sources)
+    }
 }
 
 /// The mutable legacy log, plus one group per shard-store directory, for each
@@ -1051,6 +1112,8 @@ fn worktree_event_source_groups(
             source_prefix: format!("{SOURCE_WORKTREE}{}", legacy_path.display()),
             direct_children_only: false,
             always_derive: true,
+            dir: None,
+            container: container.clone(),
             sources: vec![WorkEventsSource {
                 events_path: legacy_path,
                 kind: WorkEventsSourceKind::Legacy,
@@ -1093,59 +1156,50 @@ fn worktree_event_source_groups(
             key: format!("{GROUP_WORKTREE}{}", events_dir.display()),
             generation: shard_directory_generation(
                 &events_dir,
-                flat.len(),
                 &index_identity,
                 container.as_ref(),
             )?,
             source_prefix: format!("{SOURCE_WORKTREE}{}/", events_dir.display()),
             direct_children_only: true,
             always_derive: false,
+            dir: None,
+            container: container.clone(),
             sources: flat,
         });
 
         for bucket in buckets {
-            let mut bucket_entries = std::fs::read_dir(&bucket)?.collect::<Result<Vec<_>, _>>()?;
-            bucket_entries.sort_by_key(std::fs::DirEntry::file_name);
-            let mut sources = Vec::new();
-            for shard in bucket_entries {
-                if !shard.file_type()?.is_file() {
-                    return Err(gwt_core::GwtError::Other(format!(
-                        "work event bucket entry is not a regular file: {}",
-                        shard.path().display()
-                    )));
-                }
-                if is_work_event_writer_temp_residue(&shard.path()) {
-                    continue;
-                }
-                sources.push(WorkEventsSource {
-                    events_path: shard.path(),
-                    kind: WorkEventsSourceKind::Shard,
-                    container: container.clone(),
-                });
-            }
+            // Issue #4397: the bucket's own directory generation is resolved
+            // from one stat. Listing its shards is deferred to
+            // `WorkEventsSourceGroup::sources`, which a trigger only asks for
+            // when the generation moved — otherwise enumerating every local
+            // shard would cost O(all shards) again, whatever the generations
+            // then proved.
             groups.push(WorkEventsSourceGroup {
                 key: format!("{GROUP_WORKTREE}{}", bucket.display()),
                 generation: shard_directory_generation(
                     &bucket,
-                    sources.len(),
                     &index_identity,
                     container.as_ref(),
                 )?,
                 source_prefix: format!("{SOURCE_WORKTREE}{}/", bucket.display()),
                 direct_children_only: true,
                 always_derive: false,
-                sources,
+                dir: Some(bucket),
+                container: container.clone(),
+                sources: Vec::new(),
             });
         }
     }
     Ok(groups)
 }
 
-/// Generation of one shard-store directory: what it holds, when it last
-/// changed, and which git state the worktree is on.
+/// Generation of one shard-store directory: when it last changed, and which
+/// git state the worktree is on.
+///
+/// Publishing or removing a shard updates the directory's own mtime, so the
+/// members never have to be listed to tell whether any of them moved.
 fn shard_directory_generation(
     dir: &Path,
-    members: usize,
     index_identity: &str,
     container: Option<&WorkspaceExecutionContainerRef>,
 ) -> gwt_core::Result<String> {
@@ -1157,7 +1211,7 @@ fn shard_directory_generation(
         .map(|since| since.as_nanos())
         .unwrap_or_default();
     Ok(source_fingerprint(
-        &format!("shard-dir-v1:{members}:{modified}:{index_identity}"),
+        &format!("shard-dir-v2:{modified}:{index_identity}"),
         container,
     ))
 }
@@ -2012,6 +2066,262 @@ mod tests {
         // legacy log, which carries no generation by design.
         let settled = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
         assert_eq!(settled.sources_rederived, 1, "{settled:?}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #4397 AC-2 scale benchmark.
+    //
+    // Reproduces the reported condition — 429,699 recorded source fingerprints
+    // (220,541 from fetched origin refs, 209,157 from local worktrees) with 40
+    // changed sources on the measured trigger — and reports the wall time and
+    // the bytes the trigger re-serialized.
+    //
+    // Ignored by default: the fixture writes ~210k files. Run with
+    //   cargo test --release -p gwt --bin gwt scale_benchmark -- --ignored --nocapture
+    // ---------------------------------------------------------------------
+
+    const BENCH_WORKTREES: usize = 39;
+    const BENCH_EVENTS: usize = 5_363;
+    const BENCH_REFS: usize = 701;
+    const BENCH_SHARDS_PER_REF: usize = 315;
+    const BENCH_CHANGED_SOURCES: usize = 40;
+
+    fn bench_event(index: usize) -> (String, String, String) {
+        let event_id = format!("evt-bench-{index:07}");
+        let digest = format!("{:x}", sha2::Sha256::digest(event_id.as_bytes()));
+        let line = event_line(
+            &event_id,
+            &format!("work-bench-{:04}", index % 400),
+            "Bench work",
+            "2026-09-01T00:00:00Z",
+        );
+        (event_id, digest, line)
+    }
+
+    /// Size and last-write time of the persisted intake state, base snapshot
+    /// plus the append-only delta when one exists.
+    fn bench_state_footprint(state_path: &Path) -> (u64, Option<std::time::SystemTime>, u64) {
+        let base = std::fs::metadata(state_path).ok();
+        let delta = std::fs::metadata(state_path.with_file_name("work-events-intake.delta.jsonl"))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        (
+            base.as_ref().map(|meta| meta.len()).unwrap_or(0),
+            base.and_then(|meta| meta.modified().ok()),
+            delta,
+        )
+    }
+
+    /// Bytes the trigger between the two footprints handed to the filesystem.
+    ///
+    /// A rewritten base snapshot costs its whole size; an appended delta costs
+    /// only its growth. Measuring it this way compares the two storage
+    /// strategies on the same terms.
+    fn bench_reserialized_bytes(
+        before: (u64, Option<std::time::SystemTime>, u64),
+        after: (u64, Option<std::time::SystemTime>, u64),
+    ) -> u64 {
+        let rewrote_base = before.1 != after.1;
+        let base_cost = if rewrote_base { after.0 } else { 0 };
+        base_cost + after.2.saturating_sub(before.2)
+    }
+
+    #[test]
+    #[ignore = "writes ~210k files; run explicitly for Issue #4397 AC-2"]
+    fn scale_benchmark_one_trigger_with_forty_changed_sources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+
+        let started = std::time::Instant::now();
+        let events: Vec<(String, String, String)> = (0..BENCH_EVENTS).map(bench_event).collect();
+
+        // 1) Local worktrees: BENCH_WORKTREES linked checkouts plus the main
+        //    one, each holding every shard, for 209,157 worktree sources.
+        let mut worktrees = vec![repo.clone()];
+        for index in 0..BENCH_WORKTREES {
+            let path = temp.path().join(format!("wt-{index:03}"));
+            let branch = format!("bench/wt-{index:03}");
+            let output = gwt_core::process::hidden_command("git")
+                .args(["worktree", "add", "-b", &branch])
+                .arg(&path)
+                .arg("HEAD")
+                .current_dir(&repo)
+                .output()
+                .expect("worktree add runs");
+            assert!(
+                output.status.success(),
+                "worktree add: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            worktrees.push(path);
+        }
+        for worktree in &worktrees {
+            for (_, digest, line) in &events {
+                let shard = worktree
+                    .join(EVENTS_TREE_DIR)
+                    .join(&digest[..2])
+                    .join(format!("{digest}.jsonl"));
+                std::fs::create_dir_all(shard.parent().expect("bucket")).expect("bucket");
+                std::fs::write(&shard, format!("{line}\n")).expect("shard");
+            }
+        }
+        let worktree_sources = worktrees.len() * events.len();
+
+        // 2) Fetched origin refs: BENCH_REFS commits, each carrying an
+        //    overlapping slice of the same shards, for 220,541 ref sources.
+        let mut stream = String::new();
+        for index in 0..BENCH_REFS {
+            stream.push_str(&format!(
+                "commit refs/remotes/origin/bench/ref-{index:04}\n"
+            ));
+            stream.push_str("mark :1\n");
+            stream.push_str("author Bench <bench@example.com> 1700000000 +0000\n");
+            stream.push_str("committer Bench <bench@example.com> 1700000000 +0000\n");
+            stream.push_str("data 0\n");
+            for slot in 0..BENCH_SHARDS_PER_REF {
+                let (_, digest, line) = &events[(index * 7 + slot) % events.len()];
+                let payload = format!("{line}\n");
+                stream.push_str(&format!(
+                    "M 100644 inline {EVENTS_TREE_DIR}/{}/{digest}.jsonl\n",
+                    &digest[..2]
+                ));
+                stream.push_str(&format!("data {}\n", payload.len()));
+                stream.push_str(&payload);
+            }
+        }
+        let import = gwt_core::process::run_git_logged_with_stdin(
+            &["fast-import", "--quiet"],
+            Some(&repo),
+            stream.as_bytes(),
+        )
+        .expect("fast-import runs");
+        assert!(
+            import.status.success(),
+            "fast-import: {}",
+            String::from_utf8_lossy(&import.stderr)
+        );
+        drop(stream);
+        println!("fixture built in {:?}", started.elapsed());
+
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+
+        // Cold pass: establishes the recorded fingerprints the trigger below
+        // has to work against.
+        let cold_started = std::time::Instant::now();
+        let cold = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        println!(
+            "cold pass: {:?} ingested={} skipped={} rebuilt={}",
+            cold_started.elapsed(),
+            cold.sources_ingested,
+            cold.sources_skipped,
+            cold.projection_rebuilt
+        );
+
+        // Settle: the pass after a rebuild re-establishes generations.
+        let settle_started = std::time::Instant::now();
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        println!("settling pass: {:?}", settle_started.elapsed());
+
+        let recorded = load_work_events_intake_state(&state_path).sources.len();
+        println!(
+            "recorded source fingerprints: {recorded} (worktree sources {worktree_sources}, refs {})",
+            BENCH_REFS * BENCH_SHARDS_PER_REF
+        );
+
+        // Unchanged trigger.
+        let unchanged_before = bench_state_footprint(&state_path);
+        let unchanged_started = std::time::Instant::now();
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        let unchanged_elapsed = unchanged_started.elapsed();
+        let unchanged_after = bench_state_footprint(&state_path);
+        println!(
+            "UNCHANGED trigger: {unchanged_elapsed:?} re-serialized {} bytes",
+            bench_reserialized_bytes(unchanged_before, unchanged_after)
+        );
+
+        // 40 changed sources: publish 40 new shards into the main checkout.
+        for index in 0..BENCH_CHANGED_SOURCES {
+            let (_, digest, line) = bench_event(BENCH_EVENTS + index);
+            let shard = repo
+                .join(EVENTS_TREE_DIR)
+                .join(&digest[..2])
+                .join(format!("{digest}.jsonl"));
+            std::fs::create_dir_all(shard.parent().expect("bucket")).expect("bucket");
+            std::fs::write(&shard, format!("{line}\n")).expect("shard");
+        }
+
+        let changed_before = bench_state_footprint(&state_path);
+        let changed_started = std::time::Instant::now();
+        let changed = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        let changed_elapsed = changed_started.elapsed();
+        let changed_after = bench_state_footprint(&state_path);
+        println!(
+            "CHANGED trigger ({BENCH_CHANGED_SOURCES} sources): applied={} ingested={} rebuilt={}",
+            changed.events_applied, changed.sources_ingested, changed.projection_rebuilt
+        );
+        println!(
+            "AC-2 wall time {:.3}s (budget 5s), re-serialized {} bytes (budget 5 MB)",
+            changed_elapsed.as_secs_f64(),
+            bench_reserialized_bytes(changed_before, changed_after)
+        );
+
+        // Where a settled trigger's time goes, measured against the same
+        // fixture so a regression can be attributed rather than guessed at.
+        let phase = std::time::Instant::now();
+        let worktree_entries =
+            gwt::worktree_inventory::enumerate_worktrees(&repo, None).expect("worktrees");
+        println!("  phase enumerate_worktrees: {:?}", phase.elapsed());
+        let phase = std::time::Instant::now();
+        let groups = worktree_event_source_groups(&worktree_entries).expect("groups");
+        println!(
+            "  phase worktree group generations ({} groups): {:?}",
+            groups.len(),
+            phase.elapsed()
+        );
+        let phase = std::time::Instant::now();
+        let origin_refs = gwt_git::refs::list_origin_refs_with_commit(&repo).expect("origin refs");
+        println!(
+            "  phase list_origin_refs ({}): {:?}",
+            origin_refs.len(),
+            phase.elapsed()
+        );
+        let commits: Vec<String> = origin_refs.iter().map(|(_, sha)| sha.clone()).collect();
+        let phase = std::time::Instant::now();
+        gwt_git::blob::work_event_tree_identity_batch(
+            &repo,
+            &commits,
+            EVENTS_TREE_PATH,
+            EVENTS_TREE_DIR,
+        )
+        .expect("identities");
+        println!("  phase ref tree identities: {:?}", phase.elapsed());
+        let phase = std::time::Instant::now();
+        let loaded = load_work_events_intake_state(&state_path);
+        println!("  phase load intake state: {:?}", phase.elapsed());
+        let phase = std::time::Instant::now();
+        tracked_source_list_fingerprint(&loaded);
+        println!("  phase source-list digest: {:?}", phase.elapsed());
+        let phase = std::time::Instant::now();
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("projection")
+                .expect("projection present");
+        println!(
+            "  phase load projection ({} work items): {:?}",
+            projection.work_items.len(),
+            phase.elapsed()
+        );
+        let phase = std::time::Instant::now();
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &temp.path().join("state/projection-save-probe.json"),
+            &projection,
+        )
+        .expect("projection save");
+        println!("  phase save projection: {:?}", phase.elapsed());
     }
 
     fn write_legacy_log(repo: &Path, events: &[(&str, &str)]) {
