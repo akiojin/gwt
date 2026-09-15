@@ -1525,6 +1525,69 @@ mod tests {
         }
     }
 
+    /// Issue #4352 AC-1 / AC-3: gwt-verify, gwt-search, and AGENTS.md carry
+    /// the same bootstrap order as the canonical coordination guidance.
+    #[test]
+    fn gwtd_bootstrap_contract_is_mirrored_in_verify_search_and_agents_md() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let shared = [
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`GWT_BIN_PATH`",
+        ];
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-search/SKILL.md",
+            ".codex/skills/gwt-search/SKILL.md",
+        ] {
+            let skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in shared.iter().chain(["lease-free bootstrap step"].iter()) {
+                assert!(
+                    skill.contains(required),
+                    "expected gwtd bootstrap contract in {relative}: {required}"
+                );
+            }
+        }
+        for pair in [
+            (
+                ".claude/skills/gwt-verify/SKILL.md",
+                ".codex/skills/gwt-verify/SKILL.md",
+            ),
+            (
+                ".claude/skills/gwt-search/SKILL.md",
+                ".codex/skills/gwt-search/SKILL.md",
+            ),
+        ] {
+            let claude = std::fs::read_to_string(workspace_root.join(pair.0)).unwrap();
+            let codex = std::fs::read_to_string(workspace_root.join(pair.1)).unwrap();
+            assert_eq!(
+                claude, codex,
+                "{} and {} must be byte-identical",
+                pair.0, pair.1
+            );
+        }
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in shared
+            .iter()
+            .chain(["lease \u{4e0d}\u{8981}\u{306e} bootstrap step"].iter())
+        {
+            assert!(
+                agents.contains(required),
+                "expected AGENTS.md local verification rule to match canonical guidance: {required}"
+            );
+        }
+    }
+
     #[test]
     fn public_task_entrypoints_are_documented() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
