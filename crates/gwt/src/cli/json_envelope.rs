@@ -432,6 +432,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 clear,
             })
         }
+        "issue.monitor.wait.invalidate" | "issue.monitor.wait-invalidate" => {
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                // An unexplained invalidation is exactly the record AC-2 needs.
+                reason: required_string(params, "reason")?,
+                by: optional_string(params, "by")?,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -933,6 +942,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
         "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.startup" => {
+            reject_unknown_params(params, &[], "perf.startup")?;
+            CliCommand::Perf(PerfCommand::Startup)
+        }
         "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
@@ -2213,6 +2226,87 @@ mod tests {
         assert!(!verification_record::integrity_ok(&tampered));
     }
 
+    #[test]
+    fn verify_run_rejects_autonomous_confirmation_and_allows_correction() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
+        let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut session = gwt_agent::Session::new(&repo, "test", gwt_agent::AgentId::Codex);
+        session.id = "session-4237".to_string();
+        session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git --version"], "user_verification_result": "n/a"}),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let original = verification_record::load(&repo).unwrap().unwrap();
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git init must-not-run"],
+                "user_verification_result": "**Confirmed** (launch instructions)"
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        let output = String::from_utf8_lossy(&env.stdout);
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("autonomous"), "{output}");
+        assert!(
+            output.contains("deferred (autonomous execution)"),
+            "{output}"
+        );
+        assert!(output.contains("verify.run"), "{output}");
+        assert!(!repo.join("must-not-run").exists());
+        assert_eq!(
+            verification_record::load(&repo).unwrap().unwrap().record_id,
+            original.record_id,
+            "a rejected result must preserve the preceding record"
+        );
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": "deferred (autonomous execution)"
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert_eq!(
+            verification_record::load(&repo)
+                .unwrap()
+                .unwrap()
+                .user_verification_result
+                .as_deref(),
+            Some("deferred (autonomous execution)")
+        );
+
+        let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _unknown = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "legacy-4237");
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git init legacy-must-not-run"], "user_verification_result": "confirmed"}),
+        );
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!repo.join("legacy-must-not-run").exists());
+    }
+
     /// Issue #3510: a failed operation used to leave stdout empty and report
     /// only a bare stderr line, so a machine caller could not tell an
     /// operation failure apart from a crashed process — let alone which stage
@@ -3257,6 +3351,50 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
+        ));
+    }
+
+    /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
+    /// target and the reason are mandatory because an unexplained
+    /// invalidation is exactly the record AC-2 says must exist.
+    #[test]
+    fn issue_monitor_wait_invalidate_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({ "number": 42, "reason": "bootstrap build needs no lease" })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: None,
+                number: 42,
+                reason: "bootstrap build needs no lease".to_string(),
+                by: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 42,
+                    "reason": "ruled out",
+                    "by": "session:pm",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 42,
+                reason: "ruled out".to_string(),
+                by: Some("session:pm".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
         ));
     }
 

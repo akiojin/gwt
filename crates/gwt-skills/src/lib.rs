@@ -1525,6 +1525,69 @@ mod tests {
         }
     }
 
+    /// Issue #4352 AC-1 / AC-3: gwt-verify, gwt-search, and AGENTS.md carry
+    /// the same bootstrap order as the canonical coordination guidance.
+    #[test]
+    fn gwtd_bootstrap_contract_is_mirrored_in_verify_search_and_agents_md() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let shared = [
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`GWT_BIN_PATH`",
+        ];
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-search/SKILL.md",
+            ".codex/skills/gwt-search/SKILL.md",
+        ] {
+            let skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in shared.iter().chain(["lease-free bootstrap step"].iter()) {
+                assert!(
+                    skill.contains(required),
+                    "expected gwtd bootstrap contract in {relative}: {required}"
+                );
+            }
+        }
+        for pair in [
+            (
+                ".claude/skills/gwt-verify/SKILL.md",
+                ".codex/skills/gwt-verify/SKILL.md",
+            ),
+            (
+                ".claude/skills/gwt-search/SKILL.md",
+                ".codex/skills/gwt-search/SKILL.md",
+            ),
+        ] {
+            let claude = std::fs::read_to_string(workspace_root.join(pair.0)).unwrap();
+            let codex = std::fs::read_to_string(workspace_root.join(pair.1)).unwrap();
+            assert_eq!(
+                claude, codex,
+                "{} and {} must be byte-identical",
+                pair.0, pair.1
+            );
+        }
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in shared
+            .iter()
+            .chain(["lease \u{4e0d}\u{8981}\u{306e} bootstrap step"].iter())
+        {
+            assert!(
+                agents.contains(required),
+                "expected AGENTS.md local verification rule to match canonical guidance: {required}"
+            );
+        }
+    }
+
     #[test]
     fn public_task_entrypoints_are_documented() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2763,7 +2826,7 @@ mod tests {
         for required in [
             "Deliver",
             "drive to merge",
-            "gh pr merge --auto",
+            "JSON operation `pr.merge`",
             "merged_at",
             "Ready PR Gate",
             "Loop Safety Guard",
@@ -2863,12 +2926,12 @@ mod tests {
 
             for required in [
                 "drive-to-merge",
-                "gh pr merge --auto",
+                "JSON operation `pr.merge`",
                 "merged_at",
                 "Loop Safety Guard",
                 // Re-gate invariant: never keep auto-merge armed across a
                 // code-changing push.
-                "--disable-auto",
+                "disable auto-merge through `pr.merge`",
                 "re-arm",
             ] {
                 assert!(
@@ -2903,8 +2966,8 @@ mod tests {
                 // Hard PR gate before enabling auto-merge.
                 "Ready PR Gate",
                 "pending",
-                // Auto-merge enablement via the allowed gh command.
-                "gh pr merge --auto",
+                // Auto-merge enablement via the canonical JSON operation.
+                "JSON operation `pr.merge`",
                 // Project-agnostic merge-method selection (no hardcoded method).
                 "viewerDefaultMergeMethod",
                 // Merged-state watch surface and completion signal.
@@ -2912,13 +2975,13 @@ mod tests {
                 "merged_at",
                 // Transient CI classification + bounded re-run, like /release.
                 "transient",
-                "gh run rerun",
+                "`actions.rerun`",
                 // Bounded drive loop.
                 "Loop Safety Guard",
                 // Safety invariant: auto-merge must never stay armed across a
                 // code-changing push. Disable, re-gate, and re-arm per push so
                 // GitHub only ever merges a verified, gated snapshot.
-                "gh pr merge --disable-auto",
+                "**disable auto-merge** through JSON operation",
                 "re-arm",
             ] {
                 assert!(
