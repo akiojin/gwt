@@ -775,6 +775,100 @@ mod tests {
         assert!(!config.skip_permissions);
     }
 
+    /// Issue #4228 AC-2: the reported reproduction, end to end. A Codex launch
+    /// with Fast Mode writes the Issue Monitor head profile; the operator then
+    /// switches that profile's agent to Claude; the Monitor opens the wizard
+    /// from the saved profile and launches. The resulting Claude `LaunchConfig`
+    /// must not carry Fast Mode.
+    #[test]
+    fn issue_monitor_profile_switched_to_claude_launches_without_fast_mode() {
+        // Step 1-2 of the reported reproduction: a Codex launch with Fast Mode
+        // writes the Issue Monitor head profile.
+        let codex_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .fast_mode(true)
+            .build();
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.set_head_launch_profile(crate::IssueMonitorLaunchProfile::from(&codex_config));
+        assert!(
+            prefs.launch_profile.as_ref().expect("head").fast_mode,
+            "the Codex launch really did opt into Fast Mode"
+        );
+
+        // Step 3, as the field state the owner measured: the head profile names
+        // `claude` while the pre-#4228 single bit is still set.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let mut stuck_prefs = serde_json::to_value(crate::IssueMonitorPrefs::default())
+            .expect("serialize default prefs");
+        stuck_prefs["launch_profile"] =
+            serde_json::json!({"agent_id":"claude","codex_fast_mode":true});
+        std::fs::write(&path, stuck_prefs.to_string()).expect("write stuck prefs");
+        let stuck = crate::load_issue_monitor_prefs(&path)
+            .expect("load stuck prefs")
+            .launch_profile
+            .expect("head profile");
+        assert_eq!(stuck.agent_id, "claude");
+
+        // Step 4: the Issue Monitor opens the wizard from the saved head
+        // profile and launches.
+        let previous_profiles = LaunchWizardPreviousProfiles::from_profile(Some(stuck.into()));
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+            previous_profiles,
+        );
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+        assert!(
+            !config.fast_mode,
+            "a Codex Fast Mode opt-in must not reach a Claude launch"
+        );
+        assert!(!config.codex_fast_mode);
+    }
+
+    /// Issue #4228 AC-4: the restore path reads the Fast Mode of the agent the
+    /// saved profile itself names. A profile recovered under a different agent
+    /// key (a stale map entry, or a head profile whose agent was rewritten
+    /// without clearing the bit) must not decide this agent's Fast Mode.
+    #[test]
+    fn previous_profile_fast_mode_is_ignored_when_it_names_another_agent() {
+        let codex_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .fast_mode(true)
+            .build();
+        let mismatched: LaunchWizardPreviousProfile =
+            crate::IssueMonitorLaunchProfile::from(&codex_config).into();
+        assert_eq!(mismatched.agent_id, "codex");
+        assert!(mismatched.fast_mode);
+
+        // The profile still says "codex" while sitting under the Claude key.
+        let previous_profiles = LaunchWizardPreviousProfiles {
+            default_agent_id: None,
+            by_agent: std::collections::HashMap::from([("claude".to_string(), mismatched)]),
+            repo_local: None,
+        };
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+            previous_profiles,
+        );
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+        assert!(
+            !config.fast_mode,
+            "the restore path must read only the target agent's own Fast Mode"
+        );
+    }
+
     #[test]
     fn shell_target_hides_agent_specific_controls_and_builds_shell_request() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
