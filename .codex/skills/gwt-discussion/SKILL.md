@@ -139,6 +139,19 @@ proposal before stopping. The runtime's `stop_hook_active` flag (built into
 Claude Code; shared with Codex via `codex_hooks`) keeps the handler fail-safe:
 at most one forced continuation per Stop cycle.
 
+The Stop gate is session-scoped (Issue #3465). The work-notes discussion log is
+machine-local but project-scoped, so every session of the project reads the
+same entries. `discussion.update` stamps the opening session into the entry
+metadata as `Origin Session: <GWT_SESSION_ID>`, and `skill-discussion-stop-check`
+only blocks on entries whose `Origin Session` matches the current session. An
+entry that records no `Origin Session`, or a session launched without
+`GWT_SESSION_ID`, keeps the previous fail-closed behaviour. Never run
+`discuss.park` / `resolve` / `reject` on another session's proposal just to free
+your own Stop — it rewrites the owner's in-progress state.
+
+Open a discussion entry with `discussion.update` before writing the
+`Discussion TODO` proposals, so the entry carries its `Origin Session` stamp.
+
 ## Resume hooks
 
 Managed hook settings in `.claude/settings.local.json` and `.codex/hooks.json`

@@ -5,16 +5,38 @@ on:
     branches: [develop, main]
 
 jobs:
+  # Issue #4134 AC-3: this job is redundant on Linux. `cargo test --workspace
+  # --all-features` in test.yml compiles the same crates with the same features
+  # and links the `gwt` binaries too, because the integration tests reach them
+  # through CARGO_BIN_EXE_*. (The Issue proposed clippy as the job that
+  # subsumes it; that is not right — `cargo clippy --all-targets` type-checks
+  # but never links, so it cannot stand in for a build.) Removing the job is
+  # therefore safe for coverage but not for merges: `Build` is a required
+  # status check on develop, so deleting it leaves every pull request waiting
+  # for a context that no longer reports. Dropping the context is a branch
+  # protection change and stays the repository owner's call; until then the
+  # ~131s duplicate is deliberate. The duplication costs runner minutes and
+  # queue slots (#4119), not wall clock — build.yml runs beside test.yml.
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install tray + GTK dependencies (Linux)
-        run: |
-          sudo bash scripts/ci-apt.sh update
-          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+      # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
+      # list, so a changed set is never served the previous archive.
+      - name: Cache Linux GTK dependency packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/gwt-apt-archives
+          key: gwt-apt-gtk-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
         timeout-minutes: 5
+      # Issue #4191: scripts/ci-apt.sh owns the deadline (900s) and retries
+      # inside it; this cap is only the outer net and must stay above it, so
+      # the script and not GitHub reports a dependency-install failure. The
+      # measured step distribution behind the numbers is recorded in test.yml.
+      - name: Install tray + GTK dependencies (Linux)
+        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true

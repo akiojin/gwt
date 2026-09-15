@@ -27,6 +27,7 @@ pub mod hub;
 pub mod kind;
 pub mod line;
 pub mod redact;
+pub mod runner_probe_guard;
 pub mod spawn;
 pub mod strip_ansi;
 
@@ -37,6 +38,11 @@ pub use hub::{global, set_global, ProcessConsoleHub, DEFAULT_RING_CAPACITY};
 pub use kind::{ParseProcessKindError, ProcessKind};
 pub use line::{ProcessLine, ProcessStream};
 pub use redact::{redact_line, REDACTED};
+pub use runner_probe_guard::{
+    forbid_real_package_runner_probes_for_tests, real_package_runner_probe_denial,
+    real_package_runner_probes_forbidden, ALLOW_REAL_RUNNER_PROBE_MARKER,
+    REAL_RUNNER_PROBE_BLOCKED_ERROR_CODE, RUNNER_PROBE_SANDBOX_MARKER,
+};
 pub use spawn::{
     spawn_logged, spawn_logged_blocking, spawn_logged_blocking_with_deadline,
     spawn_logged_with_deadline, SpawnOptions, SpawnOutput,

@@ -63,20 +63,26 @@ fn release_pull_request_is_opened_with_credentials_that_start_required_checks() 
 /// `scripts/release_issue_refs.py` classifies every ref through `gh`, which
 /// refuses to run inside Actions without a token. The script propagates that
 /// failure, so an unauthenticated step fails the release run — after the bump
-/// has already been pushed.
+/// has already been pushed. Since Issue #3545 the same script also renders the
+/// reference-only Release PR body (`--format pr-body`).
 #[test]
-fn closing_issue_collection_runs_gh_with_a_token() {
+fn release_pr_body_rendering_runs_gh_with_a_token() {
     let workflow = prepare_release_workflow();
     let step = workflow
-        .split("- name: Collect closing issues")
+        .split("- name: Render Release PR body")
         .nth(1)
         .and_then(|rest| rest.split("- name: ").next())
-        .expect("workflow must keep the closing-issue step");
+        .expect("workflow must keep the Release PR body step");
 
     assert!(
         step.contains("GH_TOKEN:"),
-        "collecting closing issues shells out to `gh`, which needs a token in \
-         Actions: {step}"
+        "rendering the Release PR body shells out to `gh`, which needs a token \
+         in Actions: {step}"
+    );
+    assert!(
+        step.contains("--format pr-body"),
+        "the Release PR body must come from release_issue_refs.py --format \
+         pr-body so it stays reference-only (Issue #3545): {step}"
     );
 }
 

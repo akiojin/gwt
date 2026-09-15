@@ -67,18 +67,28 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
+// Issue #3164 retired the only production members of
+// DEFAULT_ORDERED_STATE_KINDS, so these fence tests exercise the generic
+// "activation state must precede scoped outcomes" mechanism with an
+// explicit ordered-state kind set rather than relying on the (now empty)
+// default.
+const SAMPLE_ORDERED_STATE_KINDS = new Set([
+  "project_scoped_notice",
+  "project_scoped_alert",
+]);
+
 test("project snapshots stay after the workspace state that activates their project", () => {
   const workspace = {
     kind: "workspace_state",
     workspace: { active_tab_id: "project-b" },
   };
   const candidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/b",
     candidates: [{ id: "impr-b" }],
   };
   const otherProjectCandidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/a",
     candidates: [{ id: "impr-a" }],
   };
@@ -87,6 +97,7 @@ test("project snapshots stay after the workspace state that activates their proj
     coalesceEvents(
       [workspace, otherProjectCandidates, candidates],
       DEFAULT_COALESCE_KINDS,
+      { orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS },
     ),
     [workspace, otherProjectCandidates, candidates],
     "project-scoped snapshots must preserve multiplicity without overtaking activation state",
@@ -99,18 +110,20 @@ test("project action outcomes stay behind the workspace activation fence", () =>
     workspace: { active_tab_id: "project-b" },
   };
   const staleError = {
-    kind: "improvement_action_error",
+    kind: "project_scoped_alert",
     project_root: "/projects/a",
     message: "stale project error",
   };
   const candidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/b",
     candidates: [{ id: "impr-b" }],
   };
 
   assert.deepEqual(
-    coalesceEvents([workspace, staleError, candidates], DEFAULT_COALESCE_KINDS),
+    coalesceEvents([workspace, staleError, candidates], DEFAULT_COALESCE_KINDS, {
+      orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS,
+    }),
     [workspace, staleError, candidates],
     "the active-project fence must run before scoped action outcomes",
   );
@@ -122,7 +135,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     workspace: { active_tab_id: "project-b" },
   };
   const staleError = {
-    kind: "improvement_action_error",
+    kind: "project_scoped_alert",
     project_root: "/projects/a",
     message: "stale project error",
   };
@@ -131,7 +144,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     workspace: { active_tab_id: "project-c" },
   };
   const candidatesC = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/c",
     candidates: [{ id: "impr-c" }],
   };
@@ -140,6 +153,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     coalesceEvents(
       [workspaceB, staleError, workspaceC, candidatesC],
       DEFAULT_COALESCE_KINDS,
+      { orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS },
     ),
     [workspaceC, staleError, candidatesC],
     "the surviving activation must update the frontend fence before stale outcomes",
@@ -167,7 +181,6 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
     "terminal_output",
     "terminal_snapshot",
     "runtime_hook_event",
-    "improvement_candidates",
   ]) {
     assert.equal(
       DEFAULT_COALESCE_KINDS.has(kind),

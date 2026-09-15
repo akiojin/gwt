@@ -268,6 +268,7 @@ mod tests {
                         next_not_before: None,
                     }),
                     settings: pm_registry::PmSettings::default(),
+                    ..pm_registry::PmPrefs::default()
                 },
             )
             .expect("save prefs");

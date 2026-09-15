@@ -31,12 +31,17 @@ impl UsageProvider {
 }
 
 /// The kind of rate-limit window an account exposes.
+///
+/// Codex windows are classified from their reported `window_minutes`
+/// (Issue #3860), never from the `primary` / `secondary` key position, so an
+/// upstream reshuffle of the pools cannot mislabel them. Claude windows are
+/// keyed by name (`five_hour` / `seven_day` / ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowKind {
-    /// 5-hour rolling window (Codex `primary` / Claude `five_hour`).
+    /// 5-hour rolling window (Claude `five_hour`; Codex `window_minutes≈300`).
     FiveHour,
-    /// 7-day window (Codex `secondary` / Claude `seven_day`).
+    /// 7-day window (Claude `seven_day`; Codex `window_minutes≈10080`).
     Weekly,
     /// Claude Opus-specific weekly sub-limit (`seven_day_opus`).
     OpusWeekly,
@@ -44,7 +49,15 @@ pub enum WindowKind {
     SonnetWeekly,
     /// Codex code-review weekly sub-limit.
     CodeReviewWeekly,
+    /// A window whose length is missing or matches no known kind. The value is
+    /// kept (with its `window_minutes`, when reported) rather than guessed.
+    Unknown,
 }
+
+/// Minutes in the 5-hour window.
+const FIVE_HOUR_MINUTES: u32 = 300;
+/// Minutes in the 7-day window.
+const WEEKLY_MINUTES: u32 = 10_080;
 
 impl WindowKind {
     pub fn as_str(self) -> &'static str {
@@ -54,6 +67,24 @@ impl WindowKind {
             WindowKind::OpusWeekly => "opus_weekly",
             WindowKind::SonnetWeekly => "sonnet_weekly",
             WindowKind::CodeReviewWeekly => "code_review_weekly",
+            WindowKind::Unknown => "unknown",
+        }
+    }
+
+    /// Classify a window by its reported length in minutes. Upstream values
+    /// drift by a minute or so around the nominal length, so each known kind
+    /// accepts ±10%. Anything else is `None` (caller keeps it as `Unknown`).
+    pub fn from_minutes(minutes: u32) -> Option<WindowKind> {
+        fn near(minutes: u32, nominal: u32) -> bool {
+            let tolerance = nominal / 10;
+            minutes >= nominal - tolerance && minutes <= nominal + tolerance
+        }
+        if near(minutes, FIVE_HOUR_MINUTES) {
+            Some(WindowKind::FiveHour)
+        } else if near(minutes, WEEKLY_MINUTES) {
+            Some(WindowKind::Weekly)
+        } else {
+            None
         }
     }
 }
@@ -73,6 +104,11 @@ pub struct UsageWindow {
     pub kind: WindowKind,
     pub used_percent: f32,
     pub resets_at: Option<DateTime<Utc>>,
+    /// Actual window length as reported upstream, when known. Lets the UI show
+    /// the real length (and label `Unknown` windows) instead of inferring it
+    /// from `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u32>,
 }
 
 impl UsageWindow {
@@ -82,7 +118,14 @@ impl UsageWindow {
             kind,
             used_percent: clamp_percent(used_percent),
             resets_at,
+            window_minutes: None,
         }
+    }
+
+    /// Attach the upstream-reported window length.
+    pub fn with_window_minutes(mut self, window_minutes: Option<u32>) -> Self {
+        self.window_minutes = window_minutes;
+        self
     }
 }
 
@@ -194,6 +237,36 @@ mod tests {
         let w = UsageWindow::new(WindowKind::Weekly, 250.0, None);
         assert_eq!(w.used_percent, 100.0);
         assert_eq!(w.kind, WindowKind::Weekly);
+    }
+
+    #[test]
+    fn window_kind_from_minutes_tolerates_small_drift() {
+        assert_eq!(WindowKind::from_minutes(300), Some(WindowKind::FiveHour));
+        assert_eq!(WindowKind::from_minutes(299), Some(WindowKind::FiveHour));
+        assert_eq!(WindowKind::from_minutes(10080), Some(WindowKind::Weekly));
+        assert_eq!(WindowKind::from_minutes(10079), Some(WindowKind::Weekly));
+        assert_eq!(WindowKind::from_minutes(1440), None);
+        assert_eq!(WindowKind::from_minutes(0), None);
+        assert_eq!(WindowKind::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn window_minutes_is_optional_on_the_wire() {
+        // Issue #3860 AC-4: the window length rides along when known and is
+        // omitted (not `null`) otherwise so older frontends keep parsing.
+        let without = UsageWindow::new(WindowKind::Weekly, 5.0, None);
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(!json.contains("window_minutes"));
+        let round: UsageWindow = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.window_minutes, None);
+
+        let with =
+            UsageWindow::new(WindowKind::Unknown, 40.0, None).with_window_minutes(Some(1440));
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains("\"window_minutes\":1440"));
+        assert!(json.contains("\"kind\":\"unknown\""));
+        let round: UsageWindow = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, with);
     }
 
     #[test]

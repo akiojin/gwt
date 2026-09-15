@@ -12,7 +12,173 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gwt_core::{GwtError, Result};
+use gwt_core::{
+    process::{resolved_command, ProcessPlanRequest},
+    GwtError, Result,
+};
+
+/// A network-free canonical source snapshot pinned to an immutable Git tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalRootTree {
+    pub reference: String,
+    pub root_tree_oid: String,
+}
+
+fn canonical_git_request(repo_path: &Path, args: &[&str]) -> ProcessPlanRequest {
+    ProcessPlanRequest::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_PREFIX")
+        .env_remove("GIT_NAMESPACE")
+        .env_remove("GIT_COMMON_DIR")
+}
+
+fn run_canonical_git(repo_path: &Path, args: &[&str]) -> Result<std::process::Output> {
+    resolved_command(canonical_git_request(repo_path, args))
+        .map_err(|error| GwtError::Git(format!("resolve git executable: {error}")))?
+        .output()
+        .map_err(|error| GwtError::Git(format!("git {}: {error}", args.join(" "))))
+}
+
+fn bare_repository_metadata_exists(path: &Path) -> bool {
+    path.join("objects").is_dir()
+        && (path.join("refs").is_dir() || path.join("packed-refs").is_file())
+        && (path.join("HEAD").exists() || path.join("config").is_file())
+}
+
+fn repository_metadata_exists(requested_path: &Path, effective_path: &Path) -> bool {
+    requested_path
+        .ancestors()
+        .any(|path| path.join(".git").exists())
+        || bare_repository_metadata_exists(requested_path)
+        || bare_repository_metadata_exists(effective_path)
+        || std::fs::read_dir(requested_path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| bare_repository_metadata_exists(&entry.path()))
+}
+
+/// Resolve the first locally available canonical ref to its immutable root
+/// tree OID. No fetch is attempted: refresh admission must pin a snapshot of
+/// the refs already present on disk.
+///
+/// An unborn/empty repository returns `Ok(None)` so callers can use the empty
+/// base contract and classify every visible record as overlay content.
+pub fn resolve_canonical_root_tree(repo_path: &Path) -> Result<Option<CanonicalRootTree>> {
+    const REMOTE_CANDIDATES: [(&str, &str); 4] = [
+        ("origin/develop", "refs/remotes/origin/develop"),
+        ("origin/HEAD", "refs/remotes/origin/HEAD"),
+        ("origin/main", "refs/remotes/origin/main"),
+        ("origin/master", "refs/remotes/origin/master"),
+    ];
+
+    let requested_path = repo_path;
+    let repo_path = effective_refs_root(requested_path);
+    let repository_probe = run_canonical_git(&repo_path, &["rev-parse", "--is-inside-work-tree"])?;
+    if !repository_probe.status.success() {
+        if repository_metadata_exists(requested_path, &repo_path) {
+            let stderr = String::from_utf8_lossy(&repository_probe.stderr)
+                .trim()
+                .to_string();
+            return Err(GwtError::Git(format!(
+                "repository metadata is present but unreadable: {stderr}"
+            )));
+        }
+        return Ok(None);
+    }
+    let refs = run_canonical_git(
+        &repo_path,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/develop",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/master",
+            "refs/heads/",
+        ],
+    )?;
+    if !refs.status.success() {
+        let stderr = String::from_utf8_lossy(&refs.stderr).trim().to_string();
+        return Err(GwtError::Git(format!(
+            "canonical ref existence probe: {stderr}"
+        )));
+    }
+    let existing_refs: HashSet<String> = String::from_utf8_lossy(&refs.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let head_probe = run_canonical_git(
+        &repo_path,
+        &[
+            "rev-parse",
+            "--symbolic-full-name",
+            "--verify",
+            "--quiet",
+            "HEAD",
+        ],
+    )?;
+    let head_exists = if head_probe.status.success() {
+        true
+    } else {
+        let symbolic_head = run_canonical_git(&repo_path, &["symbolic-ref", "--quiet", "HEAD"])?;
+        if symbolic_head.status.success() {
+            let target = String::from_utf8_lossy(&symbolic_head.stdout);
+            existing_refs.contains(target.trim())
+        } else {
+            // A valid repository always has HEAD. When it is detached and
+            // cannot be resolved, the object is corrupt rather than unborn.
+            true
+        }
+    };
+
+    let candidate_presence = REMOTE_CANDIDATES
+        .iter()
+        .map(|(reference, full_ref)| (*reference, existing_refs.contains(*full_ref)))
+        .chain(std::iter::once(("HEAD", head_exists)));
+    for (reference, exists) in candidate_presence {
+        if !exists {
+            continue;
+        }
+        let tree_expression = format!("{reference}^{{tree}}");
+        let output = run_canonical_git(
+            &repo_path,
+            &["rev-parse", "--verify", "--quiet", &tree_expression],
+        )?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(GwtError::Git(format!(
+                "canonical ref {tree_expression} exists but could not be peeled: {stderr}"
+            )));
+        }
+        let root_tree_oid = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_ascii_lowercase();
+        let valid_oid = matches!(root_tree_oid.len(), 40 | 64)
+            && root_tree_oid.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !valid_oid {
+            return Err(GwtError::Git(format!(
+                "rev-parse {tree_expression}: invalid tree oid {root_tree_oid:?}"
+            )));
+        }
+        return Ok(Some(CanonicalRootTree {
+            reference: reference.to_string(),
+            root_tree_oid,
+        }));
+    }
+    Ok(None)
+}
 
 /// Issue #3629 AC-4: the bulk snapshot helpers are handed a *project root*,
 /// which for the workspace-home layout is not a git work tree. Resolve the
@@ -218,6 +384,165 @@ mod tests {
         run(gwt_core::process::hidden_command("git")
             .args(["update-ref", refname, "HEAD"])
             .current_dir(repo));
+    }
+
+    fn root_tree(repo: &Path, reference: &str) -> String {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", &format!("{reference}^{{tree}}")])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn rev_parse(repo: &Path, expression: &str) -> String {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", expression])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn loose_object_path(repo: &Path, oid: &str) -> PathBuf {
+        repo.join(".git")
+            .join("objects")
+            .join(&oid[..2])
+            .join(&oid[2..])
+    }
+
+    #[test]
+    fn canonical_root_tree_prefers_local_origin_develop_without_fetching() {
+        let dir = init_repo();
+        let repo = dir.path();
+        std::fs::write(repo.join("source.txt"), "main\n").unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "source.txt"])
+            .current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "main tree"])
+            .current_dir(repo));
+        create_remote_tracking_ref(repo, "refs/remotes/origin/main");
+
+        std::fs::write(repo.join("source.txt"), "develop\n").unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-am", "develop tree"])
+            .current_dir(repo));
+        create_remote_tracking_ref(repo, "refs/remotes/origin/develop");
+
+        let snapshot = resolve_canonical_root_tree(repo).unwrap().unwrap();
+        assert_eq!(snapshot.reference, "origin/develop");
+        assert_eq!(snapshot.root_tree_oid, root_tree(repo, "origin/develop"));
+        assert_ne!(
+            snapshot.root_tree_oid,
+            root_tree(repo, "origin/main"),
+            "precedence must select the develop tree already present locally"
+        );
+    }
+
+    #[test]
+    fn canonical_root_tree_returns_none_for_unborn_repository() {
+        let dir = TempDir::new().unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(dir.path()));
+        assert_eq!(resolve_canonical_root_tree(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_root_tree_returns_none_for_non_git_directory() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(resolve_canonical_root_tree(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_root_tree_returns_none_for_unborn_bare_repository() {
+        let dir = TempDir::new().unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "repo.git"])
+            .current_dir(dir.path()));
+        assert_eq!(
+            resolve_canonical_root_tree(&dir.path().join("repo.git")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_root_tree_rejects_corrupt_bare_repository_metadata() {
+        let layout = TempDir::new().unwrap();
+        let bare = layout.path().join("repo.git");
+        run(gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "repo.git"])
+            .current_dir(layout.path()));
+        std::fs::write(bare.join("HEAD"), "invalid HEAD\n").unwrap();
+
+        for repo_path in [&bare, layout.path()] {
+            let error = resolve_canonical_root_tree(repo_path)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("repository metadata"), "{error}");
+        }
+    }
+
+    #[test]
+    fn canonical_root_tree_rejects_existing_ref_with_missing_object() {
+        let dir = init_repo();
+        let repo = dir.path();
+        create_remote_tracking_ref(repo, "refs/remotes/origin/main");
+
+        std::fs::write(repo.join("develop.txt"), "develop\n").unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "develop.txt"])
+            .current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "develop tip"])
+            .current_dir(repo));
+        create_remote_tracking_ref(repo, "refs/remotes/origin/develop");
+
+        let commit_oid = rev_parse(repo, "origin/develop");
+        let object_path = loose_object_path(repo, &commit_oid);
+        std::fs::rename(&object_path, object_path.with_extension("missing")).unwrap();
+
+        let error = resolve_canonical_root_tree(repo).unwrap_err().to_string();
+        assert!(error.contains("origin/develop^{tree}"), "{error}");
+    }
+
+    #[test]
+    fn canonical_git_request_disables_lazy_fetch_and_prompts() {
+        let request = canonical_git_request(
+            Path::new("/tmp/canonical-repo"),
+            &["rev-parse", "HEAD^{tree}"],
+        );
+        let environment = request
+            .env
+            .iter()
+            .map(|(key, value)| (key.to_string_lossy(), value.to_string_lossy()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            environment.get("GIT_NO_LAZY_FETCH").map(|v| v.as_ref()),
+            Some("1")
+        );
+        assert_eq!(
+            environment.get("GIT_TERMINAL_PROMPT").map(|v| v.as_ref()),
+            Some("0")
+        );
+        let removed = request
+            .remove_env
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(removed.contains("GIT_DIR"));
+        assert!(removed.contains("GIT_WORK_TREE"));
+        assert!(removed.contains("GIT_COMMON_DIR"));
+    }
+
+    #[test]
+    fn canonical_root_tree_rejects_corrupt_repository_metadata() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".git"), "not a gitdir").unwrap();
+        assert!(resolve_canonical_root_tree(dir.path()).is_err());
     }
 
     /// Issue #3629 AC-4: a workspace-home layout root is not a git work tree.

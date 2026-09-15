@@ -105,6 +105,9 @@ const STATE_TEXT_TOKENS = [
   "--color-state-blocked",
   "--color-state-done",
   "--color-state-needs-input",
+  // Issue #3979 — the notification-center triage marker renders the "good"
+  // severity glyph as text in this color.
+  "--color-state-success",
 ];
 // State colors are used as TEXT inside cards / status chips that sit on
 // surface bg. They are NOT used directly on canvas as text — canvas text

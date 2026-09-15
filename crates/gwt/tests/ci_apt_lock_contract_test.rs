@@ -13,6 +13,8 @@
 //! These tests pin the shared wrapper and the workflow wiring that keep a
 //! held dpkg lock from hanging a job or failing a PR for an unrelated change.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -351,7 +353,9 @@ exit 1
     }
 
     /// A lock that never clears must fail with a greppable reason and stop
-    /// well before a GitHub step timeout.
+    /// well before a GitHub step timeout. Since Issue #4191 the wrapper
+    /// retries a contended lock instead of giving up on the first wait, so the
+    /// backoff is collapsed here to keep the bound about the wait itself.
     #[test]
     fn a_held_lock_fails_fast_with_contention_reason() {
         let harness = Harness::new("held");
@@ -365,6 +369,7 @@ exit 1
                 ("GWT_APT_LOCK_PROBE", probe.to_string_lossy().as_ref()),
                 ("GWT_APT_LOCK_POLL", "1"),
                 ("GWT_APT_LOCK_TIMEOUT", "2"),
+                ("GWT_APT_RETRY_DELAY", "1"),
             ],
         );
         let elapsed = started.elapsed();

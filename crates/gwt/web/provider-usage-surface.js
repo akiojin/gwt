@@ -2,9 +2,8 @@
 // extracted from app.js. Owns the latest provider usage snapshot, the
 // usage formatter/render helpers, the consolidated status-strip hover
 // popover (window.__gwtShowUsageHover / window.__gwtHideUsageHover), and
-// the Settings "Usage & Limits" panel. Pure movement from app.js: the
-// behavior, DOM output, and WS protocol are unchanged; the moved code keeps
-// its original app.js indentation.
+// the Settings "Usage & Limits" panel. The WS protocol remains owned by
+// app.js; presentation follow-ups stay within this extracted surface.
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -12,7 +11,14 @@
 //   Work surface after a usage snapshot lands. Late-bound: app.js
 //   constructs that surface after this factory runs, so the dep closes
 //   over the binding instead of receiving the surface object.
-export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
+// - sessionLabel(sessionId) (optional): resolve a gwt session id to the
+//   window title the user knows it by (Issue #3862). Returning a falsy
+//   value falls back to a shortened session id.
+export function createProviderUsageSurface({
+  send,
+  renderWorkspaceWindows,
+  sessionLabel = () => null,
+}) {
       // ---- Provider usage & rate limits (SPEC-2970) ----
       let latestProviderUsage = { accounts: [], sessions: [], consumption: [] };
 
@@ -24,6 +30,51 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         sonnet_weekly: "Sonnet weekly",
         code_review_weekly: "Code review weekly",
       };
+
+      // Issue #3860 — a window's reported length in minutes, when it is a
+      // finite positive number; otherwise null.
+      function usageWindowMinutes(w) {
+        const minutes = Number(w && w.window_minutes);
+        return Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : null;
+      }
+
+      // "1-day" / "5-hour" / "90-minute" style length for labels.
+      function usageWindowLengthShort(minutes) {
+        if (minutes % 1440 === 0) return `${minutes / 1440}-day`;
+        if (minutes % 60 === 0) return `${minutes / 60}-hour`;
+        return `${minutes}-minute`;
+      }
+
+      // "7 days" / "5 hours" / "90 minutes" style length for tooltips.
+      function usageWindowLengthLong(minutes) {
+        const unit = (n, name) => `${n} ${name}${n === 1 ? "" : "s"}`;
+        if (minutes % 1440 === 0) return unit(minutes / 1440, "day");
+        if (minutes % 60 === 0) return unit(minutes / 60, "hour");
+        return unit(minutes, "minute");
+      }
+
+      // Row label for one window. Known kinds keep their fixed label; an
+      // `unknown` kind (length missing or unrecognized upstream) is shown as
+      // such, with the reported length when there is one, instead of being
+      // forced into a known window or dropped.
+      function usageWindowLabel(w) {
+        const known = USAGE_WINDOW_LABEL[w.kind];
+        if (known) return known;
+        if (w.kind !== "unknown") return w.kind;
+        const minutes = usageWindowMinutes(w);
+        return minutes == null ? "Unknown" : `Unknown (${usageWindowLengthShort(minutes)})`;
+      }
+
+      // Apply the label plus the real window length (data attribute + tooltip)
+      // to a label element so the UI can surface the length for every window.
+      function applyUsageWindowLabel(el, w) {
+        el.textContent = usageWindowLabel(w);
+        const minutes = usageWindowMinutes(w);
+        if (minutes != null) {
+          el.dataset.windowMinutes = String(minutes);
+          el.title = `Window length: ${usageWindowLengthLong(minutes)}`;
+        }
+      }
 
       function usageStateReason(state) {
         if (!state) return "";
@@ -88,15 +139,16 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         );
       }
 
-      function buildUsageBar(percent) {
+      function buildUsageBar(percent, limitReached = false) {
         const wrap = document.createElement("div");
         wrap.className = "op-usage-bar";
         const fill = document.createElement("div");
         fill.className = "op-usage-bar__fill";
-        const pct = Math.max(0, Math.min(100, Math.round(percent)));
-        fill.style.width = `${pct}%`;
-        if (pct >= 90) fill.dataset.level = "high";
-        else if (pct >= 70) fill.dataset.level = "mid";
+        const boundedPercent = Math.max(0, Math.min(100, percent));
+        fill.style.width = `${Math.round(boundedPercent)}%`;
+        if (limitReached || boundedPercent >= 95) fill.dataset.severity = "danger";
+        else if (boundedPercent >= 80) fill.dataset.severity = "warning";
+        else fill.dataset.severity = "normal";
         wrap.appendChild(fill);
         return wrap;
       }
@@ -144,12 +196,12 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
           line.className = "op-usage-window";
           const label = document.createElement("span");
           label.className = "op-usage-window__label";
-          label.textContent = USAGE_WINDOW_LABEL[w.kind] || w.kind;
+          applyUsageWindowLabel(label, w);
           const pct = document.createElement("span");
           pct.className = "op-usage-window__pct";
           pct.textContent = `${Math.round(w.used_percent)}%`;
           line.appendChild(label);
-          line.appendChild(buildUsageBar(w.used_percent));
+          line.appendChild(buildUsageBar(w.used_percent, account.limit_reached));
           line.appendChild(pct);
           if (w.resets_at) {
             const reset = document.createElement("span");
@@ -213,13 +265,13 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
       }
 
       // One rate-limit window as an aligned row: label · bar · % · reset.
-      function buildUsageWindowRow(w) {
+      function buildUsageWindowRow(w, limitReached = false) {
         const row = document.createElement("div");
         row.className = "op-usage-win";
         const lbl = document.createElement("span");
         lbl.className = "op-usage-win__lbl";
-        lbl.textContent = USAGE_WINDOW_LABEL[w.kind] || w.kind;
-        const bar = buildUsageBar(w.used_percent);
+        applyUsageWindowLabel(lbl, w);
+        const bar = buildUsageBar(w.used_percent, limitReached);
         bar.classList.add("op-usage-win__bar");
         const pct = document.createElement("span");
         pct.className = "op-usage-win__pct";
@@ -263,9 +315,148 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         return grid;
       }
 
+      // ---- Per-session tokens / context (Issue #3862) ----
+      // The popover is the one usage surface, so per-session data must be
+      // readable here too. The list is bounded: the earlier unbounded table
+      // grew to hundreds of rows and was removed, so each provider shows at
+      // most USAGE_SESSION_ROWS_MAX rows (context-hungriest first) plus a
+      // "+N more" line.
+      const USAGE_SESSION_ROWS_MAX = 5;
+
+      function usageSessionsFor(provider) {
+        return (latestProviderUsage.sessions || []).filter(
+          (s) => s && s.provider === provider,
+        );
+      }
+
+      function usageSessionContextLeft(s) {
+        const pct = Number(s.context_left_pct);
+        return s.context_left_pct != null && Number.isFinite(pct) ? pct : null;
+      }
+
+      // Rank: eligible sessions with a known context figure (lowest remaining
+      // first — the ones closest to compaction), then eligible sessions
+      // without one, then ineligible (API-key backend / other agent) sessions.
+      function usageSessionRank(s) {
+        if (s.eligible === false) return 2;
+        return usageSessionContextLeft(s) == null ? 1 : 0;
+      }
+
+      function compareUsageSessions(a, b) {
+        const ra = usageSessionRank(a);
+        const rb = usageSessionRank(b);
+        if (ra !== rb) return ra - rb;
+        if (ra === 0) return usageSessionContextLeft(a) - usageSessionContextLeft(b);
+        return 0;
+      }
+
+      function usageSessionName(s) {
+        let label = null;
+        try {
+          label = sessionLabel(s.session_id);
+        } catch {
+          label = null;
+        }
+        const text = String(label || "").trim();
+        if (text) return text;
+        const id = String(s.session_id || "");
+        return id.length > 8 ? `${id.slice(0, 8)}…` : id || "Session";
+      }
+
+      function usageSessionSeverity(left) {
+        if (left <= 10) return "danger";
+        if (left <= 25) return "warning";
+        return "normal";
+      }
+
+      function buildUsageSessionRow(s) {
+        const row = document.createElement("div");
+        row.className = "op-usage-sess__row";
+        row.dataset.sessionId = String(s.session_id || "");
+        row.dataset.eligible = s.eligible === false ? "false" : "true";
+
+        const name = document.createElement("span");
+        name.className = "op-usage-sess__name";
+        name.textContent = usageSessionName(s);
+        name.title = String(s.session_id || "");
+
+        const model = document.createElement("span");
+        model.className = "op-usage-sess__model";
+        model.textContent = s.model ? String(s.model) : "";
+
+        const stateReason =
+          s.state && s.state.kind !== "ok" ? usageStateReason(s.state) : "";
+
+        const tokens = document.createElement("span");
+        tokens.className = "op-usage-sess__tokens";
+        tokens.textContent = stateReason ? "—" : usageFmtTokens(s.total_tokens);
+        tokens.title = stateReason
+          ? stateReason
+          : `Total tokens: in ${usageFmtTokens(s.input_tokens || 0)} · out ${usageFmtTokens(
+              s.output_tokens || 0,
+            )}`;
+
+        const ctx = document.createElement("span");
+        ctx.className = "op-usage-sess__ctx";
+        const left = usageSessionContextLeft(s);
+        if (s.eligible === false) {
+          ctx.textContent = "n/a";
+          ctx.title = "Not on the subscription quota (API-key backend or unsupported agent)";
+        } else if (stateReason) {
+          ctx.textContent = stateReason;
+        } else if (left != null) {
+          const bounded = Math.max(0, Math.min(100, left));
+          ctx.textContent = `${Math.round(bounded)}% left`;
+          ctx.dataset.severity = usageSessionSeverity(bounded);
+          const used = s.context_used_tokens;
+          const limit = s.context_limit_tokens;
+          ctx.title =
+            used != null && limit != null
+              ? `Context remaining (approx.): ${usageFmtTokens(used)} / ${usageFmtTokens(limit)} used`
+              : "Context remaining (approx.)";
+        } else {
+          ctx.textContent = "—";
+          ctx.title = "Context limit unknown for this model";
+        }
+        if (s.limit_reached) row.dataset.limit = "true";
+
+        row.appendChild(name);
+        row.appendChild(model);
+        row.appendChild(tokens);
+        row.appendChild(ctx);
+        return row;
+      }
+
+      // Bounded per-provider session list, or null when the snapshot carries
+      // no sessions for the provider (nothing is rendered rather than a fake
+      // empty table).
+      function buildUsageSessionsSection(provider) {
+        const sessions = usageSessionsFor(provider);
+        if (!sessions.length) return null;
+        const ordered = [...sessions].sort(compareUsageSessions);
+        const section = document.createElement("div");
+        section.className = "op-usage-sess";
+        const head = document.createElement("div");
+        head.className = "op-usage-sess__head";
+        head.textContent = `Sessions (${ordered.length})`;
+        section.appendChild(head);
+        for (const s of ordered.slice(0, USAGE_SESSION_ROWS_MAX)) {
+          section.appendChild(buildUsageSessionRow(s));
+        }
+        const hidden = ordered.length - USAGE_SESSION_ROWS_MAX;
+        if (hidden > 0) {
+          const more = document.createElement("div");
+          more.className = "op-usage-sess__more";
+          more.textContent = `+${hidden} more session${hidden === 1 ? "" : "s"}`;
+          section.appendChild(more);
+        }
+        return section;
+      }
+
       // A provider card: header (icon · name · plan) + rate-limit windows (or a
-      // degraded reason) + consumption grid + 7-day sparkline. Grouping all of
-      // one provider's data together is the key readability win.
+      // degraded reason) + consumption grid + 7-day sparkline + bounded session
+      // list. Grouping all of one provider's data together is the key
+      // readability win.
       function buildUsageProviderCard(account) {
         const card = document.createElement("div");
         card.className = "op-usage-card";
@@ -287,6 +478,12 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
           plan.textContent = account.plan;
           head.appendChild(plan);
         }
+        if (account.limit_reached) {
+          const limit = document.createElement("span");
+          limit.className = "op-usage-card__limit";
+          limit.textContent = "Limit reached";
+          head.appendChild(limit);
+        }
         card.appendChild(head);
 
         if (account.account_label) {
@@ -300,7 +497,9 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         if (windows.length) {
           const wins = document.createElement("div");
           wins.className = "op-usage-wins";
-          for (const w of windows) wins.appendChild(buildUsageWindowRow(w));
+          for (const w of windows) {
+            wins.appendChild(buildUsageWindowRow(w, account.limit_reached));
+          }
           card.appendChild(wins);
         } else {
           const reason = usageStateReason(account.state);
@@ -336,15 +535,18 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
           }
           card.appendChild(cwrap);
         }
+
+        const sessions = buildUsageSessionsSection(account.provider);
+        if (sessions) card.appendChild(sessions);
         return card;
       }
 
       // SPEC-2970 — the full usage detail as provider cards, appended to a
       // container. The hover popover is the single surface for all usage info
-      // (the click-open modal was removed per UX feedback). The per-session
-      // list was removed per UX feedback — it grew to hundreds of rows and
-      // overwhelmed the popover; per-session token usage still drives each
-      // agent's inline footer (see usageForSession).
+      // (the click-open modal was removed per UX feedback). Per-session
+      // tokens / context live inside each provider card as a bounded list
+      // (Issue #3862) — the earlier unbounded table was removed because it
+      // grew to hundreds of rows.
       function buildUsageFullSections(container) {
         for (const account of latestProviderUsage.accounts || []) {
           container.appendChild(buildUsageProviderCard(account));
@@ -389,24 +591,53 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
 
       function refreshUsageHoverIfOpen() {
         if (!usageHoverEl || usageHoverEl.hidden) return;
+        const restoreKeyboardFocus = usageHoverEl.contains(document.activeElement);
         while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
         usageHoverEl.appendChild(buildUsageHoverBody());
         positionUsageHover();
+        if (restoreKeyboardFocus) {
+          requestAnimationFrame(() => usageHoverEl?.focus());
+        }
       }
 
       window.__gwtShowUsageHover = (anchor) => {
         cancelUsageHoverHide();
+        if (usageHoverAnchor && usageHoverAnchor !== anchor) {
+          usageHoverAnchor.setAttribute("aria-expanded", "false");
+        }
         usageHoverAnchor = anchor || usageHoverAnchor;
         if (!usageHoverEl) {
           usageHoverEl = document.createElement("div");
           usageHoverEl.className = "op-usage-hover";
+          usageHoverEl.id = "provider-usage-popover";
+          usageHoverEl.setAttribute("role", "region");
+          usageHoverEl.setAttribute("aria-label", "Usage & Limits");
+          usageHoverEl.setAttribute("tabindex", "0");
           usageHoverEl.addEventListener("mouseenter", cancelUsageHoverHide);
           usageHoverEl.addEventListener("mouseleave", () => window.__gwtHideUsageHover());
+          usageHoverEl.addEventListener("focusin", cancelUsageHoverHide);
+          usageHoverEl.addEventListener("focusout", (event) => {
+            if (
+              usageHoverEl?.contains(event.relatedTarget) ||
+              event.relatedTarget === usageHoverAnchor
+            ) {
+              return;
+            }
+            window.__gwtHideUsageHover();
+          });
+          usageHoverEl.addEventListener("keydown", (event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            const anchor = usageHoverAnchor;
+            anchor?.focus();
+            window.__gwtHideUsageHover({ immediate: true });
+          });
           document.body.appendChild(usageHoverEl);
         }
         while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
         usageHoverEl.appendChild(buildUsageHoverBody());
         usageHoverEl.hidden = false;
+        usageHoverAnchor?.setAttribute("aria-expanded", "true");
         usageHoverEl.style.visibility = "hidden";
         requestAnimationFrame(() => {
           positionUsageHover();
@@ -414,10 +645,19 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         });
       };
 
-      window.__gwtHideUsageHover = () => {
+      window.__gwtUsageHoverContains = (node) => Boolean(node && usageHoverEl?.contains(node));
+      window.__gwtFocusUsageHover = () => usageHoverEl?.focus();
+      window.__gwtHideUsageHover = (options = {}) => {
         cancelUsageHoverHide();
+        if (options.immediate) {
+          if (usageHoverEl) usageHoverEl.hidden = true;
+          usageHoverAnchor?.setAttribute("aria-expanded", "false");
+          usageHoverAnchor = null;
+          return;
+        }
         usageHoverHideTimer = setTimeout(() => {
           if (usageHoverEl) usageHoverEl.hidden = true;
+          usageHoverAnchor?.setAttribute("aria-expanded", "false");
           usageHoverHideTimer = null;
         }, 180);
       };

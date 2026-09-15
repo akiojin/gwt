@@ -27,7 +27,10 @@ pub mod spec_structured;
 pub mod spec_validate;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
-pub use cache::{Cache, CacheEntry, CacheError, CacheMeta};
+pub use cache::{
+    Cache, CacheEntry, CacheError, CacheGeneration, CacheMeta, IssueValidationReceipt,
+    ValidatedCacheEntry, VersionedCacheEntry,
+};
 pub use client::{
     fake::FakeIssueClient, ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient,
     IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,

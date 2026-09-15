@@ -65,6 +65,7 @@ impl AppRuntime {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.migration_pending = false;
         }
+        self.refresh_project_tab_incarnation(tab_id);
         Vec::new()
     }
 
@@ -79,11 +80,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let canonical = dunce::canonicalize(branch_worktree_path)
             .unwrap_or_else(|_| branch_worktree_path.to_path_buf());
-        let active_tab = self.active_tab_id.as_deref() == Some(tab_id);
-        let mut active_root_changed = false;
-
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            active_root_changed = active_tab && tab.project_root != canonical;
             tab.project_root = canonical.clone();
             tab.kind = ProjectKind::Git;
             tab.migration_pending = false;
@@ -99,9 +96,7 @@ impl AppRuntime {
                 }
             }
         }
-        if active_root_changed {
-            self.schedule_active_improvement_candidates_refresh();
-        }
+        self.refresh_project_tab_incarnation(tab_id);
         let _ = self.persist();
 
         vec![
@@ -125,6 +120,7 @@ impl AppRuntime {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.migration_pending = false;
         }
+        self.refresh_project_tab_incarnation(tab_id);
         vec![OutboundEvent::broadcast(BackendEvent::MigrationError {
             tab_id: tab_id.to_string(),
             phase: phase.as_str().to_string(),
@@ -136,7 +132,9 @@ impl AppRuntime {
     /// SPEC-1934 US-6.8: user chose Quit. Leave the repository untouched and
     /// ask the GUI event loop to exit through the normal shutdown path.
     pub(crate) fn quit_migration_events(&mut self, _tab_id: &str) -> Vec<OutboundEvent> {
-        self.proxy.send(UserEvent::QuitApp);
+        self.proxy.send(UserEvent::QuitApp {
+            reason: crate::GuiShutdownReason::QuitApp,
+        });
         Vec::new()
     }
 }

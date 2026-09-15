@@ -11,7 +11,9 @@ use gwt_github::{
     SpecOpsError,
 };
 
-use crate::cli::{CliEnv, CliParseError, ClientRef, IssueCommand};
+use crate::cli::{
+    issue::guard_autonomous_acceptance_block, CliEnv, CliParseError, ClientRef, IssueCommand,
+};
 
 use std::collections::BTreeMap;
 
@@ -104,6 +106,24 @@ pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
             i += 1;
         }
         return Ok(IssueCommand::SpecList { phase, state });
+    }
+    if head == "audit" {
+        let mut state: Option<String> = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--state" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err(CliParseError::MissingFlag("--state"));
+                    }
+                    state = Some(args[i].clone());
+                }
+                other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+            }
+            i += 1;
+        }
+        return Ok(IssueCommand::SpecAudit { state });
     }
     if head == "create" {
         let mut title: Option<String> = None;
@@ -373,6 +393,7 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
+        IssueCommand::SpecAudit { state } => audit_spec_tasks(env, out, state.as_deref())?,
         IssueCommand::SpecCreate {
             title,
             file,
@@ -461,6 +482,79 @@ pub(super) fn run<E: CliEnv>(
     Ok(code)
 }
 
+/// Issue #4146 AC-4: report every gwt-spec Issue whose `tasks` section carries
+/// task rows with no checkbox.
+///
+/// Those rows used to be invisible to the completion count, so a section could
+/// read "10 done / 0 open" with 51 rows untouched and the Issue was closed as
+/// complete. Closed Issues are scanned by default because that is where the
+/// damage already landed; `--state open` / `--state all` widen the scan.
+fn audit_spec_tasks<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    state: Option<&str>,
+) -> Result<i32, SpecOpsError> {
+    let state = match state.unwrap_or("closed") {
+        "closed" => Some(gwt_github::client::IssueState::Closed),
+        "open" => Some(gwt_github::client::IssueState::Open),
+        "all" => None,
+        other => {
+            return Err(SpecOpsError::from(ApiError::Unexpected(format!(
+                "unknown --state '{other}' (expected open, closed, or all)"
+            ))))
+        }
+    };
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    let list = env
+        .client()
+        .list_spec_issues(&SpecListFilter { phase: None, state })?;
+    let scanned = list.len();
+    let tasks = SectionName("tasks".to_string());
+    let mut flagged = 0usize;
+    let mut without_tasks = 0usize;
+    let mut unreadable: Vec<String> = Vec::new();
+    for spec in list {
+        let content = match ops.read_section(spec.number, &tasks) {
+            Ok(content) => content,
+            Err(SpecOpsError::SectionNotFound(_)) => {
+                without_tasks += 1;
+                continue;
+            }
+            Err(err) => {
+                unreadable.push(format!("#{}: {err}", spec.number.0));
+                continue;
+            }
+        };
+        let progress = crate::spec_tasks::parse_tasks_progress(&content);
+        if progress.untracked == 0 {
+            continue;
+        }
+        flagged += 1;
+        let state_marker = match spec.state {
+            gwt_github::client::IssueState::Open => "OPEN",
+            gwt_github::client::IssueState::Closed => "CLOSED",
+        };
+        out.push_str(&format!(
+            "#{} [{state_marker}] completed={} open={} untracked={} {}\n",
+            spec.number.0, progress.completed, progress.open, progress.untracked, spec.title
+        ));
+    }
+    for failure in &unreadable {
+        out.push_str(&format!("unreadable {failure}\n"));
+    }
+    out.push_str(&format!(
+        "audit: scanned {scanned}, flagged {flagged}, no tasks section {without_tasks}, unreadable {}\n",
+        unreadable.len()
+    ));
+    Ok(0)
+}
+
 fn write_spec_section<E: CliEnv>(
     env: &mut E,
     out: &mut String,
@@ -475,6 +569,7 @@ fn write_spec_section<E: CliEnv>(
         },
         cache,
     );
+    guard_spec_section_write(&ops, number, &section, &content)?;
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
     super::intake_outcome::auto_record_issue_operation(
@@ -492,6 +587,28 @@ fn write_spec_section<E: CliEnv>(
     );
     out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
+}
+
+/// Issue #3873 AC-2: a `spec` section write on an `auto-merge` Issue must keep
+/// a machine-checkable acceptance block. Reads the Issue's current labels
+/// through a conditional refresh so a label added after the last cache write
+/// is honoured; other sections are never inspected.
+fn guard_spec_section_write<C: IssueClient>(
+    ops: &SpecOps<C>,
+    number: u64,
+    section: &str,
+    content: &str,
+) -> Result<(), SpecOpsError> {
+    if section != SPEC_SECTION_NAME {
+        return Ok(());
+    }
+    ops.refresh_cache(IssueNumber(number))?;
+    let labels = ops
+        .cache()
+        .load_entry(IssueNumber(number))
+        .map(|entry| entry.snapshot.labels)
+        .unwrap_or_default();
+    guard_autonomous_acceptance_block(&labels, content)
 }
 
 /// Render the committed-write evidence line (SPEC-3248 P7C / #3284): byte
@@ -536,6 +653,7 @@ fn write_structured_spec_section<E: CliEnv>(
     } else {
         merge_structured_spec(&existing, &structured)
     };
+    guard_spec_section_write(&ops, number, &section, &content)?;
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
     super::intake_outcome::auto_record_issue_operation(
@@ -574,6 +692,7 @@ fn create_spec_from_markdown<E: CliEnv>(
         .into_iter()
         .map(|section| (section.name, section.content))
         .collect();
+    guard_autonomous_acceptance_block(&labels, raw)?;
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -604,6 +723,7 @@ fn create_spec_from_structured_json<E: CliEnv>(
     );
     let structured = parse_structured_spec_json(raw_json)?;
     let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
+    guard_autonomous_acceptance_block(&labels, &spec)?;
     let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(

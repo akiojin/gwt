@@ -480,24 +480,122 @@ pub fn set_upstream(worktree: &Path, branch: &str) -> Result<()> {
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+    let entries = fs::read_dir(src)?;
     fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
+    copy_dir_entries(entries, dst)
+}
+
+fn copy_dir_entries<I>(entries: I, dst: &Path) -> io::Result<()>
+where
+    I: IntoIterator<Item = io::Result<fs::DirEntry>>,
+{
+    for entry in entries {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&from)?;
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() {
-            // Symlinks inside `.git/` (e.g. submodule worktree pointers) are
-            // intentionally skipped: bare layout does not preserve worktree
-            // markers and re-creating links can foot-gun across hosts.
-            continue;
-        }
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else if file_type.is_file() {
-            fs::copy(&from, &to)?;
+        match copy_entry(&from, &to) {
+            Ok(()) => {}
+            // The source is a live `.git/`, so a child yielded by `read_dir`
+            // can be gone before it is stat-ed, descended into, or read. Only
+            // the child is skipped; a missing source root stays fatal because
+            // `read_dir` on it runs before this loop.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
     }
     Ok(())
+}
+
+fn copy_entry(from: &Path, to: &Path) -> io::Result<()> {
+    let file_type = fs::symlink_metadata(from)?.file_type();
+    if file_type.is_symlink() {
+        // Symlinks inside `.git/` (e.g. submodule worktree pointers) are
+        // intentionally skipped: bare layout does not preserve worktree
+        // markers and re-creating links can foot-gun across hosts.
+        return Ok(());
+    }
+    if file_type.is_dir() {
+        copy_dir_recursive(from, to)
+    } else if file_type.is_file() {
+        fs::copy(from, to).map(|_| ())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_dir_entries, copy_dir_recursive};
+    use std::fs;
+    use std::io;
+
+    #[test]
+    fn copy_dir_entries_skips_child_removed_after_enumeration() {
+        let source_root = tempfile::tempdir().expect("source tempdir");
+        let destination_root = tempfile::tempdir().expect("destination tempdir");
+        let vanished_source = source_root.path().join("vanishing.lock");
+        let stable_source = source_root.path().join("config");
+        fs::write(&vanished_source, "transient").expect("write transient entry");
+        fs::write(&stable_source, "stable").expect("write stable entry");
+
+        let entries = fs::read_dir(source_root.path())
+            .expect("enumerate source")
+            .collect::<Vec<_>>();
+        fs::remove_file(&vanished_source).expect("remove entry after enumeration");
+
+        copy_dir_entries(entries, destination_root.path())
+            .expect("an enumerated child may disappear before metadata is read");
+        assert!(
+            !destination_root.path().join("vanishing.lock").exists(),
+            "a vanished transient entry must not create a destination"
+        );
+        assert_eq!(
+            fs::read_to_string(destination_root.path().join("config"))
+                .expect("read copied stable entry"),
+            "stable",
+            "copying must continue after the vanished entry"
+        );
+    }
+
+    #[test]
+    fn copy_dir_entries_skips_directory_removed_after_enumeration() {
+        // The same race applies to directories: `read_dir` yields
+        // `.git/objects/<shard>` and the shard is gone before it is descended
+        // into. Skipping the child must not abort the whole copy.
+        let source_root = tempfile::tempdir().expect("source tempdir");
+        let destination_root = tempfile::tempdir().expect("destination tempdir");
+        let vanished_source = source_root.path().join("tmp_objdir");
+        fs::create_dir(&vanished_source).expect("create transient directory");
+        fs::write(vanished_source.join("payload"), "transient").expect("write transient child");
+        fs::create_dir(source_root.path().join("refs")).expect("create stable directory");
+        fs::write(source_root.path().join("refs").join("HEAD"), "ref").expect("write stable child");
+
+        let entries = fs::read_dir(source_root.path())
+            .expect("enumerate source")
+            .collect::<Vec<_>>();
+        fs::remove_dir_all(&vanished_source).expect("remove directory after enumeration");
+
+        copy_dir_entries(entries, destination_root.path())
+            .expect("an enumerated directory may disappear before it is descended into");
+        assert!(
+            !destination_root.path().join("tmp_objdir").exists(),
+            "a vanished transient directory must not create a destination"
+        );
+        assert_eq!(
+            fs::read_to_string(destination_root.path().join("refs").join("HEAD"))
+                .expect("read copied stable child"),
+            "ref",
+            "copying must continue after the vanished directory"
+        );
+    }
+
+    #[test]
+    fn copy_dir_recursive_propagates_not_found_for_missing_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        let error = copy_dir_recursive(&root.path().join("missing"), &root.path().join("copy"))
+            .expect_err("a missing source root must remain an error");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
 }

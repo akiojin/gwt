@@ -729,3 +729,35 @@ async function importOperatorShell() {
   writeFileSync(tmpModule, source);
   return import(pathToFileURL(tmpModule).href);
 }
+
+// Issue #3884 AC-3: the RUNNING cell tells how many of the running agents live
+// as inline terminals inside the Issue window (SPEC-3671 `issue_preview`
+// placement) instead of on the canvas, so "RUNNING 6" with an empty canvas is
+// no longer a contradiction.
+test("Issue #3884 AC-3: RUNNING cell breaks out inline-terminal agents", async () => {
+  const { applyTelemetryCounts } = await importOperatorShell();
+  const { document } = parseHTML(html);
+
+  const runningCell = () => document.querySelector(".op-status-strip__cell--running");
+  const inline = () => document.getElementById("op-strip-running-inline");
+  assert.ok(inline(), "index.html carries the inline breakdown slot inside the RUNNING cell");
+  assert.ok(runningCell()?.contains(inline()));
+
+  applyTelemetryCounts(document, { running: 6, running_inline: 5 });
+  assert.equal(document.getElementById("op-strip-running")?.textContent, "6");
+  assert.equal(inline()?.textContent, "5 inline");
+  assert.equal(inline()?.hidden, false);
+  assert.match(
+    runningCell()?.title || "",
+    /5 of 6 running agents are inline terminals in the Issue window/,
+    "hover explains where the agents are",
+  );
+
+  applyTelemetryCounts(document, { running: 1, running_inline: 0 });
+  assert.equal(inline()?.hidden, true, "no breakdown when every running agent is on the canvas");
+  assert.equal(runningCell()?.title, "");
+
+  // Counts that omit the breakdown (legacy callers) keep the slot hidden.
+  applyTelemetryCounts(document, { running: 2 });
+  assert.equal(inline()?.hidden, true);
+});

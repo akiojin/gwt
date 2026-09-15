@@ -34,6 +34,10 @@
 - Fetch GitHub Actions logs through JSON operations `actions.logs` or
   `actions.job_logs` and extract failure snippets.
 - For external checks (Buildkite, etc.), report URL only.
+- When the failure is transient (infrastructure, flake), re-run through
+  JSON operation `actions.rerun` instead of pushing a throwaway commit:
+  `{"run_id":<id>,"failed_only":true}` for a whole run, `{"job_id":<id>}`
+  for a single job. It refuses ids the current repository does not own.
 
 ### All Mode (`--mode all`)
 

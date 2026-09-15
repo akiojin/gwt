@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { parseHTML } from "linkedom";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -141,17 +142,132 @@ test("settings-select uses --color-focus-ring on focus-visible", () => {
   assert.match(block[1], /var\(--color-focus-ring\)/);
 });
 
-test("renderSettingsWindow builds a tablist toolbar with System and Custom Agents tabs", () => {
+test("renderSettingsWindow builds a tablist toolbar with System, Project Manager, and Custom Agents tabs", () => {
   // The renderer must declare role="tablist" so assistive tech sees the tab
   // group, and emit both data-settings-tab values that switchSettingsTab
   // expects.
-  assert.match(settingsSource, /toolbar\.className\s*=\s*"settings-toolbar"/);
-  assert.match(settingsSource, /tabs\.setAttribute\("role",\s*"tablist"\)/);
-  assert.match(settingsSource, /buildSettingsTab\("system",\s*"System"/);
+  const renderSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
+  assert.match(renderSource, /toolbar\.className\s*=\s*"settings-toolbar"/);
+  assert.match(renderSource, /tabs\.setAttribute\("role",\s*"tablist"\)/);
+  assert.match(renderSource, /buildSettingsTab\("system",\s*"System"/);
   assert.match(
-    settingsSource,
+    renderSource,
+    /buildSettingsTab\(\s*"project-manager",\s*"Project Manager"/,
+  );
+  assert.match(
+    renderSource,
     /buildSettingsTab\("custom-agents",\s*"Custom Agents"/,
   );
+});
+
+test("Project Manager tab mounts the shared PM editor controller", () => {
+  const { document } = parseHTML('<!doctype html><body><div id="settings-body"></div></body>');
+  const settingsBody = document.getElementById("settings-body");
+  const mounted = [];
+  const pmSettingsPanel = {
+    mount(node) {
+      mounted.push(node);
+    },
+  };
+  const mountProjectManagerSettingsPanel = loadFunction(
+    "mountProjectManagerSettingsPanel",
+  );
+
+  mountProjectManagerSettingsPanel(document, settingsBody, pmSettingsPanel);
+
+  assert.equal(mounted.length, 1);
+  assert.equal(mounted[0].dataset.settingsPanel, "project-manager");
+  assert.equal(mounted[0].parentElement, settingsBody);
+
+  const renderSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
+  const mountSource = extractFunctionSource(
+    settingsSource,
+    "mountProjectManagerSettingsPanel",
+  );
+  assert.match(
+    renderSource,
+    /mountProjectManagerSettingsPanel\(\s*document,\s*bodyEl,\s*pmSettingsPanel,\s*windowData\.id,\s*\)/,
+    "renderSettingsWindow must mount the shared PM editor at its render boundary",
+  );
+  assert.doesNotMatch(
+    `${renderSource}\n${mountSource}`,
+    /set_pm_(?:auto_start|launch_profile|loop_interval)/,
+    "Settings render and mount helpers must not duplicate PM event construction",
+  );
+});
+
+test("Project Manager tab and panel expose an explicit accessible relationship", () => {
+  const { document } = parseHTML('<!doctype html><body><div id="settings-body"></div></body>');
+  const settingsBody = document.getElementById("settings-body");
+  const mountProjectManagerSettingsPanel = loadFunction(
+    "mountProjectManagerSettingsPanel",
+  );
+
+  const panel = mountProjectManagerSettingsPanel(
+    document,
+    settingsBody,
+    null,
+    "window-7",
+  );
+
+  assert.equal(panel.id, "settings-window-7-panel-project-manager");
+  assert.equal(
+    panel.getAttribute("aria-labelledby"),
+    "settings-window-7-tab-project-manager",
+  );
+
+  const tabSource = extractFunctionSource(settingsSource, "buildSettingsTab");
+  assert.match(tabSource, /btn\.id\s*=\s*settingsTabId\(windowId,\s*id\)/);
+  assert.match(
+    tabSource,
+    /btn\.setAttribute\("aria-controls",\s*settingsPanelId\(windowId,\s*id\)\)/,
+  );
+});
+
+test("settings:open routes to the Project Manager tab and frames an existing Settings window", () => {
+  const { document } = parseHTML(`<!doctype html><body>
+    <div id="settings-body">
+      <button class="settings-tab active" data-settings-tab="system" aria-selected="true"></button>
+      <button class="settings-tab" data-settings-tab="project-manager" aria-selected="false"></button>
+      <section class="settings-panel" data-settings-panel="system"></section>
+      <section class="settings-panel hidden" data-settings-panel="project-manager"></section>
+    </div>
+  </body>`);
+  const settingsBody = document.getElementById("settings-body");
+  const framed = [];
+  const installSettingsOpenHandler = loadFunctionWithDeps(
+    "installSettingsOpenHandler",
+    ["switchSettingsTab"],
+  );
+
+  installSettingsOpenHandler({
+    document,
+    settingsWindowBodies: new Set([settingsBody]),
+    focusOrSpawnPreset: (preset) => framed.push(preset),
+    setPendingTarget: () => assert.fail("an existing Settings window must not pend"),
+  });
+  document.dispatchEvent(
+    new document.defaultView.CustomEvent("settings:open", {
+      detail: { target: "project-manager" },
+    }),
+  );
+
+  assert.equal(
+    settingsBody.querySelector('[data-settings-tab="project-manager"]')
+      .getAttribute("aria-selected"),
+    "true",
+  );
+  assert.equal(
+    settingsBody.querySelector('[data-settings-panel="project-manager"]')
+      .classList.contains("hidden"),
+    false,
+  );
+  assert.equal(
+    settingsBody.querySelector('[data-settings-panel="system"]')
+      .classList.contains("hidden"),
+    true,
+  );
+  assert.deepEqual(framed, ["settings"]);
 });
 
 test("System tab Language select offers Auto / English / 日本語", () => {
@@ -532,5 +648,102 @@ test("switchSettingsTab toggles aria-selected and hidden together", () => {
     settingsSource,
     /panel\.classList\.toggle\(\s*"hidden"/,
     "switchSettingsTab must toggle hidden on non-active panels",
+  );
+});
+
+test("renderSystemPanel exposes agent process-tree resource controls (#3813)", () => {
+  assert.match(
+    settingsSource,
+    /agentResource:\s*\{\s*enabled:\s*true,\s*preset:\s*"automatic",\s*priority:\s*"below-normal",\s*cpuLimitPercent:\s*null,\s*buildJobs:\s*null,?\s*\}/,
+    "expected agent resource UI state to default to enabled / automatic preset",
+  );
+  for (const id of [
+    "settings-system-agent-resource-enabled",
+    "settings-system-agent-preset",
+    "settings-system-agent-priority",
+    "settings-system-agent-cpu-limit",
+    "settings-system-agent-build-jobs",
+  ]) {
+    assert.match(
+      settingsSource,
+      new RegExp(`id\\s*=\\s*"${id}"`),
+      `expected agent resource control with id ${id}`,
+    );
+  }
+  assert.match(
+    settingsSource,
+    /kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*agent_resource:/,
+    "expected agent resource controls to send the complete agent_resource object",
+  );
+  assert.match(
+    settingsSource,
+    /function parseOptionalPositiveInteger\(/,
+    "expected empty numeric inputs to resolve to automatic (null) mode",
+  );
+  assert.match(
+    settingsSource,
+    /applyAgentResourceSnapshot\(deferred\.agent_resource\)/,
+    "expected deferred backend events to reconcile agent resource state",
+  );
+  assert.match(
+    settingsSource,
+    /presetSelect\.className\s*=\s*"settings-select"/,
+    "expected the preset select to reuse the shared settings-select primitive",
+  );
+  for (const [value, label] of [
+    ["automatic", "Automatic (recommended)"],
+    ["gui-responsiveness", "Prioritize GUI responsiveness"],
+    ["build-speed", "Prioritize build speed"],
+    ["custom", "Custom"],
+  ]) {
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(
+      settingsSource,
+      new RegExp(`value:\\s*"${value}",\\s*text:\\s*"${escapedLabel}"`),
+      `expected preset option ${value} labelled "${label}"`,
+    );
+  }
+  assert.match(
+    settingsSource,
+    /customSection\.hidden\s*=\s*agentResource\.preset\s*!==\s*"custom"/,
+    "expected numeric / priority controls to be shown only for the Custom preset",
+  );
+  assert.match(
+    componentsCss,
+    /\.settings-section\[hidden\]\s*\{\s*display:\s*none;/,
+    "expected the hidden attribute to win over the flex display of settings sections",
+  );
+  assert.doesNotMatch(
+    settingsSource,
+    /Cargo build jobs/,
+    "expected the parallelism control to use generic build vocabulary, not cargo",
+  );
+  assert.match(
+    settingsSource,
+    /prioritySelect\.className\s*=\s*"settings-select"/,
+    "expected the priority select to reuse the shared settings-select primitive",
+  );
+  assert.match(
+    settingsSource,
+    /cpuInput\.className\s*=\s*"settings-input"/,
+    "expected numeric inputs to reuse the shared settings-input primitive",
+  );
+});
+
+test("app.js reconciles agent_resource from system settings events (#3813)", () => {
+  assert.match(
+    appSource,
+    /kind:\s*"system_settings",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
+    "expected deferred system_settings payload to carry agent_resource",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"system_settings_updated",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
+    "expected deferred system_settings_updated payload to carry agent_resource",
+  );
+  const applyCalls = appSource.match(/applyAgentResourceSnapshot\(event\.agent_resource\)/g) || [];
+  assert.ok(
+    applyCalls.length >= 2,
+    "expected both system_settings and system_settings_updated arms to reconcile agent_resource",
   );
 });

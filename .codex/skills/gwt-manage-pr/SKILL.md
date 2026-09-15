@@ -144,8 +144,18 @@ Ready for review only when all of the following are true:
 - no known blockers remain for the PR scope
 - rollback / follow-up boundaries are explained in the PR body when relevant
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`
-- `User Verification Result` is `confirmed`, `n/a`, or
-  `skipped(<reason>)`
+- `User Verification Result` is `confirmed`, `n/a`, `n/a (autonomous)`,
+  `deferred (autonomous execution)`, or `skipped(<reason>)`. The two autonomous
+  values are what an unattended gwt Issue Monitor launch records — read the
+  launch route from `execution.status` (`launch_route`), not from an environment
+  variable: the user-verification handoff is waived for that launch mode, and
+  any UI surface is carried by `Agent Visual Check: pass` instead. Never rewrite
+  either as `confirmed` — the user confirmed nothing.
+- A `deferred (autonomous execution)` result reaches a **Draft** PR only, and
+  gwt enforces it: `pr.ready` and non-draft `pr.create` refuse a body carrying
+  that value. Automation ends at PR creation; the owner makes the merge
+  decision after sweeping the deferred PRs (`pr.list` with
+  `include: ["body"]`, field `deferred_user_verification`).
 - every PR body checklist item is checked or explicitly marked N/A with
   a reason
 
@@ -263,6 +273,7 @@ Detailed logic in `references/check-flow.md`.
 - Reviews: `pr.reviews`
 - Unresolved threads: `pr.review_threads`
 - Actions logs: `actions.logs` / `actions.job_logs`
+- Actions re-run: `actions.rerun` (`run_id` + `failed_only`, or `job_id`)
 
 ### Output Contract
 
@@ -425,9 +436,13 @@ Deliver applies a stricter gate than Create/Fix because auto-merge removes the
 last human checkpoint:
 
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`
-- `User Verification Result` is `confirmed` or `n/a` (not `pending`,
-  `rejected(<reason>)`, or `skipped(<reason>)` — a skip is enough to *create* a
-  PR but not to merge unattended)
+- `User Verification Result` is `confirmed`, `n/a`, or `n/a (autonomous)` (not
+  `pending`, `rejected(<reason>)`, `skipped(<reason>)`, or
+  `deferred (autonomous execution)` — a skip is enough to *create* a PR but not
+  to merge unattended, and a deferral is by definition a check the owner has
+  not made yet). `n/a (autonomous)` qualifies because that waiver is a property
+  of the launch mode rather than a postponed check, but it still requires
+  `Agent Visual Check: pass` when a UI surface is in scope.
 - the PR is a releaseable slice with no known blockers, and is not a Draft
 
 If verification is `pending`, do **not** run `gh pr merge --auto`. Stop and

@@ -8,23 +8,28 @@ pub mod ai_settings;
 pub mod atomic;
 pub mod board_config;
 pub mod error;
+pub mod github_budget_config;
 pub mod locale;
 pub mod profile;
 pub mod settings;
 pub mod usage_config;
 pub mod voice_config;
 
-pub use agent_config::AgentConfig;
+pub use agent_config::{
+    AgentConfig, AgentProcessPriority, AgentResourceConfig, AgentResourceConfigError,
+    AgentResourcePreset,
+};
 pub use ai_settings::AISettings;
 pub use board_config::{
     BoardConfig, BoardProviderKind, ProjectBoardConfig, SlackConfig, TeamsConfig,
     DEFAULT_OAUTH_REDIRECT_PORT, PROJECT_BOARD_FILE,
 };
 pub use error::{ConfigError, Result};
+pub use github_budget_config::GitHubBudgetConfig;
 pub use locale::{
     detect_user_locale, detect_user_locale_from, detect_user_locale_from_env_and_system,
 };
 pub use profile::{Profile, ProfilesConfig};
-pub use settings::{ServerConfig, Settings};
+pub use settings::{PerfBudgetOverrides, PerfConfig, ServerConfig, Settings};
 pub use usage_config::UsageConfig;
 pub use voice_config::VoiceConfig;

@@ -310,9 +310,13 @@ git push origin develop
 **失敗時**: 最大3回リトライ。それでも失敗した場合：
 > 「エラー: pushに失敗しました。ネットワーク接続を確認してください。」
 
-### 9. Closing Issue の収集
+### 9. Delivered Issue の収集（reference-only）
 
-`develop` 向けPRに書かれた `Closes #...` は自動クローズされないため、release PR（`develop -> main`）本文に再掲します。
+> 🚨 **Release PR（`develop -> main`）の本文に closing keyword（`Closes` / `Fixes` /
+> `Resolves` + `#N`）を書いてはならない（Issue #3545）。** `main` は default branch なので、
+> 本文の closing keyword は merge 時に受け入れ条件が未消化の Issue まで閉じてしまう。
+> Issue の決着は work ブランチが `develop` に merge された時点で Issue Monitor が
+> 受け入れ基準を確認して行う（Issue #3917）。Release PR は Issue を **参照するだけ**。
 
 まず、今回のリリース範囲を決定：
 
@@ -324,58 +328,38 @@ else
 fi
 ```
 
-#### 9.1 リリース範囲内の参照番号を収集
+#### 9.1 リリース範囲内の参照番号を収集し分類する
 
-コミットメッセージ末尾の `(#N)` から参照番号を抽出する。
-
-**注意**: `(#N)` は PR 番号の場合も Issue 番号の場合もある（GitHub のスカッシュマージは PR 番号を付与するが、手動で Issue 番号を付けるケースもある）。そのため、PR / Issue の両方として処理する。
-
-```bash
-# squash マージ: コミットメッセージ末尾の (#N) から番号を抽出
-SQUASH_REFS=$(git log --pretty=%s "$RANGE" --no-merges \
-  | grep -Eo '\(#[0-9]+\)$' \
-  | grep -Eo '[0-9]+' \
-  | sort -u)
-
-# マージコミット: "Merge pull request #N" から PR 番号を抽出
-MERGE_PRS=$(git log --merges --pretty=%s "$RANGE" \
-  | sed -n 's/^Merge pull request #\([0-9]\+\).*$/\1/p' \
-  | sort -u)
-
-# 結合・重複排除
-ALL_REFS=$(printf '%s\n%s\n' "$SQUASH_REFS" "$MERGE_PRS" | awk 'NF' | sort -nu)
-```
-
-#### 9.2 各番号を分類し、Closing Issue を収集
-
-各番号について GitHub API で PR か Issue かを判定し、それぞれ適切に処理する。  
-**必ず** 以下のヘルパースクリプトを使って収集結果を JSON で取得すること：
+コミットメッセージ末尾の `(#N)` と `Merge pull request #N` から番号を抽出し、
+GitHub API で PR / Issue を判定する。**必ず** 以下のヘルパースクリプトを使うこと：
 
 ```bash
 ISSUE_REF_JSON=$(python3 scripts/release_issue_refs.py --range "$RANGE" --format json)
 
-ISSUE_NUMBERS=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.auto_close_issues[]?')
+DELIVERED_ISSUES=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.delivered_issues[]?')
 REFERENCE_ONLY_ISSUES=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.reference_only_issues[]?')
 ISSUE_WARNINGS=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.warnings[]?')
 ```
 
-`ISSUE_NUMBERS` が空でなければ、PR 本文の `## Closing Issues` セクションに **1行ずつ** 以下を追加：
+- `DELIVERED_ISSUES`: feature PR が `Closing Issues` に宣言していた Issue。本文の
+  `## Delivered Issues` に `- #N` で列挙する（keyword なし）
+- `REFERENCE_ONLY_ISSUES`: 参照のみの Issue（`gwt-spec` Issue を含む）。`## Related Issues / Links` に `- #N` で列挙する
+- `ISSUE_WARNINGS`: ステップ 5 の承認時にそのまま表示する
 
-```text
-Closes #123
-Closes #456
+#### 9.2 本文の生成
+
+本文は LLM が手書きせず、`--format pr-body` で生成する。`## Changes` に載せたい
+変更概要（LLM 作成のリスト等）がある場合は一時ファイルに書き `--notes-file` で渡す。
+スクリプトが本文全体の closing keyword を機械的に無害化し（`fixes #N` →
+``fixes `#N` ``）、無害化できなければ失敗する：
+
+```bash
+NOTES_FILE="$(mktemp)"
+# ここに `## Changes` の内容（任意）を書く。空なら渡さなくてよい。
+BODY_FILE="$(mktemp)"
+python3 scripts/release_issue_refs.py --range "$RANGE" --format pr-body \
+  --version "v{NEW_VERSION}" --bump "{BUMP}" --notes-file "$NOTES_FILE" > "$BODY_FILE"
 ```
-
-#### 9.3 warning の扱い
-
-`REFERENCE_ONLY_ISSUES` または `ISSUE_WARNINGS` がある場合、それらは **自動クローズ対象ではない**。  
-この場合、ステップ5の承認時とステップ10の PR 本文生成時に必ず可視化すること。
-
-- `REFERENCE_ONLY_ISSUES`: `## Related Issues / Links` に残す
-- `ISSUE_WARNINGS`: ユーザー承認時にそのまま表示する
-- `ISSUE_NUMBERS` が空でも `REFERENCE_ONLY_ISSUES` がある場合:
-  - 「関連Issueは見つかったが、自動クローズ対象は 0 件」と明示する
-  - 対象 Issue を本当に閉じたいなら `Closing Issues` 側へ移す必要があると説明する
 
 ### 10. PR作成/更新
 
@@ -408,7 +392,7 @@ JSON
 
 #### 既存PRがある場合
 
-`pr.current` の JSON envelope 出力に PR 番号が含まれている場合、以下を実行してタイトル・ラベル・本文を更新（`## Closing Issues` を反映）：
+`pr.current` の JSON envelope 出力に PR 番号が含まれている場合、以下を実行してタイトル・ラベル・本文を更新（`## Delivered Issues` を反映）：
 本文は `params.body` に入れること。
 
 ```bash
@@ -430,21 +414,22 @@ PRを作成：
 JSON
 ```
 
-**PR_BODY の内容**（LLMが生成）：
+**PR_BODY の内容**: ステップ 9.2 で生成した `$BODY_FILE` の内容をそのまま `params.body` に渡す。
+生成される本文は次のセクションで構成される：
 
-PR bodyには以下を含めてください：
-- `## Summary` - このリリースの概要（変更内容を要約）
-- `## Changes` - 主な変更点をリスト形式で
-- `## Version` - バージョン番号
-- `## Closing Issues` - main マージ時にクローズしたい Issue を `Closes #<番号>` の生テキストで列挙（`ISSUE_NUMBERS` が空の場合は `None` と記載）
-- `## Related Issues / Links` - `REFERENCE_ONLY_ISSUES` を `#<番号>` で列挙（空の場合は `None`）
+- `## Summary` - リリースの概要
+- `## Version` - バージョン番号と bump 種別
+- `## Changes` - `--notes-file` を渡した場合のみ（closing keyword は無害化済み）
+- `## Delivered Issues` - `DELIVERED_ISSUES` を `- #<番号>` で列挙（空なら `None`）
+- `## Related Issues / Links` - `REFERENCE_ONLY_ISSUES` を `- #<番号>` で列挙（空なら `None`）
 
-**重要**: `Closes #<番号>` はコードブロックに入れず、通常の本文として記載すること。
-**重要**: `#<番号>` を `## Related Issues / Links` にだけ書いても auto-close されない。
+**重要**: 本文を手で編集して `Closes #<番号>` 等の closing keyword を追加しない。
+**重要**: Issue の close は Release PR の役割ではない。未 close の Issue が残っていれば、
+develop merge 時の Issue Monitor settlement コメント（`merge 済み・未達 AC あり` 等）を確認する。
 
-### 11. Closing Issue へのコメント追記
+### 11. Delivered Issue へのコメント追記
 
-`ISSUE_NUMBERS` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する。
+`DELIVERED_ISSUES` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する（close はしない）。
 
 まず、ステップ10の直後に JSON operation `pr.current` を再実行し、出力から PR 番号を取得する：
 
@@ -462,7 +447,7 @@ PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head
 ```bash
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
 
-for NUM in $ISSUE_NUMBERS; do
+for NUM in $DELIVERED_ISSUES; do
   python3 - "$NUM" "{NEW_VERSION}" "$PR_NUMBER" <<'PY' | "$GWT_BIN" || true
 import json
 import sys
@@ -482,7 +467,7 @@ PY
 done
 ```
 
-- `ISSUE_NUMBERS` が空の場合はこのステップ全体をスキップ
+- `DELIVERED_ISSUES` が空の場合はこのステップ全体をスキップ
 - コメント本文にはバージョン番号（`v{NEW_VERSION}`）と Release PR 番号を含める
 - `|| true` により、個別の Issue へのコメント失敗（既にクローズ済み等）でもリリースフロー全体を中断しない
 
@@ -594,9 +579,11 @@ JSON
 
 PRがmainにマージされると、`.github/workflows/release.yml` が以下を自動実行：
 
-1. Git タグを作成 (`v{NEW_VERSION}`)
-2. GitHub Release を作成（最初は draft）
-3. クロスコンパイル済みバイナリをアップロードし、Release を公開（draft 解除）
+1. Release PR の merge で閉じられた Issue を検出して reopen する
+   （`scripts/release_close_guard.py`、Issue #3545。API 経由で閉じられた Issue は対象外）
+2. Git タグを作成 (`v{NEW_VERSION}`)
+3. GitHub Release を作成（最初は draft）
+4. クロスコンパイル済みバイナリをアップロードし、Release を公開（draft 解除）
 
 > この自動処理は **失敗しうる**（特にビルド時の crates.io download の transient 失敗）。
 > エージェントはステップ 13 でこの run を必ず監視し、transient 失敗は再実行で復旧、
