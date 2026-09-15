@@ -1934,9 +1934,9 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // setConnectionState and the pendingMessages flush so dispatcher
     // setup is allowed inside the function, but the ordering assertion
     // — frontend_ready strictly precedes the queued-message replay — is
-    // preserved.
+    // preserved. Recovery Center also reloads after the readiness handshake.
     let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
+            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
         )
         .expect("valid regex");
 
