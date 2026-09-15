@@ -45,17 +45,32 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
      output only if nothing changed and no open PR is CI-RED, CONFLICTED, or escalation_due.";
 
-/// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
-/// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm
-/// guidance owns the detailed timeout, retry, readback, and lifecycle rules;
-/// this clause only prevents injected prompts from silently restoring direct
-/// long-running execution.
+/// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
+/// and subscribe-ordering reminder for the Stop-gate continuation. The
+/// generated gwt-pm guidance owns the full retry, readback, and lifecycle
+/// rules; this clause keeps every injected prompt aligned on the five-second,
+/// nonblocking path. The two PTY wake prompts carry
+/// [`PM_GWTD_EXECUTION_WAKE_CLAUSE`] instead, for the byte reason documented
+/// there.
 pub const PM_GWTD_EXECUTION_CLAUSE: &str =
     "Keep the PM turn responsive: run only short read-only gwtd operations directly with the \
-     contract's 10-second outer deadline. Delegate `daemon.subscribe`, batch mutations, repeated \
-     `pane.read`, and every long-running or hang-risk operation to exactly one background task or \
-     in-session sub-agent; collect the result only from its task-completion notification, and \
-     never duplicate an operation while it is pending.";
+     contract's 5-second outer deadline. Launch `daemon.subscribe` only as one background task \
+     with `params.timeout_seconds:5`; do not wait for it, and immediately reconcile a fresh \
+     `issue.monitor.status` snapshot. Delegate batch mutations, repeated `pane.read`, and every \
+     long-running or hang-risk operation to exactly one background task or in-session sub-agent; \
+     collect the result only from its task-completion notification, and never duplicate an \
+     operation while it is pending.";
+
+/// Issue #3825 AC-1 / AC-4: the same execution budget for the two PTY wake
+/// prompts. Kept terse on purpose — those prompts must stay under the
+/// 1024-byte PTY canonical queue (#3868), and the wake text already orders the
+/// fresh `issue.monitor.status` reconcile that the full clause spells out, so
+/// only the per-call ceiling and the "never wait on the subscribe" rule need
+/// repeating here.
+pub const PM_GWTD_EXECUTION_WAKE_CLAUSE: &str =
+    "Keep the turn responsive: run gwtd reads directly only within the contract's 5-second outer \
+     deadline; start `daemon.subscribe` with `params.timeout_seconds:5` as a background task and \
+     do not wait for it.";
 
 /// Issue #3767 AC-1〜AC-3: compact steering obligation shared by the delta
 /// wake, the periodic wake, the Stop-gate continuation, and the PM's
@@ -161,8 +176,10 @@ pub struct PmSettings {
     /// FR-026: absent until the user chooses; see [`PmSettings::launch_profile_or_default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<PmLaunchProfile>,
-    /// SPEC-3431 FR-132: resident-loop cycle interval in seconds. Both the
-    /// Stop-gate floor and the subscribe timeout the PM is told to use.
+    /// SPEC-3431 FR-132 / Issue #3825: resident-loop cycle interval in
+    /// seconds. This is the scheduling cadence and the Stop-gate floor only;
+    /// it is never an operation timeout, because a cadence that becomes
+    /// foreground waiting time makes the PM unresponsive to the user.
     /// Missing values default to 60s and effective values are at least 10s.
     #[serde(default = "default_loop_interval_secs")]
     pub loop_interval_secs: u64,
@@ -354,6 +371,8 @@ pub fn pm_delivery_prompt_sha256(prompt: &str) -> String {
     format!("{:x}", Sha256::digest(prompt.as_bytes()))
 }
 
+const PM_DELIVERY_SOURCE: &str = "[gwt PM delivery — not an owner message] ";
+
 pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Result<String> {
     if uuid::Uuid::parse_str(operation_id)
         .ok()
@@ -368,7 +387,7 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
     }
     let body_sha256 = pm_delivery_prompt_sha256(body);
     Ok(format!(
-        "{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"
+        "{PM_DELIVERY_SOURCE}{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"
     ))
 }
 
@@ -384,7 +403,10 @@ pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, Strin
         .ok()
         .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
         || !is_canonical_sha256(body_sha256)
-        || pm_delivery_prompt_sha256(body) != body_sha256
+        || (pm_delivery_prompt_sha256(body) != body_sha256
+            && body
+                .strip_prefix(PM_DELIVERY_SOURCE)
+                .is_none_or(|body| pm_delivery_prompt_sha256(body) != body_sha256))
     {
         return None;
     }
@@ -3059,6 +3081,123 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
     Ok(())
 }
 
+fn tracked_pm_work_diagnosis(worktree: &Path) -> String {
+    let mut paths = std::collections::BTreeSet::new();
+    for args in [
+        vec!["diff", "--name-only", "--no-renames", "-z", "--"],
+        vec![
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "--",
+        ],
+    ] {
+        match gwt_core::process::run_git_logged(&args, Some(worktree)) {
+            Ok(output) if output.status.success() => {
+                paths.extend(
+                    output
+                        .stdout
+                        .split(|byte| *byte == 0)
+                        .filter(|path| !path.is_empty())
+                        .map(|path| String::from_utf8_lossy(path).into_owned()),
+                );
+            }
+            _ => {
+                return "user-owned changes: tracked or index changes; path inspection unavailable"
+                    .to_string()
+            }
+        }
+    }
+    let mut groups = std::collections::BTreeMap::<&str, Vec<String>>::new();
+    for path in paths {
+        let category = if gwt_skills::is_gwt_managed_skill_or_command_path(Path::new(&path)) {
+            "managed artifacts"
+        } else if path == ".gwt/work/events.jsonl" || path.starts_with(".gwt/work/events/") {
+            "Work history"
+        } else {
+            "user-owned changes"
+        };
+        groups.entry(category).or_default().push(path);
+    }
+    let groups = groups
+        .into_iter()
+        .map(|(category, paths)| {
+            let examples = paths
+                .iter()
+                .take(5)
+                .map(|path| {
+                    path.chars()
+                        .take(120)
+                        .flat_map(char::escape_default)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{category}: {} tracked/index path(s): {examples}",
+                paths.len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("PM worktree has tracked or index changes; {groups}")
+}
+
+fn repoint_and_refresh_pm_assets(
+    manager: &gwt_git::WorktreeManager,
+    worktree: &Path,
+    old_head: &str,
+    target: &str,
+) -> Result<(), (PmWorktreeRefreshFailureStage, io::Error)> {
+    let mut stage = PmWorktreeRefreshFailureStage::Repoint;
+    let result = crate::managed_assets::with_pm_repoint_transaction(worktree, target, || {
+        let refresh = (|| {
+            // A self-heal writer may have run since the initial preflight.
+            // This lock remains held until checkout and regeneration end.
+            normalize_previous_generated_hook_configs(worktree)?;
+            manager
+                .repoint_detached(worktree, target)
+                .map_err(|error| {
+                    io::Error::other(format!("managed artifacts: repoint failed: {error}"))
+                })?;
+            stage = PmWorktreeRefreshFailureStage::ManagedAssets;
+            crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
+                .map_err(|error| {
+                    io::Error::other(format!("managed artifacts: regeneration failed: {error}"))
+                })
+        })();
+        if let Err(error) = refresh {
+            // Git can advance HEAD and then report failure from post-checkout.
+            // Inspect the actual commit before restoring displaced assets.
+            let rollback = detached_worktree_head_sha(worktree).and_then(|head| {
+                if head.as_deref() == Some(old_head) {
+                    return Ok(());
+                }
+                if head.as_deref() != Some(target) {
+                    return Err(io::Error::other(
+                        "PM HEAD changed outside the refresh transaction",
+                    ));
+                }
+                normalize_previous_generated_hook_configs(worktree)?;
+                manager
+                    .repoint_detached(worktree, old_head)
+                    .map_err(|error| io::Error::other(error.to_string()))
+            });
+            let mut reason = error.to_string();
+            if let Err(rollback_error) = rollback {
+                reason.push_str(&format!(
+                    "; restoring prior PM worktree HEAD {old_head} also failed: {rollback_error}"
+                ));
+            }
+            return Err(io::Error::other(reason));
+        }
+        Ok(())
+    });
+    result.map_err(|error| (stage, error))
+}
+
 fn refresh_pm_worktree_at_locked(
     git_root: &Path,
     // Fetch and worktree administration belong to the shared main Git root,
@@ -3315,7 +3454,7 @@ fn refresh_pm_worktree_at_locked(
                 )),
                 Ok(gwt_git::worktree::DetachedRepointSafety::TrackedOrIndexChanges) => Some((
                     PmWorktreeRefreshFailureStage::LocalWork,
-                    "PM worktree has tracked or index changes".to_string(),
+                    tracked_pm_work_diagnosis(worktree),
                 )),
                 Ok(gwt_git::worktree::DetachedRepointSafety::DetachedOnlyCommit) => Some((
                     PmWorktreeRefreshFailureStage::LocalWork,
@@ -3335,19 +3474,39 @@ fn refresh_pm_worktree_at_locked(
                 return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
             }
         }
+        let mut assets_refreshed = false;
         if let Some(head) = old_head.as_deref().filter(|head| *head != target_sha) {
-            if let Err(error) = manager.repoint_detached(worktree, &target_sha) {
+            if let Err((stage, error)) =
+                repoint_and_refresh_pm_assets(&manager, worktree, head, &target_sha)
+            {
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
-                    PmWorktreeRefreshFailureStage::Repoint,
+                    stage,
                     error.to_string(),
                 );
-                return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+                if stage == PmWorktreeRefreshFailureStage::ManagedAssets {
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(error);
+                }
+                // The transaction already restored its prior assets. A second
+                // materialization here would immediately overwrite them.
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                if let Some(snapshot) = generated_hook_snapshot.take() {
+                    if let Err(restore_error) = snapshot.restore() {
+                        let reason = format!("restoring prior generated PM hook configs also failed: {restore_error}");
+                        append_pm_worktree_refresh_failure_reason(project_dir, &reason)?;
+                        return Err(io::Error::other(format!("{error}; {reason}")));
+                    }
+                }
+                return Ok(PmWorktreeRefreshOutcome {
+                    worktree: worktree.to_path_buf(),
+                    freshness,
+                });
             }
-            debug_assert!(!head.is_empty());
+            assets_refreshed = true;
         } else if !existed {
             if let Some(parent) = worktree.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
@@ -3377,37 +3536,21 @@ fn refresh_pm_worktree_at_locked(
             }
         }
 
-        if let Err(error) =
-            crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
-        {
-            let mut failure_reason = error.to_string();
-            if let Some(old_head) = old_head
-                .as_deref()
-                .filter(|old_head| *old_head != target_sha)
+        if !assets_refreshed {
+            if let Err(error) =
+                crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(worktree)
             {
-                let rollback = normalize_previous_generated_hook_configs(worktree)
-                    .map_err(|error| error.to_string())
-                    .and_then(|()| {
-                        manager
-                            .repoint_detached(worktree, old_head)
-                            .map_err(|error| error.to_string())
-                    });
-                if let Err(rollback_error) = rollback {
-                    failure_reason.push_str(&format!(
-                    "; restoring prior PM worktree HEAD {old_head} also failed: {rollback_error}"
-                ));
-                }
+                let freshness = pm_refresh_failure(
+                    git_root,
+                    worktree,
+                    Some(target_sha),
+                    PmWorktreeTargetObservation::Fresh,
+                    PmWorktreeRefreshFailureStage::ManagedAssets,
+                    format!("managed artifacts: regeneration failed: {error}"),
+                );
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
+                return Err(error);
             }
-            let freshness = pm_refresh_failure(
-                git_root,
-                worktree,
-                Some(target_sha),
-                PmWorktreeTargetObservation::Fresh,
-                PmWorktreeRefreshFailureStage::ManagedAssets,
-                &failure_reason,
-            );
-            persist_pm_worktree_freshness(project_dir, &freshness)?;
-            return Err(io::Error::other(failure_reason));
         }
 
         let observed_head = match detached_worktree_head_sha(worktree) {
@@ -4308,6 +4451,17 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
     })
 }
 
+/// Identify a PM pane across Session replacement without persisting a role flag.
+pub fn pane_is_pm(
+    repo_path: &Path,
+    worktree_path: Option<&Path>,
+    session_id: Option<&str>,
+) -> bool {
+    worktree_path.is_some_and(is_canonical_pm_worktree)
+        || session_id
+            .is_some_and(|id| session_is_registered_pm(&pm_prefs_path_for_repo_path(repo_path), id))
+}
+
 /// SPEC-3431 FR-009: is `session_id` the project's registered PM?
 ///
 /// This is the whole privileged-subject rule. It is deliberately an exact
@@ -4561,6 +4715,42 @@ mod tests {
         }
         assert!(PM_STEERING_CLAUSE.contains("before you judge the cycle unchanged"));
         assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
+
+    /// Issue #3825 AC-1 / AC-4: the terse wake clause and the full Stop-gate
+    /// clause must agree that one resident `daemon.subscribe` blocks for at
+    /// most five seconds and is never awaited. The two wordings differ only in
+    /// length, because one of them rides a 1024-byte PTY queue.
+    #[test]
+    fn execution_clauses_cap_the_resident_subscribe_at_five_seconds() {
+        for clause in [PM_GWTD_EXECUTION_CLAUSE, PM_GWTD_EXECUTION_WAKE_CLAUSE] {
+            for phrase in [
+                "contract's 5-second outer deadline",
+                "`daemon.subscribe`",
+                "`params.timeout_seconds:5`",
+                "background task",
+                "do not wait for it",
+            ] {
+                assert!(
+                    clause.contains(phrase),
+                    "execution clause is missing {phrase}: {clause}"
+                );
+            }
+            assert!(
+                !clause.contains("10-second"),
+                "the superseded ten-second ceiling must not survive: {clause}"
+            );
+            assert!(
+                !clause.contains("`params.timeout_seconds:60`"),
+                "the loop cadence must never become the subscribe budget: {clause}"
+            );
+        }
+        // The wake variant exists only to fit the PTY queue; if it ever grew
+        // past the full clause it would have no reason to exist.
+        assert!(
+            PM_GWTD_EXECUTION_WAKE_CLAUSE.len() < PM_GWTD_EXECUTION_CLAUSE.len(),
+            "the wake clause must stay the terse one"
+        );
     }
 
     #[cfg(unix)]
@@ -7204,6 +7394,26 @@ mod tests {
 
         assert_eq!(monitor.active_count(), before);
         assert_eq!(monitor.active_count(), 0);
+    }
+
+    #[test]
+    fn pm_delivery_prompt_identifies_its_source_and_preserves_body_hash() {
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "report exact status";
+        let hash = pm_delivery_prompt_sha256(body);
+        let prompt = protected_pm_delivery_prompt(operation_id, body).unwrap();
+        assert!(prompt.contains("PM delivery"), "{prompt}");
+        assert!(prompt.contains("not an owner message"), "{prompt}");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&prompt),
+            Some((operation_id.to_string(), hash.clone()))
+        );
+        assert!(parse_protected_pm_delivery_prompt(&prompt.replace(body, "tampered")).is_none());
+        let legacy = format!("{body} [gwt-delivery:{operation_id}:{hash}]\r");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&legacy),
+            Some((operation_id.to_string(), hash))
+        );
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
 pub mod managed_assets;
+pub mod memory_pressure;
 pub mod migration;
 pub mod native_app;
 pub(crate) mod path_filter;
@@ -71,12 +72,14 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 
 #[doc(hidden)]
 pub use agent_project_state::{
-    apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
+    adopt_authenticated_execution, apply_authenticated_work_terminalization,
+    apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
     continue_authenticated_execution, observe_agent_runtime, prepare_resume_producing_authority,
     probe_authenticated_execution_binding, probe_authenticated_prepared_execution_binding,
-    AgentBuildAbortTerminalizationRequest, AgentExecutionBindingProbeReceipt,
+    AgentBuildAbortTerminalizationRequest, AgentExecutionAdoptionReceipt,
+    AgentExecutionAdoptionRequest, AgentExecutionBindingProbeReceipt,
     AgentExecutionBindingProbeRequest, AgentExecutionContinuationOutcome,
     AgentExecutionContinuationReceipt, AgentExecutionContinuationRequest, AgentRuntimeObservation,
     AgentWorkTerminalKind, AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
@@ -126,12 +129,13 @@ pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
     bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
     clear_wait_on_record, decide_merged_issue_settlement, declare_wait_on_record,
-    delegation_recorded, establish_issue_monitor_authority_fence, is_auto_improve_candidate,
-    is_legacy_git_launch_failure_for_project, issue_monitor_authority_fence_path,
-    issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
-    issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
-    issue_monitor_prefs_path_for_repo_path, load_issue_monitor_authority_fence,
-    load_issue_monitor_prefs, mark_autonomous_handoff_delivered_from_prefs,
+    delegation_recorded, establish_issue_monitor_authority_fence, invalidate_wait_on_record,
+    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
+    issue_monitor_authority_fence_path, issue_monitor_launch_plan,
+    issue_monitor_launch_profile_pool_summary, issue_monitor_launch_profile_summary,
+    issue_monitor_launch_prompt, issue_monitor_prefs_path_for_repo_path,
+    load_issue_monitor_authority_fence, load_issue_monitor_prefs,
+    mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,
     mutate_issue_monitor_prefs, mutate_issue_monitor_prefs_recovering,
     pending_autonomous_handoff_resumption_from_prefs, persist_issue_monitor_authority_fence,
@@ -146,17 +150,17 @@ pub use issue_monitor::{
     AutonomousHandoffDeliveryAttempt, AutonomousHandoffDeliveryFailureOutcome,
     AutonomousHandoffDeliveryPreparation, AutonomousHandoffResumption, AutonomousIssueRecord,
     AutonomousPendingQuestion, AutonomousPhase, AutonomousReviewDispatch,
-    AutonomousSteeringRequest, AutonomousWaitDeclaration, AutonomousWaitOutcome,
-    EligibilityDecision, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
-    IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
-    IssueMonitorClaimIdentity, IssueMonitorConfig, IssueMonitorControlReceipt,
-    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
-    IssueMonitorExecutionSettlement, IssueMonitorFailedIssue, IssueMonitorFailoverOutcome,
-    IssueMonitorFailure, IssueMonitorIdleKind, IssueMonitorIdlePaneClose,
-    IssueMonitorIdleReconciliation, IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow,
-    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorLaunchBindingReconciliation, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
-    IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfilePatch,
+    AutonomousSteeringRequest, AutonomousWaitDeclaration, AutonomousWaitInvalidation,
+    AutonomousWaitOutcome, EligibilityDecision, IssueMonitorAgentStatus,
+    IssueMonitorAuthorityFence, IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease,
+    IssueMonitorCandidateSource, IssueMonitorClaimIdentity, IssueMonitorConfig,
+    IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload,
+    IssueMonitorEffectState, IssueMonitorExecutionSettlement, IssueMonitorFailedIssue,
+    IssueMonitorFailoverOutcome, IssueMonitorFailure, IssueMonitorIdleKind,
+    IssueMonitorIdlePaneClose, IssueMonitorIdleReconciliation, IssueMonitorIdleReleaseRequest,
+    IssueMonitorIdleWindow, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    IssueMonitorLaunchBindingReconciliation, IssueMonitorLaunchIdentity, IssueMonitorLaunchPlan,
+    IssueMonitorLaunchProfile, IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfilePatch,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchProfileSwitchError,
     IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue,
     IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorPrefsReset,
@@ -172,7 +176,7 @@ pub use issue_monitor::{
     IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
     MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
     PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

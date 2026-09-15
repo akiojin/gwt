@@ -6,6 +6,7 @@
 
 pub mod board_escalation;
 pub mod board_remote_roots;
+pub mod concern;
 pub mod config;
 pub mod coordination;
 pub mod daemon;
