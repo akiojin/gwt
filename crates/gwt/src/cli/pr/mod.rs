@@ -516,6 +516,7 @@ pub(super) fn run<E: CliEnv>(
                 refresh,
                 include: include.unwrap_or(defaults.include),
                 force_reason,
+                ..defaults
             };
             let read = env
                 .list_open_prs(&options)
@@ -1084,6 +1085,8 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         "cache_age_secs": read.cache_age_secs,
         "throttled": read.throttled,
         "github_calls": read.github_calls,
+        "hydrated": read.hydrated,
+        "skipped_unchanged": read.skipped_unchanged,
         "pull_requests": rows,
         "unlanded_branch_count": unlanded.len(),
         "unlanded_branches": unlanded,
@@ -2580,6 +2583,8 @@ mod tests {
             "\"cache_age_secs\": 0",
             "\"throttled\": null",
             "\"github_calls\": 1",
+            "\"hydrated\": 0",
+            "\"skipped_unchanged\": 1",
         ] {
             assert!(out.contains(field), "missing {field}: {out}");
         }
