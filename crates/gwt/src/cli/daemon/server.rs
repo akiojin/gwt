@@ -8941,12 +8941,18 @@ exit 0
         restored.record_candidate(sample_issue_monitor_issue(42));
         restored.record_candidate(sample_issue_monitor_issue(43));
 
-        let before_reset_result: Result<usize, std::convert::Infallible> = restored
-            .try_prepare_claim_effects_with_probe("host/session", &before_reset, 1, |_| Ok(false));
+        // Issue #4366 AC-4: the hold admits one re-verification launch every
+        // interval instead of waiting for reset, so the gate is asserted while
+        // the hold is in force and that launch is not yet due.
+        let while_held = (chrono::Utc::now() + chrono::Duration::seconds(60))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(while_held < before_reset);
+        let while_held_result: Result<usize, std::convert::Infallible> = restored
+            .try_prepare_claim_effects_with_probe("host/session", &while_held, 1, |_| Ok(false));
         assert_eq!(
-            before_reset_result.expect("infallible probe"),
+            while_held_result.expect("infallible probe"),
             0,
-            "the exhausted provider must gate every queued Issue before reset"
+            "the exhausted provider must gate every queued Issue while it is held"
         );
         assert!(
             restored.pending_effects().is_empty(),
