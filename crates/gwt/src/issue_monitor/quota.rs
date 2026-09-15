@@ -27,7 +27,7 @@ pub(crate) const PROVIDER_QUOTA_REVERIFY_INTERVAL_SECS: i64 = 30 * 60;
 pub(crate) const PROVIDER_QUOTA_RECOVERY_CONFIRM_SECS: i64 = 5 * 60;
 
 /// Consecutive refusals a hold needs: the constant, or one while a test holds
-/// [`hold_provider_quota_on_first_failure_in_this_test`].
+/// the `hold_provider_quota_on_first_failure_in_this_test` guard.
 pub(crate) fn provider_quota_required_failures() -> usize {
     #[cfg(test)]
     if HOLD_ON_FIRST_FAILURE.with(std::cell::Cell::get) {

@@ -8366,7 +8366,7 @@ impl IssueMonitorState {
     ///
     /// Activity proves the provider serves again only from a launch confirmed
     /// after the provider's last refused attempt, and only
-    /// [`PROVIDER_QUOTA_RECOVERY_CONFIRM_SECS`] after that launch — a launch
+    /// `PROVIDER_QUOTA_RECOVERY_CONFIRM_SECS` after that launch — a launch
     /// the provider is about to refuse needs up to the screen settle window to
     /// say so. The proof releases a hold, recording the release, and forgets
     /// a pending streak. Returns whether anything changed.
