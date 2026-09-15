@@ -24,6 +24,7 @@
 //!   gwt executions always run in git worktrees.
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
@@ -270,6 +271,10 @@ pub struct VerificationAdjudicationRef {
 pub struct VerificationRunRecord {
     pub record_id: String,
     pub session_id: String,
+    /// The reported human verification outcome, separate from automated test
+    /// success. Omission remains unknown for existing records (Issue #4217).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_verification_result: Option<String>,
     /// Linked owner number copied from the Execution Control Record at run
     /// time (`None` for unlinked worktrees).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2214,6 +2219,92 @@ fn git_is_ancestor(worktree: &Path, ancestor: &str, descendant: &str) -> Result<
     }
 }
 
+/// Shape of a `cargo test` invocation for plan coverage: the selected `-p` /
+/// `--package` set plus every other argument in order.
+struct CargoTestShape {
+    packages: BTreeSet<String>,
+    rest: Vec<String>,
+}
+
+fn cargo_test_shape(command: &str) -> Option<CargoTestShape> {
+    let mut args = split_command_line(command).ok()?.into_iter();
+    if args.next()? != "cargo" || args.next()? != "test" {
+        return None;
+    }
+    let mut packages = BTreeSet::new();
+    let mut rest = Vec::new();
+    let mut passthrough = false;
+    while let Some(arg) = args.next() {
+        if passthrough {
+            rest.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            rest.push(arg);
+        } else if arg == "-p" || arg == "--package" {
+            packages.insert(args.next()?);
+        } else if let Some(package) = arg.strip_prefix("--package=") {
+            packages.insert(package.to_string());
+        } else {
+            rest.push(arg);
+        }
+    }
+    Some(CargoTestShape { packages, rest })
+}
+
+/// Whether a command the run executed covers a planned command (Issue
+/// #4349). Commands match exactly, or — for `cargo test` — when the run
+/// selects a superset of the planned `-p` packages with otherwise identical
+/// arguments: `cargo test -p gwt-core -p gwt --all-features` covers the
+/// derived `cargo test -p gwt --all-features`, so an AC that names the wider
+/// matrix is not forced through a second heavy run.
+pub(crate) fn command_covers_planned(ran: &str, planned: &str) -> bool {
+    if ran == planned {
+        return true;
+    }
+    let (Some(ran), Some(planned)) = (cargo_test_shape(ran), cargo_test_shape(planned)) else {
+        return false;
+    };
+    !planned.packages.is_empty()
+        && planned.packages.is_subset(&ran.packages)
+        && ran.rest == planned.rest
+}
+
+/// Planned commands no executed command covers.
+pub(crate) fn planned_commands_missing(planned: &[String], ran: &[String]) -> Vec<String> {
+    planned
+        .iter()
+        .filter(|planned| !ran.iter().any(|ran| command_covers_planned(ran, planned)))
+        .cloned()
+        .collect()
+}
+
+/// Registration-time diff between an explicit plan and the derived matrix
+/// (Issue #4349 AC-3): the derived commands the registered plan leaves
+/// uncovered, or `None` when it covers them all (trivial matrices included).
+pub(crate) fn derived_coverage_note(
+    registered: &[String],
+    derived: &crate::cli::verify_derivation::DerivedPlan,
+) -> Option<String> {
+    let uncovered = planned_commands_missing(&derived.commands, registered);
+    if uncovered.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "verify: note — the registered plan does not cover {} derived command(s) from changed surfaces [{}]:\n",
+        uncovered.len(),
+        derived.surfaces.join(", ")
+    );
+    for command in &uncovered {
+        note.push_str(&format!("  - {command}\n"));
+    }
+    note.push_str(
+        "verify: completion gates accept this registered plan once `verify.run` executes it in full (a `cargo test` run may select a superset of a planned command's `-p` packages); `execution.reopen` recovery still requires `params.derive:true`\n",
+    );
+    Some(note)
+}
+
 /// Minimal quote-aware command splitter: whitespace-separated arguments with
 /// double- and single-quote grouping. Deliberately supports no shell
 /// features (pipes, redirects, `&&`) — verification commands run as direct
@@ -2283,6 +2374,40 @@ pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
 /// spends the real budget from every fixture-free test.
 const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
 
+/// Every environment override a `verify.run` child receives, as explicit
+/// `(key, value)` pairs on top of the inherited environment — `None` removes
+/// the variable (#4182 AC-7 / AC-11).
+///
+/// This list exists so the contract is written once instead of being patched
+/// one symptom at a time. A `verify.run` child is a test runner, and a test
+/// runner that differs from an ordinary shell produces verdicts nobody can
+/// reproduce: a command that passes in the terminal but fails under
+/// `verify.run` reads as a real RED and sends its owner after a bug that is
+/// not there.
+fn child_environment_contract() -> Vec<(&'static str, Option<&'static str>)> {
+    vec![
+        // Live GitHub opt-in must never cross the child boundary (SPEC #4093
+        // FR-008, Issue #3850): a `cargo test` child that inherits it spends
+        // the real budget from every fixture-free test.
+        (LIVE_GITHUB_OPT_IN_ENV, None),
+        // A test that fetches an unreachable remote makes Windows'
+        // `git-credential-manager` ask for input, and a child with no console
+        // waits on that prompt forever — taking the host-wide verification
+        // lease down with it (#4182 AC-7). GitHub's runners set this for
+        // every step, which is precisely why CI never sees the hang.
+        ("GIT_TERMINAL_PROMPT", Some("0")),
+    ]
+}
+
+fn apply_child_environment_contract(process: &mut std::process::Command) {
+    for (key, value) in child_environment_contract() {
+        match value {
+            Some(value) => process.env(key, value),
+            None => process.env_remove(key),
+        };
+    }
+}
+
 fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
     execute_command_with_isolation(worktree, command, false)
 }
@@ -2294,10 +2419,8 @@ fn execute_command_with_isolation(
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
     let mut process = gwt_core::process::hidden_command(&args[0]);
-    process
-        .args(&args[1..])
-        .current_dir(worktree)
-        .env_remove(LIVE_GITHUB_OPT_IN_ENV);
+    process.args(&args[1..]).current_dir(worktree);
+    apply_child_environment_contract(&mut process);
     if isolated_baseline {
         gwt_core::process::scrub_git_env(&mut process);
         process.env_remove("CARGO_TARGET_DIR");
@@ -2490,7 +2613,7 @@ pub fn run_verification(
     session_id: &str,
     commands: &[String],
 ) -> Result<(VerificationRunRecord, String), String> {
-    run_verification_inner(worktree, session_id, commands, None, &[], "", || {})
+    run_verification_inner(worktree, session_id, commands, None, &[], None, || {})
 }
 
 fn run_verification_for_caller(
@@ -2499,7 +2622,7 @@ fn run_verification_for_caller(
     commands: &[String],
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    quarantine_diagnostics: &str,
+    user_verification_result: Option<&str>,
 ) -> Result<(VerificationRunRecord, String), String> {
     run_verification_inner(
         worktree,
@@ -2507,7 +2630,7 @@ fn run_verification_for_caller(
         commands,
         Some(authority),
         prepared_quarantines,
-        quarantine_diagnostics,
+        user_verification_result,
         || {},
     )
 }
@@ -2518,7 +2641,7 @@ fn run_verification_inner<F>(
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    quarantine_diagnostics: &str,
+    user_verification_result: Option<&str>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
@@ -2565,7 +2688,6 @@ where
     let started_at = Utc::now();
     let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
-    transcript.push_str(quarantine_diagnostics);
     if std::env::var_os(LIVE_GITHUB_OPT_IN_ENV).is_some() {
         transcript.push_str(
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
@@ -2656,14 +2778,7 @@ where
                     && plan.owner_number == owner_number
                     && plan.execution_binding == execution_binding =>
             {
-                let ran: std::collections::HashSet<&str> =
-                    commands.iter().map(String::as_str).collect();
-                let missing: Vec<String> = plan
-                    .commands
-                    .iter()
-                    .filter(|planned| !ran.contains(planned.as_str()))
-                    .cloned()
-                    .collect();
+                let missing = planned_commands_missing(&plan.commands, commands);
                 (
                     missing.is_empty() && plan.worktree_fingerprint == fingerprint_before,
                     missing,
@@ -2676,6 +2791,7 @@ where
     let mut record = VerificationRunRecord {
         record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
+        user_verification_result: user_verification_result.map(str::to_owned),
         owner_number,
         execution_binding: execution_binding.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
@@ -3280,15 +3396,15 @@ struct VerificationCallerAuthority {
 /// Render the `verify.*` entry refusal.
 ///
 /// A window without execution authority cannot register a plan or a record,
-/// and saying only that leaves it with nothing to try — the window in Issue
-/// #4140 concluded it was completely stuck. The host verification queue is
-/// reachable without any execution authority, so the refusal names it.
+/// but development checks still run directly without a verification lease.
+/// Never direct an unauthorized window to reserve an idle detached holder.
 fn verification_entry_refusal(err: &io::Error) -> String {
     if err.kind() == ErrorKind::PermissionDenied {
         format!(
             "{err}. This window cannot register a verification plan or record, but it can still \
-             take its turn in the host verification queue: `verify.lease.status` and \
-             `verify.lease.acquire` need no execution authority."
+             run development builds, tests, and lint directly without a lease. \
+             `verify.lease.status` remains available to inspect canonical verification. \
+             Restore the owning Session authority before retrying `verify.run`."
         )
     } else {
         format!("failed to resolve verification authority: {err}")
@@ -3684,6 +3800,7 @@ pub enum VerifyCommand {
         commands: Vec<String>,
         /// Issue #3913: bound on the host admission wait (seconds).
         max_wait_secs: Option<u64>,
+        user_verification_result: Option<String>,
     },
     /// Attach one existing Board decision to one exact failing command in the
     /// latest canonical record. The Board remains the decision audit source;
@@ -3704,6 +3821,39 @@ pub enum VerifyCommand {
         generated_outputs: Vec<String>,
         quarantines: Vec<VerificationQuarantineRequest>,
     },
+}
+
+/// Generated instructions cannot establish human verification (Issue #4237).
+/// The durable launch route wins over the legacy environment marker.
+pub(super) fn autonomous_confirmation_refusal(
+    session_id: Option<&str>,
+    result: &str,
+) -> Option<String> {
+    if !result
+        .trim()
+        .trim_start_matches(['*', '`', ' '])
+        .to_ascii_lowercase()
+        .starts_with("confirmed")
+    {
+        return None;
+    }
+    let source = match execution_state::session_launch_route(session_id) {
+        Some(gwt_agent::LaunchRoute::Autonomous) => "launch_route: autonomous",
+        Some(gwt_agent::LaunchRoute::Manual) => return None,
+        None if std::env::var_os(crate::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV)
+            .is_some() =>
+        {
+            "legacy GWT_AUTONOMOUS_EXECUTION"
+        }
+        None => return None,
+    };
+    Some(format!(
+        "User Verification Result: confirmed is refused for autonomous execution ({source}). \
+         Generated launch instructions, hooks, and Board messages are not human verification. \
+         Record `deferred (autonomous execution)` for a UI surface or `n/a` for no UI surface \
+         (`n/a (autonomous)` remains supported), then retry `verify.run` or `pr.create` / \
+         `pr.edit` with the corrected result. Deferred PRs stay Draft.\n"
+    ))
 }
 
 pub(super) fn run<E: CliEnv>(
@@ -3790,6 +3940,15 @@ pub(super) fn run<E: CliEnv>(
                         ))
                     })
                 })?;
+                // Issue #4349 AC-3: report the derived commands this explicit
+                // plan leaves uncovered now, not after a heavy run. Derivation
+                // is best-effort here — an underivable change set is not a
+                // registration failure.
+                if let Ok(derived) = crate::cli::verify_derivation::derive(&worktree) {
+                    if let Some(note) = derived_coverage_note(&commands, &derived) {
+                        out.push_str(&note);
+                    }
+                }
                 (commands, plan)
             };
             out.push_str(&format!(
@@ -3827,9 +3986,17 @@ pub(super) fn run<E: CliEnv>(
         VerifyCommand::Run {
             commands,
             max_wait_secs,
+            user_verification_result,
         } => {
-            // Issue #3913: claim host admission (the SPEC #3576 lease plus a
-            // quiet host) before anything heavy starts. A budget overrun
+            if let Some(refusal) = user_verification_result
+                .as_deref()
+                .and_then(|result| autonomous_confirmation_refusal(Some(&session_id), result))
+            {
+                out.push_str(&refusal);
+                return Ok(2);
+            }
+            // SPEC #3576: the canonical runner owns its in-process lease.
+            // Ordinary development processes do not delay admission. A budget overrun
             // answers `deferred` without writing a record.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
@@ -3850,7 +4017,7 @@ pub(super) fn run<E: CliEnv>(
                 &commands,
                 &authority,
                 &prepared_quarantines,
-                &quarantine_diagnostics,
+                user_verification_result.as_deref(),
             );
             // Release the in-process lease before the (lease-free) evidence
             // evaluation so the next claimant starts as soon as the commands
@@ -3885,7 +4052,11 @@ pub(super) fn run<E: CliEnv>(
                     &format!("verify.run {}", record.record_id),
                 );
             }
+            out.push_str(&quarantine_diagnostics);
             out.push_str(&transcript);
+            if let Some(result) = &record.user_verification_result {
+                out.push_str(&format!("User Verification Result: {result}\n"));
+            }
             let command_outcome_accepted =
                 record.all_passed || evidence == EvidenceStatus::FreshWithQuarantine;
             out.push_str(&format!(
@@ -3948,6 +4119,7 @@ pub(crate) mod tests {
     fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
         VerificationRunRecord {
             record_id: "vr-test".to_string(),
+            user_verification_result: None,
             session_id: session.to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -3970,21 +4142,20 @@ pub(crate) mod tests {
         }
     }
 
-    /// Issue #4140 AC-4: a window without execution authority is told both why
-    /// `verify.*` refused it and how it can still take its turn in the host
-    /// verification queue. Without that, the only observable outcome is a
-    /// permission error with no path forward, which is how the reported
-    /// window ended up with nothing left to try.
+    /// An authority refusal must explain how ordinary development can proceed
+    /// without reserving a detached holder that has no canonical work to run.
     #[test]
-    fn verification_entry_refusal_points_at_the_authority_free_queue() {
+    fn verification_entry_refusal_points_at_direct_development_checks() {
         let refused = verification_entry_refusal(&verification_caller_authority_error());
         assert!(
             refused.contains("verification authority"),
             "the refusal must keep naming its cause: {refused}"
         );
         assert!(
-            refused.contains("verify.lease.acquire") && refused.contains("verify.lease.status"),
-            "the refusal must name the queue entry points that need no authority: {refused}"
+            !refused.contains("verify.lease.acquire")
+                && refused.contains("verify.lease.status")
+                && refused.contains("directly"),
+            "the refusal must allow development checks without reserving an idle lease: {refused}"
         );
 
         let other = verification_entry_refusal(&io::Error::other("disk on fire"));
@@ -4475,6 +4646,7 @@ mod tests {
         assert_eq!(load(dir.path()).unwrap(), None);
         let record = VerificationRunRecord {
             record_id: "vrr-test".to_string(),
+            user_verification_result: None,
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             execution_binding: None,
@@ -4546,6 +4718,42 @@ mod tests {
             std::env::var_os("GWT_ALLOW_REAL_GH").as_deref(),
             Some("1".as_ref()),
             "the operator's own environment is left alone"
+        );
+    }
+
+    // #4182 AC-7 / AC-11: the child environment is one declared contract,
+    // not a pile of per-symptom patches at the spawn site. Pinning the list
+    // here is what makes a future omission visible before a Windows host
+    // hangs on it again.
+    #[test]
+    fn verify_run_child_environment_contract_is_declared_in_one_place() {
+        assert_eq!(
+            child_environment_contract(),
+            vec![
+                ("GWT_ALLOW_REAL_GH", None),
+                ("GIT_TERMINAL_PROMPT", Some("0")),
+            ],
+            "the verify.run child environment contract changed — update #4182's rationale with it"
+        );
+    }
+
+    // #4182 AC-7: a test that fetches an unreachable remote makes Windows'
+    // `git-credential-manager` prompt for input on a child with no console,
+    // and the whole run blocks there forever while holding the host-wide
+    // verification lease. CI never sees it because GitHub's runners set this
+    // variable for every step; verify.run has to do the same.
+    #[test]
+    fn verify_run_child_cannot_be_blocked_by_a_git_credential_prompt() {
+        let mut process = gwt_core::process::hidden_command("git");
+        apply_child_environment_contract(&mut process);
+        let terminal_prompt = process
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("GIT_TERMINAL_PROMPT"))
+            .map(|(_, value)| value);
+        assert_eq!(
+            terminal_prompt,
+            Some(Some(std::ffi::OsStr::new("0"))),
+            "verify.run children must never be able to open a credential prompt"
         );
     }
 
@@ -5147,7 +5355,7 @@ mod tests {
             &[failed_command],
             None,
             &[prepared],
-            "",
+            None,
             || {},
         )
         .unwrap();
@@ -5172,6 +5380,7 @@ mod tests {
             gwt_git::PrStatus {
                 number: 3854,
                 title: "typed quarantine".to_string(),
+                head_ref_name: String::new(),
                 state: gwt_git::pr_status::PrState::Open,
                 url: "https://example.invalid/pull/3854".to_string(),
                 created_at: None,
@@ -5367,7 +5576,7 @@ mod tests {
             &commands,
             None,
             &[],
-            "",
+            None,
             || {
                 fs::create_dir_all(dir.path().join("artifacts")).unwrap();
                 fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
@@ -5484,7 +5693,7 @@ mod tests {
         .unwrap();
 
         let (record, _) =
-            run_verification_inner(dir.path(), "sess-mixed", &commands, None, &[], "", || {
+            run_verification_inner(dir.path(), "sess-mixed", &commands, None, &[], None, || {
                 fs::write(dir.path().join("report.json"), "{}").unwrap();
                 fs::write(dir.path().join("src.txt"), "v2").unwrap();
             })
@@ -5694,6 +5903,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             }),
         )
         .expect_err("missing GWT_SESSION_ID must fail");
@@ -5760,6 +5970,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             }),
         )
         .unwrap();
@@ -5794,6 +6005,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                user_verification_result: None,
             }),
         )
         .unwrap();
@@ -6295,6 +6507,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect_err("foreign Session must be rejected before command dispatch");
@@ -6434,6 +6647,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect_err("Completed generation must not dispatch verification commands");
@@ -6497,6 +6711,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: commands.clone(),
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect("exact Blocked owner Session may produce recovery evidence");
@@ -6559,6 +6774,7 @@ mod tests {
                 VerifyCommand::Run {
                     commands: commands.clone(),
                     max_wait_secs: None,
+                    user_verification_result: None,
                 },
             )
             .expect("ledgerless verify.run remains compatible")
@@ -6648,6 +6864,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                user_verification_result: None,
             },
         )
         .expect_err("capability rotation before dispatch must fail closed");
@@ -6697,7 +6914,7 @@ mod tests {
             &commands,
             Some(&authority),
             &[],
-            "",
+            None,
             move || {
                 advance_generation_scoped_session_binding(&session_for_hook, current);
             },
@@ -9200,5 +9417,238 @@ mod tests {
             initial_bytes,
             "identity loss must leave the leased directory byte-equivalent"
         );
+    }
+
+    // Issue #4349 (AC-1/AC-2/AC-4): a planned `cargo test` command is covered
+    // by a run whose `-p` package set is a superset with otherwise identical
+    // arguments — the measured pair from Issue #4339 included.
+    #[test]
+    fn plan_coverage_accepts_cargo_test_package_superset() {
+        let planned = "cargo test -p gwt --all-features";
+        let ran = "cargo test -p gwt-core -p gwt --all-features";
+        assert!(command_covers_planned(ran, planned));
+        assert!(command_covers_planned(planned, planned));
+        // Package order and the long flag spelling do not matter.
+        assert!(command_covers_planned(
+            "cargo test --package gwt --package gwt-core --all-features",
+            planned
+        ));
+        assert!(command_covers_planned(
+            "cargo test --package=gwt --all-features",
+            planned
+        ));
+        // A subset never covers the planned superset.
+        assert!(!command_covers_planned(planned, ran));
+        // Any other argument difference is still a mismatch.
+        assert!(!command_covers_planned(
+            "cargo test -p gwt-core -p gwt",
+            planned
+        ));
+        assert!(!command_covers_planned(
+            "cargo test -p gwt-core -p gwt --all-features -- --test-threads=1",
+            planned
+        ));
+        assert!(!command_covers_planned(
+            "cargo test -p gwt-core -p gwt --lib --all-features",
+            planned
+        ));
+        // A planned command without `-p` (workspace default) is not covered
+        // by a package selection, and non-`cargo test` commands stay exact.
+        assert!(!command_covers_planned(
+            "cargo test -p gwt --all-features",
+            "cargo test --all-features"
+        ));
+        assert!(!command_covers_planned(
+            "cargo clippy -p gwt-core -p gwt --all-targets",
+            "cargo clippy -p gwt --all-targets"
+        ));
+        assert!(command_covers_planned("git --version", "git --version"));
+
+        assert_eq!(
+            planned_commands_missing(
+                &[
+                    "cargo fmt --all -- --check".to_string(),
+                    planned.to_string(),
+                    "cargo test -p gwt-skills --all-features".to_string(),
+                ],
+                &[
+                    "cargo fmt --all -- --check".to_string(),
+                    ran.to_string(),
+                    "cargo test -p gwt-skills --all-features".to_string(),
+                ],
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            planned_commands_missing(
+                &[planned.to_string()],
+                &["cargo test -p gwt-core --all-features".to_string()]
+            ),
+            vec![planned.to_string()]
+        );
+    }
+
+    // Issue #4349 (AC-1): the run record itself binds the superset run to the
+    // registered (derived) plan, so the completion gate never sees
+    // plan_not_covered / plan_changed for it. The commands fail fast here
+    // (no Cargo.toml in the fixture) — coverage is independent of exit codes.
+    #[test]
+    fn verify_run_covers_derived_plan_with_package_superset() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let planned = "cargo test -p gwt --all-features".to_string();
+        let ran = "cargo test -p gwt-core -p gwt --all-features".to_string();
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-4349".to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec![planned.clone()],
+                derived: true,
+                worktree_fingerprint: worktree_fingerprint_excluding(dir.path(), &[]).unwrap(),
+                surfaces: vec!["rust(gwt)".to_string()],
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-4349", std::slice::from_ref(&ran)).unwrap();
+        assert!(record.plan_covered, "{transcript}");
+        assert!(record.planned_missing.is_empty(), "{transcript}");
+        assert!(record.plan_derived, "{transcript}");
+        assert!(
+            !transcript.contains("does not cover a registered verification plan"),
+            "{transcript}"
+        );
+    }
+
+    // Issue #4349 (AC-3): registering an explicit plan reports the derived
+    // commands it leaves uncovered — at registration time, not after a run.
+    #[test]
+    fn derived_coverage_note_lists_uncovered_derived_commands() {
+        let derived = crate::cli::verify_derivation::DerivedPlan {
+            commands: vec![
+                "cargo fmt --all -- --check".to_string(),
+                "cargo test -p gwt --all-features".to_string(),
+                "cargo test -p gwt-skills --all-features".to_string(),
+            ],
+            surfaces: vec!["rust(gwt)".to_string(), "skills".to_string()],
+            trivial_reason: None,
+        };
+        let covering = vec![
+            "cargo fmt --all -- --check".to_string(),
+            "cargo test -p gwt-core -p gwt --all-features".to_string(),
+            "cargo test -p gwt-skills --all-features".to_string(),
+        ];
+        assert_eq!(derived_coverage_note(&covering, &derived), None);
+
+        let partial = vec![
+            "cargo fmt --all -- --check".to_string(),
+            "cargo test -p gwt-core --all-features".to_string(),
+        ];
+        let note = derived_coverage_note(&partial, &derived).expect("uncovered derived commands");
+        assert!(
+            note.contains("does not cover 2 derived command(s)"),
+            "{note}"
+        );
+        assert!(
+            note.contains("  - cargo test -p gwt --all-features\n"),
+            "{note}"
+        );
+        assert!(
+            note.contains("  - cargo test -p gwt-skills --all-features\n"),
+            "{note}"
+        );
+        assert!(!note.contains("cargo fmt"), "{note}");
+        assert!(note.contains("rust(gwt), skills"), "{note}");
+
+        let trivial = crate::cli::verify_derivation::DerivedPlan {
+            commands: Vec::new(),
+            surfaces: vec!["trivial(ledger_only)".to_string()],
+            trivial_reason: Some(crate::cli::verify_derivation::TrivialReason::LedgerOnly),
+        };
+        assert_eq!(derived_coverage_note(&partial, &trivial), None);
+    }
+
+    // Issue #4349 (AC-3): the note travels with the `verify.plan` output.
+    #[test]
+    fn explicit_verify_plan_reports_derived_commands_it_does_not_cover() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("explicit plan diff repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let git = |args: &[&str]| {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        git(&["checkout", "-q", "-b", "work/issue-4349"]);
+        let src = dir.path().join("crates/gwt-core/src/lib.rs");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, "pub fn x() {}").unwrap();
+        let owner = generation_scoped_owner();
+        let session_id = "session-explicit-plan-diff";
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("materialize execution");
+
+        let (code, out) = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: vec!["git --version".to_string()],
+                derive: false,
+            },
+        )
+        .expect("explicit verify.plan registers");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("plan registered"), "{out}");
+        assert!(out.contains("does not cover"), "{out}");
+        assert!(out.contains("cargo test -p gwt-core"), "{out}");
+        // The plan itself is unchanged by the note: the registered commands win.
+        let plan = load_plan(dir.path()).unwrap().unwrap();
+        assert_eq!(plan.commands, vec!["git --version".to_string()]);
+        assert!(!plan.derived);
+
+        // Registering exactly the derived matrix leaves nothing to report.
+        let derived = crate::cli::verify_derivation::derive(dir.path()).unwrap();
+        assert!(!derived.commands.is_empty());
+        let (code, out) = run_verify_cli_as(
+            dir.path(),
+            session_id,
+            VerifyCommand::Plan {
+                commands: derived.commands.clone(),
+                derive: false,
+            },
+        )
+        .expect("explicit derived-equivalent verify.plan registers");
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("does not cover"), "{out}");
     }
 }

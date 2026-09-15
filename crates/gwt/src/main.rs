@@ -81,18 +81,20 @@ pub(crate) use app_runtime::{
     WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
-pub(crate) use docker_launch::{
-    apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
-    docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_launch_service_ready,
-    finalize_docker_agent_launch_config_with_runtime, resolve_docker_launch_plan,
-    resolve_docker_shell_command,
-};
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
     mount_source_matches_project_root, normalize_docker_launch_action, package_runner_version_spec,
     resolved_test_docker_runtime, strip_package_runner_args, DockerLaunchServiceAction,
+};
+pub(crate) use docker_launch::{
+    detect_wizard_docker_context_and_status, docker_binary_for_launch,
+    docker_compose_exec_env_args, ensure_docker_launch_service_ready,
+    finalize_docker_agent_launch_config_with_binding, prepare_docker_runtime_for_launch,
+    register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
+    resolve_docker_agent_program_with_binding, resolve_docker_launch_plan,
+    resolve_docker_shell_command, DockerLaunchBinding,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
@@ -357,6 +359,41 @@ fn debug_variant_label<T: std::fmt::Debug + ?Sized>(value: &T) -> DispatchLabel 
 
 fn frontend_event_kind_label(event: &FrontendEvent) -> DispatchLabel {
     debug_variant_label(event)
+}
+
+fn log_frontend_timing(
+    event: DispatchLabel,
+    received_at: std::time::Instant,
+    handler_started: std::time::Instant,
+    completed_at: std::time::Instant,
+    window_count: usize,
+) {
+    let queue_wait_ms = handler_started.duration_since(received_at).as_millis() as u64;
+    let handler_ms = completed_at.duration_since(handler_started).as_millis() as u64;
+    let receive_to_complete_ms = completed_at.duration_since(received_at).as_millis() as u64;
+    if receive_to_complete_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt.frontend.timing",
+            event = %event,
+            elapsed_ms = handler_ms,
+            queue_wait_ms,
+            handler_ms,
+            receive_to_complete_ms,
+            window_count,
+            "frontend event receive-to-completion latency exceeded budget"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            event = %event,
+            elapsed_ms = handler_ms,
+            queue_wait_ms,
+            handler_ms,
+            receive_to_complete_ms,
+            window_count,
+            "frontend event handled"
+        );
+    }
 }
 
 /// Issue #3611 AC-4: name the event-loop dispatch that is about to be timed.
@@ -1135,11 +1172,10 @@ fn issue_monitor_daemon_user_event(
     match event_name {
         "status" => {
             let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorStatus {
-                    status: Box::new(status),
-                },
-            )]))
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: project_root.to_path_buf(),
+                status: Box::new(status),
+            })
         }
         "inbox" => {
             let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
@@ -1257,6 +1293,7 @@ enum UserEvent {
     Frontend {
         client_id: ClientId,
         event: FrontendEvent,
+        received_at: std::time::Instant,
     },
     /// Internal request from the capability-authenticated pane bridge. The
     /// server-side principal is the only project/Session routing authority.
@@ -1428,6 +1465,10 @@ enum UserEvent {
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
+    },
+    IssueMonitorDaemonStatus {
+        project_root: PathBuf,
+        status: Box<gwt::IssueMonitorStatusView>,
     },
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -1659,7 +1700,7 @@ mod tests {
     /// poll interval.
     #[test]
     fn the_gui_drives_daemon_supervision_on_its_own_timer() {
-        let source = include_str!("main.rs");
+        let source = include_str!("main.rs").replace("\r\n", "\n");
         let supervision = source
             .split_once("runtime-daemon-ensure-tick")
             .expect("the GUI must own a daemon supervision thread")
@@ -1783,6 +1824,63 @@ mod tests {
         assert_eq!(
             frontend_event_kind_label(&gwt::FrontendEvent::FrontendReady).as_str(),
             "FrontendReady"
+        );
+    }
+
+    pub(crate) fn capture_timing_warnings(run: impl FnOnce()) -> String {
+        let output = tempfile::NamedTempFile::new().expect("timing log");
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(output.reopen().expect("timing log writer"))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        std::fs::read_to_string(output.path()).expect("read timing log")
+    }
+
+    #[test]
+    fn frontend_timing_warns_for_receive_latency_without_logging_input() {
+        use std::time::{Duration, Instant};
+        let received = Instant::now();
+        let started = received + Duration::from_millis(50);
+        let completed = started + Duration::from_millis(5);
+        let label = frontend_event_kind_label(&gwt::FrontendEvent::TerminalInput {
+            id: "secret-window".to_string(),
+            data: "secret-input".to_string(),
+        });
+        let output = capture_timing_warnings(|| {
+            super::log_frontend_timing(label, received, started, completed, 9);
+            super::log_frontend_timing(
+                label,
+                received + Duration::from_millis(26),
+                started,
+                completed,
+                9,
+            );
+            super::log_frontend_timing(
+                label,
+                received + Duration::from_millis(25),
+                started,
+                completed,
+                9,
+            );
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("timing JSON"))
+            .collect();
+        assert_eq!(logs.len(), 2, "29ms must not warn; 30ms must warn");
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["event"], "TerminalInput");
+        assert_eq!(fields["queue_wait_ms"], 50);
+        assert_eq!(fields["handler_ms"], 5);
+        assert_eq!(fields["elapsed_ms"], 5);
+        assert_eq!(fields["receive_to_complete_ms"], 55);
+        assert_eq!(fields["window_count"], 9);
+        assert_eq!(logs[1]["fields"]["receive_to_complete_ms"], 30);
+        assert!(
+            !output.contains("secret"),
+            "timing must exclude input payload"
         );
     }
 
@@ -2048,19 +2146,19 @@ mod tests {
             serde_json::to_value(status.clone()).expect("status serializes"),
             42,
         );
-        match super::daemon_broadcast_user_event(
+        let status_event = super::daemon_broadcast_user_event(
             gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
             status_payload,
             project_root,
             99,
-        ) {
-            Some(UserEvent::Dispatch(events)) => {
-                assert!(events.iter().any(|event| {
-                    matches!(
-                        &event.event,
-                        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
-                    )
-                }));
+        );
+        match status_event {
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: actual_project_root,
+                status: actual,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(*actual, status);
             }
             other => panic!("unexpected issue monitor status event: {other:?}"),
         }
@@ -6981,8 +7079,13 @@ mod tests {
     fn prune_orphan_intake_worktrees_removes_clean_keeps_dirty_and_is_bounded() {
         // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
         // are reaped — clean ones removed, dirty ones kept, capped per run.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -7012,6 +7115,18 @@ mod tests {
             .expect("intake worktree");
         gwt_skills::generate_settings_local(&generated_hook).expect("generate hook config");
 
+        let codex_config_path = temp.path().join(".codex/config.toml");
+        let trusted_projects = [&clean_a, &clean_b, &dirty, &branch_named, &generated_hook]
+            .into_iter()
+            .map(|path| {
+                gwt_skills::register_codex_managed_project_trust(path, &codex_config_path)
+                    .expect("seed Codex project trust")
+                    .project_path
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+
         let removed = super::prune_orphan_intake_worktrees(&repo, 10);
         assert_eq!(
             removed, 3,
@@ -7033,6 +7148,35 @@ mod tests {
             branch_named.exists(),
             "a real branch worktree named .intake-* is never reaped"
         );
+        let config: toml::Value = toml::from_str(
+            &fs::read_to_string(&codex_config_path).expect("read Codex config after prune"),
+        )
+        .expect("parse Codex config after prune");
+        let projects = config
+            .get("projects")
+            .and_then(toml::Value::as_table)
+            .expect("remaining project table");
+        for removed_project in [
+            &trusted_projects[0],
+            &trusted_projects[1],
+            &trusted_projects[4],
+        ] {
+            assert!(
+                !projects.contains_key(removed_project),
+                "pruned worktree trust must be revoked: {removed_project}"
+            );
+        }
+        for retained_project in [&trusted_projects[2], &trusted_projects[3]] {
+            assert_eq!(
+                projects
+                    .get(retained_project)
+                    .and_then(toml::Value::as_table)
+                    .and_then(|project| project.get("trust_level"))
+                    .and_then(toml::Value::as_str),
+                Some("trusted"),
+                "retained worktree trust must remain: {retained_project}"
+            );
+        }
 
         // Bounded: a second batch of clean intakes is capped at the limit.
         let clean_c = temp.path().join(".intake-c");
@@ -7047,9 +7191,56 @@ mod tests {
     }
 
     #[test]
-    fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+    fn orphan_intake_prune_keeps_worktree_when_codex_trust_revocation_fails() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let orphan = temp.path().join(".intake-invalid-codex-config");
+        gwt_git::WorktreeManager::new(&repo)
+            .create_detached("HEAD", &orphan)
+            .expect("create orphan intake worktree");
+        let config_path = temp.path().join(".codex/config.toml");
+        fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+            .expect("create Codex config parent");
+        fs::write(&config_path, "projects = [\n").expect("write malformed Codex config");
+
+        let removed = super::prune_orphan_intake_worktrees(&repo, 10);
+
+        assert_eq!(removed, 0, "failed trust revocation is not a removal");
+        assert!(
+            orphan.exists(),
+            "trust revocation failure must keep the orphan worktree"
+        );
+        assert_eq!(
+            fs::read_to_string(config_path).expect("malformed config remains"),
+            "projects = [\n"
+        );
+    }
+
+    #[test]
+    fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+        // Executing the plan revokes Codex project trust, which resolves its
+        // config from the process-global `CODEX_HOME` (falling back to the real
+        // user home). Pin it to this test's tempdir under the env lock, the same
+        // way the sibling prune tests do: without it this test reads whichever
+        // `CODEX_HOME` a concurrently running test happens to have installed —
+        // including the deliberately malformed config written by
+        // `orphan_intake_prune_keeps_worktree_when_codex_trust_revocation_fails`
+        // — and then keeps the snapshotted orphan because trust cleanup failed,
+        // so `removed` is 0 instead of 1 (Issue #4299).
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -7995,14 +8186,14 @@ mod tests {
             .env_vars
             .insert("EXTRA_FLAG".to_string(), "1".to_string());
         let runtime = super::resolved_test_docker_runtime(temp.path());
+        let plan = super::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = super::DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
 
-        let runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
-            &project,
-            &mut config,
-            Some(&runtime),
-        )
-        .expect("finalize docker launch")
-        .expect("Docker runtime worktree");
+        let runtime_worktree =
+            super::finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
+                .expect("finalize docker launch")
+                .expect("Docker runtime worktree");
 
         assert_eq!(config.command, runtime.binary());
         assert_eq!(runtime_worktree, "/workspace/app");
@@ -8051,13 +8242,13 @@ mod tests {
         config.working_dir = Some(project.clone());
         config.docker_service = Some("app".to_string());
         let runtime = super::resolved_test_docker_runtime(temp.path());
+        let plan = super::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch plan");
+        let binding = super::DockerLaunchBinding::capture_for_test(runtime.clone(), plan);
 
-        let _runtime_worktree = super::finalize_docker_agent_launch_config_with_runtime(
-            &project,
-            &mut config,
-            Some(&runtime),
-        )
-        .expect("finalize docker launch");
+        let _runtime_worktree =
+            super::finalize_docker_agent_launch_config_with_binding(&mut config, Some(&binding))
+                .expect("finalize docker launch");
 
         assert_eq!(config.command, runtime.binary());
         assert_eq!(
@@ -8992,7 +9183,11 @@ fn main() -> std::io::Result<()> {
                 );
                 *control_flow = ControlFlow::Exit;
             }
-            Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
+            Event::UserEvent(UserEvent::Frontend {
+                client_id,
+                event,
+                received_at,
+            }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
                 // Issue #4145 AC-1: the canvas reporting its bounds is the
@@ -9006,25 +9201,17 @@ fn main() -> std::io::Result<()> {
                 let dispatch_kind = frontend_event_kind_label(&event);
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                let completed_at = std::time::Instant::now();
                 if canvas_ready {
                     record_startup_perf_route_once();
                 }
-                let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
-                if dispatch_elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
-                    tracing::warn!(
-                        target: "gwt.frontend.timing",
-                        event = %dispatch_kind,
-                        elapsed_ms = dispatch_elapsed_ms,
-                        "frontend event handler blocked the GUI event loop"
-                    );
-                } else {
-                    tracing::debug!(
-                        target: "gwt.frontend.timing",
-                        event = %dispatch_kind,
-                        elapsed_ms = dispatch_elapsed_ms,
-                        "frontend event handled"
-                    );
-                }
+                log_frontend_timing(
+                    dispatch_kind,
+                    received_at,
+                    dispatch_started,
+                    completed_at,
+                    app.window_lookup.len(),
+                );
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
@@ -9287,18 +9474,17 @@ fn main() -> std::io::Result<()> {
                 ));
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
+                project_root,
+                status,
+            }) => {
+                clients.dispatch(app.issue_monitor_daemon_status_events(&project_root, status));
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
                 project_root,
                 items,
             }) => {
-                // SPEC-3431 T-093: the wake decision runs before the frontend
-                // broadcast so a parked PM is revived by daemon-side activity.
-                app.replace_knowledge_monitor_snapshot(&project_root, &items);
-                let mut events = app.pm_wake_events(&project_root, &items);
-                events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
-                    items,
-                }));
-                clients.dispatch(events);
+                clients.dispatch(app.issue_monitor_daemon_inbox_events(&project_root, items));
             }
             Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
                 window_id,

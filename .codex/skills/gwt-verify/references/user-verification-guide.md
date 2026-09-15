@@ -165,13 +165,17 @@ When the user selects `Rejected`:
 
 The handoff is **automatically skipped** (no user prompt) when:
 
-- The launch mode is `autonomous` (`GWT_AUTONOMOUS_EXECUTION` is set by the
-  gwt Issue Monitor). Nobody is watching the session, and calling the question
-  tool would park the owner Issue instead of pausing for an answer. Record
-  `User Verification Result: n/a (autonomous)` and cover any UI surface with
-  the `Agent Visual Check:` line described in SKILL.md. This waiver is a
-  property of the launch, not a judgement, so it is never written as
-  `skipped(<reason>)`.
+- The launch mode is `autonomous` — `execution.status` reports
+  `launch_route: autonomous`; the legacy `GWT_AUTONOMOUS_EXECUTION` marker also
+  counts when present, but its absence proves nothing. Nobody is watching the
+  session, and calling the question tool would park the owner Issue instead of
+  pausing for an answer. Record
+  `User Verification Result: deferred (autonomous execution)` when a UI surface
+  is in scope (`n/a` when none is; `n/a (autonomous)` is the older spelling of
+  both) and cover any UI surface with the `Agent Visual Check:` line described
+  in SKILL.md. This waiver is a property of the launch, not a judgement, so it
+  is never written as `skipped(<reason>)` — and a deferral is never written as
+  `confirmed`, because the check has not happened yet.
 - `--mode quick` is in effect (TDD mid-iteration).
 - `Changed surfaces: (none)` — nothing to verify.
 - All changed surfaces are `docs-only` per `surface-taxonomy.md`.

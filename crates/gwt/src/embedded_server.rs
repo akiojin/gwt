@@ -300,6 +300,11 @@ struct ClientQueueState {
     /// `terminal_snapshot` was serialized at, per pane. A `terminal_output`
     /// at or below it is already part of that snapshot and must not follow it.
     snapshot_stream_seq: HashMap<String, u64>,
+    /// Issue #4206: panes whose streamed output has a hole in it. A chunk the
+    /// client never received carried the cursor moves the following chunks
+    /// position themselves against, so the surviving suffix is unusable until
+    /// a snapshot re-establishes the screen. Cleared by that snapshot.
+    torn_panes: std::collections::HashSet<String>,
     dropped_lossy: u64,
     dead: bool,
     close_frame: Option<ClientCloseFrame>,
@@ -348,6 +353,9 @@ impl ClientQueue {
         if Self::superseded_by_snapshot(&state, message) {
             return false;
         }
+        if Self::withheld_from_torn_pane(&mut state, message) {
+            return false;
+        }
         // Snapshot-class kinds without a coalesce key (file trees, resume acks,
         // release notes) must not replace each other by kind alone — different
         // windows would clobber one another. They get lossless append semantics
@@ -369,6 +377,7 @@ impl ClientQueue {
                 }
             }
             QueueClass::SnapshotLatest => {
+                Self::heal_torn_pane(&mut state, message);
                 Self::record_snapshot_position(&mut state, message);
                 if let Some(entry) = state.entries.iter_mut().find(|entry| {
                     entry.kind == message.kind && entry.coalesce_key == message.coalesce_key
@@ -390,6 +399,10 @@ impl ClientQueue {
                     state.dropped_lossy += 1;
                     if let Some(pane) = &message.repair_pane_id {
                         state.dirty_panes.insert(pane.clone());
+                        // Issue #4206: the hole starts here. Everything the
+                        // pane streams from now on is positioned against a
+                        // screen the client will never have.
+                        state.torn_panes.insert(pane.clone());
                     }
                     return false;
                 }
@@ -434,6 +447,39 @@ impl ClientQueue {
             .snapshot_stream_seq
             .get(pane)
             .is_some_and(|snapshot_seq| seq <= *snapshot_seq)
+    }
+
+    /// Issue #4206: hold back a torn pane's stream. Once a chunk is dropped
+    /// under queue pressure the client's screen and the pane's byte stream
+    /// have diverged, and every later chunk positions its text against the
+    /// state the missing one produced — writing it paints unrelated output
+    /// across whatever occupies those cells instead. The pane is re-marked
+    /// dirty so the drain loop keeps asking for the snapshot that heals it;
+    /// without that a pane whose first repair failed would never recover.
+    fn withheld_from_torn_pane(state: &mut ClientQueueState, message: &PreparedOutbound) -> bool {
+        let Some(pane) = &message.repair_pane_id else {
+            return false;
+        };
+        if !state.torn_panes.contains(pane) {
+            return false;
+        }
+        state.dropped_lossy += 1;
+        state.dirty_panes.insert(pane.clone());
+        true
+    }
+
+    /// Issue #4206: a snapshot replaces the client's screen wholesale, so it
+    /// closes the pane's hole regardless of whether the stream position that
+    /// produced it is known.
+    fn heal_torn_pane(state: &mut ClientQueueState, message: &PreparedOutbound) {
+        if message.kind != "terminal_snapshot" {
+            return;
+        }
+        let Some(pane) = &message.terminal_pane else {
+            return;
+        };
+        state.torn_panes.remove(pane);
+        state.dirty_panes.remove(pane);
     }
 
     /// Issue #4095: remember the snapshot's stream position and drop every
@@ -3947,6 +3993,7 @@ async fn client_session_with_scope(
             maybe_message = receiver.next() => {
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
+                        let received_at = Instant::now();
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
@@ -3964,6 +4011,7 @@ async fn client_session_with_scope(
                                             &client_id,
                                             &input_seq,
                                             event,
+                                            received_at,
                                         );
                                     }
                                     Some(ScopedFrontendRequest::AgentPmRefusal {
@@ -4255,6 +4303,7 @@ fn handle_frontend_message(
     client_id: &str,
     input_seq: &AtomicU64,
     event: FrontendEvent,
+    received_at: Instant,
 ) {
     let (id, data) = match event {
         FrontendEvent::TerminalInput { id, data } => (id, data),
@@ -4265,6 +4314,7 @@ fn handle_frontend_message(
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
                 event: FrontendEvent::StartupFirstFrame { navigation_ms },
+                received_at,
             });
             return;
         }
@@ -4278,6 +4328,7 @@ fn handle_frontend_message(
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
                 event: other,
+                received_at,
             });
             return;
         }
@@ -4301,7 +4352,7 @@ fn handle_frontend_message(
     );
 
     let pty_handle = match state.pty_writers.read() {
-        Ok(guard) => guard.get(&id).cloned(),
+        Ok(guard) => guard.get(&id).map(|pty| (pty.clone(), guard.len())),
         Err(_error) => {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -4317,7 +4368,7 @@ fn handle_frontend_message(
 
     let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
     let mut resolution_marked = false;
-    if let Some(pty) = pty_handle {
+    if let Some((pty, pty_writer_count)) = pty_handle {
         if approval_resolution {
             // `EventLoopProxy::send_event` completes the tao channel enqueue
             // synchronously. Enqueue the causal marker before the PTY write so
@@ -4331,14 +4382,14 @@ fn handle_frontend_message(
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
-                tracing::debug!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write",
-                    client_id = %client_id,
+                let completed_at = Instant::now();
+                log_terminal_input_completion(
+                    client_id,
                     seq,
-                    window_id = %id,
-                    write_us = write_started.elapsed().as_micros() as u64,
-                    "terminal_input written to PTY via WS fast-path"
+                    &id,
+                    completed_at.duration_since(write_started).as_micros() as u64,
+                    completed_at.duration_since(received_at).as_millis() as u64,
+                    pty_writer_count,
                 );
                 if had_unsent && !pty.has_unsent_user_input() {
                     state
@@ -4375,7 +4426,7 @@ fn handle_frontend_message(
         );
     }
 
-    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data);
+    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data, received_at);
     tracing::debug!(
         target: "gwt_input_trace",
         stage = "ws_dispatch",
@@ -4392,11 +4443,48 @@ fn forward_terminal_input_to_event_loop(
     client_id: &str,
     id: String,
     data: String,
+    received_at: Instant,
 ) {
     state.proxy.send(UserEvent::Frontend {
         client_id: client_id.to_string(),
         event: FrontendEvent::TerminalInput { id, data },
+        received_at,
     });
+}
+
+fn log_terminal_input_completion(
+    client_id: &str,
+    seq: u64,
+    window_id: &str,
+    write_us: u64,
+    elapsed_ms: u64,
+    pty_writer_count: usize,
+) {
+    if elapsed_ms >= crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt_input_trace",
+            stage = "fast_path_write",
+            client_id,
+            seq,
+            window_id,
+            write_us,
+            elapsed_ms,
+            pty_writer_count,
+            "terminal_input receive-to-PTY latency exceeded budget"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt_input_trace",
+            stage = "fast_path_write",
+            client_id,
+            seq,
+            window_id,
+            write_us,
+            elapsed_ms,
+            pty_writer_count,
+            "terminal_input written to PTY via WS fast-path"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4476,7 +4564,7 @@ mod tests {
         pin::Pin,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
         task::{Context, Poll},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use axum::extract::ws::Message as AxumMessage;
@@ -8127,12 +8215,14 @@ mod tests {
     #[test]
     fn handle_frontend_message_forwards_non_terminal_events_to_proxy() {
         let (state, events) = sample_server_state();
+        let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             FrontendEvent::FrontendReady,
+            received_at,
         );
 
         let recorded = events
@@ -8140,14 +8230,35 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady }]
-                if client_id == "client-1"
+            [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady, received_at: forwarded_at }]
+                if client_id == "client-1" && *forwarded_at == received_at
         ));
+    }
+
+    #[test]
+    fn terminal_input_timing_warns_only_for_slow_successful_write() {
+        let output = crate::tests::capture_timing_warnings(|| {
+            super::log_terminal_input_completion("client-1", 7, "window-1", 1000, 30, 9);
+            super::log_terminal_input_completion("client-1", 8, "window-1", 1000, 29, 9);
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("timing JSON"))
+            .collect();
+        assert_eq!(logs.len(), 1, "29ms must not warn; 30ms must warn");
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["stage"], "fast_path_write");
+        assert_eq!(fields["elapsed_ms"], 30);
+        assert_eq!(fields["write_us"], 1000);
+        assert_eq!(fields["pty_writer_count"], 9);
+        assert_eq!(fields["seq"], 7);
+        assert!(fields.get("data").is_none());
     }
 
     #[test]
     fn handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing() {
         let (state, events) = sample_server_state();
+        let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
             &state,
@@ -8157,6 +8268,7 @@ mod tests {
                 id: "tab-1::shell-1".to_string(),
                 data: "ls\n".to_string(),
             },
+            received_at,
         );
 
         let recorded = events
@@ -8164,10 +8276,11 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data } }]
+            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data }, received_at: forwarded_at }]
                 if client_id == "client-1"
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
+                    && *forwarded_at == received_at
         ));
     }
 
@@ -8201,6 +8314,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "1\r".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8252,6 +8366,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "1\r".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8261,6 +8376,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "\u{1b}[A".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8270,6 +8386,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "x".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8312,6 +8429,7 @@ mod tests {
                 id: "tab-1::pm-window".to_string(),
                 data: "実行されてい".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8321,6 +8439,7 @@ mod tests {
                 id: "tab-1::pm-window".to_string(),
                 data: "ますか？\r".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8896,6 +9015,159 @@ mod tests {
                 "terminal_output:chunk-3".to_string(),
             ]
         );
+    }
+
+    // Issue #4206 AC-1 / AC-2: a dropped chunk tears the pane's byte stream.
+    // Every later chunk of that pane positions its text relative to the screen
+    // the dropped one produced, so delivering the surviving suffix paints at
+    // offsets that never existed — two legitimate outputs of the same stream
+    // crossing inside one line. The pane must stay silent from the drop until
+    // a snapshot re-baselines the client screen.
+    #[test]
+    fn client_queue_withholds_torn_pane_output_until_a_snapshot_rebaselines_it() {
+        let queue = ClientQueue::default();
+        let torn = "tab-1::agent-7";
+        let healthy = "tab-1::agent-8";
+
+        // Saturate with unrelated lossless traffic so the pane's own delivery
+        // is the only terminal_* content under test.
+        for index in 0..LOSSY_HIGH_WATER {
+            queue.enqueue(&prepare_outbound(&lossless_error(&format!("fill-{index}"))));
+        }
+        queue.enqueue(&terminal_output_at(torn, "dropped", 1));
+        // Room again: the queue would accept this pane's next chunk, and
+        // before Issue #4206 it did.
+        let _ = queue.try_next();
+        queue.enqueue(&terminal_output_at(torn, "post-hole", 2));
+        queue.enqueue(&terminal_output_at(healthy, "unaffected", 2));
+
+        assert_eq!(
+            drained_terminal_events(&queue),
+            vec!["terminal_output:unaffected".to_string()],
+            "a torn pane stays silent until repaired; other panes are untouched"
+        );
+
+        queue.enqueue(&terminal_snapshot_at(torn, "repair", 3));
+        queue.enqueue(&terminal_output_at(torn, "rebaselined", 4));
+
+        assert_eq!(
+            drained_terminal_events(&queue),
+            vec![
+                "terminal_snapshot:repair".to_string(),
+                "terminal_output:rebaselined".to_string(),
+            ],
+            "the repair snapshot re-baselines the screen and the stream resumes"
+        );
+    }
+
+    // Issue #4206 AC-1: withholding must not strand a pane. While torn, the
+    // pane stays scheduled for repair so the drain loop keeps asking the event
+    // loop for a snapshot instead of leaving the display frozen forever.
+    #[test]
+    fn client_queue_keeps_requesting_repair_while_a_pane_stays_torn() {
+        let queue = ClientQueue::default();
+        let pane = "tab-1::agent-7";
+
+        for index in 0..LOSSY_HIGH_WATER {
+            queue.enqueue(&prepare_outbound(&lossless_error(&format!("fill-{index}"))));
+        }
+        queue.enqueue(&terminal_output_at(pane, "dropped", 1));
+        let (_, first_repairs) = drain_all(&queue);
+        assert_eq!(first_repairs, vec![pane.to_string()]);
+
+        // The repair snapshot never materialized (contended pane lock, empty
+        // screen). The next withheld chunk must re-arm the request.
+        queue.enqueue(&terminal_output_at(pane, "still-torn", 2));
+        queue.enqueue(&prepare_outbound(&lossless_error("carrier")));
+        let (_, second_repairs) = drain_all(&queue);
+        assert_eq!(
+            second_repairs,
+            vec![pane.to_string()],
+            "a still-torn pane is re-scheduled for repair, never left blank"
+        );
+    }
+
+    // Issue #4206 AC-3: the reported corruption needed a saturated host — the
+    // WebView stopped draining under CPU pressure while writers kept
+    // producing. Reproduce that shape (concurrent writers against a drain that
+    // runs behind them) and assert the property that actually protects the
+    // screen: what a client receives for a pane is always an unbroken prefix
+    // of what that pane produced. A gap is the corruption.
+    #[test]
+    fn client_queue_delivers_gap_free_pane_prefixes_under_concurrent_saturation() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        const WRITERS: u64 = 4;
+        const CHUNKS_PER_WRITER: u64 = 4_000;
+
+        let queue = Arc::new(ClientQueue::default());
+        let writers_done = Arc::new(AtomicBool::new(false));
+
+        let writers = (0..WRITERS)
+            .map(|writer| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    let pane = format!("tab-1::agent-{writer}");
+                    for index in 0..CHUNKS_PER_WRITER {
+                        queue.enqueue(&terminal_output_at(&pane, &format!("{index}"), index + 1));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // A drain that keeps falling behind: the queue oscillates around the
+        // high-water mark, so panes tear and the queue then has room again.
+        let drainer = {
+            let queue = Arc::clone(&queue);
+            let writers_done = Arc::clone(&writers_done);
+            std::thread::spawn(move || {
+                let mut delivered: HashMap<String, Vec<u64>> = HashMap::new();
+                loop {
+                    let Some(DrainStep::Message { payload, .. }) = queue.try_next() else {
+                        if writers_done.load(AtomicOrdering::Relaxed) {
+                            break;
+                        }
+                        std::thread::yield_now();
+                        continue;
+                    };
+                    let value: serde_json::Value =
+                        serde_json::from_str(&payload).expect("outbound payload json");
+                    if value.get("kind").and_then(serde_json::Value::as_str)
+                        != Some("terminal_output")
+                    {
+                        continue;
+                    }
+                    let pane = value["id"].as_str().expect("pane id").to_string();
+                    let index = value["data_base64"]
+                        .as_str()
+                        .expect("chunk label")
+                        .parse::<u64>()
+                        .expect("chunk index");
+                    delivered.entry(pane).or_default().push(index);
+                    std::thread::yield_now();
+                }
+                delivered
+            })
+        };
+
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        writers_done.store(true, AtomicOrdering::Relaxed);
+        let delivered = drainer.join().expect("drain thread");
+
+        assert!(
+            queue.dropped_lossy() > 0,
+            "the test must actually saturate the queue"
+        );
+        for (pane, indices) in &delivered {
+            let expected = (0..indices.len() as u64).collect::<Vec<_>>();
+            assert_eq!(
+                indices, &expected,
+                "{pane} received a torn stream: a gap means later chunks painted \
+                 against a screen state the client never saw"
+            );
+        }
     }
 
     // SPEC-2359 W-17 (FR-394): kinds missing from BACKEND_EVENT_POLICIES are

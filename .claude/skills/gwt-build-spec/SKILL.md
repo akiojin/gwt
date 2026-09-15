@@ -177,11 +177,15 @@ The skill is considered green when **all** of the following hold:
 - no visual / UI snapshot diff is unresolved (visual regression must be
   triaged before declaring PASS, not silently regenerated)
 - `User Verification Result` is one of `confirmed`, `n/a`, `n/a (autonomous)`,
-  or `skipped(<reason>)`. An unattended gwt Issue Monitor launch records
-  `n/a (autonomous)` and carries any UI surface with `Agent Visual Check: pass`
-  instead of a human handoff. `pending` is not acceptable; `rejected(<reason>)`
-  forces `Overall: FAIL` and the implementation returns to Phase 2 (TDD
-  loop). The user's reason is preserved in the evidence bundle.
+  `deferred (autonomous execution)`, or `skipped(<reason>)`. An unattended gwt
+  Issue Monitor launch — recognized from `execution.status`'s
+  `launch_route: autonomous`, not from an environment variable — records
+  `deferred (autonomous execution)` when a UI surface is in scope (`n/a` when
+  none is) and carries that surface with `Agent Visual Check: pass` instead of a
+  human handoff; the PR then stays Draft until the owner sweeps it. `pending` is
+  not acceptable; `rejected(<reason>)` forces `Overall: FAIL` and the
+  implementation returns to Phase 2 (TDD loop). The user's reason is preserved
+  in the evidence bundle.
 
 In SPEC mode, also verify:
 

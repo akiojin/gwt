@@ -65,12 +65,12 @@ class ReleaseIssueRefsTests(unittest.TestCase):
 
         result = release_issue_refs.parse_pr_body_refs(body, pr_number=1234)
 
-        self.assertEqual([2000, 2001, 2002], result.auto_close_issues)
+        self.assertEqual([2000, 2001, 2002], result.delivered_issues)
         self.assertEqual([2003], result.reference_only_issues)
         self.assertEqual(
             [
                 "PR #1234 references #2003 only in `Related Issues / Links`; "
-                "they will not auto-close on release."
+                "listed as reference-only."
             ],
             result.warnings,
         )
@@ -78,12 +78,12 @@ class ReleaseIssueRefsTests(unittest.TestCase):
     def test_parse_pr_body_flags_related_only_refs(self) -> None:
         result = release_issue_refs.parse_pr_body_refs(PR_1585_BODY, pr_number=1585)
 
-        self.assertEqual([], result.auto_close_issues)
+        self.assertEqual([], result.delivered_issues)
         self.assertEqual([1457], result.reference_only_issues)
         self.assertEqual(
             [
                 "PR #1585 references #1457 only in `Related Issues / Links`; "
-                "they will not auto-close on release."
+                "listed as reference-only."
             ],
             result.warnings,
         )
@@ -123,12 +123,12 @@ class ReleaseIssueRefsTests(unittest.TestCase):
             runner=runner,
         )
 
-        self.assertEqual([1589], result.auto_close_issues)
+        self.assertEqual([1589], result.delivered_issues)
         self.assertEqual([1457], result.reference_only_issues)
         self.assertEqual(
             [
-                "Reference-only issues detected: #1457. Add them to `Closing Issues` if they should auto-close.",
-                "PR #1585 references #1457 only in `Related Issues / Links`; they will not auto-close on release.",
+                "Reference-only issues detected: #1457. They are listed under `Related Issues / Links`.",
+                "PR #1585 references #1457 only in `Related Issues / Links`; listed as reference-only.",
             ],
             result.warnings,
         )
@@ -158,11 +158,11 @@ class ReleaseIssueRefsTests(unittest.TestCase):
             runner=runner,
         )
 
-        self.assertEqual([], result.auto_close_issues)
+        self.assertEqual([], result.delivered_issues)
         self.assertEqual([1700], result.reference_only_issues)
         self.assertIn(
             "gwt-spec issues moved to reference-only: #1700. "
-            "gwt-spec issues are never auto-closed by releases.",
+            "gwt-spec issues are settled per phase, never by a release.",
             result.warnings,
         )
 
@@ -213,16 +213,16 @@ class ReleaseIssueRefsTests(unittest.TestCase):
             runner=runner,
         )
 
-        self.assertEqual([], result.auto_close_issues)
+        self.assertEqual([], result.delivered_issues)
         self.assertEqual([1700], result.reference_only_issues)
         self.assertIn(
             "gwt-spec issues moved to reference-only: #1700. "
-            "gwt-spec issues are never auto-closed by releases.",
+            "gwt-spec issues are settled per phase, never by a release.",
             result.warnings,
         )
 
-    def test_non_gwt_spec_issue_stays_in_auto_close(self) -> None:
-        """Non-gwt-spec issue stays in auto_close."""
+    def test_non_gwt_spec_issue_stays_delivered(self) -> None:
+        """Non-gwt-spec issue stays in delivered."""
         runner = FakeRunner(
             {
                 (
@@ -245,12 +245,117 @@ class ReleaseIssueRefsTests(unittest.TestCase):
             runner=runner,
         )
 
-        self.assertEqual([1589], result.auto_close_issues)
+        self.assertEqual([1589], result.delivered_issues)
         self.assertEqual([], result.reference_only_issues)
         gwt_spec_warnings = [
             w for w in result.warnings if "gwt-spec" in w
         ]
         self.assertEqual([], gwt_spec_warnings)
+
+
+GITHUB_CLOSING_RE = release_issue_refs.CLOSING_REFERENCE_RE
+
+
+class ClosingKeywordNeutralizationTests(unittest.TestCase):
+    """Issue #3545 AC-2 / AC-4: closing keywords never survive body generation."""
+
+    def test_neutralize_wraps_reference_after_every_keyword_form(self) -> None:
+        body = dedent(
+            """\
+            Closes #3527
+            fixes: #3528
+            Resolved akiojin/gwt#3529
+            closed https://github.com/akiojin/gwt/issues/3530
+            - fix(launch): skip legacy resume (#3527 対応)
+            """
+        )
+
+        result = release_issue_refs.neutralize_closing_keywords(body)
+
+        self.assertEqual(
+            dedent(
+                """\
+                Closes `#3527`
+                fixes: `#3528`
+                Resolved `akiojin/gwt#3529`
+                closed `https://github.com/akiojin/gwt/issues/3530`
+                - fix(launch): skip legacy resume (#3527 対応)
+                """
+            ),
+            result,
+        )
+        self.assertIsNone(GITHUB_CLOSING_RE.search(result))
+
+    def test_neutralize_is_idempotent_and_keeps_plain_refs(self) -> None:
+        body = "Related: #3540, see also enclosed #99 and prefix #100"
+
+        once = release_issue_refs.neutralize_closing_keywords(body)
+
+        self.assertEqual(body, once)
+        self.assertEqual(once, release_issue_refs.neutralize_closing_keywords(once))
+
+    def test_contains_closing_reference_matches_github_keyword_grammar(self) -> None:
+        self.assertTrue(release_issue_refs.contains_closing_reference("Closes #1"))
+        self.assertTrue(release_issue_refs.contains_closing_reference("fix:  #1"))
+        self.assertFalse(release_issue_refs.contains_closing_reference("Closes `#1`"))
+        self.assertFalse(release_issue_refs.contains_closing_reference("hotfix #1"))
+        self.assertFalse(release_issue_refs.contains_closing_reference("#1 closes the loop"))
+
+
+class ReleasePrBodyTests(unittest.TestCase):
+    """Issue #3545 AC-1: the generated Release PR body is reference-only."""
+
+    def report(self, delivered, reference_only, warnings=()):
+        return release_issue_refs.ReleaseIssueRefs(
+            repo="akiojin/gwt",
+            range="v9.91.0..HEAD",
+            refs=[],
+            delivered_issues=list(delivered),
+            reference_only_issues=list(reference_only),
+            warnings=list(warnings),
+        )
+
+    def test_body_lists_delivered_issues_without_closing_keywords(self) -> None:
+        body = release_issue_refs.render_release_pr_body(
+            self.report([3527, 3528], [3540]), version="v9.92.0", bump="minor"
+        )
+
+        self.assertIn("## Summary", body)
+        self.assertIn("- v9.92.0 (bump: minor)", body)
+        self.assertIn("## Delivered Issues", body)
+        self.assertIn("- #3527\n- #3528", body)
+        self.assertIn("## Related Issues / Links", body)
+        self.assertIn("- #3540", body)
+        self.assertNotIn("## Closing Issues", body)
+        self.assertNotIn("Closes", body)
+        self.assertIsNone(GITHUB_CLOSING_RE.search(body))
+
+    def test_body_says_none_when_no_issues(self) -> None:
+        body = release_issue_refs.render_release_pr_body(
+            self.report([], []), version="v9.92.0", bump="auto"
+        )
+
+        self.assertIn("## Delivered Issues\n\nNone", body)
+        self.assertIn("## Related Issues / Links\n\nNone", body)
+
+    def test_body_neutralizes_closing_keywords_in_free_text(self) -> None:
+        body = release_issue_refs.render_release_pr_body(
+            self.report([1], []),
+            version="v9.92.0",
+            bump="patch",
+            notes="### Bug Fixes\n\n- **launch:** Skip legacy resume, fixes #3527\n",
+        )
+
+        self.assertIn("fixes `#3527`", body)
+        self.assertIsNone(GITHUB_CLOSING_RE.search(body))
+
+    def test_render_text_has_no_closing_keywords(self) -> None:
+        text = release_issue_refs.render_text(self.report([3527], [3540], ["w"]))
+
+        self.assertIn("Delivered issues:", text)
+        self.assertIn("- #3527", text)
+        self.assertNotIn("Closes", text)
+        self.assertIsNone(GITHUB_CLOSING_RE.search(text))
 
 
 if __name__ == "__main__":
