@@ -39,7 +39,7 @@ use std::{
 use gwt_core::daemon::{
     persist_endpoint, resolve_daemon_socket_path, validate_handshake, ClientFrame, DaemonEndpoint,
     DaemonFrame, DaemonSocketPlacement, DaemonStatus, IpcHandshakeRequest, IpcHandshakeResponse,
-    RuntimeScope, DAEMON_PROTOCOL_VERSION,
+    RuntimeScope, VerificationSpawnFinished, DAEMON_PROTOCOL_VERSION,
 };
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
@@ -4698,6 +4698,10 @@ async fn handle_connection(
 
     let mut line = String::new();
     let mut materializer_lease = None;
+    // Binds any verification child to this connection. Dropped on every exit
+    // from the loop below, which is what makes a dead or disconnected caller
+    // reclaim its workload instead of orphaning it (Issue #4409 AC-2).
+    let mut verification_reclaim: Option<super::verification_spawn::VerificationReclaim> = None;
     let mut subscribed_channels = HashSet::new();
     loop {
         line.clear();
@@ -4830,6 +4834,55 @@ async fn handle_connection(
                 }
                 if out_tx.send(DaemonFrame::Ack).is_err() {
                     break;
+                }
+            }
+            Ok(ClientFrame::SpawnVerification(request)) => {
+                // One verification child per connection. A second request
+                // would orphan the first one's reclamation handle, which is
+                // the exact failure this whole path exists to prevent.
+                if verification_reclaim.is_some() {
+                    if out_tx
+                        .send(DaemonFrame::Error {
+                            message: "this connection already owns a verification child; open a \
+                                      second connection to run a second command"
+                                .to_string(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                match super::verification_spawn::spawn(&request) {
+                    Err(message) => {
+                        if out_tx.send(DaemonFrame::Error { message }).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(child) => {
+                        let accepted = child.accepted().clone();
+                        // The connection keeps the reclamation right while the
+                        // child is waited on elsewhere: when this connection
+                        // ends for any reason, the handle drops and the whole
+                        // group goes with it (Issue #4409 AC-2 / AC-7).
+                        verification_reclaim = Some(child.reclaim_handle());
+                        let finished_tx = out_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let (exit_code, reclaimed_survivors) = child.wait();
+                            let _ = finished_tx.send(DaemonFrame::VerificationFinished(
+                                VerificationSpawnFinished {
+                                    exit_code,
+                                    reclaimed_survivors,
+                                },
+                            ));
+                        });
+                        if out_tx
+                            .send(DaemonFrame::VerificationAccepted(accepted))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
             Ok(ClientFrame::Status) => {
