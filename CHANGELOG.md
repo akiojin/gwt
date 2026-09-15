@@ -1,6 +1,45 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.98.0] - 2026-09-15
+
+### Bug Fixes
+
+- **skills:** Gwtd bootstrap の順序を canonical guidance に定義し lease 契約の循環を解消する
+- **issue-monitor:** Statusと操作のlaunch識別子を統一する
+- **launch:** Auto-resume successor の Active authority を復元する
+- **ci:** Apt の acquire を境界付けし停滞の原因をログに出す
+- **ci:** Windows で未使用になる定数を unix 限定モジュールへ移す
+- **verification:** Pre-push から重量級 Cargo ジョブを外して lease 外の CPU 飽和を止める
+- **verification:** Pre-push の markdownlint が git 無視の tasks/ を検査しないようにする
+- **terminal:** Pane が読み手のない生行バッファを無制限に保持しないようにする
+- **cli:** Issue.monitor.status に gwt GUI process の RSS と飽和警告を出す
+
+### Miscellaneous Tasks
+
+- **work:** Issue 4352 の Work event shard を記録する
+- **work:** Issue 4352 の terminal Work event shard を記録する
+- **work:** Issue 3732の検証済み作業状態を記録する
+- **work:** Issue 3625 の受け入れ監査を記録
+- **work:** Issue 3625 の完了 Work イベントを記録
+- **work:** Issue 3625 の terminal Work 更新を記録
+- **work:** #4324 の統合レビューと検証引き渡しを記録
+- **work:** #4324 の再起動世代の統合と検証引き渡しを記録
+- **work:** #4268 の Work event receipt を記録する
+- **work:** #4268 継続 launch の Work event receipt を記録
+- **work:** #4268 の AC 評価世代の Work event shard を記録する
+- **work:** Runtime が書き出した work event shard を記録する
+- **work:** Repair 後の work event shard を記録する
+- **work:** Verify 再実行前の work event shard を記録する
+- **work:** 世代の terminal Work receipt を記録する
+- **work:** #4234 の Work イベントを記録
+- **work:** #4234 の Work 完了イベントを記録
+
+### Testing
+
+- **issue-monitor:** Launch識別子不整合の回帰を再現する
+- **launch:** Auto-resume successor 回帰を明確化する
+
 ## [9.97.0] - 2026-09-15
 
 ### Bug Fixes
