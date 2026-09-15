@@ -150,6 +150,9 @@ pub enum UsageState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderUsage {
     pub provider: UsageProvider,
+    /// Opaque, non-secret fingerprint of the locally authenticated account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
     pub plan: Option<String>,
@@ -164,6 +167,7 @@ impl ProviderUsage {
     pub fn degraded(provider: UsageProvider, state: UsageState) -> Self {
         Self {
             provider,
+            account_id: None,
             account_label: None,
             plan: None,
             windows: Vec::new(),
@@ -313,6 +317,7 @@ mod tests {
         let snap = UsageSnapshot {
             accounts: vec![ProviderUsage {
                 provider: UsageProvider::Codex,
+                account_id: None,
                 account_label: Some("codex@example.com".into()),
                 plan: Some("pro".into()),
                 windows: vec![UsageWindow::new(WindowKind::FiveHour, 12.0, None)],
