@@ -153,6 +153,8 @@ pub struct Settings {
     pub server: ServerConfig,
     /// GitHub API budget throttle knobs (SPEC #4093 FR-007).
     pub github_budget: crate::GitHubBudgetConfig,
+    /// Automatic build-artifact reclaim on low disk (Issue #4391).
+    pub build_artifact_gc: crate::BuildArtifactGcConfig,
 }
 
 impl Default for Settings {
@@ -176,6 +178,7 @@ impl Default for Settings {
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
             github_budget: crate::GitHubBudgetConfig::default(),
+            build_artifact_gc: crate::BuildArtifactGcConfig::default(),
         }
     }
 }

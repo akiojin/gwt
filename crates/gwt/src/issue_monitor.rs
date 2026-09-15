@@ -3028,6 +3028,12 @@ pub struct IssueMonitorAgentStatus {
     /// projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_pressure: Option<crate::memory_pressure::MemoryPressureStatus>,
+    /// Issue #4391 AC-3: the last automatic build-artifact reclaim — what
+    /// triggered it, what it removed and why the rest was kept. Filled in by
+    /// the `issue.monitor.status` surface from the run history on disk;
+    /// `None` in daemon projections and before the first run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_artifact_gc: Option<crate::worktree::gc::BuildArtifactGcRecord>,
     /// Issue #4087 AC-1: the Issue cache full-refresh cadence — when it last
     /// completed and how far past its TTL it is — so a stopped refresh is
     /// read from the same snapshot as `scan_stall` instead of inferred from
@@ -9395,6 +9401,7 @@ impl IssueMonitorState {
             idle_window_counts: self.idle_window_counts(),
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             failure_surge,
         }
     }
@@ -15290,6 +15297,7 @@ mod tests {
                 generation_reclaim: None,
                 disk_space: None,
                 memory_pressure: None,
+                build_artifact_gc: None,
                 issue_cache: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: BTreeMap::new(),

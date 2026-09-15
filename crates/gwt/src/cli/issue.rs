@@ -390,12 +390,23 @@ fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
 /// Issue #4009 AC-4: free space where the worktrees live and where the
 /// verification coordinator writes its lease, so a filling host warns here
 /// before `verify.run` fails with `No space left on device`.
+/// Issue #4391 AC-1: judged against the `[build_artifact_gc]` thresholds,
+/// the same probe the automatic reclaim fires on.
 fn attach_disk_space(project_root: &std::path::Path, status: &mut crate::IssueMonitorAgentStatus) {
-    let coordinator_root = gwt_core::index_coordinator::coordinator_root();
-    status.disk_space = Some(crate::disk_space::probe(&[
+    status.disk_space = Some(crate::worktree::gc::probe_disk(
         project_root,
-        coordinator_root.as_path(),
-    ]));
+        &crate::worktree::gc::current_config(),
+    ));
+}
+
+/// Issue #4391 AC-3: the last automatic build-artifact reclaim, read from
+/// the run history the daemon appends to. Read-only: no history, no field.
+fn attach_build_artifact_gc(
+    project_root: &std::path::Path,
+    status: &mut crate::IssueMonitorAgentStatus,
+) {
+    status.build_artifact_gc =
+        crate::worktree::gc::last_record(&crate::worktree::gc::record_path(project_root));
 }
 
 /// Issue #4234 AC-5: resident size of every gwt GUI process on the host,
@@ -527,6 +538,7 @@ fn run_monitor_status<E: CliEnv>(
     merge_board_escalations_into_needs_human(&project_root, &mut status);
     attach_github_budget(&mut status);
     attach_disk_space(&project_root, &mut status);
+    attach_build_artifact_gc(&project_root, &mut status);
     attach_memory_pressure(&mut status);
     attach_issue_cache_status(&project_root, &mut status);
     out.push_str(
@@ -4992,6 +5004,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -5057,6 +5070,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -5173,6 +5187,7 @@ mod tests {
                 generation_reclaim: None,
                 disk_space: None,
                 memory_pressure: None,
+                build_artifact_gc: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
                 failure_surge: None,
@@ -5236,6 +5251,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -7220,6 +7236,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             review_windows: Vec::new(),
             failure_surge: None,
             issue_cache: None,
