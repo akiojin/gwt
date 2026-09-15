@@ -919,11 +919,10 @@ pub struct IssueMonitorPrefs {
     /// window id and kept independent of slot accounting.
     ///
     /// `launched_issues` is a projection of `launched_windows`, and every path
-    /// that frees a slot erases that projection: the over-cap restore (#3627),
-    /// an operator stop, a stale cross-process writer. Each of those is right
-    /// about the slot and wrong about the window — the agent is still running
-    /// on its worktree — so the monitor loses the only evidence that the Issue
-    /// is being worked and launches a duplicate. This ledger is written where
+    /// that frees a slot erases that projection. An operator stop or a stale
+    /// cross-process writer can do so while the agent is still running on its
+    /// worktree, losing the evidence that the Issue is being worked. This
+    /// ledger is written where
     /// the window is bound, is never capped, and is pruned only once the
     /// window has actually left the owning tab's canvas.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -933,6 +932,10 @@ pub struct IssueMonitorPrefs {
     /// source-compatible while new readers can reject delayed window closes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub launched_claims: BTreeMap<u64, String>,
+    /// Issue #4328: the ACK's immutable observation boundary, kept with the
+    /// durable binding ledger even if a slot projection is lost.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub launch_confirmations: BTreeMap<u64, IssueMonitorLaunchConfirmation>,
     /// Issue #4077: the claim identity each Issue's last confirmed claim used,
     /// kept past the end of the launch so a stop / requeue can release it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1076,6 +1079,7 @@ impl Default for IssueMonitorPrefs {
             launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             claim_identities: Vec::new(),
+            launch_confirmations: BTreeMap::new(),
             launching_issues: Vec::new(),
             pending_launch_deliveries: Vec::new(),
             queued_launch_session_strategies: BTreeMap::new(),
@@ -1274,6 +1278,14 @@ impl IssueMonitorPrefs {
 pub struct IssueMonitorLaunchedIssue {
     pub issue_number: u64,
     pub window_id: String,
+}
+
+/// Ordering evidence for one confirmed launch, never claim authority by time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchConfirmation {
+    pub window_id: String,
+    pub claim_id: Option<String>,
+    pub confirmed_at: String,
 }
 
 /// Issue #4077: the exact `(claim_id, owner)` pair of the last claim this
@@ -3600,13 +3612,15 @@ pub struct IssueMonitorState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_prefs_reset: Option<IssueMonitorPrefsReset>,
     /// Issue #3883: window id → Issue for every window this project ever bound,
-    /// independent of `launched_windows` and its slot cap. See
+    /// independent of the `launched_windows` slot projection. See
     /// [`IssueMonitorPrefs::launch_bindings`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     launch_bindings: BTreeMap<String, u64>,
     /// Durable generation for each launched window binding. A successor launch
     /// receives a new claim even when its issue and window ids are reused.
     launched_claims: BTreeMap<u64, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    launch_confirmations: BTreeMap<u64, IssueMonitorLaunchConfirmation>,
     /// Issue #4077: `(claim_id, owner)` of the last confirmed claim per Issue.
     /// Outlives the launch on purpose — see [`IssueMonitorClaimIdentity`].
     #[serde(default)]
@@ -5259,7 +5273,7 @@ pub fn acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
             return Ok(false);
         }
         if complete_launch {
-            monitor.complete_active_launch(observed_target.issue_number, target.window_id);
+            monitor.complete_active_launch_at(observed_target.issue_number, target.window_id, now);
         }
         monitor.autonomous_handoffs[index].delivered_at = Some(now.to_string());
         monitor.autonomous_handoffs[index].delivery = AutonomousHandoffDeliveryState::Delivered {
@@ -5470,6 +5484,7 @@ impl IssueMonitorState {
             launch_bindings: BTreeMap::new(),
             launched_claims: BTreeMap::new(),
             claim_identities: BTreeMap::new(),
+            launch_confirmations: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
             issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
@@ -5533,77 +5548,31 @@ impl IssueMonitorState {
             .collect();
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
         state.launched_claims = prefs.launched_claims;
+        state.launch_confirmations = prefs.launch_confirmations;
         state.claim_identities = prefs
             .claim_identities
             .into_iter()
             .map(|identity| (identity.issue_number, identity))
             .collect();
-        // Issue #3883: restored ahead of — and deliberately outside — the cap
-        // below. The cap is right about how many slots may be held and says
-        // nothing about which windows exist, so capping the ledger too would
-        // erase exactly the evidence that keeps a running agent attributable.
+        // Issue #3883: the ledger keeps running windows attributable even
+        // when another process loses its active launch projection.
         state.launch_bindings = prefs.launch_bindings;
         state.last_scan_driver = prefs.last_scan_driver;
         state.last_prefs_reset = prefs.last_prefs_reset;
-        // Issue #3627: restore used to re-inject every persisted launch into
-        // `active_launches` without consulting `config.max_active`, so a disk
-        // snapshot holding more launches than the cap (11 slots against a cap
-        // of 5, in the reported wedge) reproduced that over-cap accounting on
-        // every reload and every restart — the queue could never recover by
-        // restarting.
-        //
-        // The excess is dropped whole, window binding included, so
-        // `launched_windows` stays a subset of `active_launches`. Every
-        // reconciler in this file walks one of the two and assumes the other
-        // agrees; admitting a bound launch that holds no slot would make those
-        // passes skip it silently.
-        //
-        // Claimed-but-unbound launches (Issue #3222) reserve their slots ahead
-        // of the bound ones rather than being capped away. Their claim is
-        // serialized back out of `active_launches`, so dropping one here would
-        // erase an in-flight claim from disk and let the next rescan re-claim
-        // the same Issue into a duplicate window — the exact regression #3222
-        // fixed. They lapse on their own TTL through
-        // [`Self::expire_stale_unbound_launches`] instead.
-        let max_active = state.config.max_active.max(1);
-        let bound_issue_numbers = prefs
-            .launched_issues
-            .iter()
-            .filter(|launched| !launched.window_id.is_empty())
-            .map(|launched| launched.issue_number)
-            .collect::<BTreeSet<_>>();
-        let unbound_reservation = prefs
-            .launching_issues
-            .iter()
-            .map(|entry| entry.issue_number)
-            .chain(
-                prefs
-                    .pending_launch_deliveries
-                    .iter()
-                    .map(|delivery| delivery.issue_number),
-            )
-            .filter(|issue_number| !bound_issue_numbers.contains(issue_number))
-            .collect::<BTreeSet<_>>()
-            .len();
-        let bound_capacity = max_active.saturating_sub(unbound_reservation);
-        let mut dropped_over_cap = Vec::new();
+        // Issue #4328: max_active limits new admissions, not the number of
+        // existing launches that remain accounted for. Truncating on restore
+        // erased live slots and undid the PM's reconciliation on the next
+        // prefs write. Restore every binding; the owning canvas determines
+        // which windows have actually vanished (Issue #3627).
         for launched in prefs.launched_issues {
             if launched.window_id.is_empty() {
                 continue;
             }
-            // Issue #3883: back-fill the ledger from a pre-#3883 snapshot, and
-            // do it before the cap so the launches dropped just below stay
-            // attributable to the windows still running them.
+            // Issue #3883: back-fill the ledger from a pre-#3883 snapshot.
             state
                 .launch_bindings
                 .entry(launched.window_id.clone())
                 .or_insert(launched.issue_number);
-            if !state.active_launches.contains(&launched.issue_number)
-                && state.active_launches.len() >= bound_capacity
-            {
-                dropped_over_cap.push(launched.issue_number);
-                continue;
-            }
             let issue_number = launched.issue_number;
             state
                 .launched_windows
@@ -5620,13 +5589,6 @@ impl IssueMonitorState {
         state
             .launched_claims
             .retain(|issue_number, _| retained_claim_issues.contains(issue_number));
-        if !dropped_over_cap.is_empty() {
-            tracing::warn!(
-                dropped = ?dropped_over_cap,
-                max_active,
-                "issue monitor prefs held more launches than max_active; dropped the excess on restore"
-            );
-        }
         // Issue #3222: restore claimed-but-unbound launches so a reload (every
         // GUI handler) still sees the in-flight claim and cannot re-claim it.
         for entry in prefs.launching_issues {
@@ -5742,6 +5704,14 @@ impl IssueMonitorState {
             last_scan_driver: self.last_scan_driver.clone(),
             last_prefs_reset: self.last_prefs_reset.clone(),
             launched_claims: self.launched_claims.clone(),
+            launch_confirmations: self
+                .launch_confirmations
+                .iter()
+                .filter(|(issue, confirmation)| {
+                    self.launch_bindings.get(&confirmation.window_id) == Some(*issue)
+                })
+                .map(|(issue, confirmation)| (*issue, confirmation.clone()))
+                .collect(),
             claim_identities: self.claim_identities.values().cloned().collect(),
             launching_issues: self
                 .active_launches
@@ -8127,6 +8097,28 @@ impl IssueMonitorState {
                 self.launched_claims.remove(&issue_number);
             }
         }
+        // Normal rebase already kept the latest boundary for this window.
+        // Only discard that boundary when the exact binding changes windows.
+        if self
+            .launch_confirmations
+            .get(&issue_number)
+            .is_none_or(|ack| &ack.window_id != disk_window_id)
+        {
+            match disk
+                .launch_confirmations
+                .get(&issue_number)
+                .filter(|ack| &ack.window_id == disk_window_id)
+            {
+                Some(confirmation) => {
+                    self.launch_confirmations
+                        .insert(issue_number, confirmation.clone());
+                }
+                None => {
+                    self.launch_confirmations.remove(&issue_number);
+                }
+            }
+        }
+        self.invalidate_idle_launch_observation(issue_number, disk_window_id);
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
@@ -8709,6 +8701,30 @@ impl IssueMonitorState {
                     self.launched_claims
                         .entry(launched.issue_number)
                         .or_insert_with(|| claim_id.clone());
+                }
+                if let Some(confirmation) = disk
+                    .launch_confirmations
+                    .get(&launched.issue_number)
+                    .filter(|ack| ack.window_id == launched.window_id)
+                {
+                    // Observation ordering never transfers claim authority.
+                    // Keep this boundary even when the local claim is retained.
+                    let newer_ack = self
+                        .launch_confirmations
+                        .get(&launched.issue_number)
+                        .is_none_or(|local| {
+                            local.window_id != confirmation.window_id
+                                || parse_rfc3339_utc(&confirmation.confirmed_at)
+                                    > parse_rfc3339_utc(&local.confirmed_at)
+                        });
+                    if newer_ack {
+                        self.launch_confirmations
+                            .insert(launched.issue_number, confirmation.clone());
+                        self.invalidate_idle_launch_observation(
+                            launched.issue_number,
+                            &launched.window_id,
+                        );
+                    }
                 }
             }
             if !self.active_launches.contains(&launched.issue_number) {
@@ -10312,6 +10328,71 @@ impl IssueMonitorState {
         expired
     }
 
+    /// Issue #4328 AC-2: a claim comment this Monitor wrote itself is evidence
+    /// of its own launch, never a foreign hold.
+    ///
+    /// `acquire_claim` mints a fresh `claim_id` on every scan, so the claim the
+    /// Monitor confirmed minutes earlier no longer matches the one it is
+    /// requesting and comes back as the winning — therefore blocking — claim.
+    /// Recording that as `blocked_by_claim` drops the Issue out of slot
+    /// accounting while its agent keeps running, and the freed slot admits
+    /// another launch over the cap (the reported 5 panes against `max_active`
+    /// 3). The recorded claim identity (#4077) is the proof of authorship: the
+    /// blocking claim is ours when it is the exact claim we confirmed, or when
+    /// it carries the same `<user>:<pid>` owner label we stamp.
+    ///
+    /// Recognition alone is not repair. The binding ledger (#3883) survives the
+    /// lost slot projection, so the window that Issue is running in is restored
+    /// from it and the row goes back to `Launched` with its
+    /// `launched_window_id`. Without a ledger window there is nothing to repair
+    /// from and the block is recorded as before — a claim of ours whose window
+    /// is gone is a stale claim, not a running launch.
+    fn reconcile_own_claim_binding(
+        &mut self,
+        issue_number: u64,
+        blocking_claim_id: Option<&str>,
+        blocking_owner: &str,
+    ) -> bool {
+        let own_claim = self
+            .claim_identities
+            .get(&issue_number)
+            .is_some_and(|identity| {
+                blocking_claim_id == Some(identity.claim_id.as_str())
+                    || identity.owner == blocking_owner
+            });
+        if !own_claim {
+            return false;
+        }
+        if self.active_launches.contains(&issue_number) {
+            // Already accounted for; never demote a live launch to a block.
+            return true;
+        }
+        // The last ACK names the window this Issue is actually running in; the
+        // ledger can still carry a superseded one alongside it (#4041).
+        let Some(window_id) = self
+            .launch_confirmations
+            .get(&issue_number)
+            .map(|ack| ack.window_id.clone())
+            .filter(|window_id| self.launch_bindings.get(window_id) == Some(&issue_number))
+            .or_else(|| {
+                self.launch_bindings
+                    .iter()
+                    .find(|(_, bound_issue)| **bound_issue == issue_number)
+                    .map(|(window_id, _)| window_id.clone())
+            })
+        else {
+            return false;
+        };
+        tracing::warn!(
+            issue_number,
+            window_id,
+            blocking_owner,
+            "issue monitor readopted its own claim instead of reporting a foreign block"
+        );
+        self.readopt_live_launch(issue_number, &window_id);
+        true
+    }
+
     pub fn record_blocked_by_claim(
         &mut self,
         issue: IssueMonitorIssue,
@@ -10319,6 +10400,10 @@ impl IssueMonitorState {
         expires_at: impl Into<String>,
         blocking_claim_id: Option<&str>,
     ) -> bool {
+        let owner = owner.into();
+        if self.reconcile_own_claim_binding(issue.number, blocking_claim_id, &owner) {
+            return false;
+        }
         self.queue.retain(|queued| *queued != issue.number);
         if !self
             .inbox_item(issue.number)
@@ -10326,7 +10411,6 @@ impl IssueMonitorState {
         {
             return false;
         }
-        let owner = owner.into();
         let expires_at = expires_at.into();
         let claim_block_issue_updated_at = issue.updated_at.clone();
         // Issue #4077 AC-2: the reason a row left the queue belongs in the same
@@ -11093,7 +11177,7 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.complete_active_launch_with_claim(issue_number, window_id, launched_claim_id);
+        self.complete_active_launch_with_claim(issue_number, window_id, launched_claim_id, None);
         true
     }
 
@@ -11183,7 +11267,36 @@ impl IssueMonitorState {
     }
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
-        self.complete_active_launch_with_claim(issue_number, window_id.into(), None);
+        self.complete_active_launch_with_claim(issue_number, window_id.into(), None, None);
+    }
+
+    /// Issue #4328: acknowledge a launch against the caller's clock.
+    ///
+    /// The ACK's instant is the boundary every canvas observation is ordered
+    /// against (`window_observation_covers_launch`), so it has to come
+    /// from the same clock the observations do. A caller that already carries
+    /// the scan's `now` passes it here; the process clock is only the fallback
+    /// for the paths that carry no timestamp at all.
+    pub fn complete_active_launch_at(
+        &mut self,
+        issue_number: u64,
+        window_id: impl Into<String>,
+        confirmed_at: &str,
+    ) {
+        self.complete_active_launch_with_claim(
+            issue_number,
+            window_id.into(),
+            None,
+            Some(confirmed_at),
+        );
+    }
+
+    fn invalidate_idle_launch_observation(&mut self, issue_number: u64, window_id: &str) {
+        self.idle_windows
+            .retain(|_, idle| idle.issue_number != Some(issue_number));
+        self.pending_idle_pane_closes
+            .retain(|close| close.issue_number != Some(issue_number));
+        self.idle_pane_closes_requested.remove(window_id);
     }
 
     fn complete_active_launch_with_claim(
@@ -11191,7 +11304,29 @@ impl IssueMonitorState {
         issue_number: u64,
         window_id: String,
         claim_id: Option<String>,
+        confirmed_at: Option<&str>,
     ) {
+        let repeated_ack = self.active_launches.contains(&issue_number)
+            && self.launched_windows.get(&issue_number) == Some(&window_id)
+            && self.launched_claims.get(&issue_number) == claim_id.as_ref()
+            && self
+                .launch_confirmations
+                .get(&issue_number)
+                .is_some_and(|ack| ack.window_id == window_id);
+        if !repeated_ack {
+            self.launch_confirmations.insert(
+                issue_number,
+                IssueMonitorLaunchConfirmation {
+                    window_id: window_id.clone(),
+                    claim_id: claim_id.clone(),
+                    confirmed_at: confirmed_at.map(str::to_string).unwrap_or_else(|| {
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                    }),
+                },
+            );
+            // A cached idle verdict belongs to the predecessor, not this ACK.
+            self.invalidate_idle_launch_observation(issue_number, &window_id);
+        }
         self.launching_claimed_at.remove(&issue_number);
         // Issue #4150: the refusals belonged to the launch this one replaces.
         self.duplicate_launch_refusals.remove(&issue_number);
@@ -11507,9 +11642,14 @@ impl IssueMonitorState {
         &self,
         project_tab_id: &str,
         live_window_ids: &BTreeSet<String>,
+        observed_at: &str,
     ) -> Vec<String> {
         self.launched_windows
-            .values()
+            .iter()
+            .filter(|(issue_number, window_id)| {
+                self.window_observation_covers_launch(**issue_number, window_id, observed_at)
+            })
+            .map(|(_, window_id)| window_id)
             .filter(|window_id| {
                 issue_monitor_qualified_window_id(window_id)
                     .is_some_and(|(tab_id, _)| tab_id == project_tab_id)
@@ -11521,6 +11661,29 @@ impl IssueMonitorState {
             })
             .cloned()
             .collect()
+    }
+
+    fn window_observation_covers_launch(
+        &self,
+        issue_number: u64,
+        window_id: &str,
+        observed_at: &str,
+    ) -> bool {
+        let Some(confirmation) = self
+            .launch_confirmations
+            .get(&issue_number)
+            .filter(|ack| ack.window_id == window_id)
+        else {
+            // Older prefs have no ordering evidence; retain their existing behavior.
+            return true;
+        };
+        match (
+            chrono::DateTime::parse_from_rfc3339(observed_at),
+            chrono::DateTime::parse_from_rfc3339(&confirmation.confirmed_at),
+        ) {
+            (Ok(observed), Ok(confirmed)) => observed > confirmed,
+            _ => false,
+        }
     }
 
     /// Issue #3883: restore slot accounting from the windows that are actually
@@ -11551,6 +11714,7 @@ impl IssueMonitorState {
         &mut self,
         project_tab_id: &str,
         live_window_ids: &BTreeSet<String>,
+        observed_at: &str,
     ) -> IssueMonitorLaunchBindingReconciliation {
         let mut outcome = IssueMonitorLaunchBindingReconciliation {
             readopted: self.readopt_live_launch_bindings(live_window_ids),
@@ -11565,6 +11729,7 @@ impl IssueMonitorState {
                     || self.failed_issues.contains_key(issue_number);
                 let vanished_here = issue_monitor_qualified_window_id(window_id)
                     .is_some_and(|(tab_id, _)| tab_id == project_tab_id)
+                    && self.window_observation_covers_launch(*issue_number, window_id, observed_at)
                     && !live_window_ids
                         .iter()
                         .any(|live| issue_monitor_window_ids_match(window_id, live));
@@ -11727,6 +11892,20 @@ impl IssueMonitorState {
         self.active_launches.push(issue_number);
         self.launched_windows
             .insert(issue_number, window_id.to_string());
+        if let Some(ack) = self
+            .launch_confirmations
+            .get(&issue_number)
+            .filter(|ack| ack.window_id == window_id)
+        {
+            if let Some(claim_id) = ack.claim_id.as_ref().filter(|claim_id| {
+                self.claim_identities
+                    .get(&issue_number)
+                    .is_some_and(|identity| &identity.claim_id == *claim_id)
+            }) {
+                self.launched_claims.insert(issue_number, claim_id.clone());
+            }
+        }
+        let claim_id = self.launched_claims.get(&issue_number).cloned();
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
@@ -11737,6 +11916,13 @@ impl IssueMonitorState {
         {
             item.state = MonitorInboxState::Launched;
             item.launched_window_id = Some(window_id.to_string());
+            item.claim_id = claim_id;
+            item.blocked_by_owner = None;
+            item.blocked_by_claim_id = None;
+            item.claim_expires_at = None;
+            item.claim_block_issue_updated_at = None;
+            item.error_message = None;
+            item.exclusion_reason = None;
         }
     }
 
@@ -13758,7 +13944,13 @@ impl IssueMonitorState {
         for (issue_number, window_id) in &self.launched_windows {
             let owned_here = issue_monitor_qualified_window_id(window_id)
                 .is_some_and(|(tab_id, _)| tab_id == snapshot.project_tab_id);
-            if !owned_here {
+            if !owned_here
+                || !self.window_observation_covers_launch(
+                    *issue_number,
+                    window_id,
+                    &snapshot.observed_at,
+                )
+            {
                 continue;
             }
             let (idle_kind, pane_present, rebind_to) = match observation(window_id) {
@@ -13898,6 +14090,22 @@ impl IssueMonitorState {
         settlements: &BTreeMap<u64, IssueMonitorExecutionSettlement>,
         now: &str,
     ) -> IssueMonitorIdleReconciliation {
+        // The daemon also repairs lost projections before planning admission.
+        // Only a live implementation window with the ledger's Issue identity
+        // can restore a slot; terminal and revoked launches remain excluded.
+        if let Some(snapshot) = self.fresh_window_snapshot(now) {
+            let live = snapshot
+                .windows
+                .iter()
+                .filter(|window| !window.review_dispatch && idle_window_is_alive(window.status))
+                .filter(|window| {
+                    self.launch_bindings.get(&window.window_id).copied() == window.issue_number
+                        && window.issue_number.is_some()
+                })
+                .map(|window| window.window_id.clone())
+                .collect();
+            self.readopt_live_launch_bindings(&live);
+        }
         let classified = self.classify_idle_windows(settlements, now);
         // A close request lives exactly as long as the window it named. Once
         // the pane is gone the id may be issued again, so nothing is retained.
@@ -15071,7 +15279,7 @@ mod tests {
             std::slice::from_ref(&candidate),
             "2026-06-26T00:00:00Z",
         );
-        monitor.complete_active_launch(number, window_id);
+        monitor.complete_active_launch_at(number, window_id, "2026-06-26T00:00:00Z");
         assert_eq!(monitor.active_count(), 1);
         monitor
     }
@@ -15296,9 +15504,7 @@ mod tests {
     #[test]
     fn live_candidate_snapshot_prunes_repo_absent_inflight_launches_but_cache_does_not() {
         let stale_prefs = IssueMonitorPrefs {
-            // Both in-flight entries must fit under the cap: Issue #3627 makes
-            // restore drop persisted launches beyond `max_active`, and this
-            // fixture is about snapshot provenance, not slot accounting.
+            // This fixture tests snapshot provenance with two in-flight entries.
             max_active_agents: 2,
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 42,
@@ -18252,18 +18458,11 @@ mod tests {
         );
     }
 
-    /// Issue #3883 AC-6: the reported recovery, at the reported scale — six
-    /// running agent windows against `max_active: 3`, brought back into
-    /// agreement without killing any of them.
-    ///
-    /// Sized at six deliberately. The restore truncates to the cap, so a
-    /// one-over-cap fixture leaves a single orphan and never exercises the case
-    /// the operator actually faces: *half* the running agents untracked, with
-    /// the monitor reporting three free slots it would spend on Issues that are
-    /// already being worked. `readopt_live_launch_bindings` is the PM-surface
-    /// half — additive only, so it can run against a project mid-flight.
+    /// Issue #3883 AC-6 / Issue #4328: six running agents against a cap of
+    /// three remain accounted for across reconciliation and prefs reloads.
+    /// The cap limits admission while the existing launches keep their slots.
     #[test]
-    fn six_running_agents_against_a_cap_of_three_are_all_readopted_without_closing_one() {
+    fn six_running_agents_against_a_cap_of_three_survive_restore_and_reconciliation() {
         let cohort = [
             (3873, "project-a::agent-2"),
             (3868, "project-a::agent-3"),
@@ -18282,21 +18481,21 @@ mod tests {
             IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         assert_eq!(
             restored.active_count(),
-            3,
-            "#3627: restore truncates slot accounting to the cap"
+            6,
+            "Issue #4328: restore retains every launch even above the admission cap"
         );
         assert_eq!(
             restored.prefs().launch_bindings.len(),
             6,
-            "but all six running windows stay attributable"
+            "all six running windows stay attributable"
         );
         let orphaned = cohort
             .iter()
             .filter(|(issue_number, _)| !restored.active_issue_numbers().contains(issue_number))
             .count();
         assert_eq!(
-            orphaned, 3,
-            "three of the six are running untracked — the state the PM has to recover from"
+            orphaned, 0,
+            "restoring prefs must not orphan an existing launch"
         );
 
         let mut recovered = restored;
@@ -18309,8 +18508,8 @@ mod tests {
 
         assert_eq!(
             readopted.len(),
-            3,
-            "every untracked-but-running window comes back, and only those"
+            0,
+            "the restored bindings already account for every running window"
         );
         assert_eq!(recovered.active_count(), 6);
         for (issue_number, window_id) in cohort {
@@ -18342,6 +18541,21 @@ mod tests {
                 .is_empty(),
             "and it is idempotent — a second pass changes nothing"
         );
+        let reloaded =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered.prefs());
+        assert_eq!(
+            reloaded.active_count(),
+            6,
+            "Issue #4328: restoring the committed recovery must retain every live slot"
+        );
+        assert_eq!(
+            reloaded.prefs().launched_issues,
+            recovered.prefs().launched_issues
+        );
+        assert_eq!(
+            reloaded.prefs().launch_bindings,
+            recovered.prefs().launch_bindings
+        );
     }
 
     /// Issue #3627: a launch whose agent window is gone from the owning tab's
@@ -18360,7 +18574,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(
-            monitor.vanished_launched_windows("project-a", &live),
+            monitor.vanished_launched_windows("project-a", &live, &chrono::Utc::now().to_rfc3339()),
             vec!["project-a::agent-24".to_string()],
             "a window the tab no longer has cannot be holding an agent"
         );
@@ -18381,7 +18595,7 @@ mod tests {
 
         assert!(
             monitor
-                .vanished_launched_windows("project-a", &live)
+                .vanished_launched_windows("project-a", &live, &chrono::Utc::now().to_rfc3339())
                 .is_empty(),
             "an unexplained stall is reported, never auto-reclaimed"
         );
@@ -18396,7 +18610,11 @@ mod tests {
         let foreign = launched_monitor(42, "project-b::agent-24");
         assert!(
             foreign
-                .vanished_launched_windows("project-a", &BTreeSet::new())
+                .vanished_launched_windows(
+                    "project-a",
+                    &BTreeSet::new(),
+                    &chrono::Utc::now().to_rfc3339()
+                )
                 .is_empty(),
             "another tab's window is invisible from here, not dead"
         );
@@ -18404,7 +18622,11 @@ mod tests {
         let legacy = launched_monitor(42, "agent-24");
         assert!(
             legacy
-                .vanished_launched_windows("project-a", &BTreeSet::new())
+                .vanished_launched_windows(
+                    "project-a",
+                    &BTreeSet::new(),
+                    &chrono::Utc::now().to_rfc3339()
+                )
                 .is_empty(),
             "a bare legacy id proves no ownership"
         );
@@ -18421,16 +18643,19 @@ mod tests {
             monitor.set_autonomous_mode(autonomous_mode);
 
             assert_eq!(
-                monitor.vanished_launched_windows("project-a", &BTreeSet::new()),
+                monitor.vanished_launched_windows(
+                    "project-a",
+                    &BTreeSet::new(),
+                    &chrono::Utc::now().to_rfc3339()
+                ),
                 vec!["project-a::agent-24".to_string()],
                 "autonomous_mode={autonomous_mode} must not gate slot accounting"
             );
         }
     }
 
-    /// Issue #3627 AC-2/AC-6: the reported wedge — 11 launched entries against
-    /// `max_active` 5, none of whose windows still exist — recovers completely,
-    /// and the restore that used to resurrect it no longer over-fills the cap.
+    /// Issue #3627 AC-2/AC-6: all 11 launches above a cap of five are retained
+    /// until the owning canvas proves their windows vanished, then released.
     #[test]
     fn a_restart_that_lost_every_agent_window_frees_every_slot() {
         let prefs = IssueMonitorPrefs {
@@ -18449,20 +18674,24 @@ mod tests {
 
         assert_eq!(
             restored.active_count(),
-            5,
-            "restore must not re-inject 11 launches into a 5-slot cap"
+            11,
+            "restore preserves launches until their windows are proven absent"
         );
         assert_eq!(
             restored.prefs().launched_issues.len(),
-            5,
-            "the dropped excess must not stay bound to a slot it does not hold"
+            11,
+            "every restored launch retains its bound slot"
         );
 
-        let vanished = restored.vanished_launched_windows("project-a", &BTreeSet::new());
+        let vanished = restored.vanished_launched_windows(
+            "project-a",
+            &BTreeSet::new(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
         assert_eq!(
             vanished.len(),
-            5,
-            "every surviving window is gone after the restart"
+            11,
+            "the empty canvas proves every restored window is gone"
         );
         for window_id in vanished {
             restored.requeue_window_at(&window_id, "2026-08-17T09:00:00Z");
@@ -18475,11 +18704,10 @@ mod tests {
         );
     }
 
-    /// Issue #3627 AC-3: a bound launch never takes a slot away from a
-    /// claimed-but-unbound one. Dropping an in-flight claim would erase it from
-    /// disk and let the next rescan launch a duplicate (Issue #3222).
+    /// Issue #4328 / Issue #3222: bound launches and claimed-but-unbound
+    /// launches both survive restore, even when their count exceeds the cap.
     #[test]
-    fn restore_caps_bound_launches_without_dropping_in_flight_claims() {
+    fn restore_preserves_bound_launches_and_in_flight_claims_above_the_cap() {
         let prefs = IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 2,
@@ -18498,10 +18726,10 @@ mod tests {
 
         let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
 
-        assert!(
-            restored.active_count() <= 2,
-            "the restored slot accounting must respect max_active, got {}",
-            restored.active_count()
+        assert_eq!(
+            restored.active_count(),
+            5,
+            "all four bound launches and the unbound claim retain their slots"
         );
         assert!(
             restored.active_issue_numbers().contains(&99),
@@ -18555,7 +18783,7 @@ mod tests {
         );
         scan_issue_monitor_candidates(&mut monitor, &candidates, "2026-09-01T22:43:45Z");
         for (issue_number, window_id) in bindings {
-            monitor.complete_active_launch(*issue_number, *window_id);
+            monitor.complete_active_launch_at(*issue_number, *window_id, "2026-09-01T22:43:45Z");
         }
         assert_eq!(monitor.active_count(), bindings.len());
         monitor
@@ -18571,8 +18799,8 @@ mod tests {
     /// Issue #3883 AC-2/AC-3: an agent window that is still on the canvas is
     /// re-adopted from its durable binding instead of being relaunched.
     ///
-    /// Slot accounting is deliberately erasable. `with_prefs` caps it
-    /// (#3627), `stop` revokes it, and a stale cross-process writer can round
+    /// Slot accounting is erasable: `stop` revokes it, and a stale
+    /// cross-process writer can round
     /// -trip it away — while [`IssueMonitorState::prefs`] rebuilds
     /// `launched_issues` out of that same accounting. So the only durable
     /// record that a running agent window belongs to an Issue disappears
@@ -18618,7 +18846,11 @@ mod tests {
             "project-a::agent-3",
             "project-a::agent-4",
         ]);
-        let reconciliation = restored.reconcile_launch_bindings("project-a", &live);
+        let reconciliation = restored.reconcile_launch_bindings(
+            "project-a",
+            &live,
+            &chrono::Utc::now().to_rfc3339(),
+        );
 
         assert_eq!(
             reconciliation.readopted,
@@ -18651,12 +18883,10 @@ mod tests {
         }
     }
 
-    /// Issue #3883 AC-2: the binding ledger outlives the over-cap restore that
-    /// #3627 deliberately performs on slot accounting. Dropping the excess slot
-    /// is correct — the queue could never recover otherwise — but dropping the
-    /// window identity with it is what leaves a running agent untracked.
+    /// Issue #3883 AC-2 / Issue #4328: reducing the admission cap preserves
+    /// both the binding ledger and the slots of existing launches on restore.
     #[test]
-    fn launch_bindings_survive_the_over_cap_restore_that_drops_slot_accounting() {
+    fn launch_bindings_and_slots_survive_restore_above_a_reduced_cap() {
         let monitor = launched_cohort(&[
             (3873, "project-a::agent-2"),
             (3868, "project-a::agent-3"),
@@ -18669,13 +18899,13 @@ mod tests {
 
         assert_eq!(
             restored.active_count(),
-            1,
-            "#3627: restore still caps slot accounting at max_active"
+            3,
+            "a reduced admission cap cannot erase running launches"
         );
         assert_eq!(
             restored.prefs().launch_bindings.len(),
             3,
-            "but every live window stays attributable to its Issue"
+            "every live window stays attributable to its Issue"
         );
 
         let live = live_windows(&[
@@ -18683,8 +18913,12 @@ mod tests {
             "project-a::agent-3",
             "project-a::agent-4",
         ]);
-        let reconciliation = restored.reconcile_launch_bindings("project-a", &live);
-        assert_eq!(reconciliation.readopted.len(), 2);
+        let reconciliation = restored.reconcile_launch_bindings(
+            "project-a",
+            &live,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        assert!(reconciliation.readopted.is_empty());
         assert_eq!(
             restored.active_count(),
             3,
@@ -18712,8 +18946,11 @@ mod tests {
         let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
         restored.record_launch_failed(3868, "stopped: duplicate launch");
 
-        let reconciliation =
-            restored.reconcile_launch_bindings("project-a", &live_windows(&["project-a::agent-2"]));
+        let reconciliation = restored.reconcile_launch_bindings(
+            "project-a",
+            &live_windows(&["project-a::agent-2"]),
+            &chrono::Utc::now().to_rfc3339(),
+        );
 
         assert_eq!(
             reconciliation.readopted,
@@ -18742,7 +18979,11 @@ mod tests {
                 ..foreign.prefs()
             },
         );
-        let foreign_outcome = foreign.reconcile_launch_bindings("project-a", &BTreeSet::new());
+        let foreign_outcome = foreign.reconcile_launch_bindings(
+            "project-a",
+            &BTreeSet::new(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
         assert!(
             foreign_outcome.readopted.is_empty() && foreign_outcome.pruned.is_empty(),
             "another tab's window is invisible from here, not dead (#3627)"
@@ -18822,7 +19063,7 @@ mod tests {
             "project-a::agent-3",
             "project-a::agent-4",
         ]);
-        restarted.reconcile_launch_bindings("project-a", &live);
+        restarted.reconcile_launch_bindings("project-a", &live, &chrono::Utc::now().to_rfc3339());
 
         restarted.clear_provider_quota_hold(
             "codex",
@@ -20507,6 +20748,7 @@ mod tests {
             4140,
             "tab-1::agent-1038".to_string(),
             Some("gwt-auto-improve:f0000000-original".to_string()),
+            None,
         );
         monitor.complete_active_launch(4009, "tab-1::agent-1039");
         assert_eq!(monitor.active_count(), 2);
@@ -25873,7 +26115,11 @@ mod tests {
         assert_eq!(monitor.launched_window_issue(window_id), None);
         assert!(
             monitor
-                .vanished_launched_windows("tab-1", &BTreeSet::new())
+                .vanished_launched_windows(
+                    "tab-1",
+                    &BTreeSet::new(),
+                    &chrono::Utc::now().to_rfc3339()
+                )
                 .is_empty(),
             "a settled window is not a vanished launch"
         );
@@ -28582,6 +28828,317 @@ mod tests {
                 .map(|close| close.window_id)
                 .collect::<Vec<_>>(),
             vec!["tab-1::impl-42".to_string()]
+        );
+    }
+
+    /// Issue #4328 AC-1/AC-2/AC-3/AC-4: the reported timeline, end to end.
+    ///
+    /// Two settled windows are closed by hand, two queued Issues launch into
+    /// the window ids that were just freed, the canvas captured *before* those
+    /// launches arrives late, and the next scan re-reads the claim comments
+    /// this Monitor posted itself. Nothing may be released, nothing may be
+    /// reported as a foreign block, and the cap must stay honoured: the pair of
+    /// live agents is what produced 5 panes against `max_active` 3.
+    #[test]
+    fn issue_4328_reused_window_ids_survive_a_late_close_and_the_monitors_own_claim() {
+        const OWNER: &str = "AkioJinsenji:35272";
+        let launched_at = "2026-09-14T10:07:15Z";
+        // The canvas the close handler carried: captured while agent-348 and
+        // agent-349 still held their previous, already settled occupants.
+        let stale_canvas_at = "2026-09-14T10:06:58Z";
+        let next_scan_at = "2026-09-14T10:10:09Z";
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        let candidates = [issue(4306), issue(4258), issue(4210)];
+        scan_issue_monitor_candidates(&mut monitor, &candidates, launched_at);
+        for (issue_number, claim_id, window_id) in [
+            (4306_u64, "gwt-auto-improve:561b063f", "tab-1::agent-348"),
+            (4258, "gwt-auto-improve:0e3c39d9", "tab-1::agent-349"),
+        ] {
+            assert!(monitor.apply_confirmed_claim(
+                issue_number,
+                claim_id,
+                OWNER,
+                &format!("synchronous-claim:{claim_id}"),
+                launched_at,
+            ));
+            monitor.complete_active_launch_at(issue_number, window_id, launched_at);
+        }
+        assert_eq!(monitor.active_count(), 2);
+
+        // AC-1: the late close names window ids that now belong to the new
+        // launches, so its canvas cannot retire either of them.
+        monitor.record_window_snapshot(idle_snapshot(stale_canvas_at, Vec::new()));
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[
+                (4306, IssueMonitorExecutionSettlement::Active),
+                (4258, IssueMonitorExecutionSettlement::Active),
+            ]),
+            next_scan_at,
+        );
+        assert!(
+            outcome.released.is_empty() && outcome.requeued.is_empty(),
+            "a canvas captured before both launches cannot release them: {outcome:?}"
+        );
+        assert_eq!(monitor.active_count(), 2);
+
+        // The second half of the incident: the close of the *previous*
+        // occupant of `agent-348` is handled anyway and releases the new
+        // launch's local binding, so the next scan finds #4306 queued while
+        // its agent keeps running. The durable ledger still attributes the
+        // window to the Issue (#3883).
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-348", next_scan_at),
+            Some(4306)
+        );
+        assert_eq!(
+            monitor.inbox_item(4306).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.active_count(), 1);
+
+        // AC-2: acquiring the claim again returns the comment this Monitor
+        // wrote at 10:07:34 as the winner. It is not a foreign hold.
+        assert!(
+            !monitor.record_blocked_by_claim(
+                issue(4306),
+                OWNER,
+                "2026-09-14T10:37:15Z",
+                Some("gwt-auto-improve:561b063f"),
+            ),
+            "the Monitor's own claim may never park its own launch"
+        );
+        let repaired = monitor.inbox_item(4306).unwrap();
+        assert_eq!(repaired.state, MonitorInboxState::Launched);
+        assert_eq!(
+            repaired.launched_window_id.as_deref(),
+            Some("tab-1::agent-348"),
+            "the row is repaired from the binding ledger, not dropped"
+        );
+        assert_eq!(repaired.blocked_by_owner, None);
+        assert_eq!(repaired.claim_expires_at, None);
+
+        // AC-3: both agents are alive, so the cap is full and #4210 waits.
+        assert_eq!(monitor.active_count(), 2);
+        assert!(
+            monitor.next_launch_request(next_scan_at).is_none(),
+            "a repaired launch still holds its slot against max_active"
+        );
+    }
+
+    /// Issue #4328 AC-2: a genuinely foreign claim is still a block. The
+    /// recorded claim identity is what separates the two, so a claim the
+    /// Monitor never confirmed parks the row exactly as before.
+    #[test]
+    fn issue_4328_a_foreign_claim_on_a_bound_window_still_blocks() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(4306)], "2026-09-14T10:07:15Z");
+        assert!(monitor.apply_confirmed_claim(
+            4306,
+            "gwt-auto-improve:561b063f",
+            "AkioJinsenji:35272",
+            "synchronous-claim:gwt-auto-improve:561b063f",
+            "2026-09-14T10:07:15Z",
+        ));
+        monitor.complete_active_launch_at(4306, "tab-1::agent-348", "2026-09-14T10:07:15Z");
+        assert_eq!(
+            monitor.requeue_window_at("tab-1::agent-348", "2026-09-14T10:10:09Z"),
+            Some(4306)
+        );
+
+        assert!(monitor.record_blocked_by_claim(
+            issue(4306),
+            "other-host:99",
+            "2026-09-14T10:40:09Z",
+            Some("gwt-auto-improve:foreign"),
+        ));
+        assert_eq!(
+            monitor.inbox_item(4306).unwrap().state,
+            MonitorInboxState::BlockedByClaim
+        );
+        assert_eq!(monitor.active_count(), 0);
+    }
+
+    #[test]
+    fn issue_4328_fresh_running_snapshot_readopts_a_queued_launch_before_admission() {
+        let mut prefs = launched_cohort(&[(4308, "tab-1::agent-353")]).prefs();
+        prefs.launched_issues.clear();
+        prefs.launched_claims.clear();
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(4308));
+        monitor.record_candidate(issue(4328));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.inbox_item(4308).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        monitor.record_window_snapshot(idle_snapshot(
+            &now,
+            vec![idle_observation(
+                "tab-1::agent-353",
+                Some(4308),
+                WindowState::Running,
+                false,
+            )],
+        ));
+
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[(4308, IssueMonitorExecutionSettlement::Active)]),
+            &now,
+        );
+
+        assert!(outcome.released.is_empty());
+        assert_eq!(
+            monitor.active_count(),
+            1,
+            "the live ledger binding regains its slot"
+        );
+        assert_eq!(
+            monitor.inbox_item(4308).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert_eq!(
+            monitor.launched_window_id(4308).as_deref(),
+            Some("tab-1::agent-353")
+        );
+        assert!(
+            monitor.next_launch_request(&now).is_none(),
+            "neither the existing owner nor another issue may launch into the occupied slot"
+        );
+    }
+
+    #[test]
+    fn issue_4328_fresh_snapshot_before_launch_ack_cannot_release_the_new_binding() {
+        let observed_at = "2026-09-14T10:06:58Z";
+        let launched_at = "2026-09-14T10:06:59Z";
+        let now = "2026-09-14T10:07:15Z";
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(4258));
+        monitor.complete_active_launch_at(4258, "tab-1::agent-354", launched_at);
+        monitor.record_window_snapshot(idle_snapshot(observed_at, Vec::new()));
+        assert!(
+            monitor.fresh_window_snapshot(now).is_some(),
+            "the snapshot is recent enough; only its ordering before the ACK makes it unsafe"
+        );
+
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[(4258, IssueMonitorExecutionSettlement::Active)]),
+            now,
+        );
+
+        assert!(
+            outcome.idle_windows.is_empty(),
+            "an observation from before the launch cannot classify its new binding as dead"
+        );
+        assert!(outcome.released.is_empty());
+        assert!(outcome.requeued.is_empty());
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.launched_window_id(4258).as_deref(),
+            Some("tab-1::agent-354")
+        );
+    }
+
+    #[test]
+    fn issue_4328_legacy_same_window_relaunch_rejects_an_observation_between_launches() {
+        let mut monitor = launched_monitor(4258, "tab-1::agent-354");
+        monitor.clear_active_tracking(4258);
+        let observed_at = "2026-06-26T00:01:00Z";
+        let now = "2026-06-26T00:03:00Z";
+        monitor.complete_active_launch_at(4258, "tab-1::agent-354", "2026-06-26T00:02:00Z");
+        monitor.record_window_snapshot(idle_snapshot(observed_at, Vec::new()));
+
+        let outcome = monitor.reconcile_idle_windows(
+            &settlements(&[(4258, IssueMonitorExecutionSettlement::Active)]),
+            now,
+        );
+
+        assert!(
+            outcome.released.is_empty(),
+            "the old absence predates the new ACK"
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.launched_window_id(4258).as_deref(),
+            Some("tab-1::agent-354")
+        );
+    }
+
+    #[test]
+    fn issue_4328_rebased_successor_ack_invalidates_a_cached_idle_release() {
+        let mut monitor = launched_monitor(4258, "tab-1::agent-354");
+        monitor.complete_active_launch_with_claim(
+            4258,
+            "tab-1::agent-354".to_string(),
+            Some("predecessor-claim".to_string()),
+            Some("2026-06-26T00:01:00Z"),
+        );
+        let observed_at = "2026-06-26T00:02:00Z";
+        monitor.record_window_snapshot(idle_snapshot(
+            observed_at,
+            vec![idle_observation(
+                "tab-1::agent-354",
+                Some(4258),
+                WindowState::Idle,
+                false,
+            )],
+        ));
+        monitor.reconcile_idle_windows(
+            &settlements(&[(4258, IssueMonitorExecutionSettlement::Completed)]),
+            observed_at,
+        );
+        assert_eq!(
+            idle_kind_of(&monitor, "tab-1::agent-354"),
+            Some(IssueMonitorIdleKind::ExecutionSettled),
+            "the old snapshot leaves a releasable cached verdict in attended mode"
+        );
+        let mut successor = monitor.clone();
+        successor.complete_active_launch_with_claim(
+            4258,
+            "tab-1::agent-354".to_string(),
+            Some("successor-claim".to_string()),
+            Some("2026-06-26T00:03:00Z"),
+        );
+        monitor.rebase_daemon_driver_prefs(&successor.prefs());
+        let now = "2026-06-26T00:04:00Z";
+        // A new snapshot alone does not reclassify the old cached verdict.
+        monitor.record_window_snapshot(idle_snapshot(
+            now,
+            vec![idle_observation(
+                "tab-1::agent-354",
+                Some(4258),
+                WindowState::Running,
+                false,
+            )],
+        ));
+
+        let outcome = monitor.release_idle_windows(Some(4258), "release observed idle work", now);
+
+        assert!(
+            outcome.released.is_empty(),
+            "the cached verdict predates the successor ACK"
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.launched_window_id(4258).as_deref(),
+            Some("tab-1::agent-354")
         );
     }
 

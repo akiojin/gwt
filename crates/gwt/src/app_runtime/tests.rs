@@ -58998,6 +58998,92 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
     );
 }
 
+/// Issue #4328: a queued scan's canvas predates a legitimate launch ACK.
+/// Reading newer prefs must not turn that old absence into an exact close.
+#[test]
+fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo_without_origin(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled monitor");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-51",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.issue_monitor_scheduled_tick_events_at("2026-09-14T13:43:32Z");
+
+    let fresh = runtime
+        .tab_mut("tab-1")
+        .expect("project tab")
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    assert_ne!(fresh.id, "agent-51", "the second specimen uses a fresh id");
+    runtime.register_window("tab-1", &fresh.id);
+    runtime.set_window_status("tab-1", &fresh.id, WindowProcessStatus::Running);
+    let window_id = combined_window_id("tab-1", &fresh.id);
+    runtime.issue_monitor_launch_succeeded_events(&repo, 4258, &window_id);
+    let before = gwt::load_issue_monitor_prefs(&prefs_path).expect("ACKed prefs");
+    assert_eq!(
+        before.launched_issues.len(),
+        1,
+        "normal ACK reserves the slot"
+    );
+
+    tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .expect("queued scheduled worker")();
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs after scan");
+    assert_eq!(
+        persisted.launched_issues, before.launched_issues,
+        "a stale canvas cannot release the fresh #4258 launch"
+    );
+    assert!(runtime.tracked_window_exists(&window_id));
+    let mut monitor =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted);
+    monitor.set_gui_connected(true);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 4328,
+        title: "Next queued issue".to_string(),
+        labels: vec!["auto-improve".to_string()],
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(
+        monitor
+            .next_launch_request("2026-09-14T13:44:37Z")
+            .is_none(),
+        "the live launch leaves no capacity for #4328"
+    );
+}
+
 /// Issue #3627 (companion to the release above): the reclaim must not fire on
 /// a live agent. Everything an agent can stall on — an approval prompt, a
 /// provider rate limit, a genuine hang — leaves the window in place, and
