@@ -227,6 +227,20 @@ drive them.
   do not chase it — check whether the resume condition is something you
   can unblock (a serialization order, a ruling), and report what it is
   waiting for rather than that it is idle.
+- Read `waiting.in_force` before trusting the field: `false` means the
+  declaration no longer protects the row (it expired, or it was
+  invalidated — `waiting.invalidated` names who, when, and why), so treat
+  the row by its `last_activity_at` like any other. `waiting.silent_secs`
+  and `waiting.silent_beyond_stuck_timeout` say how long the agent has
+  been silent; a declaration in force with that flag set is a row to look
+  at, not one to skip.
+- When your own ruling removes a wait condition (a lease the agent never
+  needed, a dependency that landed), do not wait for the agent to read the
+  Board: `issue.monitor.wait.invalidate` with `params.number` and
+  `params.reason` voids the declaration, records the invalidation on the
+  row, and returns it to ordinary stuck detection on the next scan. Tell
+  the agent why on the Board as well; a fresh declaration from it
+  supersedes the invalidation.
 
 - `board.show` with `params.all` set to true returns the project-wide
   Board, where agents post their own milestones, blockers, and handoffs.

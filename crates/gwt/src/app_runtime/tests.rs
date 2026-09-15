@@ -3785,6 +3785,7 @@ fn sample_runtime_with_events(
         recoverable_agent_error_windows: HashSet::new(),
         provider_quota_holds: HashMap::new(),
         provider_quota_candidates: HashMap::new(),
+        released_provider_quota_notices: HashMap::new(),
         provider_usage_accounts: Vec::new(),
         last_agent_activity: HashMap::new(),
         agent_capability_issuer: None,
@@ -32473,11 +32474,23 @@ fn agent_activity_abandons_a_pending_quota_candidate() {
         Some(CLAUDE_USAGE_LIMIT_SCREEN),
         instant("2026-08-17T09:20:00Z"),
     );
+    runtime.released_provider_quota_notices.insert(
+        window_id.clone(),
+        gwt_core::usage::detect_provider_limit_notice(
+            CLAUDE_USAGE_LIMIT_SCREEN,
+            &chrono::Local::now(),
+        )
+        .unwrap(),
+    );
+
     let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
         "Running",
         "PreToolUse",
         "session-1",
     ));
+    assert!(!runtime
+        .released_provider_quota_notices
+        .contains_key(&window_id));
     let _ = runtime.observe_provider_quota_notice(
         &window_id,
         Some(CLAUDE_USAGE_LIMIT_SCREEN),
@@ -32537,6 +32550,7 @@ fn a_corroborated_quota_notice_holds_immediately() {
     let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
     runtime.set_provider_usage_accounts(vec![gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::ClaudeCode,
+        account_id: None,
         account_label: None,
         plan: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
@@ -32610,6 +32624,7 @@ fn a_different_providers_exhaustion_does_not_corroborate_this_pane() {
     let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
     runtime.set_provider_usage_accounts(vec![gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::ClaudeCode,
+        account_id: None,
         account_label: None,
         plan: None,
         windows: Vec::new(),
@@ -68564,6 +68579,7 @@ fn codex_usage_account(
 ) -> gwt_core::usage::ProviderUsage {
     gwt_core::usage::ProviderUsage {
         provider: gwt_core::usage::UsageProvider::Codex,
+        account_id: None,
         account_label: None,
         plan: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
@@ -68575,6 +68591,51 @@ fn codex_usage_account(
         state: gwt_core::usage::UsageState::Ok,
         fetched_at: None,
     }
+}
+
+#[test]
+fn account_switch_releases_pane_quota_without_relatching_the_old_notice() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+    let mut old = codex_usage_account(100.0, true);
+    old.account_id = Some("account-a".into());
+    runtime.set_provider_usage_accounts(vec![old]);
+    runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:00:00Z"),
+    );
+    assert!(runtime.provider_quota_holds.contains_key(&window_id));
+    let mut new = gwt_core::usage::ProviderUsage::degraded(
+        gwt_core::usage::UsageProvider::Codex,
+        gwt_core::usage::UsageState::NoData,
+    );
+    new.account_id = Some("account-b".into());
+    runtime.handle_provider_usage_snapshot(vec![new], instant("2026-09-02T09:02:00Z"));
+    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
+    runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:03:00Z"),
+    );
+    runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CODEX_USAGE_LIMIT_SCREEN),
+        instant("2026-09-02T09:05:00Z"),
+    );
+    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
+    runtime.handle_runtime_status_with_exit_confirmation(
+        window_id.clone(),
+        WindowProcessStatus::Stopped,
+        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
+        true,
+    );
+    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
 }
 
 /// Issue #3923 AC-3: the incident was a Codex pane whose tail still showed an
