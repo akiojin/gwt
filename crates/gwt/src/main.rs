@@ -1436,6 +1436,17 @@ enum UserEvent {
     WorkEventsIngested {
         project_root: PathBuf,
         changed: bool,
+        /// Issue #3752: the worker's worktree reconcile result (normalized
+        /// local branch names); `None` keeps the previous set.
+        local_worktree_branches: Option<std::collections::HashSet<String>>,
+    },
+    /// Issue #3752: a background Active Work projection build finished. The
+    /// handler stores the view, broadcasts it for the active tab, and drops
+    /// a result whose generation a newer build already superseded.
+    ActiveWorkProjectionBuilt {
+        tab_id: String,
+        generation: u64,
+        view: Option<Box<gwt::ActiveWorkProjectionView>>,
     },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
@@ -3420,10 +3431,8 @@ mod tests {
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
-            work_items_cache: std::cell::RefCell::new(
-                gwt_core::workspace_projection::WorkItemsCache::new(),
-            ),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_builds: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -4692,7 +4701,7 @@ mod tests {
         assert_eq!(close_events.len(), 3);
         assert!(matches!(
             close_events[0].event,
-            BackendEvent::ActiveWorkProjection { .. }
+            BackendEvent::ActiveWorkProjectionPatch { .. }
         ));
         assert!(matches!(
             close_events[1].event,
@@ -9318,8 +9327,21 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
+                local_worktree_branches,
             }) => {
-                let events = app.handle_work_events_ingested(project_root, changed);
+                let events = app.handle_work_events_ingested(
+                    project_root,
+                    changed,
+                    local_worktree_branches,
+                );
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionBuilt {
+                tab_id,
+                generation,
+                view,
+            }) => {
+                let events = app.handle_active_work_projection_built(&tab_id, generation, view);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {

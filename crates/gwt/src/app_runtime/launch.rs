@@ -50,7 +50,7 @@ use super::{
     resolve_docker_agent_program_with_binding, resolve_launch_spec_with_fallback,
     resolve_launch_worktree, same_worktree_path, save_resumed_workspace_projection,
     save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DockerLaunchBinding,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, DockerLaunchBinding,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
     PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
     WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
@@ -3993,16 +3993,10 @@ impl AppRuntime {
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {
-                            if let Some(tab) = self.tab(&tab_id) {
-                                if let Some(projection) =
-                                    self.active_work_projection_for_tab(&tab_id, tab)
-                                {
-                                    events.push(OutboundEvent::broadcast(
-                                        BackendEvent::ActiveWorkProjection {
-                                            projection: Box::new(projection),
-                                        },
-                                    ));
-                                }
+                            if let Some(event) =
+                                self.deferred_active_work_projection_broadcast_for_active_tab()
+                            {
+                                events.push(event);
                             }
                         }
                         let composed_status = self
@@ -5763,8 +5757,9 @@ impl AppRuntime {
         }
 
         // Broadcast the refreshed projection so the Work leaves the active
-        // surface for every connected client.
-        self.active_work_projection_broadcast_for_active_tab()
+        // surface for every connected client (Issue #3752: cached patch now,
+        // authoritative rebuild from the blocking worker).
+        self.deferred_active_work_projection_broadcast_for_active_tab()
             .into_iter()
             .collect()
     }

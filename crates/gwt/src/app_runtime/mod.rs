@@ -1353,14 +1353,15 @@ pub struct AppRuntime {
     /// the single event-loop thread and the projection builder takes `&self`.
     pub(crate) session_ledger_cache:
         std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
-    /// Same root fix for the home works.json (megabytes of Work items +
-    /// events): cache hit clones instead of re-parsing per projection event.
-    pub(crate) work_items_cache: std::cell::RefCell<gwt_core::workspace_projection::WorkItemsCache>,
     /// SPEC-3170 FR-076: latest fully built projection per tab. FrontendReady
     /// replays this snapshot (or a live-session-only fallback) without
     /// entering disk-backed projection loading on the GUI event loop.
     pub(crate) active_work_projection_cache:
         std::cell::RefCell<HashMap<String, gwt::ActiveWorkProjectionView>>,
+    /// Issue #3752: background projection build bookkeeping per tab
+    /// (generation / in-flight / coalesced follow-up).
+    pub(crate) active_work_projection_builds:
+        std::cell::RefCell<HashMap<String, workspace_views::ActiveWorkProjectionBuildState>>,
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
@@ -2908,10 +2909,8 @@ impl AppRuntime {
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
-            work_items_cache: std::cell::RefCell::new(
-                gwt_core::workspace_projection::WorkItemsCache::new(),
-            ),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_builds: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -2978,7 +2977,10 @@ impl AppRuntime {
             .insert(project_root.to_path_buf(), dirty_branches);
         self.work_live_process_branches
             .insert(project_root.to_path_buf(), live_process_branches);
-        self.refresh_active_work_projection_for_project_root(project_root)
+        // Issue #3752: the rebuild runs on the blocking worker; the event
+        // loop only stores the scan result here.
+        self.request_active_work_projection_build(project_root);
+        Vec::new()
     }
 
     /// SPEC-2359 W-15 / US-84 and SPEC-3170 FR-077: publish cleanup evidence
@@ -3055,9 +3057,15 @@ impl AppRuntime {
                 tracing::warn!(%error, "resume owner bleed repair failed");
                 false
             });
+            // Issue #3752: the worktree reconcile (git worktree enumeration +
+            // works.json backfill) stays in intake → reconcile order but runs
+            // here on the worker instead of on the event loop.
+            let local_worktree_branches =
+                reconcile_workspace_worktrees_in_background(&project_root);
             proxy.send(UserEvent::WorkEventsIngested {
                 project_root,
                 changed: summary.changed() || repaired,
+                local_worktree_branches,
             });
         });
     }
@@ -3069,17 +3077,23 @@ impl AppRuntime {
         &mut self,
         project_root: PathBuf,
         changed: bool,
+        local_worktree_branches: Option<HashSet<String>>,
     ) -> Vec<OutboundEvent> {
-        self.reconcile_workspace_worktrees(&project_root);
+        if let Some(local_worktree_branches) = local_worktree_branches {
+            self.local_worktree_branches
+                .borrow_mut()
+                .insert(project_root.clone(), local_worktree_branches);
+        }
         self.spawn_work_merge_status_scan(project_root.clone());
         self.spawn_work_tip_subjects_scan(project_root.clone());
         self.spawn_work_pr_titles_scan(project_root.clone());
         self.spawn_work_ai_summaries_scan(project_root.clone());
         if changed {
-            self.refresh_active_work_projection_for_project_root(&project_root)
-        } else {
-            Vec::new()
+            // Issue #3752: never rebuild the disk-backed projection on the
+            // event loop from a background continuation.
+            self.request_active_work_projection_build(&project_root);
         }
+        Vec::new()
     }
 
     pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
@@ -3215,7 +3229,8 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.work_tip_subjects
             .insert(project_root.to_path_buf(), tip_subjects);
-        self.refresh_active_work_projection_for_project_root(project_root)
+        self.request_active_work_projection_build(project_root);
+        Vec::new()
     }
 
     /// SPEC-3075: resolve every branch's tip commit subject off the UI thread in
@@ -3248,7 +3263,8 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.work_pr_titles
             .insert(project_root.to_path_buf(), pr_titles);
-        self.refresh_active_work_projection_for_project_root(project_root)
+        self.request_active_work_projection_build(project_root);
+        Vec::new()
     }
 
     /// SPEC-3075: resolve every branch's PR title off the UI thread in ONE
@@ -3312,7 +3328,8 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.work_ai_summaries
             .insert(project_root.to_path_buf(), ai_summaries);
-        self.refresh_active_work_projection_for_project_root(project_root)
+        self.request_active_work_projection_build(project_root);
+        Vec::new()
     }
 
     /// SPEC-3075 FR-006: optional AI polish for the rail summary. Runs off the UI
@@ -3359,50 +3376,6 @@ impl AppRuntime {
     /// plus the home works projection) so the Workspace list shows the union
     /// of existing worktrees and unclosed records. Errors are logged and
     /// swallowed — reconciliation must never block startup or project open.
-    pub(crate) fn reconcile_workspace_worktrees(&self, project_root: &Path) {
-        let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
-            Ok(entries) => entries,
-            Err(error) => {
-                tracing::warn!(
-                    "workspace worktree reconcile: enumerate failed for {}: {error}",
-                    project_root.display()
-                );
-                return;
-            }
-        };
-        // SPEC-2359 W16-3 (FR-390): refresh the local-worktree branch set the
-        // remote_only view marking reads (cache lookup only — no git spawn at
-        // view time).
-        let local_branches: std::collections::HashSet<String> = entries
-            .iter()
-            .filter_map(|entry| entry.branch.as_deref())
-            .map(crate::runtime_support::normalize_branch_name)
-            .filter(|branch| !branch.is_empty())
-            .collect();
-        self.local_worktree_branches
-            .borrow_mut()
-            .insert(project_root.to_path_buf(), local_branches);
-        let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
-        if sources.is_empty() {
-            return;
-        }
-        match gwt_core::workspace_projection::reconcile_worktree_work_items(
-            project_root,
-            &sources,
-            chrono::Utc::now(),
-        ) {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(
-                "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
-                project_root.display()
-            ),
-            Err(error) => tracing::warn!(
-                "workspace worktree reconcile failed for {}: {error}",
-                project_root.display()
-            ),
-        }
-    }
-
     /// SPEC-2970 FR-009/FR-013: persist the Claude account-usage opt-in and
     /// request an immediate refresh.
     fn set_claude_account_usage_enabled_events(&self, enabled: bool) -> Vec<OutboundEvent> {
@@ -9075,6 +9048,50 @@ impl AppRuntime {
         self.persist_dispatcher.enqueue(snapshot);
         Ok(())
     }
+}
+
+/// Enumerate the project's worktrees and backfill Work records for worktrees
+/// that have none (SPEC-2359 W-15). Returns the normalized local-worktree
+/// branch set for the remote_only view marking (SPEC-2359 W16-3 / FR-390), or
+/// `None` when enumeration failed so the previous set stays in place. Runs on
+/// the ingest worker (Issue #3752); the event loop only stores the result.
+fn reconcile_workspace_worktrees_in_background(project_root: &Path) -> Option<HashSet<String>> {
+    let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                "workspace worktree reconcile: enumerate failed for {}: {error}",
+                project_root.display()
+            );
+            return None;
+        }
+    };
+    let local_branches: HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| entry.branch.as_deref())
+        .map(crate::runtime_support::normalize_branch_name)
+        .filter(|branch| !branch.is_empty())
+        .collect();
+    let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
+    if sources.is_empty() {
+        return Some(local_branches);
+    }
+    match gwt_core::workspace_projection::reconcile_worktree_work_items(
+        project_root,
+        &sources,
+        chrono::Utc::now(),
+    ) {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(
+            "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
+            project_root.display()
+        ),
+        Err(error) => tracing::warn!(
+            "workspace worktree reconcile failed for {}: {error}",
+            project_root.display()
+        ),
+    }
+    Some(local_branches)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
