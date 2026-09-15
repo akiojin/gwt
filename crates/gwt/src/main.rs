@@ -8987,7 +8987,7 @@ fn main() -> std::io::Result<()> {
         }),
     );
     #[cfg(windows)]
-    verification_cap_relief::spawn(&runtime, pty_writers.clone());
+    verification_cap_relief::spawn(pty_writers.clone());
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.

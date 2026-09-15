@@ -8,31 +8,51 @@
 //! gwt owns the Jobs, so it lifts the cap on the Job that contains the lease
 //! holder, only while the lease is held. Nothing ever leaves the agent Job,
 //! so pane-close containment is unchanged.
+//!
+//! The loop runs on its own thread, never on the GUI event loop or a tokio
+//! worker. Each tick is one lease probe (a kernel lock test plus the lease
+//! ticket) and one `IsProcessInJob` per pane; no git work. A holder pid that
+//! exited or was recycled simply is not found in any Job, and nothing is
+//! retried until the next tick. An uncapped Job cannot outlive gwt: every
+//! agent Job is kill-on-close, so gwt's exit or crash terminates the tree.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{HeavyHolderKind, HeavyLeaseStatus, IndexCoordinator};
-use tokio::time::{interval, MissedTickBehavior};
 
 use crate::PtyWriterRegistry;
 
-const TICK_SECS: u64 = 5;
+const TICK: Duration = Duration::from_secs(5);
+/// A tick slower than this is logged, so its cost is never unmeasured.
+const SLOW_TICK: Duration = Duration::from_millis(50);
 
-/// Spawn the relief loop onto the shared tokio runtime.
-pub fn spawn(runtime: &tokio::runtime::Runtime, pty_writers: PtyWriterRegistry) {
-    drop(runtime.handle().spawn(run(pty_writers)));
-}
-
-async fn run(pty_writers: PtyWriterRegistry) {
-    let mut ticker = interval(Duration::from_secs(TICK_SECS));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        ticker.tick().await;
-        let holder = IndexCoordinator::open_default()
-            .ok()
-            .and_then(|coordinator| coordinator.heavy_lease_status().ok())
-            .and_then(|status| verification_holder_pid(&status));
-        relieve(&pty_writers, holder);
+/// Spawn the relief loop on a dedicated thread.
+pub fn spawn(pty_writers: PtyWriterRegistry) {
+    let spawned = std::thread::Builder::new()
+        .name("gwt-verification-cap-relief".to_string())
+        .spawn(move || loop {
+            std::thread::sleep(TICK);
+            let started = Instant::now();
+            let holder = IndexCoordinator::open_default()
+                .ok()
+                .and_then(|coordinator| coordinator.heavy_lease_status().ok())
+                .and_then(|status| verification_holder_pid(&status));
+            relieve(&pty_writers, holder);
+            let elapsed = started.elapsed();
+            if elapsed > SLOW_TICK {
+                tracing::warn!(
+                    target: "gwt_verification",
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "verification cap relief tick was slow"
+                );
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(
+            target: "gwt_verification",
+            %error,
+            "verification cap relief thread failed to start"
+        );
     }
 }
 

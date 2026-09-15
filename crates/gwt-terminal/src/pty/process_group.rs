@@ -250,6 +250,11 @@ mod tests {
         let outsider = std::process::id();
         assert!(!group.relieve_cap_for_lease_holder(Some(outsider)).unwrap());
         assert_eq!(group.cpu_cap_percent(), Some(25), "a holder elsewhere");
+        // A holder that already exited is simply not here: no error, no change.
+        assert!(!group
+            .relieve_cap_for_lease_holder(Some(u32::MAX - 3))
+            .unwrap());
+        assert_eq!(group.cpu_cap_percent(), Some(25), "a vanished holder");
 
         assert!(group.relieve_cap_for_lease_holder(Some(pid)).unwrap());
         assert_eq!(group.cpu_cap_percent(), Some(100), "the holder is here");
