@@ -225,6 +225,8 @@ pub(crate) enum RestoreAdmission {
     /// The Work is provably terminal: disable restore and drop the
     /// placeholder so the window stops coming back.
     RefuseTerminal(TerminalCloseReason),
+    /// The owner is closed, but cleanup must retain its diagnostic window.
+    RefuseRetainedTerminal,
     /// The canonical facts could not be read. Do not spawn, but keep the
     /// placeholder: the next generation may be able to prove the answer.
     RefuseUnprovable(&'static str),
@@ -707,6 +709,17 @@ impl AppRuntime {
                 RestoreAdmission::Admit
             }
             TerminalCloseEligibility::Eligible(reason) => RestoreAdmission::RefuseTerminal(reason),
+            // Reopened #4143: diagnostic retention is not permission to
+            // restart a closed owner's process. Keep its placeholder, but
+            // refuse automatic spawn even for Blocked/open-obligation ECRs.
+            TerminalCloseEligibility::Ineligible(_)
+                if facts
+                    .monitor
+                    .as_ref()
+                    .is_some_and(|monitor| monitor.issue_closed) =>
+            {
+                RestoreAdmission::RefuseRetainedTerminal
+            }
             TerminalCloseEligibility::Ineligible(cause)
                 if RESTORE_UNPROVABLE_CAUSES.contains(&cause) =>
             {

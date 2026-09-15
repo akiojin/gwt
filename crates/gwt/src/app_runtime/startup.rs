@@ -69,6 +69,8 @@ pub(super) enum RestoreRefusal {
     NoResumeSession,
     DuplicateResumeSession,
     LandedWorktree,
+    WorktreeAlreadyRestoring,
+    ClosedWorkDiagnostic,
     AlreadyRunning,
     NoProjectTab,
     TabNotRestorable,
@@ -90,6 +92,8 @@ impl RestoreRefusal {
             Self::NoResumeSession => "no_resume_session".to_string(),
             Self::DuplicateResumeSession => "duplicate_resume_session".to_string(),
             Self::LandedWorktree => "landed_worktree".to_string(),
+            Self::WorktreeAlreadyRestoring => "worktree_already_restoring".to_string(),
+            Self::ClosedWorkDiagnostic => "closed_work_diagnostic_retained".to_string(),
             Self::AlreadyRunning => "already_running".to_string(),
             Self::NoProjectTab => "no_project_tab".to_string(),
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
@@ -768,6 +772,30 @@ impl AppRuntime {
         project_root: &Path,
         window_id: Option<&str>,
     ) -> Result<(), RestoreRefusal> {
+        // Reopened #4143 AC-6: queued and in-flight restores reserve their
+        // worktree before a PTY attaches and enters active_agent_sessions.
+        let worktree = &session.worktree_path;
+        if self
+            .active_agent_sessions
+            .values()
+            .any(|active| same_worktree_path(&active.worktree_path, worktree))
+            || self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .any(|pending| same_worktree_path(&pending.session.worktree_path, worktree))
+            || self
+                .pending_auto_resume_sources
+                .iter()
+                .any(|(window, source)| {
+                    self.window_lookup.contains_key(window)
+                        && gwt_agent::Session::load(
+                            &self.sessions_dir.join(format!("{source}.toml")),
+                        )
+                        .is_ok_and(|pending| same_worktree_path(&pending.worktree_path, worktree))
+                })
+        {
+            return Err(RestoreRefusal::WorktreeAlreadyRestoring);
+        }
         // Reopened #4143 AC-5: retaining a stopped diagnostic does not
         // authorize starting its process again after the branch has landed.
         // Resolve only the local remote-tracking ref; startup never fetches.
@@ -790,6 +818,9 @@ impl AppRuntime {
             }
             RestoreAdmission::RefuseUnprovable(cause) => {
                 return Err(RestoreRefusal::TerminalFactsUnreadable(cause))
+            }
+            RestoreAdmission::RefuseRetainedTerminal => {
+                return Err(RestoreRefusal::ClosedWorkDiagnostic)
             }
             RestoreAdmission::Admit => {}
         }

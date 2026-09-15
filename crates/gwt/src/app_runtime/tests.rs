@@ -66275,6 +66275,24 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
         Some("native-landed"),
         Some(4143),
     );
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        4143,
+        "session-landed",
+        "$gwt-execute #4143",
+        false,
+    )
+    .expect("materialize fixture Work");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "session-landed",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle fixture Work"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
     let logs = capture_tracing_events(|| {
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
     });
@@ -66285,6 +66303,134 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
             .map(String::as_str),
         Some("landed_worktree")
     );
+    let summary = restore_admission_summary(&logs);
+    assert_eq!(
+        summary.fields.get("suppressed").map(String::as_str),
+        Some("1")
+    );
+    assert!(summary
+        .fields
+        .get("reasons")
+        .unwrap()
+        .contains("landed_worktree=1"));
+}
+
+#[test]
+fn startup_restore_queues_only_one_session_per_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let tab = restore_fixture_tab(
+        "tab-duplicate",
+        &repo,
+        &[
+            ("agent-a".into(), "session-a".into()),
+            ("agent-b".into(), "session-b".into()),
+        ],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-duplicate"));
+    for id in ["session-a", "session-b"] {
+        save_restore_fixture_session(&runtime.sessions_dir, id, &repo, Some(id), None);
+    }
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    assert!(restore_admission_refusals(&logs)
+        .values()
+        .any(|reason| reason == "worktree_already_restoring"));
+    // Opening the same project while startup restore is queued must not
+    // start a second process for that worktree.
+    runtime.restore_open_project_windows("tab-duplicate");
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+}
+
+#[test]
+fn restore_admits_worktree_with_unlanded_commits() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    run_git(&repo, &["commit", "--allow-empty", "-m", "unlanded work"]);
+    let runtime = sample_runtime(temp.path(), vec![], None);
+    let mut session = gwt_agent::Session::new(&repo, "work/live", gwt_agent::AgentId::Codex);
+    session.agent_session_id = Some("native-live".into());
+    assert_eq!(runtime.restore_admission(&session, &repo, None), Ok(()));
+}
+
+#[test]
+fn restore_closed_diagnostic_keeps_placeholder_without_spawning() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let tab = restore_fixture_tab(
+        "tab-closed",
+        &repo,
+        &[("agent-closed".into(), "session-closed".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-closed"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-closed",
+        &repo,
+        Some("native-closed"),
+        Some(4143),
+    );
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            merged_issues: vec![4143],
+            ..Default::default()
+        },
+    )
+    .expect("merged owner");
+    let path = runtime.sessions_dir.join("session-closed.toml");
+    let mut session = gwt_agent::Session::load(&path).unwrap();
+    session.status = gwt_agent::AgentStatus::Interrupted;
+    session.save(&runtime.sessions_dir).unwrap();
+    assert_eq!(
+        runtime.restore_admission(&session, &repo, Some("tab-closed::agent-closed")),
+        Err(super::startup::RestoreRefusal::ClosedWorkDiagnostic)
+    );
+    runtime.restore_open_project_windows("tab-closed");
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+}
+
+#[test]
+fn restore_pending_worktree_reservation_ends_when_window_closes() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let tab = restore_fixture_tab(
+        "tab-pending",
+        &repo,
+        &[("agent-pending".into(), "session-pending".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-pending"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-pending",
+        &repo,
+        Some("native-pending"),
+        None,
+    );
+    let session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-pending.toml")).unwrap();
+    let window = combined_window_id("tab-pending", "agent-pending");
+    runtime
+        .pending_auto_resume_sources
+        .insert(window.clone(), session.id.clone());
+    assert_eq!(
+        runtime.restore_admission(&session, &repo, None),
+        Err(super::startup::RestoreRefusal::WorktreeAlreadyRestoring)
+    );
+    runtime.close_window_after_issue_monitor_finalize_events(&window);
+    assert_eq!(runtime.restore_admission(&session, &repo, None), Ok(()));
 }
 
 fn restore_fixture_tab(
@@ -66831,8 +66977,15 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-scale"));
     for (session_id, native_id, linked_issue) in &fixtures {
-        let mut session =
-            gwt_agent::Session::new(&worktree, "work/restore-scale", gwt_agent::AgentId::Codex);
+        // Each live Work owns its own worktree. Reopened AC-6 intentionally
+        // refuses multiple conversations that target the same worktree.
+        let session_worktree = temp.path().join(session_id);
+        fs::create_dir_all(&session_worktree).expect("session worktree");
+        let mut session = gwt_agent::Session::new(
+            &session_worktree,
+            "work/restore-scale",
+            gwt_agent::AgentId::Codex,
+        );
         session.id = session_id.clone();
         session.agent_session_id = native_id.clone();
         session.linked_issue_number = *linked_issue;
