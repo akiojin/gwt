@@ -473,7 +473,14 @@ lease acquisition loop.
 `verify.lease.status` lists the run under `pending`. A `deferred` response
 means admission timed out without a verification record. Inspect the
 reported holder and wait reason, then retry when contention is resolved;
-there is no fixed retry schedule. If a holder persists without a live
+there is no fixed retry schedule. A deferral is not a spent attempt and
+there is no attempt cap: the refusal keeps your turn reserved
+(`next_turn_reserved: yes`, `queue_position`), so keep rerunning
+`verify.run` (a resident wait) while the holder makes progress. The lease
+is released after every run and a holder's next run queues behind you. A
+running `verify.run` publishes its progress, so the refusal and
+`verify.lease.status` show `remaining_batches` (commands left in the
+holder's run) and `estimated_remaining_ms`. If a holder persists without a live
 verification workload, report its run / PID and timing evidence to the
 PM. `verify.lease.release` remains available to drain a legacy holder
 without killing its process.

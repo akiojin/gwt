@@ -2623,8 +2623,9 @@ fn run_verification_for_caller(
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
     user_verification_result: Option<&str>,
+    on_progress: &mut dyn FnMut(usize, usize, std::time::Duration),
 ) -> Result<(VerificationRunRecord, String), String> {
-    run_verification_inner(
+    run_verification_with_progress(
         worktree,
         session_id,
         commands,
@@ -2632,6 +2633,7 @@ fn run_verification_for_caller(
         prepared_quarantines,
         user_verification_result,
         || {},
+        on_progress,
     )
 }
 
@@ -2643,6 +2645,35 @@ fn run_verification_inner<F>(
     prepared_quarantines: &[PreparedQuarantineRequest],
     user_verification_result: Option<&str>,
     after_commands: F,
+) -> Result<(VerificationRunRecord, String), String>
+where
+    F: FnOnce(),
+{
+    run_verification_with_progress(
+        worktree,
+        session_id,
+        commands,
+        authority,
+        prepared_quarantines,
+        user_verification_result,
+        after_commands,
+        &mut |_, _, _| {},
+    )
+}
+
+/// [`run_verification_inner`], reporting `(done, total, elapsed)` before the
+/// first command and after each one, so the lease holder can publish how far
+/// its matrix has got (Issue #4280 AC-2).
+#[allow(clippy::too_many_arguments)]
+fn run_verification_with_progress<F>(
+    worktree: &Path,
+    session_id: &str,
+    commands: &[String],
+    authority: Option<&VerificationCallerAuthority>,
+    prepared_quarantines: &[PreparedQuarantineRequest],
+    user_verification_result: Option<&str>,
+    after_commands: F,
+    on_progress: &mut dyn FnMut(usize, usize, std::time::Duration),
 ) -> Result<(VerificationRunRecord, String), String>
 where
     F: FnOnce(),
@@ -2693,6 +2724,8 @@ where
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
         );
     }
+    let commands_started = std::time::Instant::now();
+    on_progress(0, commands.len(), std::time::Duration::ZERO);
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
         let (exit_code, tail) = execute_command(worktree, command)?;
@@ -2703,6 +2736,7 @@ where
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
         });
+        on_progress(results.len(), commands.len(), commands_started.elapsed());
     }
     after_commands();
     let all_passed = results.iter().all(|result| result.exit_code == 0);
@@ -4018,6 +4052,7 @@ pub(super) fn run<E: CliEnv>(
                 &authority,
                 &prepared_quarantines,
                 user_verification_result.as_deref(),
+                &mut |done, total, elapsed| admission.publish_progress(done, total, elapsed),
             );
             // Release the in-process lease before the (lease-free) evidence
             // evaluation so the next claimant starts as soon as the commands
