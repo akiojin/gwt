@@ -109,6 +109,20 @@ pub enum IssueCommand {
         body: Option<String>,
         labels: Option<Vec<String>>,
     },
+    /// SPEC #4249 FR-001: move a plain or `gwt-spec` Issue to closed. `reason`
+    /// is the GitHub `state_reason`; `comment` is posted before the close so the
+    /// rationale is already on the Issue when it drops out of the Monitor inbox.
+    Close {
+        number: u64,
+        reason: Option<gwt_github::client::IssueCloseReason>,
+        comment: Option<String>,
+    },
+    /// SPEC #4249 FR-001: reopen a closed Issue so it returns to readiness
+    /// evaluation and can be requeued.
+    Reopen {
+        number: u64,
+        comment: Option<String>,
+    },
     Comment {
         number: u64,
         file: String,
