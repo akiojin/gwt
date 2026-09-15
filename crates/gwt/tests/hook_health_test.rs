@@ -1636,3 +1636,183 @@ fn managed_hook_health_retains_failure_evidence_after_a_later_success() {
         "a later success must be reported as recovery, not as an open failure: {issues}"
     );
 }
+
+// Issue #4370: the Active Work projection reads hook health once per Work row
+// and used to re-audit every worktree's managed hook surface on every build.
+// The surface audit is now reused across snapshots until the surface changes.
+mod surface_audit_cache {
+    use std::{fs, path::Path, time::Instant};
+
+    use gwt::cli::hook::health::{
+        ManagedHookFailureSnapshot, ManagedHookHealthInput, ManagedHookHealthStatus,
+    };
+
+    fn write_surface(worktree: &Path, hooks_json: &str) {
+        for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+            let path = worktree.join(artifact);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, hooks_json).unwrap();
+        }
+    }
+
+    fn projection_input(worktree: &Path) -> ManagedHookHealthInput {
+        let mut input = ManagedHookHealthInput::new(worktree);
+        input.expected_hook_bin = None;
+        input.runtime_state_path = None;
+        input
+    }
+
+    #[test]
+    fn unchanged_surface_is_reused_across_snapshots_without_a_fresh_audit() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let input = projection_input(worktree.path());
+
+        let first = ManagedHookFailureSnapshot::read();
+        let first_health = first.read_health(&input);
+        assert_eq!(first.surface_audit_stats().refreshed, 1);
+        assert_eq!(first.surface_audit_stats().reused, 0);
+
+        let second = ManagedHookFailureSnapshot::read();
+        let second_health = second.read_health(&input);
+        assert_eq!(
+            second.surface_audit_stats().refreshed,
+            0,
+            "unchanged surface re-audited"
+        );
+        assert_eq!(second.surface_audit_stats().reused, 1);
+        assert_eq!(second_health, first_health);
+        assert!(second_health
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed hook event missing: SessionStart")));
+    }
+
+    #[test]
+    fn removed_and_rewritten_hook_surfaces_refresh_on_the_next_snapshot() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let input = projection_input(worktree.path());
+        let warm = ManagedHookFailureSnapshot::read();
+        let warm_health = warm.read_health(&input);
+        assert_eq!(warm_health.status, ManagedHookHealthStatus::NeedsAttention);
+
+        // Hook removal: the Codex config disappears.
+        let codex_hooks = worktree.path().join(".codex/hooks.json");
+        fs::remove_file(&codex_hooks).unwrap();
+        let after_removal = ManagedHookFailureSnapshot::read();
+        let health = after_removal.read_health(&input);
+        assert_eq!(after_removal.surface_audit_stats().refreshed, 1);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("managed hook config missing")),
+            "{:?}",
+            health.issues
+        );
+
+        // Generated file update: the config comes back with different content.
+        fs::write(&codex_hooks, "{\"hooks\": 1").unwrap();
+        let after_rewrite = ManagedHookFailureSnapshot::read();
+        let health = after_rewrite.read_health(&input);
+        assert_eq!(after_rewrite.surface_audit_stats().refreshed, 1);
+        assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("managed hook config is not valid JSON")),
+            "{:?}",
+            health.issues
+        );
+
+        // Surface removal: no gwt surface at all reports Inactive again.
+        fs::remove_dir_all(worktree.path().join(".claude")).unwrap();
+        fs::remove_dir_all(worktree.path().join(".codex")).unwrap();
+        let after_teardown = ManagedHookFailureSnapshot::read();
+        let health = after_teardown.read_health(&input);
+        assert_eq!(after_teardown.surface_audit_stats().refreshed, 1);
+        assert_eq!(health.status, ManagedHookHealthStatus::Inactive);
+        assert!(health.issues.is_empty(), "{:?}", health.issues);
+    }
+
+    #[test]
+    fn expected_binary_change_invalidates_the_cached_audit() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let mut input = projection_input(worktree.path());
+        ManagedHookFailureSnapshot::read().read_health(&input);
+
+        input.expected_hook_bin = Some("/opt/gwt/other-gwtd".to_string());
+        let snapshot = ManagedHookFailureSnapshot::read();
+        snapshot.read_health(&input);
+        assert_eq!(snapshot.surface_audit_stats().refreshed, 1);
+    }
+
+    /// AC-2: with 592 Work rows the cached build must finish inside 5 seconds
+    /// and must not re-audit a single unchanged row.
+    #[test]
+    fn five_hundred_ninety_two_rows_reuse_every_unchanged_surface_within_budget() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = tempfile::tempdir().expect("worktrees");
+        let rows = 592;
+        let worktrees = (0..rows)
+            .map(|index| {
+                let worktree = root.path().join(format!("work-{index}"));
+                write_surface(&worktree, "{}");
+                worktree
+            })
+            .collect::<Vec<_>>();
+        let inputs = worktrees
+            .iter()
+            .map(|worktree| projection_input(worktree))
+            .collect::<Vec<_>>();
+
+        let cold = ManagedHookFailureSnapshot::read();
+        let cold_started = Instant::now();
+        for input in &inputs {
+            cold.read_health(input);
+        }
+        let cold_elapsed = cold_started.elapsed();
+        assert_eq!(cold.surface_audit_stats().refreshed, rows);
+
+        let warm = ManagedHookFailureSnapshot::read();
+        let warm_started = Instant::now();
+        for input in &inputs {
+            warm.read_health(input);
+        }
+        let warm_elapsed = warm_started.elapsed();
+        eprintln!(
+            "hook health surface audit: rows={rows} cold={}ms warm={}ms",
+            cold_elapsed.as_millis(),
+            warm_elapsed.as_millis()
+        );
+        assert_eq!(warm.surface_audit_stats().refreshed, 0);
+        assert_eq!(warm.surface_audit_stats().reused, rows);
+        assert!(
+            warm_elapsed.as_secs() < 5,
+            "warm build took {}ms",
+            warm_elapsed.as_millis()
+        );
+    }
+}

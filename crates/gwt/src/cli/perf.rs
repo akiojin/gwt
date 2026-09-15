@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(payload["sample_count"], 0);
         assert_eq!(
             payload["missing_routes"].as_array().expect("array").len(),
-            7
+            crate::perf::PerfRoute::ALL.len()
         );
     }
 
