@@ -940,6 +940,14 @@ lint, coverage, direct headed browser checks, and pre-push checks run
 directly without a verification lease. Completion still requires canonical
 verification evidence.
 
+The `pre-push` hook deliberately runs only checks that do not compile the
+workspace: `cargo fmt --all -- --check`, Markdownlint, and the SKILL.md
+frontmatter validation. A Git hook runs under `git push` rather than under
+`gwtd`, so it cannot take the verification lease, and a heavy Cargo job
+started there saturates the host while another worktree holds the lease.
+Clippy, the test suites, and the 90% coverage threshold are enforced per
+pull request by the Lint, Test, and Coverage workflows instead.
+
 **Migration:** `verify.lease.acquire`, `verify.lease.hold`, and
 `verify.lease.extend` now return an error without creating a holder or
 reservation. Replace manual acquisition around canonical verification with

@@ -896,6 +896,14 @@ lint、coverage、直接の headed browser 確認、pre-push 確認は verificat
 lease なしでそのまま実行します。完了判定には引き続き canonical な検証証跡が
 必要です。
 
+`pre-push` hook は、ワークスペースをコンパイルしない検査だけを実行します
+（`cargo fmt --all -- --check`、Markdownlint、SKILL.md frontmatter の検証）。
+Git hook は `gwtd` ではなく `git push` の配下で動くため verification lease を
+取得できず、そこで重量級の Cargo ジョブを起動すると、別の worktree が lease を
+保持している間にホストを飽和させてしまいます。Clippy・テスト・カバレッジ 90%
+閾値は、代わりに Lint / Test / Coverage workflow が pull request ごとに強制
+します。
+
 **移行方法:** `verify.lease.acquire`、`verify.lease.hold`、
 `verify.lease.extend` は holder や予約を作らずエラーを返すようになりました。
 canonical 検証を囲む手動取得は `verify.run` に置き換え、通常の Cargo 操作を

@@ -2944,7 +2944,15 @@ pub struct IssueMonitorAgentStatus {
     pub active_launches: Vec<u64>,
     pub max_active: usize,
     pub enabled: bool,
+    /// Issue #4273: the authoritative GUI projection; absent in older daemons.
+    #[serde(default)]
+    pub gui_status: Option<IssueMonitorStatusView>,
     pub autonomous_mode: bool,
+    /// Issue #4273: expose the saved override separately from its effective value.
+    #[serde(default)]
+    pub auto_apply_updates: Option<bool>,
+    #[serde(default)]
+    pub auto_apply_updates_effective: Option<bool>,
     pub has_launch_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
@@ -4020,6 +4028,18 @@ pub enum NeedsHumanKind {
     DestructiveChangeApproval,
     /// A spec decision only the user can make.
     UserChoiceRequired,
+    /// Issue #4200 AC-4: an execution generation still refuses every launch and
+    /// nothing the Monitor can observe will ever release it.
+    ///
+    /// This is the one park with a mechanical cause, and it is here precisely
+    /// because it is *not* retryable: the row's `launch_failed` message is
+    /// indistinguishable from a transient failure, so without a park it burns
+    /// the retry budget forever and then sits in the queue looking ordinary.
+    /// Unlike the other two kinds it is externally checkable, so
+    /// [`IssueMonitorState::release_stranded_generation_failures`] un-parks it
+    /// by itself once the generation goes terminal — an operator running
+    /// `issue.monitor.stop` is enough, and no human has to remember the Issue.
+    StrandedExecutionGeneration,
 }
 
 impl NeedsHumanKind {
@@ -4028,6 +4048,7 @@ impl NeedsHumanKind {
         match self {
             Self::DestructiveChangeApproval => "destructive change approval required",
             Self::UserChoiceRequired => "user choice required",
+            Self::StrandedExecutionGeneration => "stranded execution generation",
         }
     }
 
@@ -4036,7 +4057,16 @@ impl NeedsHumanKind {
         match self {
             Self::DestructiveChangeApproval => "destructive_change_approval",
             Self::UserChoiceRequired => "user_choice_required",
+            Self::StrandedExecutionGeneration => "stranded_execution_generation",
         }
+    }
+
+    /// Whether the Monitor may clear this park on its own once the condition
+    /// that caused it is provably gone. Only the mechanical kind qualifies; a
+    /// park waiting on a person is cleared by that person.
+    #[must_use]
+    pub fn is_monitor_clearable(self) -> bool {
+        matches!(self, Self::StrandedExecutionGeneration)
     }
 }
 
@@ -7038,7 +7068,11 @@ impl IssueMonitorState {
     /// `NeedsHuman` state — frees the slot, records the reason and its
     /// human-answerable `kind`, marks the autonomous phase, and never
     /// auto-relaunches. The `kind` is mandatory so no caller can park an Issue
-    /// for a mechanical cause (stuck, exhausted, launch, readiness, CI, review).
+    /// for a *retryable* mechanical cause (stuck, exhausted, launch, readiness,
+    /// CI, review) — those belong in the retry budget, not in front of a human.
+    /// Issue #4200 adds the one mechanical kind that is not retryable at all
+    /// ([`NeedsHumanKind::StrandedExecutionGeneration`]); it is self-clearing,
+    /// so it still never leaves an Issue waiting on someone's memory.
     pub fn escalate_to_needs_human(
         &mut self,
         issue_number: u64,
@@ -9192,7 +9226,10 @@ impl IssueMonitorState {
             active_launches: self.active_issue_numbers(),
             max_active: self.config.max_active.max(1),
             enabled: self.config.enabled,
+            gui_status: Some(status.clone()),
             autonomous_mode: self.autonomous_mode,
+            auto_apply_updates: self.auto_apply_updates,
+            auto_apply_updates_effective: Some(status.auto_apply_updates),
             has_launch_profile: self.has_launch_profile(),
             quota_hold: status.quota_hold.clone(),
             update_drain: status.update_drain.clone(),
@@ -9334,6 +9371,7 @@ impl IssueMonitorState {
     /// whether a project is being driven.
     pub fn agent_status_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let mut status = self.agent_status_without_scan_at(now);
+        status.gui_status = Some(self.status_view_at(now));
         status.scan_stall = self.scan_stall_at(now);
         status
     }
@@ -13168,13 +13206,17 @@ impl IssueMonitorState {
             })
             .map(|(issue_number, _)| *issue_number)
             .filter(|issue_number| {
-                !self
-                    .autonomous_records
-                    .get(issue_number)
-                    .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
-                    && !self
-                        .inbox_item(*issue_number)
-                        .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman)
+                // Issue #4200 AC-4: a row this loop parked itself stays in
+                // scope, or the park it created could never be cleared. Every
+                // other park is waiting on a person and is left alone.
+                self.stranded_generation_park(*issue_number)
+                    || (!self
+                        .autonomous_records
+                        .get(issue_number)
+                        .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+                        && !self
+                            .inbox_item(*issue_number)
+                            .is_some_and(|item| item.state == MonitorInboxState::NeedsHuman))
             })
             .collect::<Vec<_>>();
         let mut summary = IssueMonitorGenerationReclaimSummary {
@@ -13280,7 +13322,42 @@ impl IssueMonitorState {
                         *summary.release_counts.entry(issue_number).or_default() += 1;
                     }
                 }
-                Some(_) | None => {
+                Some(hold) => {
+                    summary.stranded.push(issue_number);
+                    *summary
+                        .stranded_by_holder_state
+                        .entry(holder_state.clone())
+                        .or_default() += 1;
+                    // Issue #4200 AC-4: an Active generation nothing can prove
+                    // dead will refuse every relaunch until an operator
+                    // releases it. Left as a bare `launch_failed` row it is
+                    // indistinguishable from a transient failure and quietly
+                    // accumulates, which is exactly how three Issues went a day
+                    // without anyone noticing. Park it so it is visible and
+                    // stops spending retries; the branch above un-parks it as
+                    // soon as the generation goes terminal.
+                    if !launch_live && !self.stranded_generation_park(issue_number) {
+                        // The park reason extends the refusal instead of
+                        // replacing it: this loop finds its own rows by the
+                        // refusal text, so overwriting it would park the row
+                        // where nothing — including the release above — could
+                        // ever find it again.
+                        let refusal = self
+                            .failed_issues
+                            .get(&issue_number)
+                            .cloned()
+                            .unwrap_or_default();
+                        self.escalate_to_needs_human(
+                            issue_number,
+                            NeedsHumanKind::StrandedExecutionGeneration,
+                            format!(
+                                "{refusal} — parked: generation {} is held by Session {} ({holder_state}) and nothing the Issue Monitor can observe will release it. Release it with the issue.monitor.stop JSON operation; the Issue returns to the queue by itself once it does",
+                                hold.generation_id, hold.holder_session_id
+                            ),
+                        );
+                    }
+                }
+                None => {
                     summary.stranded.push(issue_number);
                     *summary
                         .stranded_by_holder_state
@@ -13303,6 +13380,19 @@ impl IssueMonitorState {
         }
         self.generation_reclaim = Some(summary.clone());
         summary
+    }
+
+    /// Issue #4200 AC-4: whether this row is parked by the stranded-generation
+    /// escalation, and is therefore this loop's own to clear again.
+    fn stranded_generation_park(&self, issue_number: u64) -> bool {
+        self.autonomous_records
+            .get(&issue_number)
+            .is_some_and(|record| {
+                record.phase == AutonomousPhase::NeedsHuman
+                    && record
+                        .needs_human_kind
+                        .is_some_and(NeedsHumanKind::is_monitor_clearable)
+            })
     }
 
     /// Issue #4042 AC-2: keep a failed row held but replace what it says.
@@ -15097,7 +15187,10 @@ mod tests {
                 active_launches: Vec::new(),
                 max_active: 3,
                 enabled: true,
+                gui_status: Some(monitor.status_view()),
                 autonomous_mode: false,
+                auto_apply_updates: None,
+                auto_apply_updates_effective: Some(false),
                 has_launch_profile: false,
                 quota_hold: None,
                 update_drain: None,
@@ -21519,9 +21612,32 @@ mod tests {
             BTreeMap::from([("Interrupted".to_string(), 1), ("Running".to_string(), 1)])
         );
         for number in [42, 43] {
+            // Issue #4200 AC-4: a stranded generation will never release
+            // itself, so the row is parked where an operator can see it
+            // instead of sitting in `agent_failed` looking transient.
             assert_eq!(
                 monitor.inbox_item(number).map(|item| item.state),
-                Some(MonitorInboxState::AgentFailed)
+                Some(MonitorInboxState::NeedsHuman)
+            );
+            assert_eq!(
+                monitor
+                    .autonomous_record(number)
+                    .and_then(|record| record.needs_human_kind),
+                Some(NeedsHumanKind::StrandedExecutionGeneration)
+            );
+            assert!(
+                monitor
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .find(|failed| failed.issue_number == number)
+                    .is_some_and(|failed| {
+                        crate::cli::execution_state::is_execution_generation_conflict(
+                            &failed.message,
+                        )
+                    }),
+                "the park must keep the refusal text, or the release below could \
+                 never find this row again"
             );
         }
 
@@ -21547,6 +21663,25 @@ mod tests {
         assert_eq!(second.released, vec![43]);
         assert_eq!(second.released_at.as_deref(), Some("2026-09-05T00:10:00Z"));
         assert_eq!(second.stranded, vec![42]);
+        // Issue #4200 AC-4 / AC-5: the park this loop made is the park it can
+        // clear. An operator releasing the generation — `issue.monitor.stop`
+        // does exactly that — is all it takes for the Issue to come back.
+        assert_eq!(
+            monitor.inbox_item(43).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(43)
+                .and_then(|record| record.needs_human_kind),
+            None
+        );
+        assert!(monitor.queued_issue_numbers().contains(&43));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "the still-held row stays parked"
+        );
 
         // A quiet scan keeps the last release visible instead of blanking it.
         let third = monitor.release_stranded_generation_failures("2026-09-05T00:15:00Z", |_| {
