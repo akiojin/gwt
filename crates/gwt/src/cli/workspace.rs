@@ -1064,7 +1064,7 @@ pub(super) fn run<E: CliEnv>(
                         && work_item_shares_agent_container(item, &agent)
                     {
                         return Err(GwtError::Other(format!(
-                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.prune to review and discard the stale duplicate (Issue #3684)"
+                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.work_prune to review and discard the stale duplicate (Issue #3684)"
                         )));
                     }
                 }
@@ -2391,7 +2391,7 @@ fn validate_workspace_ensure_recovery_state(
         .collect::<Vec<_>>();
     if !conflicting_work_ids.is_empty() {
         return Err(GwtError::Other(format!(
-            "canonical execution container for Session {} is ambiguous across Works: {}; these share the container of canonical Work {} — run workspace.prune to review and discard stale same-container duplicates (Issue #3684)",
+            "canonical execution container for Session {} is ambiguous across Works: {}; these share the container of canonical Work {} — run workspace.work_prune to review and discard stale same-container duplicates (Issue #3684)",
             input.agent_session,
             conflicting_work_ids.join(", "),
             canonical_id,
@@ -10177,12 +10177,12 @@ pub(crate) mod tests {
         let message = error.to_string();
         assert!(message.contains("work-legacy-dup"), "{message}");
         assert!(
-            message.contains("workspace.prune"),
+            message.contains("workspace.work_prune"),
             "refusal must name the consolidation path: {message}"
         );
     }
 
-    /// Issue #3684 AC-3: `workspace.prune` detects same-container duplicates
+    /// Issue #3684 AC-3: `workspace.work_prune` detects same-container duplicates
     /// of an existing canonical Work and proposes discarding the stale one.
     #[test]
     fn run_work_prune_discards_same_container_duplicate_of_canonical() {
