@@ -481,6 +481,23 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
             );
         }
     }
+
+    audit_managed_git_hooks(worktree, health);
+}
+
+/// Issue #4339: a `core.hooksPath` aimed at a directory with no hook in it
+/// makes Git skip commitlint and the commit/push gates without a word. Report
+/// it so the skip is visible and the self-heal pass can materialize them.
+fn audit_managed_git_hooks(worktree: &Path, health: &mut ManagedHookHealth) {
+    for missing in gwt_skills::missing_managed_git_hooks(worktree) {
+        needs_attention(
+            health,
+            format!(
+                "managed git hook missing: {} (core.hooksPath is configured but the hook is not materialized)",
+                missing.display()
+            ),
+        );
+    }
 }
 
 /// The binary a config at `path` is expected to fall back to.
@@ -870,7 +887,9 @@ pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHo
     let provider_surface = worktree_root.join(".gwt/opencode").exists()
         || worktree_root.join(".gwt/openclaw").exists()
         || worktree_root.join(".gwt/hermes").exists();
-    let mut repaired = false;
+    // #4339: the Git hook directory belongs to the repository, not to any agent
+    // provider, so repair it even in a worktree with no agent surface at all.
+    let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
     if claude_surface || codex_surface || provider_surface {
         crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;

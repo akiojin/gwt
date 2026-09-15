@@ -834,6 +834,11 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
         assert!(content.contains("gwt-coordination"));
         assert!(
+            content.contains("Read-only `gh` commands are allowed")
+                && content.contains("Mutations must use gwtd JSON-envelope operations"),
+            "generated guidance must distinguish GitHub reads from mutations"
+        );
+        assert!(
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );
