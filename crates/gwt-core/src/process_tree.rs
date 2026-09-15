@@ -133,12 +133,24 @@ fn unix_priority_report(launcher_nice: i32, child_nice: i32) -> ChildPriorityRep
             detail: format!("nice {child_nice}"),
         };
     }
+    // Naming the launcher's own nice separates the two sources that stack
+    // here: the launch policy nices the whole pane group (SPEC #1921 Phase
+    // 86, nice 10), and anything between that and this spawn can add more —
+    // a zsh `&` backgrounds at +5, so a matrix launched that way runs at 15,
+    // not 10. Blaming the policy for the total would send the reader to the
+    // wrong knob.
+    let source = if launcher_nice > child_nice {
+        format!("the launcher's nice {launcher_nice} (lowered to {child_nice} by the host)")
+    } else {
+        format!("the launcher, which itself runs at nice {launcher_nice}")
+    };
     ChildPriorityReport {
         restored: false,
         detail: format!(
-            "nice {child_nice} inherited from the agent launch policy (SPEC #1921 Phase 86): \
-             an unprivileged process cannot lower its nice value, so this workload runs below \
-             normal priority and slows down under agent load"
+            "nice {child_nice} inherited from {source}: an unprivileged process cannot lower \
+             its nice value, so this workload runs below normal priority and slows down under \
+             agent load. The agent launch policy (SPEC #1921 Phase 86) accounts for nice 10; \
+             anything above that was added between the pane and this spawn"
         ),
     }
 }
