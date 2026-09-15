@@ -1314,9 +1314,61 @@ fn write_session_toml_atomic(path: &Path, content: &str) -> io::Result<()> {
     })
 }
 
+/// Whether a Session write waits for the storage device before returning.
+///
+/// Issue #3777: `sync_all` is the only call in the atomic write that blocks on
+/// the device, and a stalled Windows runner turned one Session write on the
+/// UserPromptSubmit path into 192ms against a 200ms budget for the whole hook.
+/// The hook only stamps `last_hook_event` / `updated_at` liveness there and the
+/// next event rewrites it, so it takes [`SessionDurability::RenameOnly`]; every
+/// other Session writer keeps waiting for the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionDurability {
+    FlushToDevice,
+    RenameOnly,
+}
+
+fn write_session_toml_atomic_with_durability(
+    path: &Path,
+    content: &str,
+    durability: SessionDurability,
+) -> io::Result<()> {
+    match durability {
+        SessionDurability::FlushToDevice => write_session_toml_atomic(path, content),
+        SessionDurability::RenameOnly => {
+            write_session_toml_unflushed_with_replace(path, content, |temporary, destination| {
+                fs::rename(temporary, destination)
+            })
+        }
+    }
+}
+
 fn write_session_toml_atomic_with_replace<F>(
     path: &Path,
     content: &str,
+    replace: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    write_session_toml_with_replace(path, content, SessionDurability::FlushToDevice, replace)
+}
+
+fn write_session_toml_unflushed_with_replace<F>(
+    path: &Path,
+    content: &str,
+    replace: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    write_session_toml_with_replace(path, content, SessionDurability::RenameOnly, replace)
+}
+
+fn write_session_toml_with_replace<F>(
+    path: &Path,
+    content: &str,
+    durability: SessionDurability,
     replace: F,
 ) -> io::Result<()>
 where
@@ -1343,7 +1395,10 @@ where
     let write_result = (|| -> io::Result<()> {
         let mut tmp = File::create(&tmp_path)?;
         tmp.write_all(content.as_bytes())?;
-        tmp.sync_all()
+        match durability {
+            SessionDurability::FlushToDevice => tmp.sync_all(),
+            SessionDurability::RenameOnly => Ok(()),
+        }
     })();
     if let Err(error) = write_result {
         let _ = fs::remove_file(&tmp_path);
@@ -1355,7 +1410,10 @@ where
         return Err(error);
     }
 
-    sync_parent_dir(parent)
+    match durability {
+        SessionDurability::FlushToDevice => sync_parent_dir(parent),
+        SessionDurability::RenameOnly => Ok(()),
+    }
 }
 
 #[cfg(unix)]
@@ -1400,6 +1458,25 @@ pub fn update_session_with_wait<F>(
 where
     F: FnOnce(&mut Session) -> io::Result<()>,
 {
+    update_session_with_wait_and_durability(
+        sessions_dir,
+        session_id,
+        wait,
+        SessionDurability::FlushToDevice,
+        mutate,
+    )
+}
+
+fn update_session_with_wait_and_durability<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    wait: Duration,
+    durability: SessionDurability,
+    mutate: F,
+) -> io::Result<Session>
+where
+    F: FnOnce(&mut Session) -> io::Result<()>,
+{
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     with_session_lock_wait(sessions_dir, session_id, wait, || {
@@ -1407,7 +1484,7 @@ where
         let mut session = Session::load_and_migrate(&path)?;
         mutate(&mut session)?;
         let content = serialize_session_toml(&session)?;
-        write_session_toml_atomic(&path, &content)?;
+        write_session_toml_atomic_with_durability(&path, &content, durability)?;
         Ok(session)
     })
 }
@@ -2541,16 +2618,25 @@ pub fn persist_session_hook_metadata_with_wait(
     let agent_session_id = agent_session_id
         .map(str::trim)
         .filter(|agent_session_id| !agent_session_id.is_empty());
-    update_session_with_wait(sessions_dir, session_id, wait, |session| {
-        if let Some(agent_session_id) = agent_session_id {
-            apply_agent_session_id(session, agent_session_id);
-        }
-        if session.project_state_root.is_none() {
-            session.project_state_root = project_state_root.map(Path::to_path_buf);
-        }
-        session.record_hook_event(event);
-        Ok(())
-    })
+    update_session_with_wait_and_durability(
+        sessions_dir,
+        session_id,
+        wait,
+        // Issue #3777: the hook only stamps liveness here and the next hook
+        // event rewrites it, so this write must not wait for the device inside
+        // the UserPromptSubmit budget.
+        SessionDurability::RenameOnly,
+        |session| {
+            if let Some(agent_session_id) = agent_session_id {
+                apply_agent_session_id(session, agent_session_id);
+            }
+            if session.project_state_root.is_none() {
+                session.project_state_root = project_state_root.map(Path::to_path_buf);
+            }
+            session.record_hook_event(event);
+            Ok(())
+        },
+    )
 }
 
 /// Persist or clear a Session's Execution generation projection under the

@@ -2253,10 +2253,31 @@ fn coordination_event_entry_id(event: &CoordinationEvent) -> &str {
 
 fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(json_error)?;
-    write_atomic(path, &bytes)
+    write_atomic_with_durability(path, &bytes, CoordinationDurability::FlushToDevice)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Like [`write_atomic_json`] but without waiting for the storage device.
+///
+/// Issue #3777: `sync_all` is the only device-blocking call in the write, and
+/// every ballooning stage in the Windows p95 failures was a durable write while
+/// no read or pure-compute stage ever was. Reserve this for state the next
+/// event rewrites anyway; the rename still publishes the file whole.
+fn write_atomic_json_unflushed<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(json_error)?;
+    write_atomic_with_durability(path, &bytes, CoordinationDurability::RenameOnly)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinationDurability {
+    FlushToDevice,
+    RenameOnly,
+}
+
+fn write_atomic_with_durability(
+    path: &Path,
+    bytes: &[u8],
+    durability: CoordinationDurability,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| GwtError::Other(format!("path has no parent: {}", path.display())))?;
@@ -2273,7 +2294,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut file = File::create(&tmp_path)?;
         file.write_all(bytes)?;
         file.write_all(b"\n")?;
-        file.sync_all()?;
+        if durability == CoordinationDurability::FlushToDevice {
+            file.sync_all()?;
+        }
     }
     replace_path_with_temp(path, &tmp_path)
 }
@@ -2506,7 +2529,10 @@ pub fn write_reminders_state_for_repo_hash(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    write_atomic_json(&path, state)
+    // Issue #3777: this sidecar only throttles how often a reminder repeats and
+    // the next intent boundary rewrites it, so it must not make the prompt wait
+    // for the storage device.
+    write_atomic_json_unflushed(&path, state)
 }
 
 /// Return Board entries whose `updated_at` is strictly later than `since`,

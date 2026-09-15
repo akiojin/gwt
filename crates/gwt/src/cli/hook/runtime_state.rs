@@ -123,7 +123,15 @@ fn write_state_with_status(
         }
     }
     let bytes = serde_json::to_vec_pretty(&value)?;
-    gwt_github::cache::write_atomic(path, &bytes)?;
+    // Issue #3777: this file is pure liveness for the Branches tab and every
+    // hook event rewrites it, so waiting for the device buys nothing while
+    // costing the prompt its budget (522ms measured on a stalled Windows
+    // runner). The rename still publishes it whole.
+    gwt_github::cache::write_atomic_with_durability(
+        path,
+        &bytes,
+        gwt_github::cache::Durability::RenameOnly,
+    )?;
     Ok(())
 }
 
