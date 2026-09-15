@@ -1,4 +1,4 @@
-//! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
+//! Terminal pane: integrates PTY handle + vt100 parser.
 
 use std::{
     collections::HashMap,
@@ -12,7 +12,6 @@ use std::{
 
 use crate::{
     pty::{PendingPty, PtyHandle, SpawnConfig},
-    scrollback::{ScrollbackLine, ScrollbackStorage},
     TerminalError,
 };
 
@@ -115,7 +114,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-/// A terminal pane integrating PTY, vt100 parser, and scrollback.
+/// A terminal pane integrating PTY and vt100 parser.
 ///
 /// `pty` is wrapped in an `Arc` so that callers who only need to write input
 /// or query process state can hold a lock-free clone without contending with
@@ -126,7 +125,6 @@ pub struct Pane {
     id: String,
     pty: Arc<PtyHandle>,
     parser: vt100::Parser,
-    scrollback: ScrollbackStorage,
     status: PaneStatus,
     /// Direct child pid captured at spawn. Kept separately because the pid is
     /// no longer reliably readable from the handle once the child is reaped,
@@ -135,12 +133,6 @@ pub struct Pane {
     /// Exit receipt captured on the `Running` → exited transition, which
     /// happens exactly once per pane (Issue #3341).
     last_exit: Option<PaneExit>,
-    /// Accumulator for incomplete lines from raw PTY output. Holds raw bytes
-    /// (including SGR escape sequences) until a `\n` boundary is reached, then
-    /// the completed line is split off and pushed into `scrollback` with both
-    /// a plain-text rendering and the original byte stream so SGR formatting
-    /// can be replayed later (SPEC-1919 FR-003j).
-    line_buf: Vec<u8>,
     /// Stream position of the last PTY chunk folded into `parser`
     /// (Issue #4095), drawn from the process-wide [`NEXT_OUTPUT_SEQ`]. A
     /// snapshot taken at position `n` already contains every chunk of this
@@ -180,11 +172,9 @@ impl PendingPane {
             id: self.id,
             pty,
             parser: vt100::Parser::new(self.rows, self.cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT),
-            scrollback: ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY),
             status: PaneStatus::Running,
             child_pid,
             last_exit: None,
-            line_buf: Vec::new(),
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
         })
@@ -261,17 +251,14 @@ impl Pane {
         let pty = Arc::new(PtyHandle::spawn(config)?);
         let child_pid = pty.process_id();
         let parser = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-        let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);
 
         Ok(Self {
             id,
             pty,
             parser,
-            scrollback,
             status: PaneStatus::Running,
             child_pid,
             last_exit: None,
-            line_buf: Vec::new(),
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
         })
@@ -316,11 +303,13 @@ impl Pane {
         Arc::clone(&self.pty)
     }
 
-    /// Feed raw bytes from PTY output through the vt100 parser and scrollback.
+    /// Feed raw bytes from PTY output through the vt100 parser.
     ///
-    /// The vt100 parser is the single source of truth for terminal screen state.
-    /// Completed lines (delimited by `\n`) are also captured into the scrollback
-    /// ring buffer for history access.
+    /// The vt100 parser is the single source of truth for terminal screen
+    /// state, history included: its bounded scrollback is what
+    /// [`Self::snapshot_bytes`] replays. Nothing else retains output
+    /// (Issue #4234: a raw line store that no reader consumed used to grow
+    /// without bound on output that never reached a `\n`).
     pub fn process_bytes(&mut self, data: &[u8]) {
         // Update vt100 screen state
         self.parser.process(data);
@@ -336,22 +325,6 @@ impl Pane {
             // A string sequence this long is not one the PTY split; treat it
             // as abandoned rather than letting the tail grow unbounded.
             self.incomplete_escape_tail.clear();
-        }
-
-        // Capture raw bytes for scrollback. SGR escape sequences (CSI ... m)
-        // never contain `\n`, so byte-level newline splitting preserves both
-        // the visible text and the SGR formatting in `formatted`.
-        self.line_buf.extend_from_slice(data);
-
-        while let Some(pos) = self.line_buf.iter().position(|b| *b == b'\n') {
-            let raw: Vec<u8> = self.line_buf.drain(..pos).collect();
-            self.line_buf.drain(..1); // consume the '\n'
-            let text = String::from_utf8_lossy(&raw).into_owned();
-            self.scrollback.push_line(ScrollbackLine {
-                text,
-                formatted: raw,
-                wrapped: false,
-            });
         }
     }
 
@@ -391,16 +364,6 @@ impl Pane {
         snapshot
     }
 
-    /// Get scrollback lines from the ring buffer.
-    pub fn scrollback_lines(&self, start: usize, count: usize) -> Vec<&ScrollbackLine> {
-        self.scrollback.get_lines(start, count)
-    }
-
-    /// Total number of lines in scrollback.
-    pub fn scrollback_len(&self) -> usize {
-        self.scrollback.len()
-    }
-
     /// Get the current pane status.
     pub fn status(&self) -> &PaneStatus {
         &self.status
@@ -429,6 +392,14 @@ impl Pane {
                 };
                 self.log_child_exit(&exit);
                 self.last_exit = Some(exit);
+                // Issue #4142: the exited-transition is the last moment the
+                // master and writer descriptors mean anything. A pane kept on
+                // screen for recovery diagnostics renders from `parser`, not
+                // from the PTY, so holding them only spends
+                // the process-wide `RLIMIT_NOFILE` budget every other pane
+                // needs. The output thread's reader clone is separate and
+                // still drains to EOF.
+                self.pty.release_descriptors();
             }
         }
         Ok(&self.status)
@@ -678,6 +649,65 @@ mod tests {
         .expect("Pane creation failed")
     }
 
+    /// Issue #4234 AC-2 / AC-4: a pane retains only its parsed screen. Output
+    /// that never reaches a `\n` boundary (alternate-screen redraws, CR-only
+    /// progress) used to accumulate byte for byte in a write-only line buffer
+    /// for the life of the pane.
+    #[test]
+    fn output_without_newlines_is_not_retained_by_the_pane() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-no-newline-retention", 3, sleep_command("60"));
+        // Warm the parser: the first chunks grow the vt100 grid and the
+        // escape-tail buffer, which are legitimately retained.
+        let progress = "\r\x1b[2Kprogress 12345 of 99999 ......".repeat(100);
+        pane.process_bytes(progress.as_bytes());
+
+        let before = crate::test_util::thread_live_heap_bytes();
+        let fed_bytes = progress.len() * 4096;
+        for _ in 0..4096 {
+            pane.process_bytes(progress.as_bytes());
+        }
+        let retained = crate::test_util::thread_live_heap_bytes() - before;
+
+        assert!(
+            retained < (fed_bytes / 64) as isize,
+            "pane retained {retained} bytes after {fed_bytes} bytes of newline-free output; \
+             the parsed screen is the only state a pane may keep"
+        );
+        let _ = pane.kill();
+    }
+
+    /// Issue #4234 AC-3 / AC-4: opening panes, streaming output through them
+    /// and dropping them returns the heap to where it started. The first pane
+    /// warms process-wide state (PTY runtime, thread-locals) and is excluded
+    /// from the baseline.
+    #[test]
+    fn panes_opened_and_closed_return_the_heap_to_baseline() {
+        let _pty_guard = lock_pty_test();
+        let line = format!("\x1b[32m{}\x1b[0m\r\n", "x".repeat(200));
+        let burst = line.repeat(64);
+        let stream_pane = |id: &str| {
+            let mut pane = test_pane_with_rows(id, 3, sleep_command("60"));
+            for _ in 0..512 {
+                pane.process_bytes(burst.as_bytes());
+            }
+            let _ = pane.kill();
+            drop(pane);
+        };
+        stream_pane("test-heap-baseline-warmup");
+
+        let baseline = crate::test_util::thread_live_heap_bytes();
+        for round in 0..3 {
+            stream_pane(&format!("test-heap-baseline-{round}"));
+        }
+        let retained = crate::test_util::thread_live_heap_bytes() - baseline;
+
+        assert!(
+            retained.abs() < 256 * 1024,
+            "heap drifted by {retained} bytes after opening and closing 3 panes"
+        );
+    }
+
     #[test]
     fn test_pane_creation() {
         let _pty_guard = lock_pty_test();
@@ -685,7 +715,6 @@ mod tests {
 
         assert_eq!(pane.id(), "test-1");
         assert_eq!(pane.status(), &PaneStatus::Running);
-        assert_eq!(pane.scrollback_len(), 0);
     }
 
     #[test]
@@ -1295,8 +1324,7 @@ mod tests {
 
         // Three rows plus 5,000 additional CRLF advances produce 5,001
         // historical rows. Parsed history must evict the first one at the
-        // snapshot replay boundary, while the legacy raw-line store retains
-        // all completed lines under its independent 10,000-line policy.
+        // snapshot replay boundary.
         for line in 1..=SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + 3 {
             pane.process_bytes(format!("line-{line:04}\r\n").as_bytes());
         }
@@ -1307,12 +1335,6 @@ mod tests {
             SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
             "Pane parsed history must be bounded at the snapshot replay limit"
         );
-        assert_eq!(
-            pane.scrollback_len(),
-            SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + 3,
-            "raw scrollback storage keeps its independent compatibility capacity"
-        );
-
         let mut replay = vt100::Parser::new(3, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
         replay.process(&pane.snapshot_bytes());
         let replay_oldest = screen_at_oldest_scrollback(replay.screen());
@@ -1796,5 +1818,90 @@ mod tests {
         assert_eq!(completed, PaneStatus::Completed(0));
         assert_ne!(PaneStatus::Completed(0), PaneStatus::Completed(1));
         assert_eq!(error, PaneStatus::Error("fail".to_string()));
+    }
+
+    /// PTY masters are the only terminals these tests open beyond the harness
+    /// stdio, so the delta of this count is the `/dev/ptmx` count Issue #4142
+    /// measures with `lsof`. Every PTY test in this binary holds
+    /// [`lock_pty_test`], so the counts below are not raced by a sibling.
+    #[cfg(unix)]
+    fn open_tty_fds() -> usize {
+        gwt_core::fd_limit::open_tty_fd_count().expect("unix exposes an fd table")
+    }
+
+    /// Poll `check_status` until the child is reaped, without attaching a
+    /// reader — a reader clone is a descriptor of its own and would mask what
+    /// these tests measure.
+    #[cfg(unix)]
+    fn wait_for_exit_without_reader(pane: &mut Pane, within: Duration) {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if pane
+                .check_status()
+                .is_ok_and(|status| *status != PaneStatus::Running)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not exit within {within:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Issue #4142 AC-1.
+    #[cfg(unix)]
+    #[test]
+    fn child_exit_releases_the_pty_descriptors_within_five_seconds() {
+        let _pty_guard = lock_pty_test();
+        let baseline = open_tty_fds();
+
+        let mut pane = test_pane("fd-exit", success_command());
+        let while_running = open_tty_fds();
+        assert!(
+            while_running > baseline,
+            "spawning a pane must open PTY descriptors: {baseline} -> {while_running}"
+        );
+
+        wait_for_exit_without_reader(&mut pane, Duration::from_secs(5));
+
+        assert_eq!(
+            open_tty_fds(),
+            baseline,
+            "the exited pane still holds PTY descriptors while it stays on screen"
+        );
+        // The pane is still alive and still reports its exit receipt.
+        assert_ne!(pane.status(), &PaneStatus::Running);
+        assert!(pane.last_exit().is_some());
+    }
+
+    /// Issue #4142 AC-4: the descriptor cost of a spawn/exit cycle must not
+    /// accumulate. 300 cycles is past the launchd soft `RLIMIT_NOFILE` of 256,
+    /// so a one-descriptor-per-cycle leak cannot stay invisible here.
+    #[cfg(unix)]
+    #[test]
+    fn repeated_spawn_and_exit_cycles_do_not_accumulate_descriptors() {
+        const CYCLES: usize = 300;
+        const SAMPLE_EVERY: usize = 50;
+
+        let _pty_guard = lock_pty_test();
+        let baseline = open_tty_fds();
+        let mut samples = Vec::new();
+
+        for cycle in 0..CYCLES {
+            let mut pane = test_pane(&format!("fd-cycle-{cycle}"), success_command());
+            wait_for_exit_without_reader(&mut pane, Duration::from_secs(5));
+            drop(pane);
+            if cycle % SAMPLE_EVERY == SAMPLE_EVERY - 1 {
+                samples.push((cycle + 1, open_tty_fds()));
+            }
+        }
+
+        assert!(
+            samples.iter().all(|(_, open)| *open == baseline),
+            "PTY descriptors grew across {CYCLES} spawn/exit cycles \
+             (baseline {baseline}, samples {samples:?})"
+        );
     }
 }

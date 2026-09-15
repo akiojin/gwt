@@ -20,6 +20,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use super::startup::prepare_open_project_window_restores;
@@ -409,6 +410,9 @@ impl AppRuntime {
         source: ProjectNavigationSource,
     ) -> Vec<OutboundEvent> {
         let request = self.reserve_project_navigation(source, None);
+        // Issue #4145 AC-1: start of the project-open route; closed in
+        // `handle_project_navigation_prepared` once the tab is committed.
+        self.project_open_started = Some((request.id, Instant::now()));
         let request_for_worker = request.clone();
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -467,6 +471,20 @@ impl AppRuntime {
         })
     }
 
+    /// Issue #4145 AC-1: close the project-open route when the committed
+    /// navigation matches the request that opened it. A superseded request
+    /// leaves the slot alone so the newer open still gets its own sample.
+    fn record_project_open_route(&mut self, request_id: u64) {
+        let Some((pending_id, started)) = self.project_open_started else {
+            return;
+        };
+        if pending_id != request_id {
+            return;
+        }
+        self.project_open_started = None;
+        gwt::perf::record_route(gwt::perf::PerfRoute::ProjectOpen, started.elapsed());
+    }
+
     pub(crate) fn handle_project_navigation_prepared(
         &mut self,
         prepared: ProjectNavigationPrepared,
@@ -487,7 +505,9 @@ impl AppRuntime {
                     return Vec::new();
                 }
                 self.pending_project_navigation = None;
-                self.commit_prepared_project_open(open, prepared.request.source)
+                let events = self.commit_prepared_project_open(open, prepared.request.source);
+                self.record_project_open_route(prepared.request.id);
+                events
             }
             Ok(ProjectNavigationPayload::Switch(switch)) => {
                 let ProjectNavigationSource::Switch { tab_id } = &prepared.request.source else {
@@ -733,6 +753,9 @@ impl AppRuntime {
     }
 
     pub(crate) fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        // Issue #4145 AC-1: the whole user-visible switch runs synchronously on
+        // the GUI event loop here, so this guard is the switch route.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::ProjectSwitch);
         let Some(target_incarnation) = self.project_tab_incarnations.get(tab_id).cloned() else {
             return Vec::new();
         };

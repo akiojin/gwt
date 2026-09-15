@@ -257,7 +257,10 @@ use launch::{
     codex_hook_discovery_mode_for_launch_config,
     codex_hook_discovery_mode_from_codex_version_output,
     codex_hook_discovery_mode_from_selected_codex_version, dispatch_agent_launch_success,
+    effective_host_codex_config_path, issue_monitor_trust_candidate_from_feedback,
     maybe_register_codex_managed_hook_trust_for_launch,
+    register_codex_managed_project_trust_for_resolved_launch_with_host_context,
+    validate_issue_monitor_managed_codex_worktree, HostEnvKeySemantics, IssueMonitorTrustCandidate,
 };
 pub(crate) use launch::{
     continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
@@ -1218,6 +1221,12 @@ pub struct AppRuntime {
     /// pending window instead of spawning a duplicate. Entries clear on
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
+    /// Issue #4145 AC-1: the navigation request id and start instant of the
+    /// project open in flight. Opening spans a synchronous reserve, a
+    /// blocking-pool prepare and an event-loop commit, and
+    /// `ProjectNavigationRequest` is cloned into the worker and compared for
+    /// identity, so the instant is parked here instead.
+    pub(crate) project_open_started: Option<(u64, std::time::Instant)>,
     /// SPEC-3431 FR-001: window ids of in-flight PM launches, mapped to the
     /// project root whose `pm.json` must record the resulting session. The
     /// entry is consumed by `handle_launch_complete`, which writes the PM
@@ -1967,7 +1976,12 @@ fn commit_local_issue_monitor_effect_result(
                             .inbox_item(*issue_number)
                             .map(|item| item.issue.clone())
                         {
-                            latest.record_blocked_by_claim(issue, winner.owner, winner.expires_at);
+                            latest.record_blocked_by_claim(
+                                issue,
+                                winner.owner.clone(),
+                                winner.expires_at.clone(),
+                                Some(winner.claim_id.as_str()),
+                            );
                         }
                     }
                     1
@@ -2407,28 +2421,24 @@ fn run_scheduled_issue_monitor_scan(
 /// Issue #4084 AC-1: hand the canvas snapshot to the live daemon, which owns
 /// the scan in production. Failure is not an error: without a daemon this
 /// process is the driver and classifies against the same snapshot itself.
+///
+/// Issue #4131: this was `#[cfg(unix)]`, which made it a no-op on the one
+/// platform where it mattered most. The daemon runs on Windows too (named
+/// pipe, Issue #3526) and takes scan authority there, so it classified every
+/// scan against no canvas at all — and a launch whose pane an auto-update
+/// restart killed held its slot until a PM stopped it by hand.
 fn publish_issue_monitor_window_snapshot(
     project_root: &Path,
     snapshot: &gwt::IssueMonitorWindowSnapshot,
 ) {
-    #[cfg(unix)]
+    if let Err(error) =
+        gwt::daemon_publisher::publish_issue_monitor_window_snapshot(project_root, snapshot)
     {
-        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
-            "control",
-            serde_json::json!({ "window_snapshot": snapshot }),
-            std::process::id(),
+        tracing::debug!(
+            %error,
+            "Issue Monitor window snapshot stayed local; no daemon accepted it"
         );
-        if let Err(error) =
-            gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
-        {
-            tracing::debug!(
-                %error,
-                "Issue Monitor window snapshot stayed local; no daemon accepted it"
-            );
-        }
     }
-    #[cfg(not(unix))]
-    let _ = (project_root, snapshot);
 }
 
 /// The read/probe phase's own budget. Exceeding it degrades the scan's
@@ -2665,7 +2675,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 (expected_project_tab_id, live_window_ids)
             {
                 let reconciliation =
-                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids);
+                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids, now);
                 if !reconciliation.readopted.is_empty() {
                     tracing::warn!(
                         issues = ?reconciliation.readopted,
@@ -2854,6 +2864,7 @@ impl AppRuntime {
             pending_launch_wizard_materializations: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
+            project_open_started: None,
             pending_pm_launches: HashMap::new(),
             pending_pm_closes: HashMap::new(),
             pm_sessions: HashMap::new(),
@@ -3441,6 +3452,19 @@ impl AppRuntime {
             })
     }
 
+    fn issue_monitor_live_issue_number_for_window(
+        &self,
+        project_root: &Path,
+        window_id: &str,
+    ) -> Option<u64> {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).ok()?;
+        prefs
+            .launched_issues
+            .iter()
+            .find_map(|launched| (launched.window_id == window_id).then_some(launched.issue_number))
+    }
+
     fn publish_active_issue_monitor_control(
         &self,
         payload: serde_json::Value,
@@ -4024,6 +4048,7 @@ impl AppRuntime {
                     // agent must be running to be refused), and the daemon
                     // rejects it, so nothing committed.
                     Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
+                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
                             self.issue_monitor_launch_failure_committed(
@@ -4061,6 +4086,9 @@ impl AppRuntime {
                         // Issue #3616: unreachable from the launch path — the
                         // agent must be running to receive a provider refusal.
                         Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
+                            IssueMonitorFailureCommit::Rejected
+                        }
+                        Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
                             IssueMonitorFailureCommit::Rejected
                         }
                         None => {
@@ -4367,6 +4395,29 @@ impl AppRuntime {
             .get(window_id)
             .and_then(|context| context.issue_monitor_issue_number);
         let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
+        self.issue_monitor_agent_failed_events_with_failure(
+            project_root,
+            window_id,
+            message,
+            issue_number_hint,
+            failure,
+        )
+    }
+
+    pub(crate) fn issue_monitor_agent_failed_events_with_failure(
+        &mut self,
+        project_root: &Path,
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+        failure: Option<gwt::IssueMonitorFailure>,
+    ) -> Vec<OutboundEvent> {
+        let message = message.trim();
+        let message = if message.is_empty() {
+            "Agent entered error state"
+        } else {
+            message
+        };
         let publication = self.publish_issue_monitor_control(
             project_root,
             Self::issue_monitor_agent_failed_payload_with_failure(
@@ -4381,7 +4432,7 @@ impl AppRuntime {
             window_id,
             message,
             issue_number_hint,
-            session_mode,
+            failure,
             publication,
         )
     }
@@ -4502,7 +4553,11 @@ impl AppRuntime {
             window_id,
             message,
             issue_number_hint,
-            self.issue_monitor_session_mode_for_window(window_id),
+            self.issue_monitor_failure_for_window(
+                window_id,
+                message,
+                self.issue_monitor_session_mode_for_window(window_id),
+            ),
             publication,
         )
     }
@@ -4513,10 +4568,9 @@ impl AppRuntime {
         window_id: &str,
         message: &str,
         issue_number_hint: Option<u64>,
-        session_mode: gwt_agent::SessionMode,
+        failure: Option<gwt::IssueMonitorFailure>,
         publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
     ) -> Vec<OutboundEvent> {
-        let failure = self.issue_monitor_failure_for_window(window_id, message, session_mode);
         match publication {
             Ok(()) => self.finalize_issue_monitor_agent_failed_events(
                 project_root,
@@ -4608,6 +4662,22 @@ impl AppRuntime {
                                     }
                                 }
                             }
+                            Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
+                                let issue_number = issue_number_hint
+                                    .or_else(|| monitor.launched_window_issue(window_id));
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                if monitor.try_escalate_codex_directory_trust_prompt(
+                                    issue_number,
+                                    window_id,
+                                    message.to_string(),
+                                ) {
+                                    IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                } else {
+                                    IssueMonitorFailureCommit::Rejected
+                                }
+                            }
                             None => {
                                 let issue_number = if let Some(issue_number) = issue_number_hint {
                                     monitor.record_agent_issue_failed(
@@ -4662,6 +4732,14 @@ impl AppRuntime {
                         issue_number_hint,
                     ),
                 }
+            }
+            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_))
+                if matches!(
+                    failure,
+                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                ) =>
+            {
+                Vec::new()
             }
             Err(error) => self.issue_monitor_control_error_events(
                 None,
@@ -4895,6 +4973,7 @@ impl AppRuntime {
     fn finalize_issue_monitor_vanished_windows_in_background(
         project_root: &Path,
         live_windows_per_tab: &[(String, std::collections::BTreeSet<String>)],
+        observed_at: &str,
         commit_timeout: std::time::Duration,
     ) -> Vec<String> {
         if live_windows_per_tab.is_empty() {
@@ -4913,7 +4992,7 @@ impl AppRuntime {
         let targets = live_windows_per_tab
             .iter()
             .flat_map(|(tab_id, live_window_ids)| {
-                monitor.vanished_launched_windows(tab_id, live_window_ids)
+                monitor.vanished_launched_windows(tab_id, live_window_ids, observed_at)
             })
             .filter_map(|window_id| {
                 let issue_number = monitor.launched_window_issue(&window_id)?;
@@ -5421,31 +5500,19 @@ impl AppRuntime {
             operation,
             "issue monitor control outcome is rejected or uncertain; local fallback denied"
         );
-        let project_root = self.active_project_root().map(Path::to_path_buf);
-        let prefs = project_root
-            .as_deref()
-            .map(gwt::issue_monitor_prefs_path_for_repo_path)
-            .and_then(|path| gwt::load_issue_monitor_prefs(&path).ok())
-            .unwrap_or_else(gwt::IssueMonitorPrefs::recovery_default);
-        let mut monitor =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         let message = error.to_string();
-        monitor.record_control_commit_error(message.clone());
-        let mut events = self.issue_monitor_snapshot_events_without_wake(
-            client_id,
-            project_root.as_deref(),
-            monitor,
-        );
+        // A rejected or uncertain control does not describe monitor state.
+        // Keep the last authoritative snapshot; an empty reconstructed monitor
+        // would overwrite live queue/active counts with zeros (Issue #4273).
         let toast = BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message,
             issue_number,
         };
-        events.push(match client_id {
+        vec![match client_id {
             Some(client_id) => OutboundEvent::reply(client_id, toast),
             None => OutboundEvent::broadcast(toast),
-        });
-        events
+        }]
     }
 
     fn quick_register_issue_events(
@@ -5587,6 +5654,61 @@ impl AppRuntime {
         // it must not feed (or reset) the PM wake fingerprint.
         self.replace_knowledge_monitor_snapshot(project_root, &monitor.inbox);
         self.issue_monitor_snapshot_events_without_wake(client_id, Some(project_root), monitor)
+    }
+
+    fn list_issue_monitor_events_with_reader(
+        &mut self,
+        client_id: &str,
+        read_status: impl FnOnce(
+            &Path,
+        ) -> Result<
+            Option<serde_json::Value>,
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+        >,
+    ) -> Vec<OutboundEvent> {
+        if let Some(project_root) = self.active_project_root() {
+            let result = read_status(project_root).and_then(|status| {
+                status
+                    .map(serde_json::from_value::<gwt::IssueMonitorAgentStatus>)
+                    .transpose()
+                    .map_err(|error| {
+                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                            format!("invalid daemon Issue Monitor status: {error}"),
+                        )
+                    })
+            });
+            match result {
+                Ok(Some(status)) => {
+                    // A live daemon owns the projection. Older daemons omit
+                    // gui_status; their subscriber frames still supply it.
+                    return status
+                        .gui_status
+                        .map(|status| {
+                            vec![OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::IssueMonitorStatus {
+                                    status: Box::new(status),
+                                },
+                            )]
+                        })
+                        .unwrap_or_default();
+                }
+                Err(error) => {
+                    return self.issue_monitor_control_error_events(
+                        Some(client_id),
+                        error,
+                        "list",
+                        None,
+                    );
+                }
+                Ok(None) => {}
+            }
+        }
+        self.local_issue_monitor_events_with_policy(
+            Some(client_id),
+            IssueMonitorScanPolicy::Scan,
+            |_| {},
+        )
     }
 
     fn local_issue_monitor_events_with_policy(
@@ -6080,6 +6202,7 @@ impl AppRuntime {
                     Self::finalize_issue_monitor_vanished_windows_in_background(
                         &worker_project_root,
                         &live_windows_per_tab,
+                        &worker_now,
                         fallback_commit_timeout,
                     );
                 // Issue #3883: the scan owns the re-adoption, so it happens
@@ -6323,9 +6446,8 @@ impl AppRuntime {
         // SPEC-3431 T-093 (FR-012): every real local snapshot also feeds the
         // PM wake path, before the active-tab filter — the resident PM watches
         // its project regardless of which tab the user is looking at.
-        // Synthetic snapshots (the control-error fallback) must instead use
-        // [`Self::issue_monitor_snapshot_events_without_wake`]: their empty
-        // inbox would reset the wake baseline and replay old rows as news.
+        // Cache-only quick views use `issue_monitor_snapshot_events_without_wake`
+        // so display refreshes cannot reset the wake baseline.
         let mut events = Vec::new();
         if let Some(project_root) = project_root {
             self.replace_knowledge_monitor_snapshot(project_root, &monitor.inbox);
@@ -6336,6 +6458,42 @@ impl AppRuntime {
             project_root,
             monitor,
         ));
+        events
+    }
+
+    pub(crate) fn issue_monitor_daemon_status_events(
+        &self,
+        project_root: &Path,
+        status: Box<gwt::IssueMonitorStatusView>,
+    ) -> Vec<OutboundEvent> {
+        if self
+            .active_project_root()
+            .is_none_or(|active_root| !same_worktree_path(active_root, project_root))
+        {
+            return Vec::new();
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorStatus {
+            status,
+        })]
+    }
+
+    pub(crate) fn issue_monitor_daemon_inbox_events(
+        &mut self,
+        project_root: &Path,
+        items: Vec<gwt::IssueMonitorInboxItem>,
+    ) -> Vec<OutboundEvent> {
+        // Every project's knowledge and PM wake state still follows its daemon.
+        // Only the active project's inbox may update the shared frontend view.
+        self.replace_knowledge_monitor_snapshot(project_root, &items);
+        let mut events = self.pm_wake_events(project_root, &items);
+        if self
+            .active_project_root()
+            .is_some_and(|active_root| same_worktree_path(active_root, project_root))
+        {
+            events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
+                items,
+            }));
+        }
         events
     }
 
@@ -7500,10 +7658,9 @@ impl AppRuntime {
                     },
                 )
             }
-            FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events_with_policy(
-                Some(&client_id),
-                IssueMonitorScanPolicy::Scan,
-                |_| {},
+            FrontendEvent::ListIssueMonitor => self.list_issue_monitor_events_with_reader(
+                &client_id,
+                gwt::daemon_publisher::read_issue_monitor_status,
             ),
             // Internal agent-listener command. Browser-scoped requests are
             // deliberately inert; the authenticated route below owns it.

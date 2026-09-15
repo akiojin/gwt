@@ -704,11 +704,25 @@ impl HostRunnerProbeSingleFlight {
         key: ProbeSingleFlightKey,
         run: impl FnOnce() -> HostRunnerProbeOutcome,
     ) -> (HostRunnerProbeOutcome, ProbeShare) {
+        self.run_persisted(key, None, run)
+    }
+
+    /// Issue #4283: the same admission, backed by a persisted store for the
+    /// registry-facing probe kinds. A persisted success is replayed exactly
+    /// like an in-memory one (`ProbeShare::Reused`) and is promoted into the
+    /// in-memory slot so the file is read once per process, not per launch.
+    pub fn run_persisted(
+        &self,
+        key: ProbeSingleFlightKey,
+        store: Option<&PersistedProbeStore>,
+        run: impl FnOnce() -> HostRunnerProbeOutcome,
+    ) -> (HostRunnerProbeOutcome, ProbeShare) {
         enum Admission {
             Lead(Arc<ProbeSlot>),
             Join(Arc<ProbeSlot>),
             Reuse(HostRunnerProbeOutcome),
         }
+        let store = store.filter(|_| PersistedProbeStore::persists(key.kind));
         let admission = {
             let mut slots = lock_ignoring_poison(&self.slots);
             let existing =
@@ -724,11 +738,23 @@ impl HostRunnerProbeSingleFlight {
                         }
                         ProbeSlotState::Done { .. } => None,
                     });
-            existing.unwrap_or_else(|| {
-                let slot = ProbeSlot::in_flight();
-                slots.insert(key, Arc::clone(&slot));
-                Admission::Lead(slot)
-            })
+            let persisted = existing
+                .is_none()
+                .then(|| store.and_then(|store| store.lookup(&key, std::time::SystemTime::now())));
+            match (existing, persisted) {
+                (Some(admission), _) => admission,
+                (None, Some(Some(outcome))) => {
+                    let slot = ProbeSlot::in_flight();
+                    slot.complete(outcome.clone());
+                    slots.insert(key.clone(), slot);
+                    Admission::Reuse(outcome)
+                }
+                (None, _) => {
+                    let slot = ProbeSlot::in_flight();
+                    slots.insert(key.clone(), Arc::clone(&slot));
+                    Admission::Lead(slot)
+                }
+            }
         };
         match admission {
             Admission::Reuse(outcome) => (outcome, ProbeShare::Reused),
@@ -740,6 +766,13 @@ impl HostRunnerProbeSingleFlight {
                 let outcome = run();
                 slot.complete(outcome.clone());
                 guard.completed = true;
+                if let Some(store) = store {
+                    if outcome.success {
+                        store.record(&key, &outcome, std::time::SystemTime::now());
+                    } else {
+                        store.invalidate(&key);
+                    }
+                }
                 (outcome, ProbeShare::Led)
             }
             Admission::Join(slot) => {
@@ -760,6 +793,176 @@ impl HostRunnerProbeSingleFlight {
 fn host_runner_probe_single_flight() -> &'static HostRunnerProbeSingleFlight {
     static REGISTRY: std::sync::OnceLock<HostRunnerProbeSingleFlight> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(HostRunnerProbeSingleFlight::default)
+}
+
+/// Issue #4283: how long a persisted package-runner probe success is replayed.
+///
+/// The in-memory reuse above lives five minutes and dies with the process.
+/// Real pane-create intervals are longer than that and gwt restarts on every
+/// auto-update, so a cold targeted Windows Host launch paid
+/// `npm view <pkg>@latest` and `npx --yes <pkg>@<exact> --version` again —
+/// two child processes and a registry round trip before the PTY, which is the
+/// p50 of `route:pane.create`. One day matches the project-index probe cache
+/// (FR-393) and npm's own update-notifier cadence: `latest` re-resolves at
+/// most once a day per host.
+pub const PERSISTED_PROBE_REUSE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const PERSISTED_PROBE_CACHE_FILE: &str = "host_runner_probe_cache.json";
+const PERSISTED_PROBE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedProbeEntry {
+    kind: String,
+    command: String,
+    args: Vec<String>,
+    path: String,
+    stdout: String,
+    verified_at_ms: u64,
+}
+
+impl PersistedProbeEntry {
+    fn matches(&self, key: &ProbeSingleFlightKey) -> bool {
+        self.kind == format!("{:?}", key.kind)
+            && self.command == key.command
+            && self.args == key.args
+            && self.path == key.path
+    }
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct PersistedProbeFile {
+    schema_version: u32,
+    entries: Vec<PersistedProbeEntry>,
+}
+
+/// Successful registry-facing probe results persisted across gwt restarts.
+///
+/// Only the metadata and exact-package kinds are persisted: they answer
+/// "which exact version is `latest`" and "does npx run that exact package",
+/// both of which stay true for a day and cost seconds to re-ask. The direct
+/// runner probe is cheap and answers "is the CLI still installed", which must
+/// not be replayed. Failures and timeouts never persist, and a failure drops
+/// any stale success for the same key (FR-393 precedent: invalidate on
+/// failure). Every file operation is fail-open — a missing, unreadable or
+/// malformed store is a cache miss, never a launch error.
+#[derive(Debug, Clone)]
+pub struct PersistedProbeStore {
+    path: PathBuf,
+}
+
+impl PersistedProbeStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// The host-wide store under `~/.gwt/runtime/`.
+    pub fn host_default() -> Self {
+        Self::new(gwt_core::paths::gwt_runtime_dir().join(PERSISTED_PROBE_CACHE_FILE))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn persists(kind: HostRunnerProbeKind) -> bool {
+        matches!(
+            kind,
+            HostRunnerProbeKind::Metadata | HostRunnerProbeKind::Package
+        )
+    }
+
+    fn read(&self) -> PersistedProbeFile {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<PersistedProbeFile>(&raw).ok())
+            .filter(|file| file.schema_version == PERSISTED_PROBE_SCHEMA_VERSION)
+            .unwrap_or_default()
+    }
+
+    fn write(&self, file: &PersistedProbeFile) {
+        let Ok(payload) = serde_json::to_vec_pretty(file) else {
+            return;
+        };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let staged = self
+            .path
+            .with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&staged, payload).is_ok() && std::fs::rename(&staged, &self.path).is_err()
+        {
+            let _ = std::fs::remove_file(&staged);
+        }
+    }
+
+    /// A persisted success for `key` that is still inside the reuse window.
+    pub fn lookup(
+        &self,
+        key: &ProbeSingleFlightKey,
+        now: std::time::SystemTime,
+    ) -> Option<HostRunnerProbeOutcome> {
+        if !Self::persists(key.kind) {
+            return None;
+        }
+        let now_ms = unix_millis(now);
+        let entry = self
+            .read()
+            .entries
+            .into_iter()
+            .find(|entry| entry.matches(key))?;
+        let age_ms = now_ms.checked_sub(entry.verified_at_ms)?;
+        (age_ms < PERSISTED_PROBE_REUSE_TTL.as_millis() as u64).then(|| HostRunnerProbeOutcome {
+            success: true,
+            exit_code: Some(0),
+            stdout: entry.stdout,
+            stderr: String::new(),
+            timed_out: false,
+            error: None,
+        })
+    }
+
+    /// Persist a successful probe, replacing any earlier entry for `key`.
+    pub fn record(
+        &self,
+        key: &ProbeSingleFlightKey,
+        outcome: &HostRunnerProbeOutcome,
+        verified_at: std::time::SystemTime,
+    ) {
+        if !Self::persists(key.kind) || !outcome.success {
+            return;
+        }
+        let mut file = self.read();
+        file.schema_version = PERSISTED_PROBE_SCHEMA_VERSION;
+        file.entries.retain(|entry| !entry.matches(key));
+        file.entries.push(PersistedProbeEntry {
+            kind: format!("{:?}", key.kind),
+            command: key.command.clone(),
+            args: key.args.clone(),
+            path: key.path.clone(),
+            stdout: outcome.stdout.clone(),
+            verified_at_ms: unix_millis(verified_at),
+        });
+        self.write(&file);
+    }
+
+    /// Drop the persisted result for `key`, if any.
+    pub fn invalidate(&self, key: &ProbeSingleFlightKey) {
+        if !self.path.exists() {
+            return;
+        }
+        let mut file = self.read();
+        let before = file.entries.len();
+        file.entries.retain(|entry| !entry.matches(key));
+        if file.entries.len() != before {
+            file.schema_version = PERSISTED_PROBE_SCHEMA_VERSION;
+            self.write(&file);
+        }
+    }
+}
+
+fn unix_millis(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1255,6 +1458,21 @@ where
     if config.agent_id.builtin_descriptor().is_none() {
         return Ok(HostRunnerHealthReport::default());
     }
+    // Issue #3972: the package runner stored on the config was resolved from
+    // the gwt process PATH before the launch profile existed. Bind it to the
+    // launch environment before anything probes or spawns it, so the runner
+    // that is health-checked is the runner this launch will use.
+    if command_matches_runner(&config.command, "bunx")
+        || command_matches_runner(&config.command, "npx")
+    {
+        if let Some(rebound) = crate::launch::rebind_package_runner_to_effective_env(
+            &config.command,
+            &config.env_vars,
+            config.working_dir.as_deref(),
+        ) {
+            config.command = rebound;
+        }
+    }
     if is_targeted_windows_host_package_launch(config) && config.tool_runtime_provenance.is_some() {
         return resolve_targeted_windows_host_package_plan(
             config,
@@ -1540,6 +1758,10 @@ where
     };
     let mut report = HostRunnerHealthReport::default();
     probe_exact_npx_package_plan(&plan, config, npx_cache_base, probe, repair, &mut report)?;
+    // Issue #3481 AC-2: the exact version resolved here is the same snapshot
+    // that builds `package_prefix`, so readiness decisions read the identity of
+    // the package this launch will actually run rather than the selector alias.
+    report.version_output = Some(resolved_exact_version.clone());
     report.switched_to_fallback = switched_to_fallback;
     if switched_to_fallback {
         report
@@ -1882,18 +2104,6 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe.to_path_buf()
 }
 
-fn resolve_generated_hook_gwt_bin_with_lookup(
-    current_exe: &Path,
-    lookup: impl FnOnce(&str) -> Option<PathBuf>,
-) -> PathBuf {
-    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
-        if let Some(candidate) = sibling_gwtd_binary(current_exe) {
-            return candidate;
-        }
-    }
-    resolve_public_gwt_bin_with_lookup(current_exe, lookup)
-}
-
 fn sibling_gwtd_binary(path: &Path) -> Option<PathBuf> {
     if !is_named_gwt_binary(path) {
         return None;
@@ -1947,74 +2157,6 @@ fn apply_docker_runtime_to_launch_config(
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
     Ok(Some(runtime))
-}
-
-pub fn register_codex_managed_hook_trust_in_docker(
-    worktree: &Path,
-    docker_service: Option<&str>,
-    codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
-) -> Result<(), String> {
-    let worktree = normalize_child_process_path(worktree);
-    let launch = resolve_docker_launch_plan(&worktree, docker_service)?;
-    let current_exe = std::env::current_exe().map_err(|err| format!("current_exe: {err}"))?;
-    let host_gwt_bin = resolve_generated_hook_gwt_bin_with_lookup(&current_exe, |command| {
-        which::which(command).ok()
-    })
-    .into_os_string()
-    .into_string()
-    .map_err(|_| "host gwtd path is not valid UTF-8".to_string())?;
-    let args = docker_codex_hook_trust_registration_args(
-        &launch.container_cwd,
-        &host_gwt_bin,
-        codex_hook_discovery_mode,
-    );
-    let output = gwt_docker::compose_service_exec_capture_with_files(
-        &launch.compose_files,
-        &launch.service,
-        Some(&launch.container_cwd),
-        &args,
-    )
-    .map_err(|err| err.to_string())?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        format!("exit status {}", output.status)
-    };
-    Err(format!(
-        "container-local Codex hook trust registration failed for service '{}': {detail}",
-        launch.service
-    ))
-}
-
-fn docker_codex_hook_trust_registration_args(
-    container_cwd: &str,
-    host_gwt_bin_fallback: &str,
-    codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
-) -> Vec<String> {
-    let project_root_json = serde_json::to_string(container_cwd)
-        .expect("container cwd must serialize as a JSON string");
-    let discovery_json = serde_json::to_string(codex_hook_discovery_mode.as_cli_value())
-        .expect("discovery mode must serialize as a JSON string");
-    let script = format!(
-        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\ncodex_config=\"$codex_home/config.toml\"\nGWT_HOOK_BIN={} exec {} <<JSON\n{{\"schema_version\":1,\"operation\":\"hook.register_codex_managed_hook_trust\",\"params\":{{\"project_root\":{},\"codex_config\":\"$codex_config\",\"codex_hook_discovery\":{}}}}}\nJSON",
-        shell_single_quote(host_gwt_bin_fallback),
-        shell_single_quote(DOCKER_GWTD_BIN_PATH),
-        project_root_json,
-        discovery_json,
-    );
-    vec!["sh".to_string(), "-lc".to_string(), script]
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn finalize_docker_agent_launch_config_with_runtime(
@@ -2095,7 +2237,14 @@ where
             cwd.clone(),
         );
         if bunx_probe.success {
-            return Ok(HostRunnerHealthReport::default());
+            // Issue #3481: this probe ran the exact package spec that will be
+            // spawned, so its version is the discovery evidence for the
+            // launched executable — including when the selector is the
+            // `latest` alias, which carries no capability information itself.
+            return Ok(HostRunnerHealthReport {
+                version_output: strict_semver_probe_evidence(&bunx_probe),
+                ..HostRunnerHealthReport::default()
+            });
         }
     }
 
@@ -2141,6 +2290,7 @@ where
         cwd.clone(),
     );
     if first_npx_probe.success {
+        report.version_output = strict_semver_probe_evidence(&first_npx_probe);
         return Ok(finish(config, report));
     }
     if first_npx_probe.timed_out {
@@ -2220,6 +2370,7 @@ where
         ));
     }
 
+    report.version_output = strict_semver_probe_evidence(&second_npx_probe);
     Ok(finish(config, report))
 }
 
@@ -2256,18 +2407,22 @@ fn probe_host_runner_outcome(
     cwd: Option<PathBuf>,
 ) -> HostRunnerProbeOutcome {
     let key = ProbeSingleFlightKey::new(kind, command, &args, env_vars);
-    let (outcome, share) = host_runner_probe_single_flight().run(key, || {
-        probe_host_runner_with_timeout(
-            kind,
-            command,
-            args,
-            env_vars,
-            remove_env,
-            cwd,
-            host_runner_probe_timeout(kind),
-            Duration::from_millis(50),
-        )
-    });
+    // Issue #4283: registry-facing probes replay a persisted success across
+    // restarts; see `PersistedProbeStore` for the kinds and the window.
+    let store = PersistedProbeStore::host_default();
+    let (outcome, share) =
+        host_runner_probe_single_flight().run_persisted(key, Some(&store), || {
+            probe_host_runner_with_timeout(
+                kind,
+                command,
+                args,
+                env_vars,
+                remove_env,
+                cwd,
+                host_runner_probe_timeout(kind),
+                Duration::from_millis(50),
+            )
+        });
     if share != ProbeShare::Led {
         tracing::info!(
             target: "gwt.process.summary",
@@ -4912,6 +5067,27 @@ mod tests {
         config
     }
 
+    /// Issue #3481: the `codex@latest` Host launch shape. `latest` never
+    /// reaches the direct runner, so the bunx/npx package-runner probe is the
+    /// only discovery of the executable that will be spawned.
+    fn sample_codex_latest_bunx_launch_config(worktree: &Path) -> LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(worktree)
+            .branch("feature/demo")
+            .version("latest")
+            .session_mode(SessionMode::Normal)
+            .build();
+        config.command = "bunx".to_string();
+        config.args = vec![
+            "@openai/codex@latest".to_string(),
+            "--no-alt-screen".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(worktree.to_path_buf());
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config
+    }
+
     fn sample_direct_codex_launch_config(worktree: &Path) -> LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir(worktree)
@@ -6255,6 +6431,139 @@ mod tests {
         assert!(!version_output.contains(SECRET));
     }
 
+    /// Issue #3481 AC-1/AC-2: `codex@latest` resolves through the package
+    /// runner, so the runner probe is the only discovery of the executable that
+    /// will actually be spawned. Its version evidence must reach the report
+    /// instead of being discarded, otherwise downstream readiness decisions
+    /// fall back to the alias string.
+    #[test]
+    fn healthy_latest_package_runner_report_carries_probe_version_evidence() {
+        const SECRET: &str = "latest-package-version-sentinel-31481";
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+        config
+            .env_vars
+            .insert("RUNNER_API_TOKEN".to_string(), SECRET.to_string());
+        let mut probe_calls = 0;
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                assert_eq!(kind, HostRunnerProbeKind::Runner);
+                HostRunnerProbeOutcome {
+                    success: true,
+                    exit_code: Some(0),
+                    stdout: format!("codex-cli 0.130.0 https://user:{SECRET}@example.test/runner"),
+                    stderr: String::new(),
+                    timed_out: false,
+                    error: None,
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy latest package runner");
+
+        assert_eq!(probe_calls, 1);
+        assert!(!report.switched_to_fallback);
+        let version_output = report.version_output.expect("version output evidence");
+        assert_eq!(version_output, "0.130.0");
+        assert!(!version_output.contains(SECRET));
+    }
+
+    /// Issue #3481 AC-2: the npx fallback probe runs the same package spec that
+    /// will be launched, so its evidence is the authoritative snapshot too.
+    #[test]
+    fn latest_npx_fallback_report_carries_probe_version_evidence() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+        let mut probe_calls = 0;
+        let fallback = if cfg!(windows) { "npx.cmd" } else { "npx" };
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            fallback.to_string(),
+            None,
+            |kind, _command, _args, _env, _remove_env, _cwd| {
+                probe_calls += 1;
+                assert_eq!(kind, HostRunnerProbeKind::Runner);
+                if probe_calls == 1 {
+                    HostRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                } else {
+                    HostRunnerProbeOutcome {
+                        success: true,
+                        exit_code: Some(0),
+                        stdout: "codex-cli 0.133.0".to_string(),
+                        stderr: String::new(),
+                        timed_out: false,
+                        error: None,
+                    }
+                }
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy npx fallback");
+
+        assert_eq!(probe_calls, 2);
+        assert!(report.switched_to_fallback);
+        assert_eq!(report.version_output.as_deref(), Some("0.133.0"));
+    }
+
+    /// Issue #3481 AC-3: a runner probe that answers without any parseable
+    /// version must not synthesize evidence. The absent snapshot is what lets
+    /// the consumer choose its diagnosable fallback instead of trusting the
+    /// alias string.
+    #[test]
+    fn latest_package_runner_without_semver_output_reports_no_version_evidence() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+
+        let report = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| HostRunnerProbeOutcome {
+                success: true,
+                exit_code: Some(0),
+                stdout: "unexpected output".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+                error: None,
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect("healthy latest package runner");
+
+        assert_eq!(report.version_output, None);
+    }
+
+    /// Issue #3481 AC-3/AC-4: when no runner can be proven, the alias must not
+    /// stand in for the missing discovery. The launch fails closed instead of
+    /// producing a readiness snapshot from the selector string.
+    #[test]
+    fn latest_package_runner_missing_binary_fails_closed_without_version_evidence() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_codex_latest_bunx_launch_config(temp.path());
+
+        let error = resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            None,
+            |_kind, _command, _args, _env, _remove_env, _cwd| {
+                HostRunnerProbeOutcome::failure_with_stderr("command not found")
+            },
+            |_candidate| panic!("cache repair must not run"),
+        )
+        .expect_err("an unproven package runner must fail closed");
+
+        assert!(
+            error.contains("@openai/codex@latest"),
+            "the failure must name the package spec it could not prove: {error}"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn host_runner_health_rejects_npx_timeout_after_cache_repair_without_mutating_config() {
@@ -6438,6 +6747,65 @@ mod tests {
 
         assert_eq!(format!("{config:?}"), original);
         assert!(error.contains("package-runner probe failed"));
+    }
+
+    /// Issue #3972: `AgentLaunchBuilder::build` picks `bunx`/`npx` before the
+    /// launch profile is merged, so it resolves them from the gwt process
+    /// `PATH` and stores an absolute host executable. Health-checking that
+    /// stored command spawns the host runner no matter what the launch `PATH`
+    /// says, which is why a test that pins fixture runners still reached the
+    /// machine's real `npx` and missed the five-second probe budget on a loaded
+    /// host. The health check must re-bind the runner to the launch `PATH`
+    /// before probing it.
+    #[cfg(unix)]
+    #[test]
+    fn package_runner_health_check_rebinds_the_command_to_the_launch_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let host_bin = temp.path().join("host-bin");
+        let launch_bin = temp.path().join("launch-bin");
+        for dir in [&host_bin, &launch_bin] {
+            fs::create_dir_all(dir).expect("create runner bin dir");
+            let runner = dir.join("npx");
+            fs::write(&runner, "#!/bin/sh\nprintf '1.2.3\\n'\n").expect("write fixture npx");
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
+                .expect("chmod fixture npx");
+        }
+        let host_npx = host_bin.join("npx").display().to_string();
+        let launch_npx = launch_bin.join("npx").display().to_string();
+
+        let mut config = sample_versioned_launch_config(temp.path());
+        config.command = host_npx.clone();
+        config.args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+        ];
+        config
+            .env_vars
+            .insert("PATH".to_string(), launch_bin.display().to_string());
+
+        let mut probed = Vec::new();
+        resolve_host_runner_health_checked_with_probe_and_repair(
+            &mut config,
+            host_npx.clone(),
+            None,
+            |kind, command, _args, _env, _remove_env, _cwd| {
+                probed.push((kind, command.to_string()));
+                HostRunnerProbeOutcome::success()
+            },
+            |_candidate| panic!("a healthy runner must not repair the npx cache"),
+        )
+        .expect("package runner health check");
+
+        assert!(
+            probed.iter().all(|(_, command)| command == &launch_npx),
+            "every probe must run the runner the launch PATH selects, got {probed:?}"
+        );
+        assert_eq!(
+            config.command, launch_npx,
+            "the launch must spawn the runner it health-checked"
+        );
     }
 
     #[cfg(unix)]
@@ -8150,7 +8518,7 @@ fi
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.docker_service = Some("app".to_string());
         config.command = "codex".to_string();
-        config.args = vec!["--no-alt-screen".to_string()];
+        config.args = crate::canonical_launch_args(&AgentId::Codex);
         config.env_vars = HashMap::from([
             (GWT_SESSION_ID_ENV.to_string(), "sess-123".to_string()),
             (
@@ -8176,57 +8544,16 @@ fi
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
-    }
-
-    #[test]
-    fn docker_codex_hook_trust_registration_uses_container_home_and_host_fallback() {
-        let args = docker_codex_hook_trust_registration_args(
-            "/workspace/app",
-            "/host/gwt/bin/gwtd",
-            gwt_skills::CodexHookDiscoveryMode::Both,
-        );
-
-        assert_eq!(args[0], "sh");
-        assert_eq!(args[1], "-lc");
-        let script = &args[2];
-        assert!(
-            script.contains(r#"codex_home="${CODEX_HOME:-${HOME:-/root}/.codex}""#),
-            "script must derive Codex home from the active container user, got: {script}"
-        );
-        assert!(
-            script.contains(r#"codex_config="$codex_home/config.toml""#)
-                && script.contains(r#""codex_config":"$codex_config""#),
-            "script must pass the derived Codex config path through JSON, got: {script}"
-        );
-        assert!(
-            script.contains(r#""operation":"hook.register_codex_managed_hook_trust""#),
-            "script must use the JSON envelope hook registration operation, got: {script}"
-        );
-        assert!(
-            script.contains(r#""codex_hook_discovery":"both""#),
-            "script must pass the resolved Codex hook discovery mode through JSON, got: {script}"
-        );
-        assert!(
-            script.contains("GWT_HOOK_BIN='/host/gwt/bin/gwtd' exec '/usr/local/bin/gwtd' <<JSON"),
-            "script must invoke container-local gwtd while matching host-generated hooks, got: {script}"
-        );
-        assert!(
-            !script.contains("/root/.codex/config.toml"),
-            "script must not hard-code root's Codex config path, got: {script}"
-        );
-    }
-
-    #[test]
-    fn docker_codex_hook_trust_fallback_matches_gui_hook_generator_sibling() {
-        let fallback = resolve_generated_hook_gwt_bin_with_lookup(
-            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
-            |_| Some(PathBuf::from("/usr/local/bin/gwtd")),
-        );
-
         assert_eq!(
-            fallback,
-            PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"),
-            "Docker trust fallback must match settings_local::gwt_hook_bin_path for GUI launches"
+            config
+                .args
+                .iter()
+                .filter(|arg| {
+                    arg.as_str() == "--config=features.default_mode_request_user_input=true"
+                })
+                .count(),
+            1,
+            "Docker wrapping must preserve the canonical Default-mode override"
         );
     }
 
@@ -8790,6 +9117,11 @@ fi
         package_dir
     }
 
+    // Both callers are `#[cfg(not(windows))]`, so on Windows this helper is
+    // dead code and `cargo clippy --all-targets -- -D warnings` fails on it.
+    // CI only runs Clippy on Linux, so the break is local-only and permanent
+    // until the helper carries the same gate as its callers.
+    #[cfg(not(windows))]
     fn sample_exact_npx_launch_config(worktree: &Path) -> LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir(worktree)
@@ -9143,5 +9475,144 @@ fi
             ProbeShare::Led,
             "a failure is re-probed, not replayed"
         );
+    }
+
+    fn metadata_key() -> ProbeSingleFlightKey {
+        ProbeSingleFlightKey {
+            kind: HostRunnerProbeKind::Metadata,
+            command: "npm.cmd".to_string(),
+            args: vec![
+                "view".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "version".to_string(),
+                "--json".to_string(),
+            ],
+            path: "C:\\Program Files\\nodejs".to_string(),
+        }
+    }
+
+    #[test]
+    fn persisted_probe_result_is_reused_by_a_fresh_registry_without_a_process() {
+        // Issue #4283 AC-1 / AC-6: the 300s in-memory reuse never survives a
+        // gwt restart, so every cold launch paid `npm view` + `npx --version`
+        // again. A successful package-runner probe is persisted and a fresh
+        // registry (= a restarted gwt) replays it without spawning anything.
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        let first_registry = HostRunnerProbeSingleFlight::default();
+        let (led, share) =
+            first_registry.run_persisted(metadata_key(), Some(&store), || HostRunnerProbeOutcome {
+                stdout: "\"2.1.0\"\n".to_string(),
+                ..HostRunnerProbeOutcome::success()
+            });
+        assert_eq!(share, ProbeShare::Led);
+        assert!(led.success);
+
+        let restarted_registry = HostRunnerProbeSingleFlight::default();
+        let started = Instant::now();
+        let (reused, share) =
+            restarted_registry.run_persisted(metadata_key(), Some(&store), || {
+                panic!("a persisted success must be replayed, not re-probed")
+            });
+        assert_eq!(share, ProbeShare::Reused);
+        assert!(reused.success);
+        assert_eq!(reused.stdout, "\"2.1.0\"\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "warm admission must not pay a process start"
+        );
+    }
+
+    #[test]
+    fn persisted_probe_result_expires_after_the_reuse_ttl() {
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        let stale =
+            std::time::SystemTime::now() - PERSISTED_PROBE_REUSE_TTL - Duration::from_secs(60);
+        store.record(&metadata_key(), &HostRunnerProbeOutcome::success(), stale);
+
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) = registry.run_persisted(
+            metadata_key(),
+            Some(&store),
+            HostRunnerProbeOutcome::success,
+        );
+        assert_eq!(
+            share,
+            ProbeShare::Led,
+            "a stale persisted result is re-probed"
+        );
+    }
+
+    #[test]
+    fn a_failed_probe_invalidates_the_persisted_result() {
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        store.record(
+            &metadata_key(),
+            &HostRunnerProbeOutcome::success(),
+            std::time::SystemTime::now(),
+        );
+
+        // An expired success is not replayed, so the probe runs; when it
+        // fails, the expired entry is dropped rather than left behind.
+        let expired_at =
+            std::time::SystemTime::now() - PERSISTED_PROBE_REUSE_TTL - Duration::from_secs(60);
+        store.record(
+            &single_flight_key("0.153.2"),
+            &HostRunnerProbeOutcome::success(),
+            expired_at,
+        );
+        assert!(store
+            .lookup(
+                &single_flight_key("0.153.2"),
+                expired_at + Duration::from_secs(1)
+            )
+            .is_some());
+        let failing_registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) =
+            failing_registry.run_persisted(single_flight_key("0.153.2"), Some(&store), || {
+                HostRunnerProbeOutcome::failure_with_stderr("E404 not found")
+            });
+        assert_eq!(share, ProbeShare::Led);
+        assert!(
+            store
+                .lookup(
+                    &single_flight_key("0.153.2"),
+                    expired_at + Duration::from_secs(1)
+                )
+                .is_none(),
+            "a failure never persists and drops the stale success"
+        );
+
+        store.invalidate(&metadata_key());
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) = registry.run_persisted(
+            metadata_key(),
+            Some(&store),
+            HostRunnerProbeOutcome::success,
+        );
+        assert_eq!(share, ProbeShare::Led, "an invalidated result is re-probed");
+    }
+
+    #[test]
+    fn direct_runner_probes_are_never_persisted() {
+        let home = tempdir().expect("tempdir");
+        let store = PersistedProbeStore::new(home.path().join("host_runner_probe_cache.json"));
+        let key = ProbeSingleFlightKey {
+            kind: HostRunnerProbeKind::Direct,
+            command: "claude".to_string(),
+            args: vec!["--version".to_string()],
+            path: "/usr/local/bin".to_string(),
+        };
+        let registry = HostRunnerProbeSingleFlight::default();
+        let (_, share) =
+            registry.run_persisted(key.clone(), Some(&store), HostRunnerProbeOutcome::success);
+        assert_eq!(share, ProbeShare::Led);
+        assert!(
+            store.lookup(&key, std::time::SystemTime::now()).is_none(),
+            "only package-runner probes (metadata / exact package) are persisted"
+        );
+        assert!(!store.path().exists(), "nothing persisted, nothing written");
     }
 }

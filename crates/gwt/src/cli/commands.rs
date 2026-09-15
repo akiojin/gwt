@@ -40,6 +40,12 @@ pub enum IssueCommand {
         phase: Option<String>,
         state: Option<String>,
     },
+    /// Issue #4146: scan gwt-spec Issues and report the ones whose `tasks`
+    /// section carries task rows with no checkbox, the shape that read as
+    /// "all complete" before the completion accounting was fixed.
+    SpecAudit {
+        state: Option<String>,
+    },
     SpecCreate {
         title: String,
         file: String,
@@ -310,6 +316,12 @@ pub enum PrCommand {
         number: u64,
     },
     Draft {
+        number: u64,
+    },
+    /// SPEC #3835 AC-15: merge the base branch into the PR head so a `BEHIND`
+    /// PR can reach `MERGEABLE`. The PM's only way out of `BEHIND`; a conflict
+    /// refuses instead of resolving anything.
+    UpdateBranch {
         number: u64,
     },
     Comment {

@@ -18,6 +18,7 @@ pub mod daemon_runtime;
 pub mod daemon_subscriber;
 pub mod daemon_supervisor;
 mod discussion_resume;
+pub mod disk_space;
 pub mod error_report;
 pub mod file_content;
 pub mod file_tree;
@@ -36,6 +37,7 @@ pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
 pub mod managed_assets;
+pub mod memory_pressure;
 pub mod migration;
 pub mod native_app;
 pub(crate) mod path_filter;
@@ -49,6 +51,7 @@ pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
 pub mod runtime_daemon_events;
+pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
@@ -69,12 +72,14 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 
 #[doc(hidden)]
 pub use agent_project_state::{
-    apply_authenticated_work_terminalization, apply_authenticated_workspace_update,
+    adopt_authenticated_execution, apply_authenticated_work_terminalization,
+    apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
     continue_authenticated_execution, observe_agent_runtime, prepare_resume_producing_authority,
     probe_authenticated_execution_binding, probe_authenticated_prepared_execution_binding,
-    AgentBuildAbortTerminalizationRequest, AgentExecutionBindingProbeReceipt,
+    AgentBuildAbortTerminalizationRequest, AgentExecutionAdoptionReceipt,
+    AgentExecutionAdoptionRequest, AgentExecutionBindingProbeReceipt,
     AgentExecutionBindingProbeRequest, AgentExecutionContinuationOutcome,
     AgentExecutionContinuationReceipt, AgentExecutionContinuationRequest, AgentRuntimeObservation,
     AgentWorkTerminalKind, AgentWorkTerminalizationOutcome, AgentWorkTerminalizationReceipt,
@@ -147,30 +152,30 @@ pub use issue_monitor::{
     AutonomousSteeringRequest, AutonomousWaitDeclaration, AutonomousWaitOutcome,
     EligibilityDecision, IssueMonitorAgentStatus, IssueMonitorAuthorityFence,
     IssueMonitorAuthorityFenceState, IssueMonitorAuthorityLease, IssueMonitorCandidateSource,
-    IssueMonitorConfig, IssueMonitorControlReceipt, IssueMonitorEffectAttemptKey,
-    IssueMonitorEffectPayload, IssueMonitorEffectState, IssueMonitorExecutionSettlement,
-    IssueMonitorFailedIssue, IssueMonitorFailoverOutcome, IssueMonitorFailure,
-    IssueMonitorIdleKind, IssueMonitorIdlePaneClose, IssueMonitorIdleReconciliation,
-    IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow, IssueMonitorInboxItem,
-    IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchBindingReconciliation,
-    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileCandidate,
-    IssueMonitorLaunchProfilePatch, IssueMonitorLaunchProfileSource,
-    IssueMonitorLaunchProfileSwitchError, IssueMonitorLaunchRequest,
-    IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue, IssueMonitorLaunchingIssue,
-    IssueMonitorPrefs, IssueMonitorPrefsReset, IssueMonitorProfilesSetChange,
-    IssueMonitorProviderQuotaHold, IssueMonitorProviderQuotaHoldClearOutcome,
-    IssueMonitorProviderQuotaHoldEvidence, IssueMonitorProviderQuotaHoldRelease,
-    IssueMonitorProviderQuotaPollerWindow, IssueMonitorProviderUsageLimitOutcome,
-    IssueMonitorReadiness, IssueMonitorReleasedFailure, IssueMonitorRequeueOutcome,
-    IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver, IssueMonitorScanDriverKind,
-    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, IssueMonitorStopMismatch,
-    IssueMonitorStopOutcome, IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts,
-    IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl, IssueMonitorUpdateDrainReason,
-    IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
-    LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery, MergedIssueSettlement,
-    MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind, PendingIssueMonitorEffect,
-    AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorClaimIdentity, IssueMonitorConfig, IssueMonitorControlReceipt,
+    IssueMonitorEffectAttemptKey, IssueMonitorEffectPayload, IssueMonitorEffectState,
+    IssueMonitorExecutionSettlement, IssueMonitorFailedIssue, IssueMonitorFailoverOutcome,
+    IssueMonitorFailure, IssueMonitorIdleKind, IssueMonitorIdlePaneClose,
+    IssueMonitorIdleReconciliation, IssueMonitorIdleReleaseRequest, IssueMonitorIdleWindow,
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    IssueMonitorLaunchBindingReconciliation, IssueMonitorLaunchIdentity, IssueMonitorLaunchPlan,
+    IssueMonitorLaunchProfile, IssueMonitorLaunchProfileCandidate, IssueMonitorLaunchProfilePatch,
+    IssueMonitorLaunchProfileSource, IssueMonitorLaunchProfileSwitchError,
+    IssueMonitorLaunchRequest, IssueMonitorLaunchSessionStrategy, IssueMonitorLaunchedIssue,
+    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorPrefsReset,
+    IssueMonitorProfilesSetChange, IssueMonitorProviderQuotaHold,
+    IssueMonitorProviderQuotaHoldClearOutcome, IssueMonitorProviderQuotaHoldEvidence,
+    IssueMonitorProviderQuotaHoldRelease, IssueMonitorProviderQuotaPollerWindow,
+    IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness, IssueMonitorReleasedFailure,
+    IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver,
+    IssueMonitorScanDriverKind, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
+    IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
+    IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
+    IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, IssueMonitorWindowObservation,
+    IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
+    MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
+    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
+    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
@@ -196,7 +201,7 @@ pub use launch_wizard::{
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
-    refresh_managed_gwt_assets_for_worktree,
+    refresh_managed_gwt_assets_for_worktree, ManagedAssetMaterialization,
 };
 pub use native_app::{
     macos_bundle_identifier, APP_NAME, GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME,

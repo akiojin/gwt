@@ -6,12 +6,14 @@
 
 pub mod board_escalation;
 pub mod board_remote_roots;
+pub mod concern;
 pub mod config;
 pub mod coordination;
 pub mod daemon;
 pub mod daemon_pipe_name;
 pub mod error;
 pub mod error_ledger;
+pub mod fd_limit;
 pub mod github_budget;
 pub mod github_quota;
 pub mod index;

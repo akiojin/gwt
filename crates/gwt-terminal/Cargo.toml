@@ -9,6 +9,10 @@ description = "PTY management, vt100 terminal emulation, and scrollback for gwt"
 publish = false
 
 [dependencies]
+# Issue #4142: the PTY spawn path reports the process descriptor budget when a
+# launch fails with `Too many open files`, so `gwt_core::fd_limit` is needed on
+# every target rather than only on Windows.
+gwt-core.workspace = true
 portable-pty.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -18,11 +22,7 @@ vt100 = "0.16"
 libc.workspace = true
 nix = { version = "0.31", features = ["signal"] }
 
-[target.'cfg(windows)'.dependencies]
-gwt-core.workspace = true
-
 [dev-dependencies]
-gwt-core.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true

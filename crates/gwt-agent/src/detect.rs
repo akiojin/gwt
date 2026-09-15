@@ -319,7 +319,6 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .expect("make Grok Build fixture executable");
-
         // The fixture PATH is injected into the probe only; the process PATH
         // stays untouched so parallel `sh` / `git` spawns keep resolving
         // (Issue #3895).

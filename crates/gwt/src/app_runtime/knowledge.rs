@@ -500,6 +500,8 @@ mod monitor_snapshot_cache_tests {
             claim_id: None,
             blocked_by_owner: None,
             claim_expires_at: None,
+            blocked_by_claim_id: None,
+            claim_block_issue_updated_at: None,
             launched_window_id: None,
             launch_plan: None,
             error_message: None,

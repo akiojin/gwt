@@ -46,8 +46,10 @@ fn write_meta(index_root: &std::path::Path, repo_hash: &str, minutes_ago: i64) {
         "schema_version": 1,
         "last_full_refresh": now.to_rfc3339(),
         "ttl_minutes": 15,
+        "document_count": 1,
     });
     std::fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+    std::fs::write(dir.join("chroma.sqlite3"), b"fixture").unwrap();
 }
 
 #[tokio::test]
@@ -166,11 +168,13 @@ fn issue_index_refreshed_since_detects_completed_duplicate() {
             "schema_version": 1,
             "last_full_refresh": now.to_rfc3339(),
             "ttl_minutes": 15,
+            "document_count": 1,
         })
         .to_string(),
     )
     .unwrap();
 
+    std::fs::write(issues_dir.join("chroma.sqlite3"), b"fixture").unwrap();
     assert!(
         issue_index_refreshed_since(
             &index_root,

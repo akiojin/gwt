@@ -482,6 +482,11 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
     ) -> CloseWindowOutcome {
+        // Issue #4145 AC-1: every close route converges here, and Issue #3783
+        // designed the accepted close to stay on the event loop, so this guard
+        // measures exactly the latency a person sees when a pane disappears.
+        // The detached teardown that follows is deliberately outside it.
+        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneClose);
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         if !close_window_from_workspace(
             &mut self.tabs,
