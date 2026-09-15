@@ -11,6 +11,7 @@
         applyRuntimeHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
+      import { createStartupMetrics } from "/startup-metrics.js";
       import {
         TITLEBAR_DOCK_HIT_HEIGHT,
         clientPointFromDragEvent,
@@ -2457,6 +2458,8 @@
         viewportTweenFrame = requestAnimationFrame(step);
       }
 
+      const startupMetrics = createStartupMetrics({ send });
+
       function sendStartupAutoResumeReady() {
         if (startupAutoResumeReadySent) {
           return;
@@ -4261,6 +4264,7 @@
         }
         runtime.handshakeAttempts = 0;
         runtime.isReady = true;
+        startupMetrics.onTerminalReady(windowId, runtime);
 
         if (pendingSnapshotMap.has(windowId)) {
           runtime.snapshotWriteCoordinator.start();
@@ -6056,6 +6060,7 @@
             // window that had not been mounted yet can finally run.
             resolvePendingWindowFrames();
             sendStartupAutoResumeReady();
+            startupMetrics.onWorkspaceRendered();
             break;
           }
           case "workspace_projection_prune_result": {
@@ -6182,6 +6187,7 @@
               event.status,
               event.detail,
             );
+            startupMetrics.onTerminalStatus(event.id, event.status, terminalMap.get(event.id));
             break;
           case "attachment_progress":
             handleAttachmentProgress(event);

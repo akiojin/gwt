@@ -28772,6 +28772,61 @@ fn startup_self_heals_managed_hooks_in_every_known_worktree() {
     }
 }
 
+/// Issue #3808 AC-4: the worktree-wide managed hook self-heal audited 203
+/// worktrees for 191 s on the startup path, ahead of the embedded server
+/// bind. Launches refresh the managed assets of the worktree they start in,
+/// so the sweep is a repair rather than a launch precondition: it runs on the
+/// blocking worker and never delays the first frame.
+#[test]
+fn bootstrap_runs_managed_hook_self_heal_off_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, &["init", "-q"]);
+    let missing_pin = temp
+        .path()
+        .join(format!("missing/gwtd{}", std::env::consts::EXE_SUFFIX));
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &missing_pin);
+    let config = repo.join(".codex/hooks.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let legacy = r#"{"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"/repo/target/debug/gwtd hook event SessionStart"}]}]}}"#;
+    fs::write(&config, legacy).unwrap();
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        legacy,
+        "the self-heal sweep must not run synchronously inside bootstrap"
+    );
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    assert!(
+        !queued.is_empty(),
+        "bootstrap must schedule the sweep on the blocking worker"
+    );
+    for task in queued {
+        task();
+    }
+    let healed = fs::read_to_string(&config).unwrap();
+    assert!(
+        healed.contains("GWT_BIN_PATH"),
+        "the deferred sweep must still heal the worktree: {healed}"
+    );
+    assert!(repo.join(".gwt/managed-hook-self-healed").exists());
+}
+
 #[test]
 fn startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin() {
     let _env_lock = crate::env_test_lock()
@@ -35793,6 +35848,106 @@ fn app_runtime_startup_recovery_persists_legacy_migration_and_skips_malformed() 
         gwt_agent::Session::CURRENT_SCHEMA_VERSION
     );
     assert_eq!(persisted.status, gwt_agent::AgentStatus::Interrupted);
+}
+
+/// Issue #4377 (AC-1 / AC-3): startup reads only the Sessions it may restore.
+/// A stale Session file is neither locked nor parsed on the startup path; the
+/// blocking worker applies the same Interrupted judgement afterwards. A
+/// placeholder-referenced Session, or any Session of an update-resumed
+/// project, is still read regardless of age.
+#[test]
+fn app_runtime_startup_recovery_reads_only_restore_candidates_and_defers_the_rest() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let mut persisted = empty_workspace_state();
+    let mut placeholder = sample_window(
+        "agent-placeholder",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    placeholder.session_id = Some("session-placeholder".to_string());
+    persisted.windows.push(placeholder);
+    persisted.next_z_index = 2;
+    let mut tab = sample_project_tab("tab-repo", "Repo", worktree.clone(), ProjectKind::Git, &[]);
+    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let age = |session_id: &str| {
+        fs::File::options()
+            .write(true)
+            .open(runtime.sessions_dir.join(format!("{session_id}.toml")))
+            .expect("open session file")
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60))
+            .expect("age session file");
+    };
+    for session_id in ["session-fresh", "session-stale", "session-placeholder"] {
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/recovery", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.record_hook_event("UserPromptSubmit");
+        session.status = gwt_agent::AgentStatus::Running;
+        session.save(&runtime.sessions_dir).expect("save session");
+    }
+    age("session-stale");
+    age("session-placeholder");
+    let stale_path = runtime.sessions_dir.join("session-stale.toml");
+    // `Session::save` takes the per-Session lock too; drop the setup's lock
+    // file so the assertion below sees only what the startup read does.
+    fs::remove_file(runtime.sessions_dir.join(".session-stale.lock")).expect("drop setup lock");
+
+    let mut loaded = runtime
+        .load_recovery_sessions()
+        .into_iter()
+        .map(|session| (session.id, session.status))
+        .collect::<Vec<_>>();
+    loaded.sort_by(|left, right| left.0.cmp(&right.0));
+
+    assert_eq!(
+        loaded,
+        vec![
+            (
+                "session-fresh".to_string(),
+                gwt_agent::AgentStatus::Interrupted
+            ),
+            (
+                "session-placeholder".to_string(),
+                gwt_agent::AgentStatus::Interrupted
+            ),
+        ]
+    );
+    assert!(
+        !runtime.sessions_dir.join(".session-stale.lock").exists(),
+        "a stale Session must not be locked or parsed on the startup path"
+    );
+    assert_eq!(
+        gwt_agent::Session::load(&stale_path).expect("stale").status,
+        gwt_agent::AgentStatus::Running
+    );
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+    assert_eq!(
+        gwt_agent::Session::load(&stale_path).expect("stale").status,
+        gwt_agent::AgentStatus::Interrupted,
+        "the deferred sweep must apply the same Interrupted judgement"
+    );
+
+    // Issue #4038: an update-resumed project bypasses the freshness gate, so
+    // its old Sessions are restore candidates again.
+    age("session-stale");
+    runtime.update_resume_tab_ids.insert("tab-repo".to_string());
+    assert!(runtime
+        .load_recovery_sessions()
+        .iter()
+        .any(|session| session.id == "session-stale"));
 }
 
 #[test]

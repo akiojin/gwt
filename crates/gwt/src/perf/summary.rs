@@ -58,6 +58,9 @@ pub struct PerfLogRecord {
     /// Wall-clock length of the over-budget run (violations only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<f64>,
+    /// Startup correlation and phase boundaries, absent on older samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<super::startup::StartupSample>,
 }
 
 impl PerfLogRecord {
@@ -507,6 +510,7 @@ mod tests {
                 budget: None,
                 consecutive_count: None,
                 duration_seconds: None,
+                startup: None,
             })
             .collect();
         records.push(PerfLogRecord {
@@ -521,6 +525,7 @@ mod tests {
             budget: Some(100.0),
             consecutive_count: Some(3),
             duration_seconds: Some(1.5),
+            startup: None,
         });
 
         let summary = summarize(&records, &budgets, Some(at(9, 0)));
@@ -554,6 +559,7 @@ mod tests {
                 budget: None,
                 consecutive_count: None,
                 duration_seconds: None,
+                startup: None,
             })
             .collect();
 
@@ -576,6 +582,7 @@ mod tests {
             budget: None,
             consecutive_count: None,
             duration_seconds: None,
+            startup: None,
         }];
 
         let summary = summarize(&records, &PerfBudgets::default(), None);
@@ -619,6 +626,7 @@ mod tests {
                 budget: None,
                 consecutive_count: None,
                 duration_seconds: None,
+                startup: None,
             },
             PerfLogRecord {
                 schema_version: 1,
@@ -632,6 +640,7 @@ mod tests {
                 budget: Some(2_000.0),
                 consecutive_count: Some(3),
                 duration_seconds: Some(4.0),
+                startup: None,
             },
         ];
 

@@ -49,6 +49,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
   "fleet-minimap.js",
   "focus-trap.js",
+  "startup-metrics.js",
   "hotkey.js",
   "index-settings-panel.js",
   // SPEC-3431 FR-026 — PM settings panel.

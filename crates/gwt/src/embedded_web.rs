@@ -64,6 +64,7 @@ macro_rules! root_js_modules {
 // runtime and the splash hangs because no boot wiring runs (learned the hard
 // way with /release-notes-window.js, see SPEC-2780 and PR #2797 memory).
 root_js_modules! {
+    "startup-metrics.js" => "createStartupMetrics",
     "branch-cleanup-modal.js" => "renderBranchCleanupModal",
     // SPEC-2009 Phase 7 (FR-064..FR-067) — Branches detail-check reconnect
     // self-heal / last-known retention / stale-load guard. app.js imports
