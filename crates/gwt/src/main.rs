@@ -1035,6 +1035,59 @@ impl BoardRefreshQueue {
     }
 }
 
+/// Issue #4406: Active Work rebuilds run off the GUI event loop, one per
+/// project at a time. Requests that land while one runs collapse into a single
+/// rerun, so a burst of background scan completions costs one rebuild.
+#[derive(Default)]
+struct ActiveWorkRefreshQueue {
+    in_flight: HashSet<PathBuf>,
+    rerun: HashSet<PathBuf>,
+}
+
+impl ActiveWorkRefreshQueue {
+    /// `true` when the caller owns the refresh; `false` while one is already
+    /// running for the project (it reruns once that finishes).
+    fn begin(&mut self, project_root: &Path) -> bool {
+        if !self.in_flight.insert(project_root.to_path_buf()) {
+            self.rerun.insert(project_root.to_path_buf());
+            return false;
+        }
+        true
+    }
+
+    /// Record a finished refresh; `true` when a request arrived meanwhile.
+    fn finish(&mut self, project_root: &Path) -> bool {
+        self.in_flight.remove(project_root);
+        self.rerun.remove(project_root)
+    }
+}
+
+fn spawn_active_work_projection_refresh(
+    handle: &tokio::runtime::Handle,
+    proxy: &EventLoopProxy<UserEvent>,
+    job: app_runtime::ActiveWorkProjectionJob,
+) {
+    let proxy = proxy.clone();
+    let project_root = job.project_root.clone();
+    let tab_id = job.tab_id.clone();
+    drop(handle.spawn_blocking(move || {
+        // A panic must still report back, or the project stays in flight and
+        // its Workspace rail never refreshes again.
+        let refreshed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app_runtime::run_active_work_projection_refresh(job)
+        }))
+        .unwrap_or(app_runtime::ActiveWorkProjectionRefreshed {
+            tab_id,
+            view: None,
+            completed: false,
+        });
+        let _ = proxy.send_event(UserEvent::ActiveWorkProjectionRefreshed {
+            project_root,
+            refreshed: Box::new(refreshed),
+        });
+    }));
+}
+
 fn spawn_board_projection_refresh(
     handle: &tokio::runtime::Handle,
     proxy: &EventLoopProxy<UserEvent>,
@@ -1448,6 +1501,18 @@ enum UserEvent {
         project_root: PathBuf,
         refreshed: Box<app_runtime::BoardProjectionRefreshed>,
         views: app_runtime::BoardScopedViews,
+    },
+    /// Issue #4406 AC-3/AC-4: something a Workspace row shows changed, so the
+    /// project's Active Work projection needs rebuilding. The rebuild reads the
+    /// home works.json, every session ledger TOML and one execution diagnosis
+    /// per row, so it runs off the GUI event loop.
+    ActiveWorkProjectionChanged {
+        project_root: PathBuf,
+    },
+    /// Issue #4406: an Active Work rebuild finished off the GUI event loop.
+    ActiveWorkProjectionRefreshed {
+        project_root: PathBuf,
+        refreshed: Box<app_runtime::ActiveWorkProjectionRefreshed>,
     },
     /// SPEC-2359 W-15 (FR-386): result of the background merged-branch scan.
     /// The runtime caches the set and rebroadcasts the Workspace projection
@@ -3506,12 +3571,12 @@ mod tests {
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
-            session_ledger_cache: std::cell::RefCell::new(
+            session_ledger_cache: Arc::new(Mutex::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
-            ),
-            work_items_cache: std::cell::RefCell::new(
+            )),
+            work_items_cache: Arc::new(Mutex::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
-            ),
+            )),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
@@ -9212,6 +9277,7 @@ fn main() -> std::io::Result<()> {
     let mut deferred_quit_reason: Option<GuiShutdownReason> = None;
     let mut gui_shutdown_backstop_armed = false;
     let mut board_refresh_queue = BoardRefreshQueue::default();
+    let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -9408,6 +9474,37 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::DaemonRuntimeApprovalOverlay { id, waiting }) => {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
+            }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
+                if active_work_refresh_queue.begin(&project_root) {
+                    match app.active_work_projection_refresh_job(&project_root) {
+                        Some(job) => spawn_active_work_projection_refresh(
+                            runtime.handle(),
+                            &proxy,
+                            job,
+                        ),
+                        // No open tab owns the project — nothing to rebuild.
+                        None => drop(active_work_refresh_queue.finish(&project_root)),
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionRefreshed {
+                project_root,
+                refreshed,
+            }) => {
+                clients.dispatch(app.apply_active_work_projection_refresh(*refreshed));
+                if active_work_refresh_queue.finish(&project_root)
+                    && active_work_refresh_queue.begin(&project_root)
+                {
+                    match app.active_work_projection_refresh_job(&project_root) {
+                        Some(job) => spawn_active_work_projection_refresh(
+                            runtime.handle(),
+                            &proxy,
+                            job,
+                        ),
+                        None => drop(active_work_refresh_queue.finish(&project_root)),
+                    }
+                }
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 if let Some(views) = board_refresh_queue.begin(&project_root) {

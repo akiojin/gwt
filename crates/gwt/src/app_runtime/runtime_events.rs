@@ -1474,8 +1474,15 @@ impl AppRuntime {
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
         ) {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            // Issue #4406 AC-4: acknowledge the ended pane from the cached
+            // projection and rebuild off the event loop. Rebuilding here read
+            // the home works.json, every session ledger TOML and one execution
+            // diagnosis per Work row, holding the GUI thread for up to 35,982ms.
+            if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
                 events.push(event);
+            }
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                self.request_active_work_projection_refresh(project_root);
             }
         }
         if hook_state_changed || effective_before != Some(composed_state) {
