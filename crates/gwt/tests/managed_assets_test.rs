@@ -319,6 +319,56 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     assert!(exclude.contains(".codex/skills/gwt-*"));
 }
 
+/// Issue #4339 AC-1 / AC-3: a worktree inherits `core.hooksPath` through git
+/// config while the directory it names arrives empty, so worktree
+/// materialization has to make the required hooks real — without adding a
+/// tracked diff.
+#[test]
+fn refresh_managed_gwt_assets_materializes_the_configured_git_hook_directory() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    run_git(root, &["init", "-q"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "core.hooksPath", ".husky/_"]);
+    std::fs::create_dir_all(root.join(".husky")).expect("create .husky");
+    std::fs::write(
+        root.join(".husky/commit-msg"),
+        "#!/usr/bin/env sh\nexit 0\n",
+    )
+    .expect("write commit-msg source");
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-q", "-m", "feat: seed"]);
+    let cli_bin = root.join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+    assert!(
+        !root.join(".husky/_/commit-msg").exists(),
+        "the configured hook directory must start out empty"
+    );
+
+    refresh_managed_gwt_assets_for_worktree(root).expect("refresh managed assets");
+
+    assert!(
+        root.join(".husky/_/commit-msg").is_file(),
+        "materialization must create the hook core.hooksPath points at"
+    );
+    let status = hidden_command("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git status");
+    assert!(
+        String::from_utf8_lossy(&status.stdout)
+            .lines()
+            .all(|line| !line.contains(".husky")),
+        "materialized hooks must stay out of the tracked diff: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hooks() {
