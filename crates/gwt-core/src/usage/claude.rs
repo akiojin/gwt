@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::model_context;
 use super::types::{
@@ -31,6 +32,7 @@ pub struct ClaudeAccount {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaudeCreds {
     pub access_token: String,
+    pub account_id: Option<String>,
     pub subscription_type: Option<String>,
     pub account_label: Option<String>,
 }
@@ -99,10 +101,39 @@ pub fn parse_creds_json(body: &str) -> Option<ClaudeCreds> {
             .map(str::to_string)
     });
     Some(ClaudeCreds {
+        account_id: Some(stable_account_identity(&v).unwrap_or_else(|| {
+            format!(
+                "{:x}",
+                Sha256::digest(format!("claude:credential:{access_token}"))
+            )
+        })),
         access_token,
         subscription_type,
         account_label,
     })
+}
+
+fn stable_account_identity(value: &Value) -> Option<String> {
+    let account = value
+        .get("oauthAccount")
+        .or_else(|| value.get("claudeAiOauth"))
+        .unwrap_or(value);
+    let id = ["accountUuid", "accountId", "account_id"]
+        .into_iter()
+        .find_map(|key| {
+            account
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    let organization = account
+        .get("organizationUuid")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Some(format!(
+        "{:x}",
+        Sha256::digest(format!("claude:account:{id}:{organization}"))
+    ))
 }
 
 fn creds_from_file(home: &Path) -> Option<ClaudeCreds> {
@@ -139,7 +170,26 @@ fn creds_from_keychain() -> Option<ClaudeCreds> {
 /// fallback. On other platforms the Keychain reader is a no-op and the file is
 /// authoritative.
 pub fn resolve_claude_creds(home: &Path) -> Option<ClaudeCreds> {
-    creds_from_keychain().or_else(|| creds_from_file(home))
+    let mut creds = creds_from_keychain().or_else(|| creds_from_file(home))?;
+    // Claude stores account metadata separately from refreshed OAuth tokens.
+    let profile = if home.file_name().is_some_and(|name| name == ".claude") {
+        home.with_extension("json")
+    } else {
+        home.join(".claude.json")
+    };
+    if let Some(identity) = fs::read_to_string(profile)
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .and_then(|profile| stable_account_identity(&profile))
+    {
+        creds.account_id = Some(identity);
+    }
+    Some(creds)
+}
+
+/// Resolve only local credentials/metadata, exposing an opaque fingerprint.
+pub fn read_auth_account_identity(home: &Path) -> Option<String> {
+    resolve_claude_creds(home)?.account_id
 }
 
 /// Build the `User-Agent` from the installed `claude --version`
@@ -185,6 +235,7 @@ pub async fn fetch_claude_account(
 ) -> ProviderUsage {
     let plan = creds.subscription_type.clone();
     let account_label = creds.account_label.clone();
+    let account_id = creds.account_id.clone();
     let client = reqwest::Client::new();
     let resp = client
         .get(OAUTH_USAGE_URL)
@@ -204,6 +255,7 @@ pub async fn fetch_claude_account(
             match parse_oauth_usage(&body, now) {
                 Some(acc) => ProviderUsage {
                     provider: UsageProvider::ClaudeCode,
+                    account_id,
                     account_label,
                     plan,
                     windows: acc.windows,
@@ -213,6 +265,7 @@ pub async fn fetch_claude_account(
                 },
                 None => ProviderUsage {
                     provider: UsageProvider::ClaudeCode,
+                    account_id,
                     account_label,
                     plan,
                     windows: Vec::new(),
@@ -226,6 +279,7 @@ pub async fn fetch_claude_account(
         }
         Ok(r) => ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            account_id,
             account_label,
             plan,
             windows: Vec::new(),
@@ -235,6 +289,7 @@ pub async fn fetch_claude_account(
         },
         Err(_) => ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            account_id,
             account_label,
             plan,
             windows: Vec::new(),
@@ -534,6 +589,51 @@ mod tests {
     fn creds_empty_token_rejected() {
         assert!(parse_creds_json(r#"{"claudeAiOauth":{"accessToken":""}}"#).is_none());
         assert!(parse_creds_json("{}").is_none());
+    }
+
+    #[test]
+    fn stable_account_identity_survives_credential_refresh() {
+        let identity = |id: &str, token: &str| {
+            parse_creds_json(
+                &serde_json::json!({"claudeAiOauth":{"accountId":id,"accessToken":token}})
+                    .to_string(),
+            )
+            .unwrap()
+            .account_id
+            .unwrap()
+        };
+        assert_eq!(
+            identity("account-a", "old-token"),
+            identity("account-a", "new-token")
+        );
+        assert_ne!(
+            identity("account-a", "new-token"),
+            identity("account-b", "new-token")
+        );
+        assert_eq!(identity("account-a", "new-token").len(), 64);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn local_profile_identity_survives_token_only_refresh() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join(".claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"account-a","organizationUuid":"org-a"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.path().join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"old-token"}}"#,
+        )
+        .unwrap();
+        let first = read_auth_account_identity(home.path()).unwrap();
+        fs::write(
+            home.path().join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"new-token"}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_auth_account_identity(home.path()), Some(first));
     }
 
     #[test]
