@@ -31,6 +31,8 @@ pub const DEFAULT_PANE_CREATE_BUDGET_MS: f64 = 5_000.0;
 pub const DEFAULT_SEARCH_BUDGET_MS: f64 = 2_000.0;
 
 const TARGET_PREFIX: &str = "route:";
+/// Perf-log `target` prefix for one phase inside a route (Issue #4283 AC-5).
+const PHASE_TARGET_PREFIX: &str = "phase:";
 
 /// One instrumented end-to-end route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -79,6 +81,14 @@ impl PerfRoute {
     /// The perf-log `target` field for this route.
     pub fn target(self) -> String {
         format!("{TARGET_PREFIX}{}", self.name())
+    }
+
+    /// The perf-log `target` field for one named phase of this route.
+    ///
+    /// Phases attribute a route's total to its dominant step; they carry no
+    /// budget of their own, so `from_target` never resolves one.
+    pub fn phase_target(self, phase: &str) -> String {
+        format!("{PHASE_TARGET_PREFIX}{}.{phase}", self.name())
     }
 
     /// Recover a route from a perf-log `target` field.
