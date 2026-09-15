@@ -398,6 +398,13 @@ fn attach_disk_space(project_root: &std::path::Path, status: &mut crate::IssueMo
     ]));
 }
 
+/// Issue #4234 AC-5: resident size of every gwt GUI process on the host,
+/// read from the OS so the number is there even when the instance itself
+/// has stopped answering its pane WebSocket.
+fn attach_memory_pressure(status: &mut crate::IssueMonitorAgentStatus) {
+    status.memory_pressure = Some(crate::memory_pressure::probe());
+}
+
 /// Issue #4087 AC-1: the Issue cache full-refresh cadence, read from the
 /// cache on disk at status time so a stopped refresh is visible next to
 /// `scan_stall` in the one snapshot the PM already reads.
@@ -520,6 +527,7 @@ fn run_monitor_status<E: CliEnv>(
     merge_board_escalations_into_needs_human(&project_root, &mut status);
     attach_github_budget(&mut status);
     attach_disk_space(&project_root, &mut status);
+    attach_memory_pressure(&mut status);
     attach_issue_cache_status(&project_root, &mut status);
     out.push_str(
         &serde_json::to_string(&status)
@@ -4630,6 +4638,40 @@ mod tests {
         );
     }
 
+    /// Issue #4234 AC-5: the resident size of every gwt GUI process on the
+    /// host is observable from the status the PM already reads, with the
+    /// threshold that raises the saturation warning, so a bloating instance
+    /// is visible before its pane WebSocket stops answering.
+    #[test]
+    fn issue_monitor_status_reports_memory_pressure_of_gwt_processes() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        let status: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("status json: {out}");
+        let memory_pressure = &status["memory_pressure"];
+        assert!(
+            memory_pressure["processes"].is_array(),
+            "status must carry the observed gwt processes: {out}"
+        );
+        assert_eq!(
+            memory_pressure["warn_above_bytes"],
+            serde_json::json!(crate::memory_pressure::WARN_ABOVE_BYTES),
+            "{out}"
+        );
+    }
+
     /// Issue #4009 AC-4: free space is observable from the status the PM
     /// already reads, with the thresholds that would raise a warning.
     #[test]
@@ -4726,6 +4768,7 @@ mod tests {
             github_budget: None,
             generation_reclaim: None,
             disk_space: None,
+            memory_pressure: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -4790,6 +4833,7 @@ mod tests {
             github_budget: None,
             generation_reclaim: None,
             disk_space: None,
+            memory_pressure: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -4905,6 +4949,7 @@ mod tests {
                 github_budget: None,
                 generation_reclaim: None,
                 disk_space: None,
+                memory_pressure: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
                 failure_surge: None,
@@ -4967,6 +5012,7 @@ mod tests {
             github_budget: None,
             generation_reclaim: None,
             disk_space: None,
+            memory_pressure: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -5086,8 +5132,14 @@ mod tests {
         // ledger at call time and has its own test; the queue projection is
         // compared without it. Issue #4087 AC-1: the same goes for the Issue
         // cache refresh block, read from the cache on disk, and Issue #4009
-        // AC-4 for the host free-space block, measured at call time.
-        for attached in ["github_budget", "issue_cache", "disk_space"] {
+        // AC-4 for the host free-space block, measured at call time, and
+        // Issue #4234 AC-5 for the gwt process memory block.
+        for attached in [
+            "github_budget",
+            "issue_cache",
+            "disk_space",
+            "memory_pressure",
+        ] {
             assert!(
                 status
                     .as_object_mut()
@@ -6657,6 +6709,7 @@ mod tests {
             idle_window_counts: std::collections::BTreeMap::new(),
             generation_reclaim: None,
             disk_space: None,
+            memory_pressure: None,
             review_windows: Vec::new(),
             failure_surge: None,
             issue_cache: None,
