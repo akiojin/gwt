@@ -896,6 +896,97 @@ pub fn events_blob_oids_batch(
     Ok(oids)
 }
 
+/// Identity of one commit's Work-event store, as seen from its tree.
+///
+/// Issue #4397: two commits that share both oids cannot differ in any Work
+/// event, so a trigger can retire a whole ref's sources from consideration
+/// without enumerating them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkEventTreeIdentity {
+    /// Blob oid of the legacy log, when the commit has one.
+    pub legacy_oid: Option<String>,
+    /// Tree oid of the canonical shard store, when the commit has one.
+    pub store_tree_oid: Option<String>,
+}
+
+impl WorkEventTreeIdentity {
+    /// Stable token for comparing against a recorded generation.
+    pub fn token(&self) -> String {
+        format!(
+            "{}:{}",
+            self.legacy_oid.as_deref().unwrap_or("-"),
+            self.store_tree_oid.as_deref().unwrap_or("-")
+        )
+    }
+}
+
+/// Resolve every commit's Work-event store identity in ONE
+/// `git cat-file --batch-check` spawn, without walking a tree.
+///
+/// Returns one entry per input commit, in input order. A commit that carries
+/// neither path yields the default identity.
+pub fn work_event_tree_identity_batch(
+    repo_path: &Path,
+    commits: &[String],
+    legacy_path: &str,
+    event_store_path: &str,
+) -> Result<Vec<WorkEventTreeIdentity>> {
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    for commit in commits {
+        validate_batch_atom(commit, "commit")?;
+    }
+    let mut stdin = String::with_capacity(commits.len() * 128);
+    for commit in commits {
+        stdin.push_str(&format!("{commit}:{legacy_path}\n"));
+        stdin.push_str(&format!("{commit}:{event_store_path}\n"));
+    }
+    let output = gwt_core::process::run_git_logged_with_stdin(
+        &["cat-file", "--batch-check"],
+        // Issue #4371: callers hand over a project root, which for the
+        // workspace-home layout is not a repository.
+        Some(&crate::worktree::effective_repo_root(repo_path)),
+        stdin.as_bytes(),
+    )
+    .map_err(|error| GwtError::Git(format!("cat-file --batch-check: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GwtError::Git(format!("cat-file --batch-check: {stderr}")));
+    }
+    // One output line per input line, in order:
+    //   `<oid> <type> <size>` for resolvable objects,
+    //   `<spec> missing` (or `... ambiguous`) otherwise.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let resolved: Vec<Option<(String, String)>> = stdout
+        .lines()
+        .map(|line| {
+            let mut parts = line.split_whitespace();
+            let oid = parts.next()?.to_string();
+            let kind = parts.next()?.to_string();
+            Some((oid, kind))
+        })
+        .collect();
+    if resolved.len() != commits.len() * 2 {
+        return Err(GwtError::Git(format!(
+            "cat-file --batch-check: expected {} lines, got {}",
+            commits.len() * 2,
+            resolved.len()
+        )));
+    }
+    Ok(resolved
+        .chunks_exact(2)
+        .map(|pair| WorkEventTreeIdentity {
+            legacy_oid: pair[0]
+                .as_ref()
+                .and_then(|(oid, kind)| (kind == "blob").then(|| oid.clone())),
+            store_tree_oid: pair[1]
+                .as_ref()
+                .and_then(|(oid, kind)| (kind == "tree").then(|| oid.clone())),
+        })
+        .collect())
+}
+
 /// Read a blob's full content by oid — no checkout, no worktree access.
 pub fn read_blob(repo_path: &Path, oid: &str) -> Result<String> {
     let output = gwt_core::process::run_git_logged(&["cat-file", "blob", oid], Some(repo_path))
@@ -1079,6 +1170,73 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(commits.len(), count);
         commits
+    }
+
+    /// Issue #4397: a trigger has to tell, for hundreds of fetched refs at
+    /// once, whether a ref's Work-event store moved at all. One batch-check
+    /// resolving the legacy blob and the store tree per commit answers that
+    /// without walking a single tree.
+    #[test]
+    fn work_event_tree_identity_is_resolved_for_every_commit_in_one_batch() {
+        let dir = init_repo();
+        let repo = dir.path();
+        let empty = head_sha(repo);
+
+        std::fs::create_dir_all(repo.join(".gwt/work/events/ab")).expect("event store");
+        std::fs::write(repo.join(".gwt/work/events.jsonl"), "legacy\n").expect("legacy log");
+        std::fs::write(repo.join(".gwt/work/events/ab/first.jsonl"), "shard\n").expect("shard");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "."])
+            .current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "events"])
+            .current_dir(repo));
+        let populated = head_sha(repo);
+
+        // A commit that changes nothing under .gwt/work keeps both identities.
+        std::fs::write(repo.join("unrelated.txt"), "x").expect("unrelated");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "."])
+            .current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "unrelated"])
+            .current_dir(repo));
+        let unrelated = head_sha(repo);
+
+        std::fs::write(repo.join(".gwt/work/events/ab/second.jsonl"), "shard2\n").expect("shard2");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "."])
+            .current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "another shard"])
+            .current_dir(repo));
+        let grown = head_sha(repo);
+
+        let identities = work_event_tree_identity_batch(
+            repo,
+            &[
+                empty.clone(),
+                populated.clone(),
+                unrelated.clone(),
+                grown.clone(),
+            ],
+            ".gwt/work/events.jsonl",
+            ".gwt/work/events",
+        )
+        .expect("identity batch");
+
+        assert_eq!(identities.len(), 4);
+        assert_eq!(identities[0], WorkEventTreeIdentity::default());
+        assert!(identities[1].legacy_oid.is_some());
+        assert!(identities[1].store_tree_oid.is_some());
+        assert_eq!(
+            identities[1], identities[2],
+            "a commit that leaves .gwt/work alone keeps the same identity"
+        );
+        assert_ne!(
+            identities[2], identities[3],
+            "a published shard has to move the store tree identity"
+        );
     }
 
     #[test]

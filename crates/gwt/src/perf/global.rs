@@ -101,6 +101,33 @@ impl PerfRuntime {
         );
     }
 
+    /// Record one resource quantity measured for a route (Issue #4397 AC-4).
+    ///
+    /// Resource samples carry no budget: a state size or a derivation count is
+    /// evidence about the route, not a latency to smooth into a violation.
+    pub fn record_route_resource(
+        &mut self,
+        route: PerfRoute,
+        metric: &str,
+        value: f64,
+        unit: PerfUnit,
+    ) {
+        if !self.sink.is_enabled() || !value.is_finite() {
+            return;
+        }
+        if !self.governor.should_sample() {
+            return;
+        }
+        let record = PerfRecord::sample(
+            Utc::now(),
+            PerfStream::Resource,
+            route.resource_target(metric),
+            value,
+            unit,
+        );
+        let _ = self.sink.append(&record);
+    }
+
     /// Record one gwtd operation measurement.
     pub fn record_operation(&mut self, operation: &str, elapsed: Duration, read_only: bool) {
         let role = if read_only {
@@ -230,6 +257,11 @@ pub fn record_route(route: PerfRoute, elapsed: Duration) {
 /// Record one route phase, or do nothing when uninstalled.
 pub fn record_route_phase(route: PerfRoute, phase: &str, elapsed: Duration) {
     with_runtime(|runtime| runtime.record_route_phase(route, phase, elapsed));
+}
+
+/// Record one route resource quantity, or do nothing when uninstalled.
+pub fn record_route_resource(route: PerfRoute, metric: &str, value: f64, unit: PerfUnit) {
+    with_runtime(|runtime| runtime.record_route_resource(route, metric, value, unit));
 }
 
 /// Record one gwtd operation measurement, or do nothing when uninstalled.

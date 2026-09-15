@@ -33,6 +33,8 @@ pub enum PerfUnit {
     Milliseconds,
     Percent,
     Bytes,
+    /// A plain quantity, e.g. how many fingerprints one trigger derived.
+    Count,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

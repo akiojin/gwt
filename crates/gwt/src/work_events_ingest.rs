@@ -27,7 +27,7 @@ use gwt_core::work_events_intake::ingest_work_events_content;
 use gwt_core::work_events_intake::{
     content_fingerprint, ingest_work_event_sources_with_local_path, ingest_work_events_sources,
     load_work_events_intake_state, rebuild_work_events_with_shared_loader,
-    save_work_events_intake_state, SharedWorkEventsSource,
+    save_work_events_intake_state_incremental, SharedWorkEventsSource,
 };
 use gwt_core::workspace_projection::WorkspaceExecutionContainerRef;
 use sha2::{Digest, Sha256};
@@ -37,6 +37,12 @@ const SOURCE_WORKTREE: &str = "worktree:";
 const SOURCE_REF: &str = "ref:";
 const SOURCE_LOCAL_LIFECYCLE: &str = "local-lifecycle:";
 const SOURCE_LIST: &str = "source-list:v1";
+
+/// Issue #4397: intake state key prefixes for the group generations that let a
+/// trigger prove a whole set of sources unchanged without deriving a
+/// fingerprint per member.
+const GROUP_WORKTREE: &str = "worktree-group:";
+const GROUP_REF: &str = "ref-group:";
 
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
@@ -62,6 +68,16 @@ pub struct WorkEventsIngestSummary {
     pub events_applied: usize,
     /// The projection was rebuilt with the current fold semantics.
     pub projection_rebuilt: bool,
+    /// Issue #4397 AC-4: source fingerprints derived during this trigger.
+    ///
+    /// A trigger that changed nothing derives none: every group proved itself
+    /// unchanged from its own generation token. This is the number the intake
+    /// used to pay unconditionally, once per known source.
+    pub sources_rederived: usize,
+    /// Bytes this trigger handed to the intake state store.
+    pub state_bytes_written: u64,
+    /// Size of the persisted intake state after this trigger.
+    pub state_bytes: u64,
 }
 
 impl WorkEventsIngestSummary {
@@ -393,6 +409,9 @@ where
     let mut current_sources = Vec::new();
     let mut local_immutable_sources = Vec::new();
     let mut source_discovery_failed = false;
+    // Group key, generation and member count to record once the pass commits.
+    let mut settled_worktree_groups: Vec<(String, String, usize)> = Vec::new();
+    let mut settled_ref_groups: Vec<(String, String, usize)> = Vec::new();
 
     // 1) Local worktree filesystems (base/main checkout included): committed
     //    or not, the working copy is the freshest view of each branch's log.
@@ -404,51 +423,112 @@ where
             Vec::new()
         }
     };
-    let worktree_sources = match worktree_event_sources(&worktree_entries) {
-        Ok(sources) => sources,
+    let worktree_groups = match worktree_event_source_groups(&worktree_entries) {
+        Ok(groups) => groups,
         Err(error) => {
             tracing::warn!(%error, "work events ingest: worktree event source discovery failed");
             source_discovery_failed = true;
             Vec::new()
         }
     };
-    for source in worktree_sources {
-        let events_path = source.events_path.clone();
-        match events_path.try_exists() {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => {
-                tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source discovery failed");
-                source_discovery_failed = true;
-                continue;
-            }
+
+    // Issue #4397: a shard-store directory whose generation still matches is
+    // proof that none of its members moved. Carrying its recorded fingerprints
+    // forward untouched is what keeps an unchanged trigger from deriving one
+    // fingerprint per known shard.
+    let live_worktree_groups = worktree_groups
+        .iter()
+        .map(|group| group.key.clone())
+        .collect::<HashSet<_>>();
+    let vanished_worktree_groups = state
+        .groups
+        .keys()
+        .filter(|key| key.starts_with(GROUP_WORKTREE) && !live_worktree_groups.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in vanished_worktree_groups {
+        // The directory is gone: so are the sources it held. Leaving their
+        // fingerprints behind would keep the snapshot claiming sources that no
+        // longer exist, and a later restore would look current and be skipped.
+        rebuild_required = true;
+        let path = key[GROUP_WORKTREE.len()..].to_string();
+        state.remove_source(&format!("{SOURCE_WORKTREE}{path}"));
+        for member in group_member_keys(&state, &format!("{SOURCE_WORKTREE}{path}/"), true) {
+            state.remove_source(&member);
         }
-        let key = format!("{SOURCE_WORKTREE}{}", events_path.display());
-        // Issue #4371: the frozen legacy log is judged by metadata like a
-        // shard. Reading all 239 of them (398.5 MB) on every trigger only to
-        // hash them was the largest cost of an unchanged pass.
-        match local_immutable_source_fingerprint(&events_path, source.container.as_ref()) {
-            Ok(fingerprint) => local_immutable_sources.push(LocalImmutableSource {
-                source,
-                key,
-                fingerprint,
-            }),
-            Err(error) => {
-                tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source metadata read failed");
-                source_discovery_failed = true;
-            }
-        }
+        state.remove_group(&key);
     }
 
-    let local_sources_by_key = local_immutable_sources
-        .iter()
-        .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
-        .collect::<HashMap<_, _>>();
-    if state.sources.iter().any(|(key, fingerprint)| {
-        key.starts_with(SOURCE_WORKTREE)
-            && local_sources_by_key.get(key.as_str()).copied() != Some(fingerprint.as_str())
-    }) {
-        rebuild_required = true;
+    for group in worktree_groups {
+        let group_is_current = !group.always_derive
+            && !rebuild_required
+            && state.group_is_current(&group.key, &group.generation);
+        if group_is_current {
+            summary.sources_skipped += state
+                .group(&group.key)
+                .map(|recorded| recorded.members)
+                .unwrap_or_default();
+            continue;
+        }
+        let mut derived = Vec::new();
+        let mut scan_failed = false;
+        for source in group.sources {
+            let events_path = source.events_path.clone();
+            match events_path.try_exists() {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source discovery failed");
+                    source_discovery_failed = true;
+                    scan_failed = true;
+                    continue;
+                }
+            }
+            let key = format!("{SOURCE_WORKTREE}{}", events_path.display());
+            // Issue #4371: the frozen legacy log is judged by metadata like a
+            // shard. Reading all 239 of them (398.5 MB) on every trigger only
+            // to hash them was the largest cost of an unchanged pass.
+            match local_immutable_source_fingerprint(&events_path, source.container.as_ref()) {
+                Ok(fingerprint) => {
+                    summary.sources_rederived += 1;
+                    derived.push(LocalImmutableSource {
+                        source,
+                        key,
+                        fingerprint,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source metadata read failed");
+                    source_discovery_failed = true;
+                    scan_failed = true;
+                }
+            }
+        }
+
+        // Within a re-scanned group the previously recorded members are known
+        // exactly, so a member that changed or disappeared still forces the
+        // rebuild it always did.
+        let derived_by_key = derived
+            .iter()
+            .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
+            .collect::<HashMap<_, _>>();
+        let mut stale = Vec::new();
+        for key in group_member_keys(&state, &group.source_prefix, group.direct_children_only) {
+            let recorded = state.sources.get(&key).map(String::as_str);
+            if derived_by_key.get(key.as_str()).copied() != recorded {
+                rebuild_required = true;
+                if !derived_by_key.contains_key(key.as_str()) {
+                    stale.push(key);
+                }
+            }
+        }
+        for key in stale {
+            state.remove_source(&key);
+        }
+        if !scan_failed {
+            settled_worktree_groups.push((group.key, group.generation, derived.len()));
+        }
+        local_immutable_sources.extend(derived);
     }
 
     for source in local_immutable_sources {
@@ -480,7 +560,84 @@ where
     //    and lenient parsing guards against contaminated logs (#3023).
     let mut unread_current_sources = current_sources;
     match gwt_git::refs::list_origin_refs_with_commit(project_root) {
-        Ok(refs) if !refs.is_empty() => {
+        Ok(all_refs) => {
+            // Issue #4397: resolve every ref's Work-event store identity in one
+            // batch-check first. A ref whose legacy blob and shard tree both
+            // stand still cannot hold a changed event, so it never reaches the
+            // tree walk and none of its sources are re-derived. This is what
+            // collapses 701 refs' worth of enumeration into the handful that
+            // actually moved.
+            let commits: Vec<String> = all_refs.iter().map(|(_, sha)| sha.clone()).collect();
+            let identities = match gwt_git::blob::work_event_tree_identity_batch(
+                project_root,
+                &commits,
+                EVENTS_TREE_PATH,
+                EVENTS_TREE_DIR,
+            ) {
+                Ok(identities) => identities,
+                Err(error) => {
+                    tracing::warn!(%error, "work events ingest: ref event store identity failed");
+                    source_discovery_failed = true;
+                    Vec::new()
+                }
+            };
+            let ref_generations: HashMap<&str, String> = all_refs
+                .iter()
+                .zip(&identities)
+                .map(|((refname, _), identity)| {
+                    let container = origin_ref_execution_container(refname);
+                    (
+                        refname.as_str(),
+                        source_fingerprint(
+                            &format!("ref-tree-v1:{}", identity.token()),
+                            container.as_ref(),
+                        ),
+                    )
+                })
+                .collect();
+
+            let live_ref_groups = all_refs
+                .iter()
+                .map(|(refname, _)| format!("{GROUP_REF}{refname}"))
+                .collect::<HashSet<_>>();
+            let vanished_ref_groups = state
+                .groups
+                .keys()
+                .filter(|key| key.starts_with(GROUP_REF) && !live_ref_groups.contains(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in vanished_ref_groups {
+                rebuild_required = true;
+                let refname = key[GROUP_REF.len()..].to_string();
+                for member in group_member_keys(&state, &format!("{SOURCE_REF}{refname}:"), false) {
+                    state.remove_source(&member);
+                }
+                state.remove_group(&key);
+            }
+
+            let unchanged_ref = |refname: &str| {
+                ref_generations.get(refname).is_some_and(|generation| {
+                    state.group_is_current(&format!("{GROUP_REF}{refname}"), generation)
+                })
+            };
+            let refs: Vec<(String, String)> = if rebuild_required || ref_generations.is_empty() {
+                all_refs.clone()
+            } else {
+                all_refs
+                    .iter()
+                    .filter(|(refname, _)| {
+                        if unchanged_ref(refname) {
+                            summary.sources_skipped += state
+                                .group(&format!("{GROUP_REF}{refname}"))
+                                .map(|group| group.members)
+                                .unwrap_or_default();
+                            return false;
+                        }
+                        true
+                    })
+                    .cloned()
+                    .collect()
+            };
             let commits: Vec<String> = refs.iter().map(|(_, sha)| sha.clone()).collect();
             let mut ref_requires_rebuild = false;
             match gwt_git::blob::work_event_blobs_batch(
@@ -503,9 +660,17 @@ where
                             );
                         }
                     }
-                    ref_requires_rebuild = state.sources.iter().any(|(key, fingerprint)| {
-                        key.starts_with(SOURCE_REF)
-                            && discovered.get(key).map(String::as_str) != Some(fingerprint.as_str())
+                    // Only the enumerated refs can be judged here: a ref that
+                    // proved itself unchanged keeps the fingerprints it already
+                    // has, and an absent one would otherwise read as deleted.
+                    ref_requires_rebuild = refs.iter().any(|(refname, _)| {
+                        let prefix = format!("{SOURCE_REF}{refname}:");
+                        group_member_keys(&state, &prefix, false)
+                            .into_iter()
+                            .any(|key| {
+                                discovered.get(&key).map(String::as_str)
+                                    != state.sources.get(&key).map(String::as_str)
+                            })
                     });
                     let mut selected = HashSet::new();
                     for (descriptors, (refname, _)) in descriptors_by_ref.iter().zip(&refs) {
@@ -534,6 +699,27 @@ where
                         HashMap::<(String, String), Result<Arc<str>, String>>::new();
                     for ((refname, _), blobs) in refs.iter().zip(blobs_by_ref) {
                         let container = origin_ref_execution_container(refname);
+                        // A re-scanned ref knows its member set exactly, so a
+                        // source that disappeared from it is pruned rather than
+                        // left behind to look current forever.
+                        let prefix = format!("{SOURCE_REF}{refname}:");
+                        let live = blobs
+                            .iter()
+                            .map(|blob| format!("{SOURCE_REF}{refname}:{}", blob.path))
+                            .collect::<HashSet<_>>();
+                        for key in group_member_keys(&state, &prefix, false) {
+                            if !live.contains(&key) {
+                                rebuild_required = true;
+                                state.remove_source(&key);
+                            }
+                        }
+                        if let Some(generation) = ref_generations.get(refname.as_str()) {
+                            settled_ref_groups.push((
+                                format!("{GROUP_REF}{refname}"),
+                                generation.clone(),
+                                live.len(),
+                            ));
+                        }
                         for blob in blobs {
                             if is_work_event_writer_temp_residue(Path::new(&blob.path)) {
                                 continue;
@@ -548,6 +734,7 @@ where
                             };
                             let key = format!("{SOURCE_REF}{refname}:{}", blob.path);
                             let fingerprint = source_fingerprint(&blob.oid, container.as_ref());
+                            summary.sources_rederived += 1;
                             let Some(bytes) = blob.content else {
                                 unread_current_sources.push((key, fingerprint));
                                 summary.sources_skipped += 1;
@@ -584,7 +771,6 @@ where
                 }
             }
         }
-        Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "work events ingest: origin ref listing failed");
             source_discovery_failed = true;
@@ -611,25 +797,7 @@ where
         }
     };
 
-    let discovered_sources = pending_sources
-        .iter()
-        .map(|source| (source.key.clone(), source.fingerprint.clone()))
-        .chain(unread_current_sources)
-        .collect::<Vec<_>>();
-    let discovered_source_list_fingerprint = source_list_fingerprint(&discovered_sources);
     let had_source_list_fingerprint = state.sources.contains_key(SOURCE_LIST);
-    let source_list_changed = !state.is_current(SOURCE_LIST, &discovered_source_list_fingerprint);
-    let discovered_by_key = discovered_sources
-        .iter()
-        .map(|(key, fingerprint)| (key.as_str(), fingerprint.as_str()))
-        .collect::<HashMap<_, _>>();
-    let existing_source_changed_or_deleted = state.sources.iter().any(|(key, fingerprint)| {
-        (key.starts_with(SOURCE_WORKTREE) || key.starts_with(SOURCE_REF))
-            && discovered_by_key.get(key.as_str()).copied() != Some(fingerprint.as_str())
-    });
-    if existing_source_changed_or_deleted {
-        rebuild_required = true;
-    }
 
     if !rebuild_required {
         pending_sources.retain(|source| {
@@ -649,6 +817,20 @@ where
         }
     }
 
+    // Issue #4397: the tracked source set is the state itself now that each
+    // group prunes its own departed members, so the snapshot fingerprint no
+    // longer needs a full discovered list to be built, cloned and sorted on
+    // every trigger. Recording the discovered fingerprints first is safe
+    // because nothing is persisted unless the intake below succeeds.
+    for source in &pending_sources {
+        state.record(source.key.clone(), source.fingerprint.clone());
+    }
+    for (key, fingerprint) in unread_current_sources {
+        state.record(key, fingerprint);
+    }
+    let discovered_source_list_fingerprint = tracked_source_list_fingerprint(&state);
+    let source_list_changed = !state.is_current(SOURCE_LIST, &discovered_source_list_fingerprint);
+
     if rebuild_required && source_discovery_failed {
         tracing::warn!(
             "work events ingest: projection rebuild deferred because source discovery was incomplete"
@@ -666,6 +848,26 @@ where
             return summary;
         }
         if !authoritative_empty_source_deletion {
+            // Issue #4397: there is nothing to ingest, but the generations this
+            // pass just proved are exactly what lets the next one skip the
+            // derivation. A settled pass that persisted nothing would re-derive
+            // every source forever.
+            for (key, generation, members) in settled_worktree_groups {
+                state.record_group(key, generation, members);
+            }
+            for (key, generation, members) in settled_ref_groups {
+                state.record_group(key, generation, members);
+            }
+            state.record(SOURCE_LIST, discovered_source_list_fingerprint);
+            match save_work_events_intake_state_incremental(state_path, &mut state) {
+                Ok(write) => {
+                    summary.state_bytes_written = write.bytes_written;
+                    summary.state_bytes = write.state_bytes;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "work events ingest: state save failed");
+                }
+            }
             return summary;
         }
     }
@@ -717,17 +919,21 @@ where
                 shared_fingerprints.len() + usize::from(local_fingerprint.is_some());
             summary.events_applied = report.applied;
             summary.projection_rebuilt = rebuild_required;
-            let applied_source_list_fingerprint = if rebuild_required {
-                source_list_fingerprint(&shared_fingerprints)
-            } else {
-                discovered_source_list_fingerprint.clone()
-            };
             if rebuild_required {
                 // A semantics rebuild establishes a new source snapshot. A
                 // fingerprint retained for a source that was not actually
                 // folded would make a later-restored source look current and
-                // permanently skip its events.
-                state.sources.clear();
+                // permanently skip its events. Generations are re-established
+                // from this pass's own scan; a group whose scan did not settle
+                // stays absent and is re-derived next trigger.
+                state.clear_sources();
+                state.clear_groups();
+            }
+            for (key, generation, members) in settled_worktree_groups {
+                state.record_group(key, generation, members);
+            }
+            for (key, generation, members) in settled_ref_groups {
+                state.record_group(key, generation, members);
             }
             for (key, fingerprint) in shared_fingerprints {
                 state.record(key, fingerprint);
@@ -741,9 +947,20 @@ where
             if rebuild_required {
                 state.record_projection_version(SOURCE_CONTEXT_FINGERPRINT_VERSION);
             }
+            let applied_source_list_fingerprint = if rebuild_required {
+                tracked_source_list_fingerprint(&state)
+            } else {
+                discovered_source_list_fingerprint.clone()
+            };
             state.record(SOURCE_LIST, applied_source_list_fingerprint);
-            if let Err(error) = save_work_events_intake_state(state_path, &state) {
-                tracing::warn!(%error, "work events ingest: state save failed");
+            match save_work_events_intake_state_incremental(state_path, &mut state) {
+                Ok(write) => {
+                    summary.state_bytes_written = write.bytes_written;
+                    summary.state_bytes = write.state_bytes;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "work events ingest: state save failed");
+                }
             }
         }
         Err(error) => {
@@ -776,7 +993,44 @@ fn validate_work_event_store_path(events_dir: &Path) -> gwt_core::Result<bool> {
 fn worktree_event_sources(
     entries: &[gwt::worktree_inventory::WorktreeEntry],
 ) -> gwt_core::Result<Vec<WorkEventsSource>> {
-    let mut sources = Vec::new();
+    Ok(worktree_event_source_groups(entries)?
+        .into_iter()
+        .flat_map(|group| group.sources)
+        .collect())
+}
+
+/// One set of worktree sources that a single directory generation covers.
+///
+/// Issue #4397: the intake used to derive a fingerprint for every known shard
+/// on every trigger. A shard store directory changes its own mtime and entry
+/// count whenever a member is published or removed, and the gwt writer never
+/// rewrites a published shard — `write_workspace_work_event_shard_bytes` links
+/// the shard into place and reports divergent content as an error rather than
+/// replacing it. Folding the worktree's git index identity into the generation
+/// covers the one writer that can legitimately replace a shard's bytes in
+/// place: git itself, on checkout or merge.
+#[derive(Debug)]
+struct WorkEventsSourceGroup {
+    /// Key recorded in the intake state.
+    key: String,
+    /// Token that changes whenever a member could have changed.
+    generation: String,
+    /// Intake-state key prefix shared by every member.
+    source_prefix: String,
+    /// Members are the direct children of `source_prefix` only.
+    direct_children_only: bool,
+    /// The group is re-derived on every trigger because its member can be
+    /// rewritten in place — only the mutable legacy log is.
+    always_derive: bool,
+    sources: Vec<WorkEventsSource>,
+}
+
+/// The mutable legacy log, plus one group per shard-store directory, for each
+/// local worktree.
+fn worktree_event_source_groups(
+    entries: &[gwt::worktree_inventory::WorktreeEntry],
+) -> gwt_core::Result<Vec<WorkEventsSourceGroup>> {
+    let mut groups = Vec::new();
     for entry in entries {
         let container = entry
             .branch
@@ -788,24 +1042,38 @@ fn worktree_event_sources(
                 pr_url: None,
                 pr_state: None,
             });
-        sources.push(WorkEventsSource {
-            events_path: entry.path.join(EVENTS_TREE_PATH),
-            kind: WorkEventsSourceKind::Legacy,
-            container: container.clone(),
+        // The legacy log is the one mutable local source, so it carries no
+        // generation: it is stat'ed on every trigger, one file per worktree.
+        let legacy_path = entry.path.join(EVENTS_TREE_PATH);
+        groups.push(WorkEventsSourceGroup {
+            key: format!("{GROUP_WORKTREE}{}", legacy_path.display()),
+            generation: "legacy-log-v1".to_string(),
+            source_prefix: format!("{SOURCE_WORKTREE}{}", legacy_path.display()),
+            direct_children_only: false,
+            always_derive: true,
+            sources: vec![WorkEventsSource {
+                events_path: legacy_path,
+                kind: WorkEventsSourceKind::Legacy,
+                container: container.clone(),
+            }],
         });
+
         let events_dir = entry.path.join(EVENTS_TREE_DIR);
         if !validate_work_event_store_path(&events_dir)? {
             continue;
         }
+        let index_identity = worktree_git_index_identity(&entry.path);
         let mut store_entries = std::fs::read_dir(&events_dir)?.collect::<Result<Vec<_>, _>>()?;
         store_entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut flat = Vec::new();
+        let mut buckets = Vec::new();
         for store_entry in store_entries {
             let file_type = store_entry.file_type()?;
             if file_type.is_file() {
                 if is_work_event_writer_temp_residue(&store_entry.path()) {
                     continue;
                 }
-                sources.push(WorkEventsSource {
+                flat.push(WorkEventsSource {
                     events_path: store_entry.path(),
                     kind: WorkEventsSourceKind::Shard,
                     container: container.clone(),
@@ -818,9 +1086,27 @@ fn worktree_event_sources(
                     store_entry.path().display()
                 )));
             }
-            let mut bucket_entries =
-                std::fs::read_dir(store_entry.path())?.collect::<Result<Vec<_>, _>>()?;
+            buckets.push(store_entry.path());
+        }
+
+        groups.push(WorkEventsSourceGroup {
+            key: format!("{GROUP_WORKTREE}{}", events_dir.display()),
+            generation: shard_directory_generation(
+                &events_dir,
+                flat.len(),
+                &index_identity,
+                container.as_ref(),
+            )?,
+            source_prefix: format!("{SOURCE_WORKTREE}{}/", events_dir.display()),
+            direct_children_only: true,
+            always_derive: false,
+            sources: flat,
+        });
+
+        for bucket in buckets {
+            let mut bucket_entries = std::fs::read_dir(&bucket)?.collect::<Result<Vec<_>, _>>()?;
             bucket_entries.sort_by_key(std::fs::DirEntry::file_name);
+            let mut sources = Vec::new();
             for shard in bucket_entries {
                 if !shard.file_type()?.is_file() {
                     return Err(gwt_core::GwtError::Other(format!(
@@ -837,9 +1123,94 @@ fn worktree_event_sources(
                     container: container.clone(),
                 });
             }
+            groups.push(WorkEventsSourceGroup {
+                key: format!("{GROUP_WORKTREE}{}", bucket.display()),
+                generation: shard_directory_generation(
+                    &bucket,
+                    sources.len(),
+                    &index_identity,
+                    container.as_ref(),
+                )?,
+                source_prefix: format!("{SOURCE_WORKTREE}{}/", bucket.display()),
+                direct_children_only: true,
+                always_derive: false,
+                sources,
+            });
         }
     }
-    Ok(sources)
+    Ok(groups)
+}
+
+/// Generation of one shard-store directory: what it holds, when it last
+/// changed, and which git state the worktree is on.
+fn shard_directory_generation(
+    dir: &Path,
+    members: usize,
+    index_identity: &str,
+    container: Option<&WorkspaceExecutionContainerRef>,
+) -> gwt_core::Result<String> {
+    let metadata = std::fs::symlink_metadata(dir)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    Ok(source_fingerprint(
+        &format!("shard-dir-v1:{members}:{modified}:{index_identity}"),
+        container,
+    ))
+}
+
+/// Size and mtime of the worktree's git index, or a marker when it cannot be
+/// resolved.
+///
+/// Any git operation that can rewrite a published shard's bytes — checkout,
+/// merge, reset — also rewrites the index, so folding this into the shard-store
+/// generations makes those changes visible without stat'ing every shard.
+fn worktree_git_index_identity(worktree_root: &Path) -> String {
+    let git_path = worktree_root.join(".git");
+    let git_dir = match std::fs::symlink_metadata(&git_path) {
+        Ok(metadata) if metadata.file_type().is_dir() => git_path,
+        Ok(_) => {
+            let Ok(body) = std::fs::read_to_string(&git_path) else {
+                return "index-unresolved".to_string();
+            };
+            let Some(dir) = body
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("gitdir:"))
+            else {
+                return "index-unresolved".to_string();
+            };
+            PathBuf::from(dir.trim())
+        }
+        Err(_) => return "index-unresolved".to_string(),
+    };
+    let Ok(metadata) = std::fs::symlink_metadata(git_dir.join("index")) else {
+        return "index-absent".to_string();
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("index-v1:{}:{modified}", metadata.len())
+}
+
+/// Every intake-state source key recorded under one group.
+fn group_member_keys(
+    state: &gwt_core::work_events_intake::WorkEventsIntakeState,
+    prefix: &str,
+    direct_children_only: bool,
+) -> Vec<String> {
+    state
+        .sources
+        .range(prefix.to_string()..)
+        .take_while(|(key, _)| key.starts_with(prefix))
+        .filter(|(key, _)| !direct_children_only || !key[prefix.len()..].contains('/'))
+        .map(|(key, _)| key.clone())
+        .collect()
 }
 
 fn is_work_event_bucket_name(name: &std::ffi::OsStr) -> bool {
@@ -934,16 +1305,32 @@ fn local_immutable_source_fingerprint(
     ))
 }
 
-fn source_list_fingerprint(sources: &[(String, String)]) -> String {
-    let mut sources = sources.to_vec();
-    sources.sort();
-    content_fingerprint(
-        &sources
-            .into_iter()
-            .map(|(key, fingerprint)| format!("{key}\0{fingerprint}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
+/// Snapshot fingerprint of every shared source the state tracks.
+///
+/// Issue #4397: this used to clone the full discovered list, sort it and join
+/// it into one string — at 429,699 sources that alone allocated ~190 MB per
+/// trigger. Folding each entry's digest with XOR is order-independent, so the
+/// sort and the intermediate string both disappear.
+fn tracked_source_list_fingerprint(
+    state: &gwt_core::work_events_intake::WorkEventsIntakeState,
+) -> String {
+    let mut accumulator = [0u8; 32];
+    for (key, fingerprint) in &state.sources {
+        if !key.starts_with(SOURCE_WORKTREE) && !key.starts_with(SOURCE_REF) {
+            continue;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(key.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(fingerprint.as_bytes());
+        for (slot, byte) in accumulator.iter_mut().zip(hasher.finalize()) {
+            *slot ^= byte;
+        }
+    }
+    accumulator
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1034,7 +1421,7 @@ mod tests {
             "the shared invalid descriptor must also validate only once"
         );
     }
-    use gwt_core::work_events_intake::WorkEventsIntakeState;
+    use gwt_core::work_events_intake::{save_work_events_intake_state, WorkEventsIntakeState};
     use sha2::Digest;
     use std::process::Command;
 
@@ -1327,6 +1714,304 @@ mod tests {
         assert_eq!(second.events_applied, 0);
         assert_eq!(second.sources_ingested, 0);
         assert!(second.sources_skipped >= 1, "{second:?}");
+    }
+
+    /// Publish one canonical shard at its bucketed, content-addressed path.
+    fn write_shard(root: &Path, event_id: &str, work_id: &str, updated_at: &str) -> PathBuf {
+        let digest = format!("{:x}", sha2::Sha256::digest(event_id.as_bytes()));
+        let shard = root
+            .join(EVENTS_TREE_DIR)
+            .join(&digest[..2])
+            .join(format!("{digest}.jsonl"));
+        std::fs::create_dir_all(shard.parent().expect("bucket")).expect("event bucket");
+        std::fs::write(
+            &shard,
+            format!(
+                "{}\n",
+                event_line(event_id, work_id, "Scale work", updated_at)
+            ),
+        )
+        .expect("event shard");
+        shard
+    }
+
+    /// Shards whose digests land in distinct buckets, so a test can change one
+    /// bucket without touching another.
+    fn write_shards_across_buckets(root: &Path, count: usize) -> Vec<PathBuf> {
+        let mut shards = Vec::new();
+        let mut buckets = HashSet::new();
+        let mut index = 0;
+        while shards.len() < count {
+            let event_id = format!("evt-scale-{index}");
+            index += 1;
+            let digest = format!("{:x}", sha2::Sha256::digest(event_id.as_bytes()));
+            if !buckets.insert(digest[..2].to_string()) {
+                continue;
+            }
+            shards.push(write_shard(
+                root,
+                &event_id,
+                &format!("work-scale-{}", shards.len()),
+                "2026-09-01T00:00:00Z",
+            ));
+        }
+        shards
+    }
+
+    fn projection_work_ids(work_items_path: &Path) -> Vec<String> {
+        let mut ids =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(work_items_path)
+                .expect("load")
+                .expect("projection")
+                .work_items
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    /// Re-ingest the same repo into fresh paths, i.e. what a full re-derivation
+    /// of every fingerprint produces.
+    fn full_rederivation_work_ids(repo: &Path, temp: &Path, tag: &str) -> Vec<String> {
+        let work_items_path = temp.join(format!("state/full-{tag}-works.json"));
+        let state_path = temp.join(format!("state/full-{tag}-intake.json"));
+        ingest_project_work_events_paths(repo, &work_items_path, &state_path);
+        projection_work_ids(&work_items_path)
+    }
+
+    /// Issue #4397 AC-1: a trigger that changed nothing must not derive a
+    /// single source fingerprint. The intake used to derive one per known
+    /// source, which is what made an unchanged pass cost O(all sources).
+    #[test]
+    fn an_unchanged_trigger_derives_no_source_fingerprint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let shards = write_shards_across_buckets(&repo, 12);
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "."])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "shards"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["update-ref", "refs/remotes/origin/work/scale", "HEAD"])
+            .current_dir(&repo));
+
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(first.projection_rebuilt, "{first:?}");
+        assert!(
+            first.sources_rederived >= shards.len(),
+            "the cold pass derives every source: {first:?}"
+        );
+
+        let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert_eq!(
+            second.sources_rederived, 0,
+            "an unchanged trigger re-derived fingerprints: {second:?}"
+        );
+        assert!(
+            second.sources_skipped >= shards.len(),
+            "every known source is still accounted for: {second:?}"
+        );
+        assert_eq!(second.events_applied, 0);
+        assert!(!second.projection_rebuilt);
+    }
+
+    /// Issue #4397 AC-1: publishing one shard costs its own group, not the
+    /// whole store.
+    #[test]
+    fn one_new_shard_only_rederives_its_own_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_shards_across_buckets(&repo, 16);
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        write_shard(
+            &repo,
+            "evt-scale-late",
+            "work-scale-late",
+            "2026-09-02T00:00:00Z",
+        );
+        let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            second.sources_rederived <= 2,
+            "one new shard should only re-derive its own bucket: {second:?}"
+        );
+        assert_eq!(second.events_applied, 1, "{second:?}");
+        assert!(projection_work_ids(&work_items_path).contains(&"work-scale-late".to_string()));
+    }
+
+    /// Issue #4397 AC-2: one trigger must not re-serialize the whole state.
+    #[test]
+    fn one_new_shard_writes_a_delta_far_below_the_state_size() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_shards_across_buckets(&repo, 32);
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(first.state_bytes > 0, "{first:?}");
+
+        write_shard(
+            &repo,
+            "evt-delta-late",
+            "work-delta-late",
+            "2026-09-02T00:00:00Z",
+        );
+        let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            second.state_bytes_written * 4 < second.state_bytes,
+            "an incremental trigger rewrote the whole state: {second:?}"
+        );
+    }
+
+    /// Issue #4397 AC-3: incremental bookkeeping has to land on the same
+    /// projection a full re-derivation produces — for an addition, for a
+    /// deletion, and for a source whose content changed.
+    #[test]
+    fn partial_updates_converge_with_a_full_rederivation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let shards = write_shards_across_buckets(&repo, 8);
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(
+            projection_work_ids(&work_items_path),
+            full_rederivation_work_ids(&repo, temp.path(), "initial"),
+            "cold pass"
+        );
+
+        // Addition.
+        write_shard(&repo, "evt-added", "work-added", "2026-09-03T00:00:00Z");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(
+            projection_work_ids(&work_items_path),
+            full_rederivation_work_ids(&repo, temp.path(), "added"),
+            "after an addition"
+        );
+
+        // Deletion.
+        std::fs::remove_file(&shards[0]).expect("remove shard");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(
+            projection_work_ids(&work_items_path),
+            full_rederivation_work_ids(&repo, temp.path(), "deleted"),
+            "after a deletion"
+        );
+
+        // Change: the mutable legacy log is the local source that can be
+        // rewritten in place.
+        write_legacy_log(&repo, &[("evt-legacy-change", "work-legacy-change")]);
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        write_legacy_log(
+            &repo,
+            &[
+                ("evt-legacy-change", "work-legacy-change"),
+                ("evt-legacy-change-2", "work-legacy-change-2"),
+            ],
+        );
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(
+            projection_work_ids(&work_items_path),
+            full_rederivation_work_ids(&repo, temp.path(), "changed"),
+            "after a change"
+        );
+    }
+
+    /// Issue #4397 AC-5: a state written before group generations existed
+    /// keeps every fingerprint it recorded, so the first pass after the upgrade
+    /// neither re-reads a source nor rebuilds the projection.
+    #[test]
+    fn a_v1_intake_state_migrates_without_re_reading_any_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        write_shards_across_buckets(&repo, 8);
+        write_legacy_log(&repo, &[("evt-v1-legacy", "work-v1-legacy")]);
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", "."])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "v1 sources"])
+            .current_dir(&repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["update-ref", "refs/remotes/origin/work/v1", "HEAD"])
+            .current_dir(&repo));
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        // Strip the group layer, leaving exactly what a pre-#4397 gwt wrote.
+        let mut v1 = load_work_events_intake_state(&state_path);
+        let v1_sources = v1.sources.clone();
+        assert!(!v1_sources.is_empty(), "the cold pass recorded sources");
+        v1.groups.clear();
+        let body = serde_json::json!({
+            "sources": v1_sources,
+            "projection_version": v1.projection_version,
+        });
+        std::fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&body).expect("v1 body"),
+        )
+        .expect("write v1 state");
+        let _ = std::fs::remove_file(state_path.with_file_name("work-events-intake.delta.jsonl"));
+
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let migrated = ingest_project_work_events_paths_with_source_read_hook(
+            &repo,
+            &work_items_path,
+            &state_path,
+            |_| {
+                reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+        );
+
+        assert!(
+            !migrated.projection_rebuilt,
+            "migration must not rebuild: {migrated:?}"
+        );
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "migration must not re-read a source whose v1 fingerprint is current"
+        );
+        let after = load_work_events_intake_state(&state_path);
+        for (key, fingerprint) in &v1_sources {
+            assert!(
+                after.is_current(key, fingerprint),
+                "migration lost the v1 fingerprint for {key}"
+            );
+        }
+        assert!(!after.groups.is_empty(), "migration recorded generations");
+
+        // And the pass after the migration derives nothing but the mutable
+        // legacy log, which carries no generation by design.
+        let settled = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(settled.sources_rederived, 1, "{settled:?}");
     }
 
     fn write_legacy_log(repo: &Path, events: &[(&str, &str)]) {

@@ -3040,10 +3040,27 @@ impl AppRuntime {
         let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
         let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
         thread::spawn(move || {
+            // Issue #4397 AC-4: the trigger's duration alone cannot tell a slow
+            // repository from bookkeeping that grew back to O(all sources), so
+            // the state size and the derivation count are reported with it.
+            let started = std::time::Instant::now();
             let summary = crate::work_events_ingest::ingest_project_work_events_paths(
                 &project_root,
                 &work_items_path,
                 &state_path,
+            );
+            gwt::perf::record_route(gwt::perf::PerfRoute::WorkEventsIntake, started.elapsed());
+            gwt::perf::record_route_resource(
+                gwt::perf::PerfRoute::WorkEventsIntake,
+                "state-bytes",
+                summary.state_bytes as f64,
+                gwt::perf::PerfUnit::Bytes,
+            );
+            gwt::perf::record_route_resource(
+                gwt::perf::PerfRoute::WorkEventsIntake,
+                "sources-rederived",
+                summary.sources_rederived as f64,
+                gwt::perf::PerfUnit::Count,
             );
             // #3065: detection-based repair for the resume owner bleed. Runs
             // after every ingest so re-ingested contaminated logs (from other

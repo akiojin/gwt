@@ -21,7 +21,8 @@ pub use record::{PerfRecord, PerfStream, PerfUnit, PerfViolationDetails};
 pub use budget::PerfBudgets;
 pub use global::{
     install, install_appending_to_established_log_from_settings, install_from_settings,
-    is_installed, record_operation, record_route, record_route_phase, RoutePhaseClock, RouteTimer,
+    is_installed, record_operation, record_route, record_route_phase, record_route_resource,
+    RoutePhaseClock, RouteTimer,
 };
 pub use route::PerfRoute;
 

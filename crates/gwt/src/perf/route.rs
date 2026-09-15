@@ -30,6 +30,14 @@ pub const DEFAULT_PANE_CREATE_BUDGET_MS: f64 = 5_000.0;
 /// Covers the embedding model query and the batched scope search.
 pub const DEFAULT_SEARCH_BUDGET_MS: f64 = 2_000.0;
 
+/// Individual ceiling for one Work-events intake trigger, in milliseconds.
+///
+/// Issue #4397: the intake runs on a 30-second poll against every local
+/// worktree and every fetched origin ref. It is background work, but a trigger
+/// that outlives this ceiling is re-deriving bookkeeping it should have been
+/// able to skip.
+pub const DEFAULT_WORK_EVENTS_INTAKE_BUDGET_MS: f64 = 5_000.0;
+
 const TARGET_PREFIX: &str = "route:";
 /// Perf-log `target` prefix for one phase inside a route (Issue #4283 AC-5).
 const PHASE_TARGET_PREFIX: &str = "phase:";
@@ -51,11 +59,13 @@ pub enum PerfRoute {
     PromptSend,
     /// One index search attempt.
     Search,
+    /// One Work-events intake trigger.
+    WorkEventsIntake,
 }
 
 impl PerfRoute {
     /// Every instrumented route, in the order `perf.summary` reports them.
-    pub const ALL: [PerfRoute; 7] = [
+    pub const ALL: [PerfRoute; 8] = [
         PerfRoute::Startup,
         PerfRoute::ProjectOpen,
         PerfRoute::ProjectSwitch,
@@ -63,6 +73,7 @@ impl PerfRoute {
         PerfRoute::PaneClose,
         PerfRoute::PromptSend,
         PerfRoute::Search,
+        PerfRoute::WorkEventsIntake,
     ];
 
     /// Stable short name, without the perf-log target prefix.
@@ -75,12 +86,23 @@ impl PerfRoute {
             PerfRoute::PaneClose => "pane.close",
             PerfRoute::PromptSend => "prompt.send",
             PerfRoute::Search => "search",
+            PerfRoute::WorkEventsIntake => "work.events.intake",
         }
     }
 
     /// The perf-log `target` field for this route.
     pub fn target(self) -> String {
         format!("{TARGET_PREFIX}{}", self.name())
+    }
+
+    /// The perf-log `target` field for one measured quantity of this route.
+    ///
+    /// Issue #4397 AC-4: a route's cost is not only its duration. The intake
+    /// reports how large its bookkeeping state is and how many fingerprints one
+    /// trigger had to derive, so a regression back to O(all sources) is visible
+    /// in `perf.summary` rather than only in a CPU graph.
+    pub fn resource_target(self, metric: &str) -> String {
+        format!("{TARGET_PREFIX}{}.{metric}", self.name())
     }
 
     /// The perf-log `target` field for one named phase of this route.
@@ -113,6 +135,7 @@ impl PerfRoute {
             PerfRoute::ProjectOpen => DEFAULT_PROJECT_OPEN_BUDGET_MS,
             PerfRoute::PaneCreate => DEFAULT_PANE_CREATE_BUDGET_MS,
             PerfRoute::Search => DEFAULT_SEARCH_BUDGET_MS,
+            PerfRoute::WorkEventsIntake => DEFAULT_WORK_EVENTS_INTAKE_BUDGET_MS,
         }
     }
 }
@@ -130,6 +153,33 @@ mod tests {
         }
         assert_eq!(PerfRoute::from_target("gwtd:issue.view"), None);
         assert_eq!(PerfRoute::from_target("route:unknown"), None);
+    }
+
+    /// Issue #4397 AC-4: the intake reports its state size and its per-trigger
+    /// derivation count as their own `perf.summary` targets, distinct from the
+    /// route's duration.
+    #[test]
+    fn work_events_intake_reports_state_size_and_rederivation_count() {
+        let route = PerfRoute::WorkEventsIntake;
+        assert_eq!(route.target(), "route:work.events.intake");
+        assert_eq!(
+            route.resource_target("state-bytes"),
+            "route:work.events.intake.state-bytes"
+        );
+        assert_eq!(
+            route.resource_target("sources-rederived"),
+            "route:work.events.intake.sources-rederived"
+        );
+        assert_eq!(
+            route.budget_ms(&PerfBudgets::default()),
+            DEFAULT_WORK_EVENTS_INTAKE_BUDGET_MS
+        );
+        // A resource target must not be mistaken for the route itself, or the
+        // duration summary would absorb byte counts.
+        assert_eq!(
+            PerfRoute::from_target(&route.resource_target("state-bytes")),
+            None
+        );
     }
 
     #[test]

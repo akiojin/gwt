@@ -923,17 +923,67 @@ fn repair_duplicate_event_container(
     changed
 }
 
+/// One group of sources that a single cheap generation token covers.
+///
+/// Issue #4397: an origin ref's whole Work-event tree, or one digest bucket of
+/// a worktree's shard store, changes as a unit. Recording the unit's generation
+/// lets a trigger prove nothing inside it moved without deriving a fingerprint
+/// per member. `members` is how many `sources` entries the group carries, so
+/// accounting stays O(groups) instead of O(sources).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkEventsIntakeGroup {
+    pub generation: String,
+    #[serde(default)]
+    pub members: usize,
+}
+
+/// One journalled mutation of the intake state, as persisted in the delta log.
+///
+/// The field names are single letters because this log is appended on every
+/// trigger of a long-running process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkEventsIntakeDelta {
+    /// Set (or overwrite) one source fingerprint.
+    Source { k: String, f: String },
+    /// Forget one source.
+    SourceRemoved { k: String },
+    /// Set (or overwrite) one group generation.
+    Group { k: String, g: String, n: usize },
+    /// Forget one group.
+    GroupRemoved { k: String },
+    /// Drop every source fingerprint (a semantics rebuild starts a new
+    /// snapshot).
+    SourcesCleared,
+    /// Set the projection version.
+    ProjectionVersion { v: String },
+}
+
 /// Fingerprint cache mapping a source key (worktree path / ref name) to the
 /// last-ingested source fingerprint. Callers may use a git blob oid, content
 /// sha256, or immutable-file metadata bound to source/container identity.
 /// Deleting the cache only costs re-reading sources; event-id dedup preserves
 /// correctness.
+///
+/// Mutations made through the methods below are journalled so
+/// [`save_work_events_intake_state_incremental`] can persist a trigger's
+/// changes without re-serializing the whole cache. Mutating `sources` directly
+/// bypasses the journal and requires the full [`save_work_events_intake_state`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkEventsIntakeState {
     #[serde(default)]
     pub sources: BTreeMap<String, String>,
     #[serde(default)]
     pub projection_version: Option<String>,
+    /// Issue #4397: generation token per source group. Absent in a v1 state,
+    /// which migrates by re-deriving generations once while still honouring
+    /// every `sources` fingerprint it already holds.
+    #[serde(default)]
+    pub groups: BTreeMap<String, WorkEventsIntakeGroup>,
+    #[serde(skip)]
+    journal: Vec<WorkEventsIntakeDelta>,
+    #[serde(skip)]
+    persisted_delta_records: usize,
 }
 
 impl WorkEventsIntakeState {
@@ -943,7 +993,84 @@ impl WorkEventsIntakeState {
     }
 
     pub fn record(&mut self, source: impl Into<String>, fingerprint: impl Into<String>) {
-        self.sources.insert(source.into(), fingerprint.into());
+        let source = source.into();
+        let fingerprint = fingerprint.into();
+        if self.sources.get(&source) == Some(&fingerprint) {
+            return;
+        }
+        self.journal.push(WorkEventsIntakeDelta::Source {
+            k: source.clone(),
+            f: fingerprint.clone(),
+        });
+        self.sources.insert(source, fingerprint);
+    }
+
+    /// Forget one source, e.g. because its shard or ref is gone.
+    pub fn remove_source(&mut self, source: &str) {
+        if self.sources.remove(source).is_none() {
+            return;
+        }
+        self.journal.push(WorkEventsIntakeDelta::SourceRemoved {
+            k: source.to_string(),
+        });
+    }
+
+    /// Drop every source fingerprint, as a semantics rebuild does.
+    pub fn clear_sources(&mut self) {
+        if self.sources.is_empty() {
+            return;
+        }
+        self.sources.clear();
+        self.journal.push(WorkEventsIntakeDelta::SourcesCleared);
+    }
+
+    /// The recorded generation of one source group, if any.
+    pub fn group(&self, key: &str) -> Option<&WorkEventsIntakeGroup> {
+        self.groups.get(key)
+    }
+
+    /// True when `key`'s recorded generation still matches `generation`.
+    pub fn group_is_current(&self, key: &str, generation: &str) -> bool {
+        self.groups.get(key).map(|group| group.generation.as_str()) == Some(generation)
+    }
+
+    pub fn record_group(
+        &mut self,
+        key: impl Into<String>,
+        generation: impl Into<String>,
+        members: usize,
+    ) {
+        let key = key.into();
+        let generation = generation.into();
+        let group = WorkEventsIntakeGroup {
+            generation,
+            members,
+        };
+        if self.groups.get(&key) == Some(&group) {
+            return;
+        }
+        self.journal.push(WorkEventsIntakeDelta::Group {
+            k: key.clone(),
+            g: group.generation.clone(),
+            n: group.members,
+        });
+        self.groups.insert(key, group);
+    }
+
+    pub fn remove_group(&mut self, key: &str) {
+        if self.groups.remove(key).is_none() {
+            return;
+        }
+        self.journal
+            .push(WorkEventsIntakeDelta::GroupRemoved { k: key.to_string() });
+    }
+
+    /// Forget every group, so the next pass re-derives all generations.
+    pub fn clear_groups(&mut self) {
+        let keys: Vec<String> = self.groups.keys().cloned().collect();
+        for key in keys {
+            self.remove_group(&key);
+        }
     }
 
     pub fn projection_is_current(&self, required: &str) -> bool {
@@ -951,26 +1078,171 @@ impl WorkEventsIntakeState {
     }
 
     pub fn record_projection_version(&mut self, version: impl Into<String>) {
-        self.projection_version = Some(version.into());
+        let version = version.into();
+        if self.projection_version.as_deref() == Some(version.as_str()) {
+            return;
+        }
+        self.journal
+            .push(WorkEventsIntakeDelta::ProjectionVersion { v: version.clone() });
+        self.projection_version = Some(version);
     }
+
+    fn apply(&mut self, delta: WorkEventsIntakeDelta) {
+        match delta {
+            WorkEventsIntakeDelta::Source { k, f } => {
+                self.sources.insert(k, f);
+            }
+            WorkEventsIntakeDelta::SourceRemoved { k } => {
+                self.sources.remove(&k);
+            }
+            WorkEventsIntakeDelta::Group { k, g, n } => {
+                self.groups.insert(
+                    k,
+                    WorkEventsIntakeGroup {
+                        generation: g,
+                        members: n,
+                    },
+                );
+            }
+            WorkEventsIntakeDelta::GroupRemoved { k } => {
+                self.groups.remove(&k);
+            }
+            WorkEventsIntakeDelta::SourcesCleared => self.sources.clear(),
+            WorkEventsIntakeDelta::ProjectionVersion { v } => self.projection_version = Some(v),
+        }
+    }
+}
+
+/// What one incremental save actually cost (Issue #4397 AC-2 / AC-4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkEventsIntakeStateWrite {
+    /// Bytes handed to the filesystem by this save.
+    pub bytes_written: u64,
+    /// The whole base snapshot was rewritten.
+    pub compacted: bool,
+    /// Size of the persisted state after the save, delta log included.
+    pub state_bytes: u64,
+}
+
+/// Append-only companion to the base snapshot.
+fn intake_state_delta_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "work-events-intake".to_string());
+    name.push_str(".delta.jsonl");
+    path.with_file_name(name)
+}
+
+/// A delta this long has stopped paying for itself against a full rewrite.
+fn intake_state_delta_limit(live_sources: usize) -> usize {
+    4_096 + live_sources / 8
 }
 
 /// Load the intake state; missing or corrupt files yield the default state
 /// (the cache is advisory).
+///
+/// The base snapshot is replayed forward through the delta log, so a process
+/// that was killed between two appends still reads its last durable state.
 pub fn load_work_events_intake_state(path: &Path) -> WorkEventsIntakeState {
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return WorkEventsIntakeState::default();
+    let mut state = match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str::<WorkEventsIntakeState>(&body).unwrap_or_default(),
+        Err(_) => WorkEventsIntakeState::default(),
     };
-    serde_json::from_str(&body).unwrap_or_default()
+    let Ok(delta) = std::fs::read_to_string(intake_state_delta_path(path)) else {
+        return state;
+    };
+    for line in delta.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // A torn tail from a killed process ends the replay; everything before
+        // it is still durable.
+        let Ok(record) = serde_json::from_str::<WorkEventsIntakeDelta>(line) else {
+            break;
+        };
+        state.apply(record);
+        state.persisted_delta_records += 1;
+    }
+    state.journal.clear();
+    state
 }
 
+/// Rewrite the whole state and drop the delta log.
 pub fn save_work_events_intake_state(path: &Path, state: &WorkEventsIntakeState) -> Result<()> {
     let body = serde_json::to_vec_pretty(state)
         .map_err(|error| GwtError::Other(format!("work events intake state: {error}")))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::workspace_projection::write_atomic(path, &body)
+    crate::workspace_projection::write_atomic(path, &body)?;
+    let delta = intake_state_delta_path(path);
+    match std::fs::remove_file(&delta) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Persist the mutations journalled since the last save (Issue #4397 AC-2).
+///
+/// Appending the delta is what keeps one trigger's write proportional to the
+/// sources it actually changed. The base snapshot is rewritten only when the
+/// delta has outgrown the live set; because the base is written atomically
+/// before the delta is truncated, and replaying an already-applied record is a
+/// no-op, a crash mid-compaction still reads back the same state.
+pub fn save_work_events_intake_state_incremental(
+    path: &Path,
+    state: &mut WorkEventsIntakeState,
+) -> Result<WorkEventsIntakeStateWrite> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let delta_path = intake_state_delta_path(path);
+    let journalled = state.journal.len();
+    let compact = !path.exists()
+        || state.persisted_delta_records + journalled
+            > intake_state_delta_limit(state.sources.len());
+
+    if compact {
+        state.journal.clear();
+        state.persisted_delta_records = 0;
+        save_work_events_intake_state(path, state)?;
+        let state_bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        return Ok(WorkEventsIntakeStateWrite {
+            bytes_written: state_bytes,
+            compacted: true,
+            state_bytes,
+        });
+    }
+
+    let mut body = Vec::new();
+    for record in &state.journal {
+        serde_json::to_writer(&mut body, record)
+            .map_err(|error| GwtError::Other(format!("work events intake delta: {error}")))?;
+        body.push(b'\n');
+    }
+    if !body.is_empty() {
+        use std::io::Write as _;
+        // No fsync: the whole cache is advisory. A lost tail costs re-reading
+        // the sources it covered, which event-id dedup makes harmless (SC-260).
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&delta_path)?;
+        file.write_all(&body)?;
+    }
+    state.persisted_delta_records += journalled;
+    state.journal.clear();
+    let state_bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+        + std::fs::metadata(&delta_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+    Ok(WorkEventsIntakeStateWrite {
+        bytes_written: body.len() as u64,
+        compacted: false,
+        state_bytes,
+    })
 }
 
 /// Content sha256 used as the fingerprint for filesystem sources (git blob
@@ -2423,6 +2695,133 @@ mod tests {
         assert_eq!(
             load_work_events_intake_state(&path),
             WorkEventsIntakeState::default()
+        );
+    }
+
+    /// Issue #4397 AC-2: one trigger must not re-serialize the whole state. An
+    /// incremental save appends only the mutations it journalled, so its cost
+    /// follows the number of changed sources, not the number of known ones.
+    #[test]
+    fn incremental_save_writes_only_the_journalled_mutations() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        let mut state = WorkEventsIntakeState::default();
+        for index in 0..5_000 {
+            state.record(format!("ref:refs/remotes/origin/b{index}"), "oid-original");
+        }
+        let base = save_work_events_intake_state_incremental(&path, &mut state).expect("base save");
+        assert!(base.compacted, "the first save establishes the base");
+        let base_bytes = std::fs::metadata(&path).expect("base metadata").len();
+
+        state.record("ref:refs/remotes/origin/b0", "oid-changed");
+        state.record("ref:refs/remotes/origin/new", "oid-new");
+        let write =
+            save_work_events_intake_state_incremental(&path, &mut state).expect("delta save");
+
+        assert!(
+            !write.compacted,
+            "two mutations must not compact: {write:?}"
+        );
+        assert!(
+            write.bytes_written < base_bytes / 10,
+            "delta {} should be far below the {base_bytes} byte base",
+            write.bytes_written
+        );
+        let reloaded = load_work_events_intake_state(&path);
+        assert!(reloaded.is_current("ref:refs/remotes/origin/b0", "oid-changed"));
+        assert!(reloaded.is_current("ref:refs/remotes/origin/new", "oid-new"));
+        assert!(reloaded.is_current("ref:refs/remotes/origin/b4999", "oid-original"));
+        assert_eq!(reloaded.sources.len(), 5_001);
+    }
+
+    /// Issue #4397: a removal and a reset have to survive the replay too, or a
+    /// deleted source would look current again after a restart.
+    #[test]
+    fn incremental_save_replays_removals_and_resets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        let mut state = WorkEventsIntakeState::default();
+        state.record("worktree:/a", "fp-a");
+        state.record("worktree:/b", "fp-b");
+        state.record_group("worktree:/a#00", "gen-a", 1);
+        save_work_events_intake_state_incremental(&path, &mut state).expect("base save");
+
+        state.remove_source("worktree:/a");
+        state.remove_group("worktree:/a#00");
+        save_work_events_intake_state_incremental(&path, &mut state).expect("delta save");
+        let reloaded = load_work_events_intake_state(&path);
+        assert!(!reloaded.sources.contains_key("worktree:/a"));
+        assert!(reloaded.is_current("worktree:/b", "fp-b"));
+        assert_eq!(reloaded.group("worktree:/a#00"), None);
+
+        state.clear_sources();
+        state.record("worktree:/c", "fp-c");
+        state.record_projection_version("v-next");
+        save_work_events_intake_state_incremental(&path, &mut state).expect("reset save");
+        let reloaded = load_work_events_intake_state(&path);
+        assert_eq!(reloaded.sources.len(), 1);
+        assert!(reloaded.is_current("worktree:/c", "fp-c"));
+        assert!(reloaded.projection_is_current("v-next"));
+    }
+
+    /// Issue #4397: the delta cannot grow without bound. Once it dwarfs the
+    /// live set the store compacts, and the compacted base must read back
+    /// identically.
+    #[test]
+    fn incremental_save_compacts_once_the_delta_outgrows_the_live_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        let mut state = WorkEventsIntakeState::default();
+        state.record("worktree:/only", "fp-0");
+        save_work_events_intake_state_incremental(&path, &mut state).expect("base save");
+
+        let mut compactions = 0;
+        for generation in 0..5_000 {
+            state.record("worktree:/only", format!("fp-{generation}"));
+            if save_work_events_intake_state_incremental(&path, &mut state)
+                .expect("delta save")
+                .compacted
+            {
+                compactions += 1;
+            }
+        }
+
+        assert!(compactions > 0, "an unbounded delta never compacted");
+        let reloaded = load_work_events_intake_state(&path);
+        assert!(reloaded.is_current("worktree:/only", "fp-4999"));
+        assert_eq!(reloaded.sources.len(), 1);
+    }
+
+    /// Issue #4397 AC-5: a state written before groups existed keeps every
+    /// fingerprint it recorded. Migration adds the group layer; it never drops
+    /// the per-source history the cache was built from.
+    #[test]
+    fn a_v1_state_without_groups_keeps_every_fingerprint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        std::fs::write(
+            &path,
+            br#"{"sources":{"ref:refs/remotes/origin/x:.gwt/work/events.jsonl":"fp-x"},"projection_version":"v1"}"#,
+        )
+        .expect("v1 state");
+
+        let mut loaded = load_work_events_intake_state(&path);
+        assert!(loaded.groups.is_empty(), "a v1 state has no groups");
+        assert!(loaded.is_current("ref:refs/remotes/origin/x:.gwt/work/events.jsonl", "fp-x"));
+        assert!(loaded.projection_is_current("v1"));
+
+        loaded.record_group("ref:refs/remotes/origin/x", "gen-1", 1);
+        save_work_events_intake_state_incremental(&path, &mut loaded).expect("migrating save");
+        let migrated = load_work_events_intake_state(&path);
+        assert!(
+            migrated.is_current("ref:refs/remotes/origin/x:.gwt/work/events.jsonl", "fp-x"),
+            "migration must not lose a v1 fingerprint"
+        );
+        assert_eq!(
+            migrated
+                .group("ref:refs/remotes/origin/x")
+                .map(|group| group.generation.as_str()),
+            Some("gen-1")
         );
     }
 
