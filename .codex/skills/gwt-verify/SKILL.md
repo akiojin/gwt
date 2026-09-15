@@ -16,6 +16,12 @@ delegates to `gwt-verify --mode full`; `gwt-manage-pr` requires `gwt-verify --mo
 before opening or updating a PR; users may also invoke it directly through
 `/gwt:gwt-verify`.
 
+Read-only `gh` commands are allowed during verification, and allowed calls
+are recorded on the shared GitHub budget ledger. Prefer gwtd JSON operations
+such as `pr.list` and `issue.view` when cached data or workflow lifecycle
+context is needed. GitHub mutations must use JSON-envelope operations;
+direct `gh` writes do not satisfy verification, audit, or Ready PR gates.
+
 ## Contract overview
 
 `gwt-verify` is **project-agnostic**. It does not own a fixed cargo / pnpm /
@@ -471,6 +477,21 @@ there is no fixed retry schedule. If a holder persists without a live
 verification workload, report its run / PID and timing evidence to the
 PM. `verify.lease.release` remains available to drain a legacy holder
 without killing its process.
+
+### gwtd bootstrap order
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
 
 ## Stop Conditions
 
