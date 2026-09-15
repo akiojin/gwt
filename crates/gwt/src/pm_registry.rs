@@ -404,9 +404,9 @@ pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, Strin
         .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
         || !is_canonical_sha256(body_sha256)
         || (pm_delivery_prompt_sha256(body) != body_sha256
-            && !body
+            && body
                 .strip_prefix(PM_DELIVERY_SOURCE)
-                .is_some_and(|body| pm_delivery_prompt_sha256(body) == body_sha256))
+                .is_none_or(|body| pm_delivery_prompt_sha256(body) != body_sha256))
     {
         return None;
     }
