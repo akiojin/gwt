@@ -99,12 +99,14 @@ pub(crate) fn handle_with_input_for_session(
         return Ok(HookOutput::Silent);
     };
     if prompt_reminder_write_has_budget(event, gwt_core::operation_deadline::current()) {
-        write_reminders_state_for_repo_hash(
-            &session.worktree_path,
-            session.repo_hash.as_deref(),
-            &session.id,
-            &plan.next_reminders,
-        )?;
+        timed_substage(event, "board-reminder/reminders-write", || {
+            write_reminders_state_for_repo_hash(
+                &session.worktree_path,
+                session.repo_hash.as_deref(),
+                &session.id,
+                &plan.next_reminders,
+            )
+        })?;
     }
     debug_assert_eq!(intent_event, plan_event(&plan.output));
     Ok(plan.output)
@@ -530,6 +532,20 @@ struct PromptBoardReadOutcome {
     succeeded: bool,
 }
 
+/// Time one `board-reminder` substage into the opt-in hook profile.
+///
+/// Issue #3777: on Windows the aggregate `board-reminder` record is ~85% of the
+/// prompt budget while its Board history read is already capped at
+/// [`USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE`], so the cost sits in the
+/// surrounding reads and writes. The substage names are fixed literals on the
+/// content-free allowlist in [`super::diagnostics`].
+fn timed_substage<T>(event: &str, handler: &'static str, work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let value = work();
+    super::diagnostics::record_handler_duration(event, handler, started.elapsed(), "ok");
+    value
+}
+
 fn prompt_reminder_write_has_budget(event: &str, deadline: Option<Instant>) -> bool {
     event != "UserPromptSubmit"
         || deadline.is_none_or(|deadline| {
@@ -596,12 +612,16 @@ pub fn compute_plan(
         return Ok(None);
     };
 
-    let context = HookContext::for_board_reminder(session)?;
-    let mut reminders = load_reminders_state_for_repo_hash(
-        &session.worktree_path,
-        session.repo_hash.as_deref(),
-        &session.id,
-    )?;
+    let context = timed_substage(event, "board-reminder/context", || {
+        HookContext::for_board_reminder(session)
+    })?;
+    let mut reminders = timed_substage(event, "board-reminder/reminders-load", || {
+        load_reminders_state_for_repo_hash(
+            &session.worktree_path,
+            session.repo_hash.as_deref(),
+            &session.id,
+        )
+    })?;
     let previous_last_injected_at = reminders.last_injected_at;
     let audience_scope = current_session_board_scope_from_projection(
         context.audience_projection(),
@@ -644,18 +664,20 @@ pub fn compute_plan(
         )
     };
     let outcome = if intent_event == IntentBoundaryEvent::UserPromptSubmit {
-        #[cfg(test)]
-        {
-            if crate::board_provider::test_provider_override::has_forced_prompt_provider() {
-                load_user_prompt_board_read_inline_with(load)
-            } else {
+        timed_substage(event, "board-reminder/board-read", || {
+            #[cfg(test)]
+            {
+                if crate::board_provider::test_provider_override::has_forced_prompt_provider() {
+                    load_user_prompt_board_read_inline_with(load)
+                } else {
+                    load_user_prompt_board_read_with(load)
+                }
+            }
+            #[cfg(not(test))]
+            {
                 load_user_prompt_board_read_with(load)
             }
-        }
-        #[cfg(not(test))]
-        {
-            load_user_prompt_board_read_with(load)
-        }
+        })
     } else {
         PromptBoardReadOutcome {
             read: load()?,
@@ -685,8 +707,9 @@ pub fn compute_plan(
     // SPEC #3245 FR-004: the Work-state reminders (title purpose, progress
     // summary) fire for every session — the intake lane suppression is gone.
     // Only a terminal delivery settlement still quiets them.
-    let suppress_work_state_reminders =
-        terminal_work_state_reminders_suppressed(context.audience_root(), &session.id);
+    let suppress_work_state_reminders = timed_substage(event, "board-reminder/suppression", || {
+        terminal_work_state_reminders_suppressed(context.audience_root(), &session.id)
+    });
     // SPEC-3431 FR-064: the resident PM owns no Work item, its window title is
     // fixed, and `workspace.update` cannot even succeed from its detached
     // worktree (#3477). Suppress separately from the terminal-settlement path

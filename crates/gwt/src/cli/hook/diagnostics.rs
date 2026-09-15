@@ -160,6 +160,13 @@ fn normalized_handler(value: &str) -> &'static str {
         "forward" => "forward",
         "coordination-event" => "coordination-event",
         "board-reminder" => "board-reminder",
+        // Issue #3777: `board-reminder` substages, same fixed-literal contract
+        // as the `runtime-state` ones above.
+        "board-reminder/context" => "board-reminder/context",
+        "board-reminder/reminders-load" => "board-reminder/reminders-load",
+        "board-reminder/board-read" => "board-reminder/board-read",
+        "board-reminder/suppression" => "board-reminder/suppression",
+        "board-reminder/reminders-write" => "board-reminder/reminders-write",
         "workspace-registration" => "workspace-registration",
         "workspace-identity" => "workspace-identity",
         "action-obligation-record" => "action-obligation-record",
