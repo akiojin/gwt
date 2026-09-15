@@ -1065,6 +1065,7 @@ if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
 )\r\n\
 set \"gwt_arg1=%~1\"\r\n\
 set \"gwt_arg2=%~2\"\r\n\
+if /I \"%~3\"==\"--include\" (echo HTTP/1.1 200 OK& echo.)\r\n\
 if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" (\r\n\
   if /I \"%gwt_arg2:~0,26%\"==\"repos/{owner}/{repo}/pulls\" (\r\n\
     echo []\r\n\
@@ -1099,6 +1100,9 @@ exit /b 0\r\n",
 	if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
 	  printf '%s\n' 'gh refresh failed' >&2
 	  exit 1
+fi
+if [ "$3" = "--include" ]; then
+  printf 'HTTP/1.1 200 OK\r\n\r\n'
 fi
 # SPEC #4093 FR-003: the merged-PR readback is the REST closed-pulls sync.
 case "$1 $2" in
