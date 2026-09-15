@@ -18,6 +18,7 @@ use gwt_core::index_coordinator::{
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::board::{BoardCommand, BoardPostCommand};
+use crate::cli::verification_lease::holder_activity::HolderActivity;
 use crate::cli::verification_lease::{self, DEFAULT_TTL_MINUTES};
 use crate::cli::CliEnv;
 
@@ -150,7 +151,19 @@ pub(crate) struct HolderNotice {
 /// that as `0s left` told agents the host was about to free up when the
 /// holder was in fact unbounded — the background issue index job was exactly
 /// that holder.
-fn holder_notice(status: &HeavyLeaseStatus) -> HolderNotice {
+fn holder_notice(status: &HeavyLeaseStatus, activity: Option<&HolderActivity>) -> HolderNotice {
+    let mut notice = holder_identity_notice(status);
+    // Issue #4405 AC-4: `(pid 21468, 0s left)` alone reads as a hang. Say
+    // whether the holder is progressing or starved of CPU.
+    if let Some(activity) = activity.filter(|_| status.held) {
+        notice
+            .detail
+            .push_str(&format!("; {}", activity.describe()));
+    }
+    notice
+}
+
+fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
     if !status.held {
         return HolderNotice {
             detail: "verification lease was contended".to_string(),
@@ -197,7 +210,16 @@ fn holder_notice(status: &HeavyLeaseStatus) -> HolderNotice {
 
 fn describe_holder(coordinator: &IndexCoordinator) -> HolderNotice {
     match coordinator.heavy_lease_status() {
-        Ok(status) => holder_notice(&status),
+        Ok(status) => {
+            let activity = status
+                .owner
+                .as_ref()
+                .filter(|_| status.held)
+                .and_then(|owner| {
+                    verification_lease::holder_activity::observe(owner.pid, status.acquired_at_ms)
+                });
+            holder_notice(&status, activity.as_ref())
+        }
         Err(err) => HolderNotice {
             detail: format!("verification lease status unavailable: {err}"),
             retry_after: None,
@@ -445,26 +467,32 @@ mod tests {
     /// waiting indefinitely.
     #[test]
     fn holder_notice_reports_an_eta_only_when_the_holder_has_a_ttl() {
-        let timed = holder_notice(&HeavyLeaseStatus {
-            held: true,
-            target: Some("repo--issues".to_string()),
-            owner: Some(gwt_core::index_coordinator::OwnerIdentity {
-                pid: 32420,
-                start_id: "start".to_string(),
-            }),
-            remaining_ms: Some(320_000),
-            ..HeavyLeaseStatus::default()
-        });
+        let timed = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("repo--issues".to_string()),
+                owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                    pid: 32420,
+                    start_id: "start".to_string(),
+                }),
+                remaining_ms: Some(320_000),
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
         assert_eq!(timed.retry_after, Some(Duration::from_secs(320)));
         assert!(timed.detail.contains("repo--issues"), "{}", timed.detail);
         assert!(timed.detail.contains("320s left"), "{}", timed.detail);
 
-        let untimed = holder_notice(&HeavyLeaseStatus {
-            held: true,
-            target: Some("repo--issues".to_string()),
-            remaining_ms: None,
-            ..HeavyLeaseStatus::default()
-        });
+        let untimed = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("repo--issues".to_string()),
+                remaining_ms: None,
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
         assert_eq!(untimed.retry_after, None);
         assert!(
             !untimed.detail.contains("0s left"),
@@ -473,9 +501,43 @@ mod tests {
         );
         assert!(untimed.detail.contains("no TTL"), "{}", untimed.detail);
 
-        let free = holder_notice(&HeavyLeaseStatus::default());
+        let free = holder_notice(&HeavyLeaseStatus::default(), None);
         assert_eq!(free.retry_after, None);
         assert!(free.detail.contains("contended"), "{}", free.detail);
+    }
+
+    /// Issue #4405 AC-4: a waiter must be able to tell a starved holder from
+    /// a hung one. `host busy for 60s ... (pid 21468, 0s left)` read as a
+    /// hang, and four windows considered `execution.blocked` over it.
+    #[test]
+    fn holder_notice_says_a_starved_holder_is_running_not_hung() {
+        let status = HeavyLeaseStatus {
+            held: true,
+            target: Some("repo--verification--wt".to_string()),
+            owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                pid: 21468,
+                start_id: "start".to_string(),
+            }),
+            remaining_ms: Some(0),
+            ..HeavyLeaseStatus::default()
+        };
+        let starved = HolderActivity {
+            held_ms: 7_260_000,
+            cpu_percent: 1.4,
+            processes: 3,
+        };
+        let notice = holder_notice(&status, Some(&starved));
+        assert!(notice.detail.contains("pid 21468"), "{}", notice.detail);
+        assert!(notice.detail.contains("starved"), "{}", notice.detail);
+        assert!(notice.detail.contains("not hung"), "{}", notice.detail);
+
+        let progressing = HolderActivity {
+            held_ms: 600_000,
+            cpu_percent: 380.0,
+            processes: 5,
+        };
+        let notice = holder_notice(&status, Some(&progressing));
+        assert!(notice.detail.contains("progressing"), "{}", notice.detail);
     }
 
     /// Issue #4140 AC-3: every refusal carries a concrete next step, so an
