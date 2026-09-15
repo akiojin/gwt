@@ -33,7 +33,7 @@ use super::{
     retain_live_workspace_agents, save_workspace_launch_projection,
     workspace_cleanup_candidate_for_projection, workspace_projection_owner_title,
     ActiveAgentSession, AppRuntime, BackendEvent, ClientId, IssueBranchLinkStore, OutboundEvent,
-    ProjectTabRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    ProjectTabRuntime, UserEvent, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 
 fn projection_worktree_path_key(path: &Path) -> PathBuf {
@@ -208,11 +208,11 @@ pub(super) fn active_work_projection_from_saved_with_journal(
 
 fn empty_active_work_projection_view(
     tab_id: &str,
-    tab: &ProjectTabRuntime,
+    tab_title: &str,
 ) -> gwt::ActiveWorkProjectionView {
     gwt::ActiveWorkProjectionView {
         id: tab_id.to_string(),
-        title: format!("{} Work", tab.title),
+        title: format!("{tab_title} Work"),
         status_category: "idle".to_string(),
         status_text: String::new(),
         summary: None,
@@ -241,7 +241,7 @@ fn empty_active_work_projection_view(
 
 fn active_work_projection_from_live_sessions(
     tab_id: &str,
-    tab: &ProjectTabRuntime,
+    tab_title: &str,
     sessions: &[&ActiveAgentSession],
     managed_hook_health: Option<gwt::ManagedHookHealthView>,
 ) -> Option<gwt::ActiveWorkProjectionView> {
@@ -262,7 +262,7 @@ fn active_work_projection_from_live_sessions(
     });
     let active_works = vec![gwt::ActiveWorkItemView {
         id: tab_id.to_string(),
-        title: format!("{} Work", tab.title),
+        title: format!("{tab_title} Work"),
         status_category: "active".to_string(),
         status_text: if active_agents == 1 {
             "1 active agent".to_string()
@@ -304,7 +304,7 @@ fn active_work_projection_from_live_sessions(
     }];
     Some(gwt::ActiveWorkProjectionView {
         id: tab_id.to_string(),
-        title: format!("{} workspace", tab.title),
+        title: format!("{tab_title} workspace"),
         status_category: "active".to_string(),
         status_text: if active_agents == 1 {
             "1 active agent".to_string()
@@ -3328,10 +3328,10 @@ impl AppRuntime {
             .filter(|session| session.tab_id == tab_id)
             .collect::<Vec<_>>();
         if sessions.is_empty() {
-            return empty_active_work_projection_view(tab_id, tab);
+            return empty_active_work_projection_view(tab_id, &tab.title);
         }
-        active_work_projection_from_live_sessions(tab_id, tab, &sessions, None)
-            .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab))
+        active_work_projection_from_live_sessions(tab_id, &tab.title, &sessions, None)
+            .unwrap_or_else(|| empty_active_work_projection_view(tab_id, &tab.title))
     }
 
     fn cached_or_in_memory_active_work_projection_for_tab(
@@ -3522,37 +3522,11 @@ impl AppRuntime {
         cache.insert(tab_id, projection);
     }
 
-    /// Rebuild the cache for the project whose background completion just
-    /// arrived. Completion events can belong to an inactive tab; rebuilding
-    /// only the active tab leaves the target cache stale, while tab-change is
-    /// intentionally cache-only to keep the GUI event path process-free.
-    pub(crate) fn refresh_active_work_projection_for_project_root(
-        &self,
-        project_root: &Path,
-    ) -> Vec<OutboundEvent> {
-        let Some(tab) = self
-            .tabs
-            .iter()
-            .find(|tab| projection_worktree_paths_match(&tab.project_root, project_root))
-        else {
-            return Vec::new();
-        };
-        let tab_id = tab.id.clone();
-        let projection = self.active_work_projection_for_tab(&tab_id, tab);
-        if self.active_tab_id.as_deref() != Some(tab_id.as_str()) {
-            return Vec::new();
-        }
-        projection
-            .map(|projection| {
-                vec![OutboundEvent::broadcast(
-                    BackendEvent::ActiveWorkProjection {
-                        projection: Box::new(projection),
-                    },
-                )]
-            })
-            .unwrap_or_default()
-    }
-
+    /// Synchronous full rebuild + broadcast for the active tab. Test oracle
+    /// only (Issue #3752): every production continuation goes through
+    /// [`Self::deferred_active_work_projection_broadcast_for_active_tab`] so
+    /// the disk-backed build never runs on the tao event loop.
+    #[cfg(test)]
     pub(crate) fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
@@ -3562,6 +3536,23 @@ impl AppRuntime {
                 projection: Box::new(projection),
             },
         ))
+    }
+
+    /// Issue #3752: event-loop replacement for the synchronous full rebuild on
+    /// lifecycle continuations (Board milestone, PTY exit, StopWindow, launch
+    /// completion, Work close, continue-work finalizers). Replays the cached
+    /// (or in-memory) view as a bounded patch right away and requests the
+    /// disk-backed rebuild on the blocking worker; the authoritative view
+    /// follows through [`UserEvent::ActiveWorkProjectionBuilt`]. With ~200
+    /// Work rows the inline rebuild blocked the loop for 9-18 s per event and
+    /// every `close_window` / `list_windows` queued behind it.
+    pub(crate) fn deferred_active_work_projection_broadcast_for_active_tab(
+        &self,
+    ) -> Option<OutboundEvent> {
+        let tab_id = self.active_tab_id.as_ref()?;
+        let project_root = self.tab(tab_id)?.project_root.clone();
+        self.request_active_work_projection_build(&project_root);
+        self.cached_active_work_projection_broadcast_for_workspace_watcher()
     }
 
     /// Issue #3783: lifecycle acknowledgements must not enter the disk-backed
@@ -3651,6 +3642,53 @@ impl AppRuntime {
         ))
     }
 
+    /// Issue #3752: snapshot every event-loop-owned input the disk-backed
+    /// Active Work projection build needs, so the build itself can run on a
+    /// blocking worker as well as inline.
+    fn active_work_projection_build_inputs(
+        &self,
+        tab_id: &str,
+        tab: &ProjectTabRuntime,
+    ) -> ActiveWorkProjectionBuildInputs {
+        let project_root = tab.project_root.clone();
+        ActiveWorkProjectionBuildInputs {
+            tab_id: tab_id.to_string(),
+            tab_title: tab.title.clone(),
+            sessions: self
+                .active_agent_sessions
+                .values()
+                .filter(|session| session.tab_id == tab_id)
+                .cloned()
+                .collect(),
+            sessions_dir: self.sessions_dir.clone(),
+            running_window_ids: self
+                .window_pty_statuses
+                .iter()
+                .filter(|(_, status)| matches!(status, crate::WindowProcessStatus::Running))
+                .map(|(window_id, _)| window_id.clone())
+                .collect(),
+            known_branch_refs: self.work_known_branch_refs.get(&project_root).cloned(),
+            merged_branches: self.work_merged_branches.get(&project_root).cloned(),
+            dirty_branches: self.work_dirty_branches.get(&project_root).cloned(),
+            cleanup_ready_branches: self.work_cleanup_ready_branches.get(&project_root).cloned(),
+            live_process_branches: self.work_live_process_branches.get(&project_root).cloned(),
+            pr_titles: self.work_pr_titles.get(&project_root).cloned(),
+            ai_summaries: self.work_ai_summaries.get(&project_root).cloned(),
+            tip_subjects: self.work_tip_subjects.get(&project_root).cloned(),
+            local_worktree_branches: self
+                .local_worktree_branches
+                .borrow()
+                .get(&project_root)
+                .cloned(),
+            project_root,
+        }
+    }
+
+    /// Synchronous disk-backed build. Test oracle only (Issue #3752): no
+    /// production path builds inline any more; continuations use
+    /// [`Self::request_active_work_projection_build`] and the interactive
+    /// paths (tab change, FrontendReady) replay the cache.
+    #[cfg(test)]
     pub(super) fn active_work_projection_for_tab(
         &self,
         tab_id: &str,
@@ -3658,201 +3696,157 @@ impl AppRuntime {
     ) -> Option<gwt::ActiveWorkProjectionView> {
         #[cfg(test)]
         FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(|count| count.set(count.get() + 1));
-        let sessions = self
-            .active_agent_sessions
-            .values()
-            .filter(|session| session.tab_id == tab_id)
-            .collect::<Vec<_>>();
-        let saved_projection =
-            gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
-                .ok()
-                .flatten();
-        // SPEC-2359 Phase W-15 (FR-379/FR-382): the Workspace list is the
-        // union of existing worktrees and unclosed records, independent of
-        // live agents and of whether the project was ever launched here. When
-        // no projection has been saved yet (fresh home / never-launched
-        // project) but Work records exist (e.g. worktree backfill), synthesize
-        // a default projection so the records still surface.
-        let loaded_projection = saved_projection.or_else(|| {
-            self.work_items_cache
-                .borrow_mut()
-                .load_or_synthesize(&tab.project_root)
-                .ok()
-                .filter(|works| !works.work_items.is_empty())
-                .map(|_| {
-                    gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
-                        &tab.project_root,
-                    )
-                })
-        });
-        if let Some(projection) = loaded_projection {
-            let mut projection = projection;
-            let had_saved_agents = !projection.agents.is_empty();
-            let cleanup_candidate =
-                workspace_cleanup_candidate_for_projection(&projection, &sessions);
-            merge_active_sessions_into_projection(
-                &mut projection,
-                sessions.iter().copied(),
-                chrono::Utc::now(),
-            );
-            let updated_at = chrono::Utc::now();
-            retain_live_workspace_agents(&mut projection, &sessions, updated_at);
-            // SPEC-2359 US-80 (FR-428): derive each Shell Work's status from its
-            // live PTY — running → Active, otherwise (exited or post-restart) →
-            // Idle — so the rail never shows a dead shell as Active.
-            projection.reconcile_shell_status(
-                |window_id| {
-                    matches!(
-                        self.window_pty_statuses.get(window_id),
-                        Some(crate::WindowProcessStatus::Running)
-                    )
-                },
-                updated_at,
-            );
-            if had_saved_agents && !projection.has_current_agents() {
-                projection.reset_idle_identity(&tab.title, updated_at);
-            }
-            let journal_entries =
-                gwt_core::workspace_projection::load_recent_workspace_journal_entries(
-                    &tab.project_root,
-                    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+        self.active_work_projection_builds
+            .borrow_mut()
+            .entry(tab_id.to_string())
+            .or_default()
+            .generation += 1;
+        let inputs = self.active_work_projection_build_inputs(tab_id, tab);
+        let view = build_active_work_projection(
+            &inputs,
+            &mut || {
+                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
+                    &inputs.project_root,
                 )
-                .unwrap_or_default()
-                .iter()
-                .map(workspace_journal_entry_view_from_entry)
-                .collect::<Vec<_>>();
-            let agent_sessions = self
-                .session_ledger_cache
-                .borrow_mut()
-                .load(&self.sessions_dir);
-            let session_index = work_session_index(&agent_sessions);
-            // Issue #3611: resumability is answered from the background merge
-            // scan's branch snapshot. Probing branches here would spawn Git
-            // once per Session on the event-loop thread.
-            let resume_branches =
-                ResumeBranchIndex::scanned(self.work_known_branch_refs.get(&tab.project_root));
-            // Current and WorkItems share the stable Project State identity.
-            // The exact worktree is an event destination, never a second
-            // WorkItems discovery root.
-            let work_items = self
-                .work_items_cache
-                .borrow_mut()
-                .load_or_synthesize(&tab.project_root)
-                .map(|items| items.work_items)
-                .unwrap_or_default();
-            let workspaces = work_items
-                .iter()
-                .map(|item| {
-                    workspace_work_item_view_from_item(item, &session_index, resume_branches)
-                })
-                .collect::<Vec<_>>();
-            let mut view = active_work_projection_from_saved_with_journal(
-                projection,
-                journal_entries,
-                workspaces,
-                cleanup_candidate,
-            );
-            // Issue #4172: one ledger read for the whole projection instead of
-            // one per Work row, so hook health stops scaling with Work count.
-            let hook_failures = ManagedHookFailureSnapshot::read();
-            view.managed_hook_health = managed_hook_health_view_for_project(
-                &tab.project_root,
-                &self.sessions_dir,
-                &sessions,
-                &hook_failures,
-            );
-            // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
-            // branch into one Workspace row before the ledger attach, so the
-            // attach / identity-collapse / cap run once per Workspace.
-            assign_and_merge_workspace_groups(&mut view.active_works, &tab.project_root);
-            // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
-            // ledger to each Workspace (branch) row so sessions surface even
-            // when works.json never recorded an agent for the branch.
-            attach_registry_sessions_to_active_works(
-                &mut view.active_works,
-                &agent_sessions,
-                gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
-                &session_index,
-                resume_branches,
-            );
-            attach_managed_hook_health_to_active_works(
-                &mut view.active_works,
-                &self.sessions_dir,
-                &sessions,
-                &hook_failures,
-            );
-            // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
-            // background merge-scan cache plus the recorded PR state.
-            let dirty_branches = self.work_dirty_branches.get(&tab.project_root);
-            mark_merged_active_works(
-                &mut view.active_works,
-                self.work_merged_branches.get(&tab.project_root),
-                dirty_branches,
-            );
-            // SPEC-3075: fill the rail summary — PR title (top), then the
-            // AI-polished summary (FR-006), then the raw branch tip commit
-            // subject for Works with no recorded purpose (all from background
-            // scan caches).
-            apply_work_summary_external_sources(
-                &mut view.active_works,
-                self.work_pr_titles.get(&tab.project_root),
-                self.work_ai_summaries.get(&tab.project_root),
-                self.work_tip_subjects.get(&tab.project_root),
-            );
-            // SPEC-2359 W16-3 (FR-390): "Remote" rows — branch known only
-            // from fetched refs, no local worktree (cache lookup only).
-            mark_remote_only_active_works(
-                &mut view.active_works,
-                self.local_worktree_branches.borrow().get(&tab.project_root),
-            );
-            let cleanup_ready_branches = self.work_cleanup_ready_branches.get(&tab.project_root);
-            let live_process_branches = self.work_live_process_branches.get(&tab.project_root);
-            if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
-                cleanup_candidate_has_live_process(candidate, live_process_branches)
-            }) {
-                view.cleanup_candidate = None;
-            }
-            mark_workspace_cleanup_candidates(
-                &mut view.active_works,
-                cleanup_ready_branches,
-                dirty_branches,
-                &sessions,
-                live_process_branches,
-            );
-            self.active_work_projection_cache
-                .borrow_mut()
-                .insert(tab_id.to_string(), view.clone());
-            return Some(view);
-        }
-
-        // Issue #4172: same single ledger read for the live-session projection.
-        let hook_failures = ManagedHookFailureSnapshot::read();
-        let mut view = active_work_projection_from_live_sessions(
-            tab_id,
-            tab,
-            &sessions,
-            managed_hook_health_view_for_project(
-                &tab.project_root,
-                &self.sessions_dir,
-                &sessions,
-                &hook_failures,
-            ),
+                .ok()
+            },
+            &mut || {
+                self.session_ledger_cache
+                    .borrow_mut()
+                    .load(&self.sessions_dir)
+            },
         );
-        if let Some(view) = view.as_mut() {
-            attach_managed_hook_health_to_active_works(
-                &mut view.active_works,
-                &self.sessions_dir,
-                &sessions,
-                &hook_failures,
-            );
-        }
-        let mut cache = self.active_work_projection_cache.borrow_mut();
-        if let Some(view) = view.as_ref() {
-            cache.insert(tab_id.to_string(), view.clone());
-        } else {
-            cache.remove(tab_id);
-        }
+        self.store_active_work_projection_view(tab_id, view.clone());
         view
+    }
+
+    fn store_active_work_projection_view(
+        &self,
+        tab_id: &str,
+        view: Option<gwt::ActiveWorkProjectionView>,
+    ) {
+        let mut cache = self.active_work_projection_cache.borrow_mut();
+        match view {
+            Some(view) => {
+                cache.insert(tab_id.to_string(), view);
+            }
+            None => {
+                cache.remove(tab_id);
+            }
+        }
+    }
+
+    /// Issue #3752: rebuild the projection for `project_root` on the blocking
+    /// worker and hand the finished view back through
+    /// [`UserEvent::ActiveWorkProjectionBuilt`]. The Work refresh continuations
+    /// (ingest, merge scan, tip subjects, PR titles, AI summaries) call this
+    /// instead of building inline: with hundreds of Work rows the build reads
+    /// works.json, the session ledger, and every worktree's managed hook
+    /// surfaces, which blocked the tao event loop for seconds per
+    /// continuation and stalled every `close_window` / `list_windows` queued
+    /// behind it. One build is in flight per tab; requests that arrive
+    /// meanwhile coalesce into a single follow-up build.
+    pub(crate) fn request_active_work_projection_build(&self, project_root: &Path) {
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| projection_worktree_paths_match(&tab.project_root, project_root))
+        else {
+            return;
+        };
+        let tab_id = tab.id.clone();
+        let generation = {
+            let mut builds = self.active_work_projection_builds.borrow_mut();
+            let state = builds.entry(tab_id.clone()).or_default();
+            if state.in_flight {
+                state.dirty = true;
+                return;
+            }
+            state.in_flight = true;
+            state.dirty = false;
+            state.generation += 1;
+            state.generation
+        };
+        let inputs = self.active_work_projection_build_inputs(&tab_id, tab);
+        let proxy = self.proxy.clone();
+        let worker_tab_id = tab_id.clone();
+        let spawned = self.blocking_tasks.try_spawn(move || {
+            let project_root = inputs.project_root.clone();
+            let sessions_dir = inputs.sessions_dir.clone();
+            let mut work_items: Option<gwt_core::workspace_projection::WorkItemsProjection> = None;
+            let view = build_active_work_projection(
+                &inputs,
+                &mut || {
+                    if work_items.is_none() {
+                        work_items =
+                            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
+                                &project_root,
+                            )
+                            .ok();
+                    }
+                    work_items.clone()
+                },
+                &mut || crate::session_ledger_cache::SessionLedgerCache::new().load(&sessions_dir),
+            );
+            proxy.send(UserEvent::ActiveWorkProjectionBuilt {
+                tab_id: worker_tab_id,
+                generation,
+                view: view.map(Box::new),
+            });
+        });
+        if let Err(error) = spawned {
+            tracing::warn!(
+                target: "gwt.frontend.timing",
+                tab_id,
+                %error,
+                "background active work projection build could not be spawned"
+            );
+            if let Some(state) = self
+                .active_work_projection_builds
+                .borrow_mut()
+                .get_mut(&tab_id)
+            {
+                state.in_flight = false;
+            }
+        }
+    }
+
+    /// Event-loop continuation of [`Self::request_active_work_projection_build`]:
+    /// store the finished view, broadcast it for the active tab, drop a result
+    /// that a newer synchronous build already superseded, and run the one
+    /// coalesced follow-up build if requests arrived while this one ran.
+    pub(crate) fn handle_active_work_projection_built(
+        &mut self,
+        tab_id: &str,
+        generation: u64,
+        view: Option<Box<gwt::ActiveWorkProjectionView>>,
+    ) -> Vec<OutboundEvent> {
+        let (current, rerun) = {
+            let mut builds = self.active_work_projection_builds.borrow_mut();
+            let state = builds.entry(tab_id.to_string()).or_default();
+            state.in_flight = false;
+            (
+                state.generation == generation,
+                std::mem::take(&mut state.dirty),
+            )
+        };
+        let mut events = Vec::new();
+        if current {
+            self.store_active_work_projection_view(tab_id, view.as_deref().cloned());
+            if self.active_tab_id.as_deref() == Some(tab_id) {
+                if let Some(projection) = view {
+                    events.push(OutboundEvent::broadcast(
+                        BackendEvent::ActiveWorkProjection { projection },
+                    ));
+                }
+            }
+        }
+        if rerun {
+            if let Some(project_root) = self.tab(tab_id).map(|tab| tab.project_root.clone()) {
+                self.request_active_work_projection_build(&project_root);
+            }
+        }
+        events
     }
 
     pub(crate) fn handle_workspace_projection_changed_events(
@@ -3861,6 +3855,283 @@ impl AppRuntime {
         projection: &gwt_core::workspace_projection::WorkspaceProjection,
     ) -> Vec<OutboundEvent> {
         self.apply_workspace_projection_title_sync_cache_only(project_root, projection)
+    }
+}
+
+/// Issue #3752: per-tab bookkeeping for background projection builds. The
+/// generation is bumped by every build (sync or background) so a background
+/// result can be dropped once a newer build superseded its snapshot.
+#[derive(Debug, Default)]
+pub(crate) struct ActiveWorkProjectionBuildState {
+    generation: u64,
+    in_flight: bool,
+    dirty: bool,
+}
+
+/// Issue #3752: everything the disk-backed projection build needs from the
+/// event-loop-owned runtime, captured as owned data so the build can run on a
+/// worker thread. Disk reads (works.json, workspace projection, journal,
+/// session ledger, managed hook surfaces) stay inside the build itself.
+pub(crate) struct ActiveWorkProjectionBuildInputs {
+    tab_id: String,
+    tab_title: String,
+    project_root: PathBuf,
+    sessions: Vec<ActiveAgentSession>,
+    sessions_dir: PathBuf,
+    running_window_ids: HashSet<String>,
+    known_branch_refs: Option<HashSet<String>>,
+    merged_branches: Option<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    dirty_branches: Option<HashSet<String>>,
+    cleanup_ready_branches: Option<HashMap<String, String>>,
+    live_process_branches: Option<HashSet<String>>,
+    pr_titles: Option<HashMap<String, String>>,
+    ai_summaries: Option<HashMap<String, String>>,
+    tip_subjects: Option<HashMap<String, String>>,
+    local_worktree_branches: Option<HashSet<String>>,
+}
+
+/// The disk-backed Active Work projection build. Shared by the synchronous
+/// event-loop path (cache-backed loaders) and the background worker
+/// (direct loaders); the caller decides where it runs.
+fn build_active_work_projection(
+    inputs: &ActiveWorkProjectionBuildInputs,
+    load_work_items: &mut dyn FnMut()
+        -> Option<gwt_core::workspace_projection::WorkItemsProjection>,
+    load_agent_sessions: &mut dyn FnMut() -> Vec<gwt_agent::Session>,
+) -> Option<gwt::ActiveWorkProjectionView> {
+    let mut phases = ProjectionPhaseTimer::start();
+    let tab_id = inputs.tab_id.as_str();
+    let project_root = inputs.project_root.as_path();
+    let sessions = inputs.sessions.iter().collect::<Vec<_>>();
+    let saved_projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
+        .ok()
+        .flatten();
+    phases.mark("load_workspace_projection");
+    // SPEC-2359 Phase W-15 (FR-379/FR-382): the Workspace list is the
+    // union of existing worktrees and unclosed records, independent of
+    // live agents and of whether the project was ever launched here. When
+    // no projection has been saved yet (fresh home / never-launched
+    // project) but Work records exist (e.g. worktree backfill), synthesize
+    // a default projection so the records still surface.
+    let loaded_projection = saved_projection.or_else(|| {
+        load_work_items()
+            .filter(|works| !works.work_items.is_empty())
+            .map(|_| {
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                    project_root,
+                )
+            })
+    });
+    phases.mark("synthesize_fallback");
+    if let Some(projection) = loaded_projection {
+        let mut projection = projection;
+        let had_saved_agents = !projection.agents.is_empty();
+        let cleanup_candidate = workspace_cleanup_candidate_for_projection(&projection, &sessions);
+        merge_active_sessions_into_projection(
+            &mut projection,
+            sessions.iter().copied(),
+            chrono::Utc::now(),
+        );
+        let updated_at = chrono::Utc::now();
+        retain_live_workspace_agents(&mut projection, &sessions, updated_at);
+        // SPEC-2359 US-80 (FR-428): derive each Shell Work's status from its
+        // live PTY — running → Active, otherwise (exited or post-restart) →
+        // Idle — so the rail never shows a dead shell as Active.
+        projection.reconcile_shell_status(
+            |window_id| inputs.running_window_ids.contains(window_id),
+            updated_at,
+        );
+        if had_saved_agents && !projection.has_current_agents() {
+            projection.reset_idle_identity(&inputs.tab_title, updated_at);
+        }
+        phases.mark("merge_sessions");
+        let journal_entries =
+            gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+                project_root,
+                WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+            )
+            .unwrap_or_default()
+            .iter()
+            .map(workspace_journal_entry_view_from_entry)
+            .collect::<Vec<_>>();
+        phases.mark("journal");
+        let agent_sessions = load_agent_sessions();
+        let session_index = work_session_index(&agent_sessions);
+        phases.mark("session_ledger");
+        // Issue #3611: resumability is answered from the background merge
+        // scan's branch snapshot. Probing branches here would spawn Git
+        // once per Session on the event-loop thread.
+        let resume_branches = ResumeBranchIndex::scanned(inputs.known_branch_refs.as_ref());
+        // Current and WorkItems share the stable Project State identity.
+        // The exact worktree is an event destination, never a second
+        // WorkItems discovery root.
+        let work_items = load_work_items()
+            .map(|items| items.work_items)
+            .unwrap_or_default();
+        phases.mark("work_items");
+        let workspaces = work_items
+            .iter()
+            .map(|item| workspace_work_item_view_from_item(item, &session_index, resume_branches))
+            .collect::<Vec<_>>();
+        let mut view = active_work_projection_from_saved_with_journal(
+            projection,
+            journal_entries,
+            workspaces,
+            cleanup_candidate,
+        );
+        phases.mark("view_from_saved");
+        // Issue #4172: one ledger read for the whole projection instead of
+        // one per Work row, so hook health stops scaling with Work count.
+        let hook_failures = ManagedHookFailureSnapshot::read();
+        view.managed_hook_health = managed_hook_health_view_for_project(
+            project_root,
+            &inputs.sessions_dir,
+            &sessions,
+            &hook_failures,
+        );
+        phases.mark("hook_health");
+        // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
+        // branch into one Workspace row before the ledger attach, so the
+        // attach / identity-collapse / cap run once per Workspace.
+        assign_and_merge_workspace_groups(&mut view.active_works, project_root);
+        phases.mark("workspace_groups");
+        // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
+        // ledger to each Workspace (branch) row so sessions surface even
+        // when works.json never recorded an agent for the branch.
+        attach_registry_sessions_to_active_works(
+            &mut view.active_works,
+            &agent_sessions,
+            gwt_core::repo_hash::detect_repo_hash(project_root),
+            &session_index,
+            resume_branches,
+        );
+        phases.mark("attach_registry_sessions");
+        attach_managed_hook_health_to_active_works(
+            &mut view.active_works,
+            &inputs.sessions_dir,
+            &sessions,
+            &hook_failures,
+        );
+        phases.mark("attach_hook_health");
+        // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
+        // background merge-scan cache plus the recorded PR state.
+        let dirty_branches = inputs.dirty_branches.as_ref();
+        mark_merged_active_works(
+            &mut view.active_works,
+            inputs.merged_branches.as_ref(),
+            dirty_branches,
+        );
+        // SPEC-3075: fill the rail summary — PR title (top), then the
+        // AI-polished summary (FR-006), then the raw branch tip commit
+        // subject for Works with no recorded purpose (all from background
+        // scan caches).
+        apply_work_summary_external_sources(
+            &mut view.active_works,
+            inputs.pr_titles.as_ref(),
+            inputs.ai_summaries.as_ref(),
+            inputs.tip_subjects.as_ref(),
+        );
+        // SPEC-2359 W16-3 (FR-390): "Remote" rows — branch known only
+        // from fetched refs, no local worktree (cache lookup only).
+        mark_remote_only_active_works(
+            &mut view.active_works,
+            inputs.local_worktree_branches.as_ref(),
+        );
+        let cleanup_ready_branches = inputs.cleanup_ready_branches.as_ref();
+        let live_process_branches = inputs.live_process_branches.as_ref();
+        if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
+            cleanup_candidate_has_live_process(candidate, live_process_branches)
+        }) {
+            view.cleanup_candidate = None;
+        }
+        mark_workspace_cleanup_candidates(
+            &mut view.active_works,
+            cleanup_ready_branches,
+            dirty_branches,
+            &sessions,
+            live_process_branches,
+        );
+        phases.mark("marks");
+        phases.finish(tab_id, view.active_works.len());
+        return Some(view);
+    }
+
+    // Issue #4172: same single ledger read for the live-session projection.
+    let hook_failures = ManagedHookFailureSnapshot::read();
+    let mut view = active_work_projection_from_live_sessions(
+        tab_id,
+        &inputs.tab_title,
+        &sessions,
+        managed_hook_health_view_for_project(
+            project_root,
+            &inputs.sessions_dir,
+            &sessions,
+            &hook_failures,
+        ),
+    );
+    if let Some(view) = view.as_mut() {
+        attach_managed_hook_health_to_active_works(
+            &mut view.active_works,
+            &inputs.sessions_dir,
+            &sessions,
+            &hook_failures,
+        );
+    }
+    view
+}
+
+/// Issue #3752: the disk-backed Active Work projection build runs on the tao
+/// event-loop thread. Every close/list/window event queued behind it waits for
+/// the whole build, so a slow build is a GUI stall even though no handler in
+/// the close path itself is slow. Phase timings name the stage that stalled so
+/// the offending input (works.json size, session ledger, hook audit, ...) is
+/// identifiable from `~/.gwt/logs/` without a profiler.
+struct ProjectionPhaseTimer {
+    started: std::time::Instant,
+    last: std::time::Instant,
+    phases: Vec<(&'static str, u128)>,
+}
+
+/// Builds slower than this are logged at `warn`; the GUI event loop budget
+/// for one dispatch is a few tens of milliseconds.
+const ACTIVE_WORK_PROJECTION_SLOW_BUILD_MS: u128 = 100;
+
+impl ProjectionPhaseTimer {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            last: now,
+            phases: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, label: &'static str) {
+        let now = std::time::Instant::now();
+        self.phases
+            .push((label, now.duration_since(self.last).as_millis()));
+        self.last = now;
+    }
+
+    fn finish(self, tab_id: &str, active_works: usize) {
+        let total_ms = self.started.elapsed().as_millis();
+        if total_ms < ACTIVE_WORK_PROJECTION_SLOW_BUILD_MS {
+            return;
+        }
+        let breakdown = self
+            .phases
+            .iter()
+            .map(|(label, ms)| format!("{label}={ms}ms"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        tracing::warn!(
+            target: "gwt.frontend.timing",
+            tab_id,
+            active_works,
+            total_ms = u64::try_from(total_ms).unwrap_or(u64::MAX),
+            %breakdown,
+            "active work projection build was slow"
+        );
     }
 }
 

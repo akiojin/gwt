@@ -3769,10 +3769,8 @@ fn sample_runtime_with_events(
         session_ledger_cache: std::cell::RefCell::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         ),
-        work_items_cache: std::cell::RefCell::new(
-            gwt_core::workspace_projection::WorkItemsCache::new(),
-        ),
         active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+        active_work_projection_builds: std::cell::RefCell::new(HashMap::new()),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
         last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -36824,7 +36822,10 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
         WindowPreset::Codex,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let window_id = combined_window_id("tab-1", "codex-1");
     let session = ActiveAgentSession {
         window_id: window_id.clone(),
@@ -36851,12 +36852,19 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
     )
     .expect("save projection");
 
-    let events = runtime.handle_runtime_status_with_exit_confirmation(
+    let exit_events = runtime.handle_runtime_status_with_exit_confirmation(
         window_id.clone(),
         WindowProcessStatus::Stopped,
         Some("Process exited".to_string()),
         true,
     );
+    // Issue #3752: the exit continuation replays the cache as a patch and
+    // rebuilds on the worker; the authoritative idle view is the background
+    // build result.
+    assert!(exit_events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })));
+    let events = drain_background_projection_builds(&mut runtime, &tasks, &user_events);
 
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
         .expect("load projection")
@@ -42547,7 +42555,10 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
         ProjectKind::Git,
         &[WindowPreset::Board],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let session = ActiveAgentSession {
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
@@ -42577,7 +42588,10 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     .with_origin_agent_id("codex")
     .with_origin_branch("work/20260504-1234");
 
-    let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
+    // Issue #3752: the milestone replays the cache and rebuilds on the worker;
+    // the authoritative view is the background build result.
+    let events = drain_background_projection_builds(&mut runtime, &tasks, &user_events);
     let event = events
         .iter()
         .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
@@ -42679,7 +42693,10 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
         ProjectKind::Git,
         &[WindowPreset::Board],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let session = ActiveAgentSession {
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
@@ -42719,7 +42736,10 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
     )
     .with_origin_session_id("session-1");
 
-    let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &status);
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &status);
+    // Issue #3752: the milestone replays the cache and rebuilds on the worker;
+    // the authoritative view is the background build result.
+    let events = drain_background_projection_builds(&mut runtime, &tasks, &user_events);
     let event = events
         .iter()
         .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
@@ -42758,7 +42778,10 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
         ProjectKind::Git,
         &[WindowPreset::Board],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let session = ActiveAgentSession {
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
@@ -42798,7 +42821,10 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
     )
     .with_origin_session_id("session-1");
 
-    let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &next);
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &next);
+    // Issue #3752: the milestone replays the cache and rebuilds on the worker;
+    // the authoritative view is the background build result.
+    let events = drain_background_projection_builds(&mut runtime, &tasks, &user_events);
     let event = events
         .iter()
         .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
@@ -51944,13 +51970,13 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_r
             .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
         "second sync with identical title must not broadcast WindowCanvasState: {second:?}"
     );
-    // ActiveWorkProjection still fires (it's idempotent on the
-    // frontend; the active card snapshot is harmless to re-send).
+    // The cached projection patch still fires (it's idempotent on the
+    // frontend); Issue #3752 moved the authoritative rebuild to the worker.
     assert!(
         second
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
-        "ActiveWorkProjection should still broadcast on resync: {second:?}"
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
+        "ActiveWorkProjectionPatch should still broadcast on resync: {second:?}"
     );
 }
 
@@ -55116,7 +55142,7 @@ fn workspace_work_event_kind_wire_maps_backfill() {
 }
 
 /// SPEC-2359 Phase W-15 (FR-379/FR-382, T-547): a real linked worktree with no
-/// Work record is backfilled by `reconcile_workspace_worktrees` and surfaces
+/// Work record is backfilled by `reconcile_workspace_worktrees_in_background` and surfaces
 /// on the Workspace list as a Paused row. Repeated reconciliation is
 /// idempotent (SC-255).
 #[test]
@@ -55172,8 +55198,8 @@ fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
     // on a previously launched project).
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.reconcile_workspace_worktrees(&repo);
-    runtime.reconcile_workspace_worktrees(&repo);
+    super::reconcile_workspace_worktrees_in_background(&repo);
+    super::reconcile_workspace_worktrees_in_background(&repo);
 
     let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
     let projection =
@@ -55468,7 +55494,7 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     );
     session.save(&runtime.sessions_dir).expect("save session");
 
-    runtime.reconcile_workspace_worktrees(&repo);
+    super::reconcile_workspace_worktrees_in_background(&repo);
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -58020,11 +58046,13 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
     );
 }
 
-/// SPEC-2359 W-16 (FR-387): the ingest completion handler runs the worktree
-/// reconcile AFTER the intake (intake → reconcile order) and rebroadcasts
-/// the projection only when the intake applied events.
+/// SPEC-2359 W-16 (FR-387) / Issue #3752: the ingest completion handler
+/// stores the worktree reconcile result the ingest worker already produced
+/// (intake → reconcile order is kept on the worker) and requests a background
+/// projection rebuild only when the intake applied events. It must not touch
+/// disk or build the projection on the event loop.
 #[test]
-fn handle_work_events_ingested_broadcasts_only_on_change() {
+fn handle_work_events_ingested_requests_background_rebuild_only_on_change() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -58041,8 +58069,51 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
         &[WindowPreset::Shell],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    seed_work_record_for_projection(&repo);
+    super::workspace_views::reset_full_active_work_projection_builds();
 
-    // Seed one Work record so the projection broadcast has content.
+    let local_branches: HashSet<String> = HashSet::from(["work/foo".to_string()]);
+    let unchanged =
+        runtime.handle_work_events_ingested(repo.clone(), false, Some(local_branches.clone()));
+    assert!(
+        unchanged.is_empty(),
+        "no-op ingest must not rebroadcast the projection"
+    );
+    assert!(
+        tasks.lock().expect("tasks").is_empty(),
+        "no-op ingest must not request a projection rebuild"
+    );
+    assert_eq!(
+        runtime.local_worktree_branches.borrow().get(&repo),
+        Some(&local_branches),
+        "the worker's reconcile result is stored for the remote_only view"
+    );
+
+    let changed = runtime.handle_work_events_ingested(repo.clone(), true, None);
+    assert!(
+        changed.is_empty(),
+        "changed ingest must not rebuild synchronously: {changed:?}"
+    );
+    assert_eq!(
+        tasks.lock().expect("tasks").len(),
+        1,
+        "changed ingest requests exactly one background rebuild"
+    );
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "the disk-backed projection build must not run on the event loop"
+    );
+    assert_eq!(
+        runtime.local_worktree_branches.borrow().get(&repo),
+        Some(&local_branches),
+        "a failed reconcile (None) keeps the previous local branch set"
+    );
+}
+
+fn seed_work_record_for_projection(repo: &Path) {
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-session-ingest-seed",
@@ -58050,22 +58121,294 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
     );
     seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
     seed.title = Some("seed".to_string());
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
+    gwt_core::workspace_projection::record_workspace_work_event(repo, seed)
         .expect("seed work record");
+}
 
-    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false);
+/// Issue #3752: run every queued background projection build (including the
+/// coalesced follow-up a second request produces) and return the event-loop
+/// broadcast of the last one — the authoritative view a client ends up with.
+fn drain_background_projection_builds(
+    runtime: &mut AppRuntime,
+    tasks: &BlockingTestTaskQueue,
+    user_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    let mut events = Vec::new();
+    loop {
+        let task = tasks.lock().expect("tasks").pop();
+        let Some(task) = task else {
+            break;
+        };
+        task();
+        let (tab_id, generation, view) = recorded_active_work_projection_built(user_events)
+            .expect("background build reports the built view");
+        events = runtime.handle_active_work_projection_built(&tab_id, generation, view);
+    }
+    events
+}
+
+fn recorded_active_work_projection_built(
+    user_events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Option<(String, u64, Option<Box<gwt::ActiveWorkProjectionView>>)> {
+    user_events
+        .lock()
+        .expect("user events")
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            UserEvent::ActiveWorkProjectionBuilt {
+                tab_id,
+                generation,
+                view,
+            } => Some((tab_id.clone(), *generation, view.clone())),
+            _ => None,
+        })
+}
+
+/// Issue #3752: the Work refresh continuations (tip subjects, PR titles,
+/// merge status, AI summaries) rebuilt the disk-backed Active Work projection
+/// on the tao event loop. With hundreds of Work rows that build blocked the
+/// loop for seconds per continuation, and every `close_window` /
+/// `list_windows` queued behind it. The rebuild now runs on the blocking
+/// worker and returns through [`UserEvent::ActiveWorkProjectionBuilt`]; the
+/// event-loop side only stores the finished view and broadcasts it.
+#[test]
+fn work_refresh_continuations_build_projection_off_the_event_loop() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    seed_work_record_for_projection(&repo);
+    super::workspace_views::reset_full_active_work_projection_builds();
+
+    let tip_subjects = HashMap::from([("work/foo".to_string(), "tip subject".to_string())]);
+    let immediate = runtime.apply_work_tip_subjects(&repo, tip_subjects);
     assert!(
-        unchanged.is_empty(),
-        "no-op ingest must not rebroadcast the projection"
+        immediate.is_empty(),
+        "continuation must not broadcast a synchronous rebuild: {immediate:?}"
+    );
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "the disk-backed projection build must not run on the event loop"
+    );
+    assert_eq!(tasks.lock().expect("tasks").len(), 1);
+
+    // A second continuation while the build is in flight coalesces into the
+    // pending rebuild instead of stacking another worker.
+    let pr_titles = HashMap::from([("work/foo".to_string(), "PR title".to_string())]);
+    assert!(runtime.apply_work_pr_titles(&repo, pr_titles).is_empty());
+    assert_eq!(
+        tasks.lock().expect("tasks").len(),
+        1,
+        "an in-flight build coalesces the second request"
     );
 
-    let changed = runtime.handle_work_events_ingested(repo, true);
+    let task = tasks.lock().expect("tasks").remove(0);
+    task();
+    let (tab_id, generation, view) =
+        recorded_active_work_projection_built(&user_events).expect("worker reports the built view");
+    assert_eq!(tab_id, "tab-1");
+    let view = view.expect("seeded Work record produces a projection");
     assert!(
-        changed
+        view.active_works
+            .iter()
+            .any(|work| work.id == "work-session-ingest-seed"),
+        "background build reads the seeded Work record: {view:?}"
+    );
+
+    let applied = runtime.handle_active_work_projection_built(&tab_id, generation, Some(view));
+    assert!(
+        applied
             .iter()
             .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
-        "changed ingest rebroadcasts the projection"
+        "the finished view is broadcast from the event loop: {applied:?}"
     );
+    assert!(
+        runtime
+            .active_work_projection_cache
+            .borrow()
+            .contains_key("tab-1"),
+        "the finished view replaces the cached snapshot"
+    );
+    assert_eq!(
+        tasks.lock().expect("tasks").len(),
+        1,
+        "the coalesced request runs exactly once after the first build lands"
+    );
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0
+    );
+}
+
+/// Issue #3752: a background build snapshot is stale once an interactive
+/// caller rebuilt the projection synchronously after it was taken. The stale
+/// result must be dropped instead of overwriting the newer view.
+#[test]
+fn stale_background_projection_build_is_dropped_after_a_newer_sync_build() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    seed_work_record_for_projection(&repo);
+
+    let tip_subjects = HashMap::from([("work/foo".to_string(), "older".to_string())]);
+    assert!(runtime
+        .apply_work_tip_subjects(&repo, tip_subjects)
+        .is_empty());
+    let task = tasks.lock().expect("tasks").remove(0);
+
+    // An interactive caller rebuilds synchronously while the worker is still
+    // running; that view is newer than anything the worker can report.
+    let sync = runtime
+        .active_work_projection_broadcast_for_active_tab()
+        .expect("interactive callers keep the synchronous rebuild");
+    assert!(matches!(
+        sync.event,
+        BackendEvent::ActiveWorkProjection { .. }
+    ));
+
+    task();
+    let (tab_id, generation, view) =
+        recorded_active_work_projection_built(&user_events).expect("worker reports the built view");
+    let applied = runtime.handle_active_work_projection_built(&tab_id, generation, view);
+    assert!(
+        applied.is_empty(),
+        "a stale background build must not overwrite the newer view: {applied:?}"
+    );
+    assert!(
+        tasks.lock().expect("tasks").is_empty(),
+        "dropping a stale build must not spawn another worker"
+    );
+}
+
+/// Issue #3752: a Board milestone (`BoardProjectionChanged`) arrives every
+/// few seconds on a busy host and its title sync rebuilt the disk-backed
+/// projection on the event loop (measured 9-18 s per event with ~210 Work
+/// rows). The sync must replay the cached view as a patch and hand the
+/// rebuild to the blocking worker.
+#[test]
+fn board_milestone_title_sync_requests_background_rebuild_instead_of_building_on_the_loop() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let projection =
+        apply_title_sync_sample_projection(&repo, &window_id, Some("Board milestone"), None);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    super::workspace_views::reset_full_active_work_projection_builds();
+
+    let events = runtime.apply_workspace_projection_title_sync(&repo, &projection);
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "the Board milestone sync must not build the disk-backed projection on the event loop"
+    );
+    assert_eq!(
+        tasks.lock().expect("tasks").len(),
+        1,
+        "the Board milestone sync requests exactly one background rebuild"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
+        "the cached view is replayed as a patch right away: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
+        "no synchronous full projection may be broadcast: {events:?}"
+    );
+}
+
+/// Issue #3752: window lifecycle continuations (StopWindow, PTY exit,
+/// launch completion) rebuilt the projection synchronously as well. They
+/// must take the same background route.
+#[test]
+fn stop_window_events_requests_background_rebuild_instead_of_building_on_the_loop() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
+    let window_id = combined_window_id("tab-1", &window.id);
+    runtime.register_window("tab-1", &window.id);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    super::workspace_views::reset_full_active_work_projection_builds();
+
+    let events = runtime.stop_window_events(&window_id);
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "StopWindow must not build the disk-backed projection on the event loop"
+    );
+    assert_eq!(
+        tasks.lock().expect("tasks").len(),
+        1,
+        "StopWindow requests exactly one background rebuild"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WindowState { window_id: id, state }
+            if id == &window_id && *state == WindowProcessStatus::Stopped
+    )));
 }
 
 #[test]
@@ -58084,7 +58427,9 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
         sample_project_tab("tab-a", "Repo A", repo_a, ProjectKind::NonRepo, &[]),
         sample_project_tab("tab-b", "Repo B", repo_b.clone(), ProjectKind::NonRepo, &[]),
     ];
-    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-a"));
+    let (mut runtime, user_events) = sample_runtime_with_events(temp.path(), tabs, Some("tab-a"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     let branch = "work/inactive-cache";
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
@@ -58121,6 +58466,18 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
     assert!(
         events.is_empty(),
         "an inactive project cache refresh must not broadcast into the active tab"
+    );
+    // Issue #3752: the refresh lands through the background build; applying
+    // it for the inactive tab updates its cache without broadcasting.
+    let task = tasks.lock().expect("tasks").remove(0);
+    task();
+    let (tab_id, generation, view) =
+        recorded_active_work_projection_built(&user_events).expect("background build reports");
+    assert_eq!(tab_id, "tab-b");
+    let applied = runtime.handle_active_work_projection_built(&tab_id, generation, view);
+    assert!(
+        applied.is_empty(),
+        "an inactive project build must not broadcast into the active tab: {applied:?}"
     );
 
     runtime.active_tab_id = Some("tab-b".to_string());

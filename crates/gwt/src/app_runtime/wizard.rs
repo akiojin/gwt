@@ -4739,14 +4739,8 @@ impl AppRuntime {
 
         let mut events = vec![self.workspace_state_broadcast()];
         if shell_work_registered && self.active_tab_id.as_deref() == Some(tab_id) {
-            if let Some(tab) = self.tab(tab_id) {
-                if let Some(projection) = self.active_work_projection_for_tab(tab_id, tab) {
-                    events.push(OutboundEvent::broadcast(
-                        BackendEvent::ActiveWorkProjection {
-                            projection: Box::new(projection),
-                        },
-                    ));
-                }
+            if let Some(event) = self.deferred_active_work_projection_broadcast_for_active_tab() {
+                events.push(event);
             }
         }
         events.extend(Self::status_events(
