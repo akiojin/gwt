@@ -2771,6 +2771,61 @@ fn legacy_failure_migration_is_one_shot_even_when_no_initial_target_exists() {
     assert_eq!(monitor.queue_len(), 0);
 }
 
+/// Issue #4436 AC-1 / AC-2: a readiness read that failed for one Issue is
+/// reported on that Issue's own row, and the pass is not declared failed.
+///
+/// One `gwt-spec` Issue whose cache entry could not be parsed used to publish
+/// `issue readiness refresh failed: …` as the monitor-wide `last_error`, which
+/// put `issue.monitor.status` into `error` for a scan whose list and whose
+/// other Issues had refreshed completely. The reason never reached the row it
+/// described, so the only way to find the Issue was to read the banner.
+#[test]
+fn a_readiness_refresh_failure_lands_on_its_own_row_not_on_the_whole_scan() {
+    let repo = init_resolvable_git_repo();
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    monitor.set_gui_connected(true);
+
+    let loaded = LoadedIssueMonitorCandidates {
+        issues: vec![issue(4378, &["bug"]), issue(4388, &["gwt-spec"])],
+        source: IssueMonitorCandidateSource::Live,
+        live_error: None,
+        readiness_failures: vec![gwt::IssueReadinessFailure {
+            number: 4388,
+            reason: "targeted refresh parse failed: broken index map".to_string(),
+        }],
+    };
+
+    scan_loaded_issue_monitor_candidates(
+        &mut monitor,
+        &loaded,
+        repo.path(),
+        "2026-09-16T02:35:00Z",
+    );
+
+    let skipped = monitor.inbox_item(4388).expect("skipped row");
+    assert_eq!(skipped.state, MonitorInboxState::NotReady);
+    assert!(
+        skipped
+            .exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("broken index map")),
+        "the row must carry its own reason, got {:?}",
+        skipped.exclusion_reason
+    );
+
+    let unrelated = monitor.inbox_item(4378).expect("unrelated row");
+    assert_eq!(
+        unrelated.state,
+        MonitorInboxState::Queued,
+        "an unrelated Issue keeps its place in the queue"
+    );
+    assert_eq!(
+        monitor.status_view().last_error,
+        None,
+        "one skipped Issue is not a failed readiness refresh"
+    );
+}
+
 #[test]
 fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     let repo = init_resolvable_git_repo();
@@ -2784,6 +2839,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
         issues: vec![issue(42, &["bug"]), issue(43, &["enhancement"])],
         source: IssueMonitorCandidateSource::Live,
         live_error: None,
+        readiness_failures: Vec::new(),
     };
     scan_loaded_issue_monitor_candidates(
         &mut monitor,

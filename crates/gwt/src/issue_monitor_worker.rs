@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::{
     IssueMonitorCandidateSource, IssueMonitorExecutionSettlement, IssueMonitorInboxItem,
     IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorReadiness, IssueMonitorScanSummary,
-    IssueMonitorState, MonitorInboxState,
+    IssueMonitorState, IssueReadinessFailure, MonitorInboxState,
 };
 use gwt_github::{Cache, CacheEntry, IssueNumber, IssueState, SectionName};
 
@@ -22,10 +22,18 @@ pub struct IssueMonitorDaemonPayload {
 pub struct LoadedIssueMonitorCandidates {
     pub issues: Vec<IssueMonitorIssue>,
     pub source: IssueMonitorCandidateSource,
-    /// The live-list failure that forced a cache fallback, or targeted
-    /// readiness-refresh errors attached to an otherwise complete live list.
-    /// Kept alongside the read model so failures never render as healthy.
+    /// The live-list failure that forced a cache fallback. Kept alongside the
+    /// read model so failures never render as healthy.
+    ///
+    /// Issue #4436 AC-1: per-issue readiness failures used to be joined into
+    /// this field too, which turned one unreadable Issue into a monitor-wide
+    /// `error` banner covering a list that had otherwise refreshed completely.
+    /// They now travel in `readiness_failures` and land on their own rows.
     pub live_error: Option<String>,
+    /// Issue #4436 AC-2: the Issues whose own readiness could not be refreshed
+    /// this pass, each with the reason. Every other Issue in `issues` carries a
+    /// freshly evaluated readiness.
+    pub readiness_failures: Vec<IssueReadinessFailure>,
 }
 
 impl LoadedIssueMonitorCandidates {
@@ -127,10 +135,15 @@ pub enum IssueMonitorScanContinuation {
     /// A shared prerequisite failed, so the stage kept the previous scan's
     /// successful result rather than throwing this pass away.
     PreviousCandidates,
-    /// Issue #3928 AC-2: the pre-launch readback of a candidate was refused by
-    /// GitHub's rate limit. That candidate is left unconfirmed — it cannot be
-    /// claimed from cache alone — and stays queued for the scan after the
-    /// backoff window; every other candidate and stage is unaffected.
+    /// Issue #3928 AC-2: the pre-launch readback of a candidate failed. That
+    /// candidate is left unconfirmed — it cannot be claimed from cache alone —
+    /// and stays queued for a later scan; every other candidate and stage is
+    /// unaffected.
+    ///
+    /// Issue #4436 AC-1: this covers every per-candidate readback refusal, not
+    /// only GitHub's rate limit. A candidate whose cache entry could not be
+    /// parsed used to abort the whole pass, which suppressed the launch stage
+    /// for every unrelated Issue in the same scan.
     DeferredCandidates,
 }
 
@@ -525,11 +538,50 @@ fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
     }
 }
 
+/// The legacy empty section index (SPEC #2780): a `gwt-spec` body whose index
+/// map is the JSON literal `{}`.
+///
+/// The SPEC parser reads this as a malformed entry rather than as "no
+/// sections", and that is deliberate everywhere else — `issue.spec.edit`
+/// refuses such a body and `issue.edit` accepts the body repair precisely
+/// because it is not recognised as section-managed (Issue #4392). Only the
+/// readiness classifier needs the other reading, so the recognition stays here
+/// instead of changing what the whole codebase calls a SPEC.
+fn body_declares_an_empty_section_index(body: &str) -> bool {
+    body.split("<!-- sections:")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("-->"))
+        .any(|(entries, _)| entries.trim() == "{}")
+}
+
+/// Issue #4436 AC-3: whether a `gwt-spec` labelled Issue actually carries a
+/// SPEC the readiness classifier can read.
+///
+/// The legacy create-body transport produced Issues whose body header says
+/// `gwt-spec` but which declare no sections — no `spec`, no `plan`, no
+/// `tasks`, and nothing `issue.spec.section` can return. Such an Issue can
+/// never become launch-ready through the structured path, so classifying it as
+/// `NotReady` parked it silently and forever. Its body is still a perfectly
+/// ordinary Issue body, and the autonomous gate reads acceptance criteria from
+/// the body, so it is evaluated as a plain Issue instead.
+///
+/// A SPEC that *declares* sections it cannot resolve — a missing comment, a
+/// malformed entry — is a different case and stays `NotReady`: content exists
+/// and is unreadable, so blessing it as a plain Issue would launch work whose
+/// plan and tasks were never read.
+fn spec_cache_entry_has_no_sections(entry: &CacheEntry) -> bool {
+    if !entry.spec_body.sections.is_empty() {
+        return false;
+    }
+    entry.spec_parse_error.is_none()
+        || body_declares_an_empty_section_index(&entry.snapshot.body)
+}
+
 fn issue_monitor_candidates_with_readiness<F>(
     issues: Vec<gwt_git::issue::Issue>,
     cache_root: &Path,
     refresh: F,
-) -> (Vec<IssueMonitorIssue>, Vec<String>)
+) -> (Vec<IssueMonitorIssue>, Vec<IssueReadinessFailure>)
 where
     F: FnMut(IssueNumber) -> Result<(), String>,
 {
@@ -546,13 +598,13 @@ fn issue_monitor_candidates_with_readiness_and_refresh_limit<F>(
     cache_root: &Path,
     refresh_limit: usize,
     mut refresh: F,
-) -> (Vec<IssueMonitorIssue>, Vec<String>)
+) -> (Vec<IssueMonitorIssue>, Vec<IssueReadinessFailure>)
 where
     F: FnMut(IssueNumber) -> Result<(), String>,
 {
     let cache = Cache::new(cache_root.to_path_buf());
     let mut candidates = Vec::with_capacity(issues.len());
-    let mut errors = Vec::new();
+    let mut errors: Vec<IssueReadinessFailure> = Vec::new();
     let mut refresh_count = 0;
 
     for issue in issues {
@@ -578,12 +630,18 @@ where
                 entry.spec_parse_error.is_none() && entry.snapshot.updated_at.0 == *updated_at
             })
         });
+        let issue_number = issue.number;
+        let mut fail = |reason: String| {
+            errors.push(IssueReadinessFailure {
+                number: issue_number,
+                reason,
+            });
+        };
         let entry = if cache_matches_live {
             cached
         } else if refresh_count >= refresh_limit {
-            errors.push(format!(
-                "issue #{} targeted refresh skipped: per-scan limit {} reached",
-                issue.number, refresh_limit
+            fail(format!(
+                "targeted refresh skipped: per-scan limit {refresh_limit} reached"
             ));
             None
         } else {
@@ -592,10 +650,18 @@ where
                 Ok(()) => {
                     let refreshed = cache.load_entry(number);
                     match refreshed {
-                        Some(entry) if entry.spec_parse_error.is_some() => {
-                            errors.push(format!(
-                                "issue #{} targeted refresh parse failed: {}",
-                                issue.number,
+                        // Issue #4436 AC-3: a body that declares no sections is
+                        // readable, not broken. Everything else that fails to
+                        // parse declares content the classifier cannot read and
+                        // stays unusable.
+                        Some(entry)
+                            if entry.spec_parse_error.is_some()
+                                && !body_declares_an_empty_section_index(
+                                    &entry.snapshot.body,
+                                ) =>
+                        {
+                            fail(format!(
+                                "targeted refresh parse failed: {}",
                                 entry.spec_parse_error.as_deref().unwrap_or_default()
                             ));
                             None
@@ -608,36 +674,41 @@ where
                             Some(entry)
                         }
                         Some(entry) => {
-                            errors.push(format!(
-                                "issue #{} targeted refresh generation mismatch: live={}, cache={}",
-                                issue.number,
+                            fail(format!(
+                                "targeted refresh generation mismatch: live={}, cache={}",
                                 issue.updated_at.as_deref().unwrap_or("missing"),
                                 entry.snapshot.updated_at.0
                             ));
                             None
                         }
                         None => {
-                            errors.push(format!(
-                                "issue #{} targeted refresh parse failed",
-                                issue.number
-                            ));
+                            fail("targeted refresh parse failed".to_string());
                             None
                         }
                     }
                 }
                 Err(error) => {
-                    errors.push(format!(
-                        "issue #{} targeted refresh failed: {error}",
-                        issue.number
-                    ));
+                    fail(format!("targeted refresh failed: {error}"));
                     None
                 }
             }
         };
-        let readiness = entry
-            .as_ref()
-            .map(spec_cache_entry_readiness)
-            .unwrap_or(IssueMonitorReadiness::NotReady);
+        // Issue #4436 AC-3: a `gwt-spec` Issue with an empty section index has
+        // no structured artifacts to classify and never will, so it is read as
+        // the plain Issue its body already is instead of being parked as
+        // `NotReady` with nothing to fix.
+        let degraded_to_plain = entry.as_ref().is_some_and(spec_cache_entry_has_no_sections);
+        let readiness = match entry.as_ref() {
+            Some(_) if degraded_to_plain => IssueMonitorReadiness::NotApplicable,
+            Some(entry) => spec_cache_entry_readiness(entry),
+            None => IssueMonitorReadiness::NotReady,
+        };
+        if degraded_to_plain {
+            tracing::warn!(
+                issue = issue.number,
+                "gwt-spec Issue has no SPEC sections; evaluating its body as a plain Issue"
+            );
+        }
         let mut issue = issue;
         if let Some(entry) = entry.as_ref() {
             // Issue #3930 AC-4: the generation-matched cache entry knows where
@@ -686,7 +757,7 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                     "issue cache full refresh failed; scanning with the live list"
                 );
             }
-            let (issues, readiness_errors) =
+            let (issues, readiness_failures) =
                 issue_monitor_candidates_with_readiness(listing.issues, &cache_root, |number| {
                     crate::issue_cache::refresh_issue_cache_entry_from_remote(
                         repo_path,
@@ -697,7 +768,11 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
                 source,
-                live_error: (!readiness_errors.is_empty()).then(|| readiness_errors.join("; ")),
+                // Issue #4436 AC-1: the live list succeeded and every other
+                // Issue's readiness was refreshed, so this pass is not a failed
+                // refresh. The per-Issue reasons ride their own rows instead.
+                live_error: None,
+                readiness_failures,
             });
         }
         Err(error) => error.to_string(),
@@ -757,6 +832,7 @@ where
                 issues,
                 source,
                 live_error: None,
+                readiness_failures: Vec::new(),
             })
         }
         Err(live_error) => {
@@ -766,6 +842,7 @@ where
                         issues,
                         source: IssueMonitorCandidateSource::Cache,
                         live_error: Some(live_error),
+                        readiness_failures: Vec::new(),
                     });
                 }
             }
@@ -859,6 +936,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             }
         }
     });
+    // Issue #4436 AC-2: a readiness read that could not be completed belongs to
+    // the Issue it happened on, not to the whole pass.
+    monitor.record_readiness_refresh_failures(&loaded.readiness_failures);
     if let Some(error) = &loaded.live_error {
         let message = if loaded.source == IssueMonitorCandidateSource::Cache {
             format!("issue list failed; using cache fallback: {error}")
@@ -2473,8 +2553,8 @@ mod tests {
             crate::IssueMonitorReadiness::NotApplicable
         );
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("#43"));
-        assert!(errors[0].contains("targeted refresh unavailable"));
+        assert_eq!(errors[0].number, 43);
+        assert!(errors[0].reason.contains("targeted refresh unavailable"));
     }
 
     #[test]
@@ -2510,8 +2590,8 @@ mod tests {
         );
         assert_eq!(issues[1].readiness, IssueMonitorReadiness::NotReady);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("#43"));
-        assert!(errors[0].contains("per-scan limit 1 reached"));
+        assert_eq!(errors[0].number, 43);
+        assert!(errors[0].reason.contains("per-scan limit 1 reached"));
     }
 
     #[test]
@@ -2535,8 +2615,98 @@ mod tests {
 
         assert_eq!(issues[0].readiness, crate::IssueMonitorReadiness::NotReady);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("#45"));
-        assert!(errors[0].contains("parse"));
+        assert_eq!(errors[0].number, 45);
+        assert!(errors[0].reason.contains("parse"));
+    }
+
+    /// Issue #4436 AC-1: one unreadable Issue may cost that Issue its readiness
+    /// and nothing else. Every other Issue in the same pass keeps the readiness
+    /// its own cache entry proves.
+    #[test]
+    fn one_unreadable_issue_does_not_cost_the_other_issues_their_readiness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        for number in [50, 52] {
+            cache
+                .write_snapshot(&structured_spec(
+                    number,
+                    "2026-09-16T02:35:00Z",
+                    "Plan body",
+                    "- [ ] T-001",
+                ))
+                .expect("write healthy spec cache");
+        }
+
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![
+                live_issue(50, &["gwt-spec"], Some("2026-09-16T02:35:00Z")),
+                live_issue(51, &["gwt-spec"], Some("2026-09-16T02:35:00Z")),
+                live_issue(52, &["gwt-spec"], Some("2026-09-16T02:35:00Z")),
+            ],
+            dir.path(),
+            |number| Err(format!("parse issue cache #{} after targeted refresh", number.0)),
+        );
+
+        assert_eq!(
+            issues[0].readiness,
+            IssueMonitorReadiness::ReadyWithOpenTasks
+        );
+        assert_eq!(issues[1].readiness, IssueMonitorReadiness::NotReady);
+        assert_eq!(
+            issues[2].readiness,
+            IssueMonitorReadiness::ReadyWithOpenTasks
+        );
+        assert_eq!(
+            errors.iter().map(|error| error.number).collect::<Vec<_>>(),
+            vec![51],
+            "only the Issue that failed may be reported"
+        );
+    }
+
+    /// Issue #4436 AC-3: the legacy create-body transport left `gwt-spec`
+    /// Issues whose section index is `{}`. No structured artifact can ever be
+    /// read from one, so classifying it `NotReady` parked it with nothing to
+    /// fix. Its body is an ordinary Issue body and is read as one.
+    #[test]
+    fn gwt_spec_issue_without_sections_is_evaluated_as_a_plain_issue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Cache::new(dir.path().to_path_buf());
+        let mut empty_spec = github_issue(4388);
+        empty_spec.labels = vec!["gwt-spec".to_string()];
+        empty_spec.updated_at = UpdatedAt::new("2026-09-16T02:35:00Z");
+        empty_spec.body = "<!-- gwt-spec id=4388 version=1 -->\n\
+                           <!-- sections: {} -->\n\n\
+                           ## 受け入れ基準\n\n- [ ] AC-1: 回収が自動実行される\n"
+            .to_string();
+        let refreshed = empty_spec.clone();
+
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![live_issue(
+                4388,
+                &["gwt-spec"],
+                Some("2026-09-16T02:35:00Z"),
+            )],
+            dir.path(),
+            |_| {
+                cache
+                    .write_snapshot(&refreshed)
+                    .map_err(|error| error.to_string())
+            },
+        );
+
+        assert_eq!(
+            issues[0].readiness,
+            IssueMonitorReadiness::NotApplicable,
+            "an empty section index has nothing to gate on"
+        );
+        assert!(
+            issues[0]
+                .body
+                .as_deref()
+                .is_some_and(|body| body.contains("- [ ] AC-1:")),
+            "the acceptance classifier must still see the body"
+        );
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]
@@ -2571,7 +2741,7 @@ mod tests {
         assert_eq!(errors.len(), 2);
         assert!(errors
             .iter()
-            .all(|error| error.contains("generation mismatch")));
+            .all(|error| error.reason.contains("generation mismatch")));
     }
 
     #[test]
@@ -2999,6 +3169,7 @@ mod tests {
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Live,
             live_error: None,
+            readiness_failures: Vec::new(),
         };
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
@@ -3734,6 +3905,7 @@ mod tests {
             issues: vec![cached_issue.clone()],
             source: IssueMonitorCandidateSource::Live,
             live_error: Some("issue #43 targeted refresh failed".to_string()),
+            readiness_failures: Vec::new(),
         };
         assert!(
             live_with_failed_spec_enrichment.authorizes_remote_effects(),
@@ -3786,6 +3958,7 @@ mod tests {
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Cache,
             live_error: Some("operation deadline exceeded at issue-list stage".to_string()),
+            readiness_failures: Vec::new(),
         };
 
         let summary = scan_loaded_issue_monitor_candidates(

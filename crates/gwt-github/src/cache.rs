@@ -112,6 +112,61 @@ pub struct IssueValidationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheGeneration(pub String);
 
+/// Why a validation-receipt renewal did or did not publish a receipt.
+///
+/// Issue #4436 AC-4: the renewal used to answer with a bare `bool`, and every
+/// caller reported `false` as "the cache changed under this read; retry". Only
+/// one of the four ways it can decline is a concurrent cache writer. The other
+/// three are properties of the persisted entry itself, so they never clear on a
+/// retry — an operator trying to repair a broken Issue got the same "retry"
+/// advice five times in a row while `meta.json` never moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationReceiptRenewal {
+    /// A receipt now binds the caller's snapshot to the persisted entry.
+    Renewed,
+    /// Another cache writer replaced the Issue since the caller read it. This
+    /// is the only outcome a retry can resolve.
+    GenerationChanged,
+    /// The caller held no generation, so there is nothing to bind a receipt to.
+    GenerationMissing,
+    /// The persisted entry could not be read back at all.
+    EntryUnreadable,
+    /// The persisted entry still carries the caller's generation but does not
+    /// round-trip to the snapshot that was validated.
+    SnapshotMismatch,
+}
+
+impl ValidationReceiptRenewal {
+    /// Whether a receipt was published.
+    #[must_use]
+    pub fn renewed(self) -> bool {
+        matches!(self, Self::Renewed)
+    }
+
+    /// Whether a concurrent cache writer explains the refusal. False for every
+    /// outcome a retry cannot change.
+    #[must_use]
+    pub fn cache_changed(self) -> bool {
+        matches!(self, Self::GenerationChanged)
+    }
+
+    /// The operator-facing reason, without any retry advice.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Renewed => "the validation receipt was published",
+            Self::GenerationChanged => {
+                "another cache writer replaced the snapshot during this read"
+            }
+            Self::GenerationMissing => "the read held no cache generation to bind a receipt to",
+            Self::EntryUnreadable => "the persisted cache entry could not be read back",
+            Self::SnapshotMismatch => {
+                "the persisted cache entry does not match the validated snapshot"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedCacheEntry {
     pub entry: CacheEntry,
@@ -265,7 +320,7 @@ impl Cache {
     pub fn renew_validation_receipt_if_current(
         &self,
         expected: &IssueSnapshot,
-    ) -> Result<bool, CacheError> {
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
         self.with_issue_lock(expected.number, || {
             let generation = self.current_generation_unlocked(expected.number)?;
             self.renew_validation_receipt_unlocked(expected, generation.as_ref())
@@ -276,7 +331,7 @@ impl Cache {
         &self,
         expected: &IssueSnapshot,
         generation: Option<&CacheGeneration>,
-    ) -> Result<bool, CacheError> {
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
         self.with_issue_lock(expected.number, || {
             self.renew_validation_receipt_unlocked(expected, generation)
         })
@@ -286,18 +341,18 @@ impl Cache {
         &self,
         expected: &IssueSnapshot,
         generation: Option<&CacheGeneration>,
-    ) -> Result<bool, CacheError> {
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
         if self.current_generation_unlocked(expected.number)?.as_ref() != generation {
-            return Ok(false);
+            return Ok(ValidationReceiptRenewal::GenerationChanged);
         }
         let Some(current) = self.load_entry(expected.number) else {
-            return Ok(false);
+            return Ok(ValidationReceiptRenewal::EntryUnreadable);
         };
         if !persisted_snapshots_match(&current.snapshot, expected) {
-            return Ok(false);
+            return Ok(ValidationReceiptRenewal::SnapshotMismatch);
         }
         let Some(generation) = generation else {
-            return Ok(false);
+            return Ok(ValidationReceiptRenewal::GenerationMissing);
         };
         let receipt = IssueValidationReceipt {
             version: ISSUE_VALIDATION_RECEIPT_VERSION,
@@ -309,7 +364,7 @@ impl Cache {
             &self.validation_receipt_path(expected.number),
             &serde_json::to_vec_pretty(&receipt)?,
         )?;
-        Ok(true)
+        Ok(ValidationReceiptRenewal::Renewed)
     }
 
     pub fn current_generation(

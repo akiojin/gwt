@@ -5,7 +5,7 @@ use std::{
 };
 
 use gwt_github::{
-    cache::{write_atomic, CacheGeneration, ValidatedCacheEntry},
+    cache::{write_atomic, CacheGeneration, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::ApiError,
     Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError,
 };
@@ -3432,11 +3432,12 @@ where
                     number.0
                 )))
             })?;
-            if !cache.renew_validation_receipt_if_generation(expected, expected_generation)? {
-                return Err(SpecOpsError::from(ApiError::Network(format!(
-                    "issue #{} cache changed during validation",
-                    number.0
-                ))));
+            let renewal =
+                cache.renew_validation_receipt_if_generation(expected, expected_generation)?;
+            if !renewal.renewed() {
+                return Err(SpecOpsError::from(ApiError::Network(
+                    validation_receipt_refusal(number, renewal),
+                )));
             }
             return load_fresh_validated_entry(&cache, number);
         }
@@ -3476,14 +3477,39 @@ where
             );
         }
     }
-    if !cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))? {
-        return Err(SpecOpsError::from(ApiError::Network(format!(
-            "issue #{} cache changed before validation receipt publication: another cache \
-             writer replaced the snapshot during this read; retry the operation",
-            number.0
-        ))));
+    let renewal =
+        cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))?;
+    if !renewal.renewed() {
+        return Err(SpecOpsError::from(ApiError::Network(
+            validation_receipt_refusal(number, renewal),
+        )));
     }
     load_fresh_validated_entry(&cache, number)
+}
+
+/// Issue #4436 AC-4: name the outcome that actually refused the read.
+///
+/// `cache changed before validation receipt publication ... retry the
+/// operation` used to be the single answer for all four refusals. Only
+/// [`ValidationReceiptRenewal::GenerationChanged`] is a concurrent writer;
+/// the rest describe the persisted entry and are unchanged by a retry, so
+/// telling an operator to retry sent them into a loop against a cache that was
+/// never moving.
+fn validation_receipt_refusal(number: IssueNumber, renewal: ValidationReceiptRenewal) -> String {
+    if renewal.cache_changed() {
+        return format!(
+            "issue #{} cache changed before validation receipt publication: {}; retry the \
+             operation",
+            number.0,
+            renewal.reason()
+        );
+    }
+    format!(
+        "issue #{} validation receipt could not be published: {}; the cached Issue did not \
+         change under this operation, so a retry cannot resolve it",
+        number.0,
+        renewal.reason()
+    )
 }
 
 fn load_fresh_validated_entry(
@@ -4144,7 +4170,8 @@ mod tests {
         let cache = Cache::new(cache_root.to_path_buf());
         assert!(cache
             .renew_validation_receipt_if_current(snapshot)
-            .expect("publish validation receipt"));
+            .expect("publish validation receipt")
+            .renewed());
         let path = cache.validation_receipt_path(snapshot.number);
         let mut receipt: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).expect("read validation receipt"))
@@ -8435,6 +8462,48 @@ mod tests {
         assert_eq!(persisted.updated_at, remote.updated_at);
         assert_eq!(persisted.comments[0].body, remote.comments[0].body);
         assert!(!cache.validation_receipt_path(remote.number).exists());
+    }
+
+    /// Issue #4436 AC-4: a refusal that no retry can resolve must not be
+    /// reported as a concurrent cache writer.
+    ///
+    /// Here the generation the read committed is still the persisted one — the
+    /// cache demonstrably did not change — but `body.md` no longer round-trips
+    /// to the validated snapshot. The old wording told the operator the cache
+    /// had changed and to retry, which is how five identical `issue.edit`
+    /// refusals arrived while `meta.json` never moved.
+    #[test]
+    fn a_stable_cache_is_never_reported_as_a_concurrent_writer() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let remote = sample_issue_snapshot();
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        let generation_before = Cache::new(cache_root.clone()).current_generation(remote.number);
+
+        let error =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, move |_| {
+                // A half-written sibling: the body changes, the generation in
+                // meta.json does not.
+                fs::write(cache_root.join("42/body.md"), "partial writer body")
+                    .map_err(|error| error.to_string())
+            })
+            .expect_err("a snapshot that does not round-trip must refuse");
+
+        let message = error.to_string();
+        assert!(
+            !message.contains("cache changed"),
+            "a stable generation must not be reported as a concurrent writer: {message}"
+        );
+        assert!(
+            message.contains("does not match the validated snapshot"),
+            "the refusal must name what actually happened: {message}"
+        );
+        assert!(
+            !message.contains("retry the operation"),
+            "a permanent refusal must not advise a retry: {message}"
+        );
+        assert!(generation_before.is_ok());
     }
 
     /// Issue #4392: a body that quotes a gwt-spec header with an unparseable

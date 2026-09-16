@@ -4338,13 +4338,15 @@ fn scan_issue_monitor_once_blocking(
                         loaded.issues[index] = refreshed;
                         confirmed.insert(issue_number);
                     }
-                    Err(failure)
-                        if crate::issue_monitor_worker::is_rate_limit_failure(&failure.detail) =>
-                    {
+                    // Issue #4436 AC-1: a per-candidate readback failure used to
+                    // abort the whole scan (`launch_suppressed`), so one Issue
+                    // whose cache entry could not be parsed stopped every other
+                    // Issue from launching. The candidate is left unconfirmed —
+                    // exactly as for a rate-limit refusal — and the pass goes on.
+                    Err(failure) => {
                         deferred_candidates.insert(issue_number);
                         deferral.get_or_insert(failure);
                     }
-                    Err(failure) => return Err(failure),
                 }
             }
             if let Some(failure) = deferral {

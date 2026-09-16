@@ -44195,6 +44195,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
         }],
         source: gwt::IssueMonitorCandidateSource::Live,
         live_error: None,
+        readiness_failures: Vec::new(),
     };
     let now = "2026-07-28T00:00:00Z";
     let mut stale = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
@@ -44345,6 +44346,7 @@ fn app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposa
         }],
         source: gwt::IssueMonitorCandidateSource::Live,
         live_error: None,
+        readiness_failures: Vec::new(),
     };
     let now = "2026-07-28T00:00:00Z";
     let mut stale = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
