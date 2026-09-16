@@ -29,11 +29,11 @@ use super::continuation::ActiveOwnerLiveness;
 use super::terminal_convergence::{RestoreAdmission, TerminalCloseReason};
 use super::{
     combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
-    plan_orphan_intake_worktree_prune, same_worktree_path, should_auto_start_restored_window,
-    workspace_resume_context_for_work_item, AgentCapabilityIssuer, AppRuntime,
-    OrphanIntakePrunePlan, OutboundEvent, PendingStartupAutoResumeSession,
-    PreparedProjectWindowRestore, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceResumeContext,
+    plan_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune_from_inventory,
+    same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
+    AgentCapabilityIssuer, AppRuntime, OrphanIntakePrunePlan, OutboundEvent,
+    PendingStartupAutoResumeSession, PreparedProjectWindowRestore, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WorkspaceResumeContext,
 };
 
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
@@ -693,8 +693,11 @@ impl AppRuntime {
         let _phase = gwt::perf::startup::PhaseTimer::start(
             gwt::perf::startup::StartupPhase::ProjectStateLoad,
         );
-        // Issue #4398 AC-3: keep each project's listing so the startup index
-        // status probe reuses it instead of listing the worktrees again.
+        // Issue #4378 AC-1: list each project's worktrees once. The startup
+        // ingest, its reconcile and the orphan intake prune plan reuse this
+        // inventory instead of listing again (one `git worktree list` is
+        // ~250 ms at 235 worktrees). Issue #4398 AC-3: the same listing is
+        // kept on the runtime so the startup index status probe takes it.
         let mut startup_worktree_inventories = std::collections::HashMap::new();
         let startup_worktrees = self
             .tabs
@@ -712,13 +715,14 @@ impl AppRuntime {
                         tracing::warn!(
                             project_root = %tab.project_root.display(),
                             %error,
-                            "managed hook startup self-heal inventory failed"
+                            "startup worktree inventory failed"
                         );
                         vec![tab.project_root.clone()]
                     }
                 }
             })
             .collect::<Vec<_>>();
+        let startup_inventories = startup_worktree_inventories.clone();
         self.startup_worktree_inventories = startup_worktree_inventories;
         // Issue #3808 AC-4: this sweep audited every worktree of the repo
         // (235 here) for 191 s on the startup path, ahead of the embedded
@@ -786,7 +790,12 @@ impl AppRuntime {
             // consumer over the same (and more) sources. Runs on a background
             // thread; its completion event then runs the worktree reconcile
             // (intake → reconcile order) and the merge scan.
-            self.spawn_work_events_ingest(tab.project_root.clone(), true);
+            let inventory = startup_inventories.get(&tab.project_root).cloned();
+            self.spawn_work_events_ingest_with_inventory(
+                tab.project_root.clone(),
+                true,
+                inventory.clone(),
+            );
             // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
             // clear of legacy prompt-derived title_summary / current_focus so
             // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
@@ -799,7 +808,13 @@ impl AppRuntime {
             // Snapshot candidates before the GUI becomes interactive, then
             // inspect/remove only that fixed set on a recovery worker. A new
             // intake launched after startup can never enter this plan.
-            if let Some(plan) = plan_orphan_intake_worktree_prune(&tab.project_root) {
+            let plan = match inventory.as_deref() {
+                Some(entries) => {
+                    plan_orphan_intake_worktree_prune_from_inventory(&tab.project_root, entries)
+                }
+                None => plan_orphan_intake_worktree_prune(&tab.project_root),
+            };
+            if let Some(plan) = plan {
                 orphan_intake_prune_plans.push((tab.project_root.clone(), plan));
             }
         }
@@ -813,10 +828,11 @@ impl AppRuntime {
         self.settle_update_resume_marker_at_bootstrap(now);
         self.queue_startup_auto_resume_sessions(&planned_orphan_intake_paths);
         // SPEC-2359 W-37 / Issue #3735: restore selection is the protection
-        // producer. Complete it before reaping repository owner ledgers, and
-        // complete the reaper synchronously before bootstrap returns to the
-        // Issue Monitor/daemon dispatch threads.
-        self.reap_startup_defunct_active_generations(&startup_worktrees);
+        // producer, so it completes before the reaper snapshots it. Issue
+        // #4378 AC-2: the reaper runs on the blocking worker; Issue Monitor
+        // launch deliveries wait for its completion event instead of the
+        // startup path waiting for the reaper.
+        self.spawn_startup_generation_reaper(&startup_worktrees);
         spawn_startup_orphan_intake_prune(orphan_intake_prune_plans);
 
         let windows = self
@@ -1034,6 +1050,50 @@ impl AppRuntime {
         &self,
         startup_worktrees: &[PathBuf],
     ) -> StartupGenerationReaperSummary {
+        let (protected_exact_sessions, protected_unknown_session_ids) =
+            self.startup_reaper_protection();
+        reap_defunct_active_generations(
+            &self.sessions_dir,
+            startup_worktrees,
+            &protected_exact_sessions,
+            &protected_unknown_session_ids,
+            GenerationReaperFailureLog::Warn,
+        )
+    }
+
+    /// Issue #4378 AC-2: run the startup reaper on the blocking worker. The
+    /// restore protection set is snapshotted here, so the worker judges exactly
+    /// the sessions this startup is about to restore. Issue Monitor launch
+    /// deliveries are held until the worker reports back.
+    pub(super) fn spawn_startup_generation_reaper(&mut self, startup_worktrees: &[PathBuf]) {
+        let (protected_exact_sessions, protected_unknown_session_ids) =
+            self.startup_reaper_protection();
+        let sessions_dir = self.sessions_dir.clone();
+        let worktrees = startup_worktrees.to_vec();
+        let proxy = self.proxy.clone();
+        self.deferred_issue_monitor_launches = Some(Vec::new());
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            reap_defunct_active_generations(
+                &sessions_dir,
+                &worktrees,
+                &protected_exact_sessions,
+                &protected_unknown_session_ids,
+                GenerationReaperFailureLog::Warn,
+            );
+            proxy.send(crate::UserEvent::StartupGenerationReaperCompleted);
+        }) {
+            tracing::warn!(
+                %error,
+                "startup generation reaper could not be scheduled; running it inline"
+            );
+            self.deferred_issue_monitor_launches = None;
+            self.reap_startup_defunct_active_generations(startup_worktrees);
+        }
+    }
+
+    fn startup_reaper_protection(
+        &self,
+    ) -> (Vec<gwt_agent::SessionExecutionIdentity>, HashSet<String>) {
         let mut protected_exact_sessions = Vec::new();
         let mut protected_unknown_session_ids = HashSet::new();
         for pending in &self.pending_startup_auto_resume_sessions {
@@ -1044,13 +1104,7 @@ impl AppRuntime {
                 }
             }
         }
-        reap_defunct_active_generations(
-            &self.sessions_dir,
-            startup_worktrees,
-            &protected_exact_sessions,
-            &protected_unknown_session_ids,
-            GenerationReaperFailureLog::Warn,
-        )
+        (protected_exact_sessions, protected_unknown_session_ids)
     }
 }
 
