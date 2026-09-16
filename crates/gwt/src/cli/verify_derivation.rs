@@ -193,7 +193,11 @@ impl DerivedPlan {
 }
 
 fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
-    hidden_command("git")
+    checked_git_lines(worktree, args).unwrap_or_default()
+}
+
+fn checked_git_lines(worktree: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let output = hidden_command("git")
         .arg("-C")
         .arg(worktree)
         // Non-ASCII paths must come back verbatim, not quote-escaped —
@@ -201,17 +205,22 @@ fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+        .map_err(|error| format!("git {} failed: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("git {} returned unreadable paths: {error}", args.join(" ")))?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Resolve the integration base the committed span is diffed against.
@@ -244,13 +253,23 @@ fn changed_paths(worktree: &Path) -> Result<Vec<String>, TrivialReason> {
         return Err(TrivialReason::IntegrationBranch);
     }
     let base = integration_merge_base(worktree).ok_or(TrivialReason::MergeBaseUnavailable)?;
+    changed_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
+}
+
+fn changed_paths_since(worktree: &Path, base: &str) -> Result<Vec<String>, String> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
-    paths.extend(git_lines(worktree, &["diff", "--name-only", &base, "HEAD"]));
-    paths.extend(git_lines(worktree, &["diff", "--name-only", "HEAD"]));
-    paths.extend(git_lines(
+    paths.extend(checked_git_lines(
+        worktree,
+        &["diff", "--no-renames", "--name-only", base, "HEAD"],
+    )?);
+    paths.extend(checked_git_lines(
+        worktree,
+        &["diff", "--no-renames", "--name-only", "HEAD"],
+    )?);
+    paths.extend(checked_git_lines(
         worktree,
         &["ls-files", "--others", "--exclude-standard"],
-    ));
+    )?);
     Ok(paths
         .into_iter()
         .filter(|path| !path.starts_with(".gwt/") && !path.starts_with("tasks/"))
@@ -276,6 +295,17 @@ fn is_frontend_path(path: &str) -> bool {
         || [".js", ".mjs", ".ts", ".css", ".html"]
             .iter()
             .any(|ext| path.ends_with(ext))
+}
+
+/// Inspect frontend changes even when plan derivation is trivial on an
+/// integration branch. An unknown base or unreadable diff cannot prove that
+/// a Ready handoff has no UI surface.
+pub fn has_frontend_changes(worktree: &Path) -> Result<bool, String> {
+    let base = integration_merge_base(worktree)
+        .ok_or_else(|| "frontend classification requires a readable git merge-base".to_string())?;
+    Ok(changed_paths_since(worktree, &base)?
+        .iter()
+        .any(|path| is_frontend_path(path)))
 }
 
 fn is_docs_path(path: &str) -> bool {
@@ -538,6 +568,58 @@ mod tests {
         let plan = derive(dir.path()).unwrap();
         assert!(plan.commands.is_empty());
         assert_eq!(plan.trivial_reason, Some(TrivialReason::IntegrationBranch));
+    }
+
+    #[test]
+    fn frontend_detection_inspects_integration_branch_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        git(dir.path(), &["checkout", "-q", "-B", "develop"]);
+        write(dir.path(), "README.md", "# readme");
+        assert!(!has_frontend_changes(dir.path()).unwrap());
+
+        write(dir.path(), "crates/gwt/web/styles/test.css", "body {}\n");
+        assert!(has_frontend_changes(dir.path()).unwrap());
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "feat: frontend fixture"]);
+        assert!(has_frontend_changes(dir.path()).unwrap());
+        assert_eq!(
+            derive(dir.path()).unwrap().trivial_reason,
+            Some(TrivialReason::IntegrationBranch)
+        );
+
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(dir.path(), &["config", "diff.renames", "true"]);
+        git(
+            dir.path(),
+            &["mv", "crates/gwt/web/styles/test.css", "archived-style.txt"],
+        );
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a staged rename must retain the removed frontend surface"
+        );
+        git(
+            dir.path(),
+            &["commit", "-qm", "chore: archive frontend fixture"],
+        );
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a committed rename must retain the removed frontend surface"
+        );
+    }
+
+    #[test]
+    fn frontend_detection_refuses_unknown_git_or_base() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(has_frontend_changes(dir.path()).is_err());
+
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        write(dir.path(), "crates/gwt/web/styles/test.css", "body {}\n");
+        let error = has_frontend_changes(dir.path()).unwrap_err();
+        assert!(error.contains("merge-base"), "{error}");
     }
 
     // Deletions-only change sets produce an explicit no-target plan rather
