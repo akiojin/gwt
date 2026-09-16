@@ -499,11 +499,13 @@ impl WorkItemsProjection {
             }
         }
         if let Some(container) = event.execution_container.clone() {
-            if !item
+            if let Some(existing) = item
                 .execution_containers
-                .iter()
-                .any(|existing| workspace_execution_container_same(existing, &container))
+                .iter_mut()
+                .find(|existing| workspace_execution_container_same(existing, &container))
             {
+                merge_workspace_pr_metadata(existing, &container);
+            } else {
                 item.execution_containers.push(container);
             }
         }
@@ -643,6 +645,24 @@ fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
         | WorkEventKind::Merge
         | WorkEventKind::Pr => WorkspaceStatusCategory::Active,
     })
+}
+
+pub(crate) fn merge_workspace_pr_metadata(
+    target: &mut WorkspaceExecutionContainerRef,
+    source: &WorkspaceExecutionContainerRef,
+) {
+    if source.pr_number.is_some() && source.pr_number != target.pr_number {
+        target.pr_number = source.pr_number;
+        target.pr_url = source.pr_url.clone();
+        target.pr_state = source.pr_state.clone();
+    } else {
+        if source.pr_url.is_some() {
+            target.pr_url = source.pr_url.clone();
+        }
+        if source.pr_state.is_some() {
+            target.pr_state = source.pr_state.clone();
+        }
+    }
 }
 
 pub(crate) fn workspace_execution_container_same(
@@ -984,6 +1004,72 @@ mod tests {
 
         let event_lines = std::fs::read_to_string(&events_path).expect("event log");
         assert_eq!(event_lines.lines().count(), 2);
+    }
+
+    #[test]
+    fn apply_event_merges_pr_metadata_into_matching_execution_container() {
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 10, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 8, 19, 11, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-pr-metadata", t0);
+        start.execution_container = Some(container_for_test(
+            "work/issue-3697",
+            "/repo/work/issue-3697",
+        ));
+        projection.apply_event(start);
+
+        let mut pr = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
+        pr.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3697".to_string()),
+            worktree_path: Some(PathBuf::from("/repo/work/issue-3697")),
+            pr_number: Some(3672),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/3672".to_string()),
+            pr_state: Some("OPEN".to_string()),
+        });
+        projection.apply_event(pr);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-pr-metadata")
+            .expect("item");
+        assert_eq!(
+            item.execution_containers.len(),
+            1,
+            "same worktree must not duplicate the container"
+        );
+        let container = &item.execution_containers[0];
+        assert_eq!(container.pr_number, Some(3672));
+        assert_eq!(
+            container.pr_url.as_deref(),
+            Some("https://github.com/akiojin/gwt/pull/3672")
+        );
+        assert_eq!(container.pr_state.as_deref(), Some("OPEN"));
+        assert_eq!(item.events.len(), 2);
+        assert_eq!(
+            item.events[1]
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.pr_number),
+            Some(3672),
+            "the Pr event itself must carry PR metadata"
+        );
+
+        let mut later = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
+        let mut closed = container.clone();
+        closed.pr_state = Some("CLOSED".to_string());
+        later.execution_container = Some(closed);
+        projection.apply_event(later);
+        let mut update = WorkEvent::new(WorkEventKind::Update, "work-pr-metadata", t1);
+        update.execution_container = Some(container_for_test(
+            "work/issue-3697",
+            "/repo/work/issue-3697",
+        ));
+        projection.apply_event(update);
+        let container = &projection.work_items[0].execution_containers[0];
+        assert_eq!(container.pr_number, Some(3672));
+        assert_eq!(container.pr_state.as_deref(), Some("CLOSED"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod board;
 pub(crate) mod branch;
 mod build;
 mod commands;
+mod concern;
 pub mod daemon;
 mod diagnostics;
 mod discuss;
@@ -67,7 +68,7 @@ pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use pr::types::{
     LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
-    PrReviewThread, PrReviewThreadComment,
+    PrReviewThread, PrReviewThreadComment, PrUpdateBranchOutcome, PrUpdateBranchResult,
 };
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
@@ -91,6 +92,7 @@ pub enum CliCommand {
     Intake(intake_outcome::IntakeCommand),
     Diagnostics(DiagnosticsCommand),
     Memory(MemoryCommand),
+    Concern(Box<concern::ConcernCommand>),
     Discuss(DiscussCommand),
     Discussion(DiscussionCommand),
     /// SPEC-3248 P8a: execution settlement, adoption, and verified recovery.
@@ -568,6 +570,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
+        CliCommand::Concern(inner) => concern::run(env, *inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,

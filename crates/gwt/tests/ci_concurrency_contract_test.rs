@@ -43,13 +43,11 @@ const REQUIRED_CHECKS: &[&str] = &[
 ];
 
 /// Heavy, non-required jobs in `test.yml` that a documentation edit cannot
-/// affect: four Windows agent launch matrix runs, the three-pass Windows
-/// default-parallel job, and the WebView E2E job.
-const DOCS_SKIPPABLE_JOBS: &[&str] = &[
-    "test-windows-agent-launch-e2e",
-    "test-windows-default-parallel",
-    "test-frontend",
-];
+/// affect: the Windows agent launch E2E job and the WebView E2E job. The
+/// three-pass Windows default-parallel job used to be listed here; Issue #4134
+/// AC-1 moved it out of the pull-request path into `nightly.yml`, where a
+/// per-PR path filter has nothing to skip.
+const DOCS_SKIPPABLE_JOBS: &[&str] = &["test-windows-agent-launch-e2e", "test-frontend"];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

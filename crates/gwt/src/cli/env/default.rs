@@ -339,7 +339,15 @@ impl CliEnv for DefaultCliEnv {
         let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path);
         let history_path = project_dir.join(gwt_git::PR_INVENTORY_HISTORY_FILE);
         let cache_path = project_dir.join(gwt_git::PR_INVENTORY_CACHE_FILE);
-        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, &cache_path, options)
+        let settings =
+            gwt_config::Settings::load_from_path(&gwt_core::paths::gwt_home().join("config.toml"))
+                .unwrap_or_default();
+        let options = gwt_git::PrInventoryOptions {
+            cache_ttl_secs: settings.pr_inventory.cache_ttl_secs,
+            checks_refresh_secs: settings.pr_inventory.checks_refresh_secs,
+            ..options.clone()
+        };
+        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, &cache_path, &options)
             .map_err(|err| io::Error::other(err.to_string()))
     }
     fn probe_github_rate_limit(&mut self) -> io::Result<String> {
@@ -356,6 +364,17 @@ impl CliEnv for DefaultCliEnv {
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::pr::convert_pr_to_draft_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
+    fn update_pr_branch(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::types::PrUpdateBranchResult> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::update_pr_branch_via_gh(
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
