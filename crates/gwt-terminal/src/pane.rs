@@ -529,8 +529,7 @@ mod tests {
     use crate::test_util::self_terminate_command;
     use crate::test_util::{
         answer_cursor_position_query, echo_command, exit_code_command, lock_pty_test,
-        read_until_contains, read_with_timeout, sleep_command, stdin_echo_command, success_command,
-        TestCommand,
+        read_until_contains, sleep_command, stdin_echo_command, success_command, TestCommand,
     };
 
     /// Collect the fields of every `gwt.process.summary` event emitted while
@@ -1456,7 +1455,8 @@ mod tests {
         answer_cursor_position_query(pane.pty());
 
         let reader = pane.reader().expect("reader failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output =
+            read_until_contains(reader, Duration::from_secs(5), "vt100-test").expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("vt100-test"),
