@@ -1525,6 +1525,69 @@ mod tests {
         }
     }
 
+    /// Issue #4352 AC-1 / AC-3: gwt-verify, gwt-search, and AGENTS.md carry
+    /// the same bootstrap order as the canonical coordination guidance.
+    #[test]
+    fn gwtd_bootstrap_contract_is_mirrored_in_verify_search_and_agents_md() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let shared = [
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`GWT_BIN_PATH`",
+        ];
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-search/SKILL.md",
+            ".codex/skills/gwt-search/SKILL.md",
+        ] {
+            let skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in shared.iter().chain(["lease-free bootstrap step"].iter()) {
+                assert!(
+                    skill.contains(required),
+                    "expected gwtd bootstrap contract in {relative}: {required}"
+                );
+            }
+        }
+        for pair in [
+            (
+                ".claude/skills/gwt-verify/SKILL.md",
+                ".codex/skills/gwt-verify/SKILL.md",
+            ),
+            (
+                ".claude/skills/gwt-search/SKILL.md",
+                ".codex/skills/gwt-search/SKILL.md",
+            ),
+        ] {
+            let claude = std::fs::read_to_string(workspace_root.join(pair.0)).unwrap();
+            let codex = std::fs::read_to_string(workspace_root.join(pair.1)).unwrap();
+            assert_eq!(
+                claude, codex,
+                "{} and {} must be byte-identical",
+                pair.0, pair.1
+            );
+        }
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in shared
+            .iter()
+            .chain(["lease \u{4e0d}\u{8981}\u{306e} bootstrap step"].iter())
+        {
+            assert!(
+                agents.contains(required),
+                "expected AGENTS.md local verification rule to match canonical guidance: {required}"
+            );
+        }
+    }
+
     #[test]
     fn public_task_entrypoints_are_documented() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2359,8 +2422,8 @@ mod tests {
             let content = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
-                // Launch mode is detected from the launcher's own environment,
-                // not from the agent's judgement.
+                // The environment is a legacy signal; execution.status owns
+                // the launch route, not the agent's judgement.
                 "GWT_AUTONOMOUS_EXECUTION",
                 "Launch mode",
                 // The recorded value for an autonomous run.
@@ -2460,12 +2523,10 @@ mod tests {
         }
     }
 
-    /// AC-3: a postponed visual check needs a value of its own. `confirmed`
-    /// would be a lie and `n/a` would claim there was nothing to look at, so
-    /// every skill that records or gates on the result must know the third
-    /// value.
+    /// Issue #4326: existing deferred results remain readable as migration
+    /// compatibility, without falsely claiming a human confirmed the check.
     #[test]
-    fn a_deferred_user_verification_has_its_own_recorded_value() {
+    fn legacy_deferred_user_verification_remains_documented() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
@@ -2489,44 +2550,49 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("deferred (autonomous execution)"),
-                "{relative} must know the deferred User Verification Result (Issue #4217 AC-3)"
+                "{relative} must document the legacy deferred User Verification Result"
             );
         }
     }
 
-    /// AC-1 / AC-4 / AC-6: what an autonomous launch does instead of waiting.
-    /// It creates a Draft PR, it does not settle itself as blocked over an
-    /// absent reviewer, and the Draft is where the automation stops.
+    /// Issue #4326: verified autonomous work proceeds through Ready and the
+    /// existing CI auto-merge path, without waiting for a human visual check.
     #[test]
-    fn an_autonomous_launch_hands_off_a_draft_pr_instead_of_stalling() {
+    fn an_autonomous_launch_delivers_through_ci_auto_merge() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
             ".claude/skills/gwt-execute/SKILL.md",
             ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
             let content = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
-            assert!(
-                content.contains("execution.blocked"),
-                "{relative} must address the terminal settlement the stall used to take"
-            );
-            assert!(
-                content.contains("Draft PR"),
-                "{relative} must name the Draft PR handoff as the way out"
-            );
-            assert!(
-                content.contains("pr.ready"),
-                "{relative} must say that a deferred result stops at the Ready door"
-            );
+            for required in ["Ready PR", "CI auto-merge", "fresh", "legacy"] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document {required}"
+                );
+            }
+            for obsolete in [
+                "Automation ends at PR creation",
+                "authorizes a **Draft** PR only",
+                "reaches a **Draft** PR only",
+                "**stays Draft**",
+            ] {
+                assert!(
+                    !content.contains(obsolete),
+                    "{relative} must retire {obsolete}"
+                );
+            }
         }
     }
 
-    /// AC-5: the owner reviews the postponed checks in one pass, not by
-    /// walking back through the Board.
+    /// The list field remains available for inspecting legacy deferred PRs.
     #[test]
-    fn deferred_prs_are_listable_for_the_owner() {
+    fn legacy_deferred_prs_remain_listable() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
@@ -2536,7 +2602,7 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("deferred_user_verification"),
-                "{relative} must name the pr.list field the owner sweeps"
+                "{relative} must name the legacy pr.list field"
             );
         }
     }
@@ -2553,6 +2619,8 @@ mod tests {
             "deferred (autonomous execution)",
             "deferred_user_verification",
             "execution.blocked",
+            "CI 自動マージ",
+            "headed_e2e_commands",
         ] {
             assert!(
                 agents.contains(required),
@@ -2763,7 +2831,7 @@ mod tests {
         for required in [
             "Deliver",
             "drive to merge",
-            "gh pr merge --auto",
+            "JSON operation `pr.merge`",
             "merged_at",
             "Ready PR Gate",
             "Loop Safety Guard",
@@ -2863,12 +2931,12 @@ mod tests {
 
             for required in [
                 "drive-to-merge",
-                "gh pr merge --auto",
+                "JSON operation `pr.merge`",
                 "merged_at",
                 "Loop Safety Guard",
                 // Re-gate invariant: never keep auto-merge armed across a
                 // code-changing push.
-                "--disable-auto",
+                "disable auto-merge through `pr.merge`",
                 "re-arm",
             ] {
                 assert!(
@@ -2876,11 +2944,11 @@ mod tests {
                     "{relative} Mode: Deliver section must document: {required}"
                 );
             }
-            // Deliver is opt-in only — auto-detection must never enable
-            // auto-merge on its own.
+            // Manual Deliver remains opt-in; autonomous delivery is covered
+            // by the launch-route contract above.
             assert!(
                 deliver.contains("opt-in") && deliver.contains("never auto-routed"),
-                "{relative} Mode: Deliver must state it is opt-in only and never auto-routed"
+                "{relative} Mode: Deliver must preserve the manual opt-in contract"
             );
             // Hard gate: pending verification must not enable auto-merge.
             assert!(
@@ -2903,8 +2971,8 @@ mod tests {
                 // Hard PR gate before enabling auto-merge.
                 "Ready PR Gate",
                 "pending",
-                // Auto-merge enablement via the allowed gh command.
-                "gh pr merge --auto",
+                // Auto-merge enablement via the canonical JSON operation.
+                "JSON operation `pr.merge`",
                 // Project-agnostic merge-method selection (no hardcoded method).
                 "viewerDefaultMergeMethod",
                 // Merged-state watch surface and completion signal.
@@ -2912,13 +2980,13 @@ mod tests {
                 "merged_at",
                 // Transient CI classification + bounded re-run, like /release.
                 "transient",
-                "gh run rerun",
+                "`actions.rerun`",
                 // Bounded drive loop.
                 "Loop Safety Guard",
                 // Safety invariant: auto-merge must never stay armed across a
                 // code-changing push. Disable, re-gate, and re-arm per push so
                 // GitHub only ever merges a verified, gated snapshot.
-                "gh pr merge --disable-auto",
+                "**disable auto-merge** through JSON operation",
                 "re-arm",
             ] {
                 assert!(

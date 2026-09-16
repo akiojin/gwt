@@ -50,6 +50,9 @@ mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+// Unix has no tree-wide CPU cap to lift (Issue #4405).
+#[cfg(windows)]
+mod verification_cap_relief;
 mod work_events_ingest;
 mod workspace_session_registry;
 
@@ -234,13 +237,17 @@ fn spawn_project_index_status_check(
     _runtime: &Runtime,
     proxy: EventLoopProxy<UserEvent>,
     project_root: Option<PathBuf>,
+    startup_inventory: Option<std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
 ) {
     dispatch_project_index_status_check_with(
         AppEventProxy::new(proxy),
         project_root,
         |proxy, root| {
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
-                .spawn(proxy, root)
+            let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::global();
+            match startup_inventory {
+                Some(inventory) => service.spawn_with_startup_inventory(proxy, root, inventory),
+                None => service.spawn(proxy, root),
+            }
         },
     );
 }
@@ -1172,11 +1179,10 @@ fn issue_monitor_daemon_user_event(
     match event_name {
         "status" => {
             let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorStatus {
-                    status: Box::new(status),
-                },
-            )]))
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: project_root.to_path_buf(),
+                status: Box::new(status),
+            })
         }
         "inbox" => {
             let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
@@ -1467,6 +1473,10 @@ enum UserEvent {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     },
+    IssueMonitorDaemonStatus {
+        project_root: PathBuf,
+        status: Box<gwt::IssueMonitorStatusView>,
+    },
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
     IssueMonitorDaemonInbox {
@@ -1562,6 +1572,15 @@ enum UserEvent {
     LaunchComplete {
         window_id: String,
         result: Box<AgentLaunchResult>,
+    },
+    /// Issue #4375: one PM worktree preparation finished on a blocking worker.
+    /// The Git work it covers (`git worktree add`, `git fetch`) used to run
+    /// inside the canvas-ready restore drain and held the GUI event loop for
+    /// seconds on a repository with many worktrees; the spawn it gates resumes
+    /// from this event instead.
+    PmWorktreePrepared {
+        continuation: Box<crate::app_runtime::pm::PmWorktreeContinuation>,
+        result: Result<PathBuf, String>,
     },
     ShellLaunchComplete {
         window_id: String,
@@ -1697,7 +1716,7 @@ mod tests {
     /// poll interval.
     #[test]
     fn the_gui_drives_daemon_supervision_on_its_own_timer() {
-        let source = include_str!("main.rs");
+        let source = include_str!("main.rs").replace("\r\n", "\n");
         let supervision = source
             .split_once("runtime-daemon-ensure-tick")
             .expect("the GUI must own a daemon supervision thread")
@@ -2143,19 +2162,19 @@ mod tests {
             serde_json::to_value(status.clone()).expect("status serializes"),
             42,
         );
-        match super::daemon_broadcast_user_event(
+        let status_event = super::daemon_broadcast_user_event(
             gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
             status_payload,
             project_root,
             99,
-        ) {
-            Some(UserEvent::Dispatch(events)) => {
-                assert!(events.iter().any(|event| {
-                    matches!(
-                        &event.event,
-                        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
-                    )
-                }));
+        );
+        match status_event {
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: actual_project_root,
+                status: actual,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(*actual, status);
             }
             other => panic!("unexpected issue monitor status event: {other:?}"),
         }
@@ -3395,6 +3414,8 @@ mod tests {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            startup_worktree_inventories: HashMap::new(),
+            pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -3432,6 +3453,7 @@ mod tests {
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             provider_quota_holds: std::collections::HashMap::new(),
             provider_quota_candidates: std::collections::HashMap::new(),
+            released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
@@ -8660,6 +8682,7 @@ fn main() -> std::io::Result<()> {
     // can be measured. Fail-open — a disabled kill switch or an unwritable log
     // directory leaves every later `record_*` call a no-op.
     gwt::perf::install_from_settings();
+    gwt::perf::startup::begin(*PROCESS_STARTED_AT.get().expect("process start instant"));
 
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
@@ -8750,7 +8773,11 @@ fn main() -> std::io::Result<()> {
         ),
     };
 
-    let runtime = Runtime::new().expect("tokio runtime");
+    let runtime = {
+        let _phase =
+            gwt::perf::startup::PhaseTimer::start(gwt::perf::startup::StartupPhase::RuntimeInit);
+        Runtime::new().expect("tokio runtime")
+    };
 
     // SPEC-3287 FR-028..FR-030: commit the embedded-server port before any
     // server task or browser URL can be published. Explicit `--port` values
@@ -8980,6 +9007,8 @@ fn main() -> std::io::Result<()> {
             let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
         }),
     );
+    #[cfg(windows)]
+    verification_cap_relief::spawn(pty_writers.clone());
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
@@ -8993,10 +9022,15 @@ fn main() -> std::io::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
+    let mut startup_index_project = app
+        .active_project_root()
+        .map(|root| root.display().to_string());
+    let startup_worktree_inventory = app.take_startup_worktree_inventory();
     spawn_project_index_status_check(
         &runtime,
         proxy.clone(),
         app.active_project_root().map(Path::to_path_buf),
+        startup_worktree_inventory,
     );
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
@@ -9212,6 +9246,7 @@ fn main() -> std::io::Result<()> {
                         &runtime,
                         proxy.clone(),
                         app.active_project_root().map(Path::to_path_buf),
+                        None,
                     );
                 }
             }
@@ -9463,18 +9498,17 @@ fn main() -> std::io::Result<()> {
                 ));
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
+                project_root,
+                status,
+            }) => {
+                clients.dispatch(app.issue_monitor_daemon_status_events(&project_root, status));
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
                 project_root,
                 items,
             }) => {
-                // SPEC-3431 T-093: the wake decision runs before the frontend
-                // broadcast so a parked PM is revived by daemon-side activity.
-                app.replace_knowledge_monitor_snapshot(&project_root, &items);
-                let mut events = app.pm_wake_events(&project_root, &items);
-                events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
-                    items,
-                }));
-                clients.dispatch(events);
+                clients.dispatch(app.issue_monitor_daemon_inbox_events(&project_root, items));
             }
             Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
                 window_id,
@@ -9556,6 +9590,15 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 status,
             }) => {
+                if startup_index_project.as_deref() == Some(project_root.as_str()) {
+                    if status.state == gwt::ProjectIndexStatusState::Ready {
+                        gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::IndexRuntimeReady);
+                        startup_index_project = None;
+                    } else if matches!(status.state, gwt::ProjectIndexStatusState::Error | gwt::ProjectIndexStatusState::Skipped) {
+                        // A later manual repair/open is not startup readiness.
+                        startup_index_project = None;
+                    }
+                }
                 clients.dispatch(vec![OutboundEvent::broadcast(
                     BackendEvent::ProjectIndexStatus {
                         project_root,
@@ -9565,6 +9608,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::PmWorktreePrepared {
+                continuation,
+                result,
+            }) => {
+                let events = app.handle_pm_worktree_prepared(*continuation, result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {

@@ -351,6 +351,10 @@ async fn send_pm_pane_input(
                     "pm message delivery is unverified: {}",
                     reply.reason.unwrap_or_else(|| "unknown reason".to_string())
                 )),
+                "refused" => Err(format!(
+                    "pm message refused: {}",
+                    reply.reason.unwrap_or_else(|| "unknown reason".to_string())
+                )),
                 "failed" => Err(format!(
                     "pm message failed: {}",
                     reply.reason.unwrap_or_else(|| "unknown reason".to_string())
@@ -875,10 +879,12 @@ fn pane_backend_silence(context: &str, received: usize, budget: Duration) -> Str
     let budget = format!("{}ms", budget.as_millis());
     if received == 0 {
         format!(
-            "{context}: pane_backend_unresponsive — the gwt instance behind this pane WebSocket \
-             accepted the connection and then sent nothing within {budget}. It is running but not \
-             answering, which is what a saturated instance looks like from here. Nothing was \
-             changed; retry, or restart that instance."
+            "{context}: pane_backend_unresponsive — connected to the gwt instance behind this pane \
+             WebSocket, but it sent nothing within {budget}. Pane replies come from the GUI event \
+             loop, so a single long dispatch holds them. This may be a temporary GUI stall; \
+             replies resume when the dispatch finishes. Nothing was changed. Wait 2.5 seconds \
+             and retry; if the silence persists, check the gwt log for \
+             `gwt.frontend.timing` \"blocked the GUI event loop\" warnings at this time."
         )
     } else {
         format!(
@@ -931,10 +937,9 @@ async fn next_pm_workspace_windows(
             else {
                 continue;
             };
-            let mut parsed = serde_json::from_value::<Vec<PersistedWindowState>>(
-                tab_windows.clone(),
-            )
-            .map_err(|error| format!("pm.message.send: invalid workspace projection: {error}"))?;
+            let mut parsed = parse_wire_windows(tab_windows, tab_root).map_err(|error| {
+                format!("pm.message.send: invalid workspace projection: {error}")
+            })?;
             windows.append(&mut parsed);
         }
         if !matched {
@@ -1311,7 +1316,7 @@ fn parse_workspace_windows_scoped(
             continue;
         };
         if let Ok(mut parsed) =
-            serde_json::from_value::<Vec<PersistedWindowState>>(tab_windows.clone())
+            parse_wire_windows(tab_windows, tab.get("project_root").and_then(Value::as_str))
         {
             let owns_caller = tab
                 .get("project_root")
@@ -1416,12 +1421,43 @@ fn render_snapshot_lines(snapshot: &str, lines: usize) -> String {
     out
 }
 
+/// Restore runtime hints and durable Session roles without changing disk restoration.
+fn parse_wire_windows(
+    value: &Value,
+    project_root: Option<&str>,
+) -> Result<Vec<PersistedWindowState>, serde_json::Error> {
+    let mut windows: Vec<PersistedWindowState> = serde_json::from_value(value.clone())?;
+    for (window, raw) in windows
+        .iter_mut()
+        .zip(value.as_array().into_iter().flatten())
+    {
+        window.is_pm = raw.get("is_pm").and_then(Value::as_bool).unwrap_or(false);
+        if !window.is_pm {
+            if let Some(session_id) = window.session_id.as_deref() {
+                let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+                if let Ok(session) = gwt_agent::Session::load(&path) {
+                    if session.id == session_id {
+                        window.is_pm = crate::pm_registry::pane_is_pm(
+                            project_root
+                                .map(Path::new)
+                                .unwrap_or(&session.worktree_path),
+                            Some(&session.worktree_path),
+                            Some(session_id),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(windows)
+}
+
 pub(crate) fn render_pane_list(windows: &[PersistedWindowState]) -> String {
     let panes = windows.iter().filter(|window| is_agent_pane(window));
     let mut out = String::new();
     for window in panes {
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\trole={}\n",
             window.id,
             status_label(window.status),
             window
@@ -1432,7 +1468,12 @@ pub(crate) fn render_pane_list(windows: &[PersistedWindowState]) -> String {
                 .dynamic_title
                 .as_deref()
                 .or(window.purpose_title.as_deref())
-                .unwrap_or(&window.title)
+                .unwrap_or(&window.title),
+            if window.is_pm {
+                "pm"
+            } else {
+                "implementation_agent"
+            }
         ));
     }
     if out.is_empty() {
@@ -2043,6 +2084,57 @@ mod tests {
         assert!(error.contains("/internal/pane-ws"), "{error}");
         assert!(pane_websocket_request("ws://127.0.0.1:46234/ws?token=forbidden").is_err());
         assert!(pane_websocket_request("ws://127.0.0.1:46234/internal/hook-live").is_err());
+    }
+
+    #[test]
+    fn pm_pane_list_preserves_wire_role_without_persisting_it() {
+        let mut pm = window("tab::pm", WindowPreset::Codex, Some("codex"));
+        pm.is_pm = true;
+        let agent = window("tab::agent", WindowPreset::Codex, Some("codex"));
+        let value = workspace_state_for_test("/repo", vec![pm, agent]);
+        let raw = &value["workspace"]["tabs"][0]["workspace"]["windows"][0];
+        let restored: PersistedWindowState = serde_json::from_value(raw.clone()).unwrap();
+        assert!(
+            !restored.is_pm,
+            "disk restoration must not trust a stored role"
+        );
+
+        let windows = parse_workspace_windows(&value, "/repo").unwrap();
+        assert!(
+            windows[0].is_pm,
+            "the wire PM role must survive CLI parsing"
+        );
+        let rows = render_pane_list(&windows);
+        let rows = rows.lines().collect::<Vec<_>>();
+        assert!(rows[0].ends_with("\trole=pm"), "{}", rows[0]);
+        assert!(
+            rows[1].ends_with("\trole=implementation_agent"),
+            "{}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn pm_pane_list_recognizes_replaced_pm_session_from_durable_role() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let session = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut pm = window("tab::old-pm", WindowPreset::Codex, Some("codex"));
+        pm.session_id = Some(session.id);
+        assert!(
+            !pm.is_pm,
+            "the GUI marker identifies only the resident registration"
+        );
+        let value = workspace_state_for_test(repo.to_str().unwrap(), vec![pm]);
+        let windows = parse_workspace_windows(&value, repo.to_str().unwrap()).unwrap();
+        assert!(render_pane_list(&windows).trim_end().ends_with("role=pm"));
     }
 
     #[test]
@@ -2725,7 +2817,7 @@ mod tests {
     }
 
     #[test]
-    fn request_window_list_identifies_backend_response_timeout() {
+    fn request_window_list_recovers_on_retry_after_backend_stall() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2753,8 +2845,24 @@ mod tests {
                     .await
                     .expect("accept pane list websocket");
                 assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
-                let _socket = socket;
-                let _ = release_rx.await;
+                // Model a dispatch holding replies beyond both response budgets.
+                release_rx.await.expect("wait for the stall to clear");
+                drop(socket);
+
+                // The same backend answers a new request once the dispatch ends.
+                let (stream, _) = listener.accept().await.expect("accept pane list retry");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept retry websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
+                let state = workspace_state_for_test(
+                    "/repo/project",
+                    vec![window("tab::agent", WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send recovered pane list");
             });
 
             let error = request_window_list_with_timeout(
@@ -2765,7 +2873,15 @@ mod tests {
             .await
             .expect_err("pane list response must time out");
             release_tx.send(()).expect("release pane list mock");
+            let windows =
+                request_window_list(&format!("ws://{address}/internal/pane-ws"), "/repo/project")
+                    .await
+                    .expect(
+                        "retry must succeed after the stall clears without restarting the backend",
+                    );
             server.await.expect("pane list mock task");
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].id, "tab::agent");
 
             // Issue #3606 AC-3: a silent backend is named, not reported as a
             // bare give-up. #3510 raised the budget so a stalled instance still
@@ -3395,6 +3511,29 @@ mod tests {
                 error.contains("pane list"),
                 "the refusal must say which operation gave up: {error}"
             );
+            // Issue #4257 AC-2: report what was observed, not a guessed cause.
+            // The live case behind "saturated instance" was an idle process
+            // whose GUI event loop was held by one long dispatch.
+            assert!(
+                !error.contains("saturated"),
+                "the refusal must not assert a cause it did not observe: {error}"
+            );
+            assert!(
+                error.contains("connected") && error.contains("300ms"),
+                "the refusal must state the observed facts (connection, wait): {error}"
+            );
+            assert!(
+                error.contains("gwt.frontend.timing"),
+                "the refusal must point at the event-loop stall evidence: {error}"
+            );
+            assert!(
+                error.contains("temporary GUI stall") && error.contains("replies resume"),
+                "the refusal must explain that a dispatch stall can recover: {error}"
+            );
+            assert!(
+                error.contains("Wait 2.5 seconds and retry"),
+                "the refusal must recommend a concrete retry interval: {error}"
+            );
             server.abort();
             let _ = server.await;
         });
@@ -3665,6 +3804,10 @@ mod tests {
             for (status, reason) in [
                 ("unverified", "submit was not acknowledged"),
                 ("failed", "input mutation was refused"),
+                (
+                    "refused",
+                    "self-delivery to PM window tab::codex-1 is refused",
+                ),
             ] {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
@@ -3713,6 +3856,7 @@ mod tests {
 
             let unverified = &outcomes[0];
             let failed = &outcomes[1];
+            let refused = &outcomes[2];
             assert!(
                 unverified.contains("unverified")
                     && unverified.contains("submit was not acknowledged")
@@ -3723,6 +3867,13 @@ mod tests {
             assert!(
                 failed.contains("pm message failed") && !failed.contains("unverified"),
                 "{failed}"
+            );
+            assert!(
+                refused.contains("pm message refused")
+                    && refused.contains("self-delivery")
+                    && refused.contains("tab::codex-1")
+                    && !refused.contains("invalid status"),
+                "{refused}"
             );
         });
     }
