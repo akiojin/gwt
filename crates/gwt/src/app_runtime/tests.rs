@@ -70205,6 +70205,315 @@ fn startup_restore_limits_a_large_history_to_unterminated_windows() {
     );
 }
 
+/// Issue #4441: backdate a restore fixture Session so it reads as history
+/// rather than as a window that was open at the last exit.
+fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: chrono::Duration) {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = gwt_agent::Session::load(&path).expect("load restore fixture session");
+    session.last_activity_at = chrono::Utc::now() - age;
+    session
+        .save(sessions_dir)
+        .expect("save aged fixture session");
+}
+
+/// Issue #4441 AC-1 / AC-5 / AC-6: the canvas comes back with the windows that
+/// were open at the last exit, not with one window per relaunch this machine
+/// ever performed.
+///
+/// A `Stopped` agent placeholder used to be unconditional permission to restore
+/// (Issue #2942), and agent panes never close themselves, so every launch that
+/// ever opened a window left one behind forever — 55 of them on the fleet that
+/// reported this.
+#[test]
+fn startup_restore_limits_windows_to_the_last_open_set() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    const HISTORY: usize = 10;
+
+    let mut placeholders = vec![
+        ("agent-open-0".to_string(), "session-open-0".to_string()),
+        ("agent-open-1".to_string(), "session-open-1".to_string()),
+    ];
+    for index in 0..HISTORY {
+        placeholders.push((
+            format!("agent-history-{index}"),
+            format!("session-history-{index}"),
+        ));
+    }
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    for index in 0..2 {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &format!("session-open-{index}"),
+            &temp.path().join(format!("wt-open-{index}")),
+            Some(&format!("native-open-{index}")),
+            Some(4_441_000 + index as u64),
+        );
+    }
+    for index in 0..HISTORY {
+        let session_id = format!("session-history-{index}");
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            &temp.path().join(format!("wt-history-{index}")),
+            Some(&format!("native-history-{index}")),
+            Some(4_442_000 + index as u64),
+        );
+        // Every one of these kept its placeholder: nobody closed the window by
+        // hand, which is exactly why they accumulated.
+        age_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            chrono::Duration::hours(48),
+        );
+    }
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let mut restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.clone())
+        .collect::<Vec<_>>();
+    restored.sort();
+    assert_eq!(
+        restored,
+        vec!["session-open-0".to_string(), "session-open-1".to_string()],
+        "AC-1 requires only the last-open set to restore"
+    );
+
+    let refusals = restore_admission_refusals(&logs);
+    for index in 0..HISTORY {
+        assert_eq!(
+            refusals
+                .get(&format!("session-history-{index}"))
+                .map(String::as_str),
+            Some("stale"),
+            "AC-1: a placeholder must not exempt history from the freshness bound: {refusals:?}"
+        );
+    }
+
+    // AC-5: the restored count and the time the selection took are both on the
+    // one summary line, so "restore is slow" is measurable next time.
+    let summary = restore_admission_summary(&logs);
+    assert_eq!(
+        summary.fields.get("restored").map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        summary.fields.get("suppressed").map(String::as_str),
+        Some(HISTORY.to_string().as_str())
+    );
+    assert!(
+        summary.fields.contains_key("elapsed_ms"),
+        "AC-5 requires the selection duration on the summary line, got {:?}",
+        summary.fields
+    );
+}
+
+/// Issue #4441 AC-2: one owner Issue restores one window.
+///
+/// Each relaunch mints a fresh conversation handle, so the existing
+/// native-session dedupe never collapsed them — the reporting fleet restored
+/// `#4257` eight times.
+#[test]
+fn startup_restore_collapses_duplicate_owner_issue_windows() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+
+    let placeholders = (0..3)
+        .map(|index| {
+            (
+                format!("agent-relaunch-{index}"),
+                format!("session-relaunch-{index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for index in 0..3 {
+        let session_id = format!("session-relaunch-{index}");
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            &temp.path().join(format!("wt-relaunch-{index}")),
+            Some(&format!("native-relaunch-{index}")),
+            Some(4257),
+        );
+        // The newest relaunch is the one that should come back.
+        age_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            chrono::Duration::minutes(10 * (2 - index as i64)),
+        );
+    }
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored,
+        vec!["session-relaunch-2"],
+        "AC-2 requires one window per owner Issue, newest first"
+    );
+    let refusals = restore_admission_refusals(&logs);
+    for index in 0..2 {
+        assert_eq!(
+            refusals
+                .get(&format!("session-relaunch-{index}"))
+                .map(String::as_str),
+            Some("duplicate_owner_issue"),
+            "{refusals:?}"
+        );
+    }
+}
+
+/// Issue #4441 AC-3: a window whose Monitor row the operator is holding does
+/// not respawn.
+///
+/// `classify_terminal_window` was written for the *close* side, where an
+/// unproven fact must never close a window. Restore reused it and read every
+/// such `Ineligible` — `failure_hold` from `issue.monitor.stop` included — as
+/// permission to spawn.
+#[test]
+fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![
+        ("agent-held".to_string(), "session-held".to_string()),
+        ("agent-parked".to_string(), "session-parked".to_string()),
+        ("agent-live".to_string(), "session-live".to_string()),
+    ];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (session_id, worktree, issue) in [
+        ("session-held", "wt-held", 4286u64),
+        ("session-parked", "wt-parked", 4287),
+        ("session-live", "wt-live", 4288),
+    ] {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            session_id,
+            &temp.path().join(worktree),
+            Some(&format!("native-{session_id}")),
+            Some(issue),
+        );
+    }
+    let prefs = gwt::IssueMonitorPrefs {
+        failed_issues: vec![gwt::IssueMonitorFailedIssue {
+            issue_number: 4286,
+            message: "operator stop hold".to_string(),
+            window_id: None,
+        }],
+        autonomous_records: vec![gwt::AutonomousIssueRecord {
+            phase: gwt::AutonomousPhase::NeedsHuman,
+            ..gwt::AutonomousIssueRecord::new(4287)
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed monitor prefs");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(restored, vec!["session-live"]);
+    let refusals = restore_admission_refusals(&logs);
+    assert_eq!(
+        refusals.get("session-held").map(String::as_str),
+        Some("monitor_hold:failure_hold"),
+        "{refusals:?}"
+    );
+    assert_eq!(
+        refusals.get("session-parked").map(String::as_str),
+        Some("monitor_hold:needs_human"),
+        "{refusals:?}"
+    );
+
+    // A hold is not terminal: the window comes back once the operator releases
+    // the row, so neither the placeholder nor the restore flag is discarded.
+    for session_id in ["session-held", "session-parked"] {
+        assert!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .any(|window| window.session_id.as_deref() == Some(session_id)),
+            "{session_id} placeholder must survive a Monitor hold"
+        );
+        let session =
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+                .expect("load held session");
+        assert!(session.restore_window_on_startup);
+    }
+}
+
+/// Issue #4441 AC-1: the restore flag is honored on the placeholder path too.
+///
+/// A settled agent whose window nobody closed by hand keeps its placeholder;
+/// the flag is the only durable record that the window is finished.
+#[test]
+fn startup_restore_honors_a_cleared_restore_flag_on_a_surviving_placeholder() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![("agent-settled".to_string(), "session-settled".to_string())];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-settled",
+        &temp.path().join("wt-settled"),
+        Some("native-settled"),
+        Some(4_441_777),
+    );
+    let path = runtime.sessions_dir.join("session-settled.toml");
+    let mut session = gwt_agent::Session::load(&path).expect("load settled session");
+    session.restore_window_on_startup = false;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save settled session");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    assert_eq!(
+        restore_admission_refusals(&logs)
+            .get("session-settled")
+            .map(String::as_str),
+        Some("window_not_open")
+    );
+}
+
 /// Issue #4143 AC-3: a restore nobody asked for that dies before PTY start
 /// records its reason and leaves no window behind.
 #[test]

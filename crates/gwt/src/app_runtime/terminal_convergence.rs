@@ -217,6 +217,18 @@ const RESTORE_UNPROVABLE_CAUSES: &[&str] = &[
     "session_unreadable",
 ];
 
+/// Issue #4441 (AC-3): ineligibility causes that mean "the Issue Monitor is
+/// holding this row", not "the Work is still live".
+///
+/// [`classify_terminal_window`] is written for the close side, where an
+/// operator stop hold or a `needs_human` park must never let the runtime close
+/// a window out from under the human who asked for it. Restore inherited that
+/// polarity and read the same holds as permission to *spawn*, which is why a
+/// row the PM had stopped with `issue.monitor.stop` came back on every startup.
+/// A hold is reversible, so unlike a terminal Work it leaves the placeholder
+/// and the restore flag alone: releasing the row brings the window back.
+const RESTORE_HELD_CAUSES: &[&str] = &["needs_human", "failure_hold"];
+
 /// Issue #4143 (AC-2): the admission decision for one restore candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreAdmission {
@@ -225,6 +237,9 @@ pub(crate) enum RestoreAdmission {
     /// The Work is provably terminal: disable restore and drop the
     /// placeholder so the window stops coming back.
     RefuseTerminal(TerminalCloseReason),
+    /// Issue #4441 (AC-3): the Issue Monitor is holding this row. Do not
+    /// spawn, but keep the placeholder — the hold is reversible.
+    RefuseHeld(&'static str),
     /// The canonical facts could not be read. Do not spawn, but keep the
     /// placeholder: the next generation may be able to prove the answer.
     RefuseUnprovable(&'static str),
@@ -711,6 +726,9 @@ impl AppRuntime {
                 if RESTORE_UNPROVABLE_CAUSES.contains(&cause) =>
             {
                 RestoreAdmission::RefuseUnprovable(cause)
+            }
+            TerminalCloseEligibility::Ineligible(cause) if RESTORE_HELD_CAUSES.contains(&cause) => {
+                RestoreAdmission::RefuseHeld(cause)
             }
             TerminalCloseEligibility::Ineligible(_) => RestoreAdmission::Admit,
         }
