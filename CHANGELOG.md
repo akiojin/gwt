@@ -1,6 +1,76 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.100.1] - 2026-09-16
+
+### Bug Fixes
+
+- **skills:** Issue.monitor.wait の guidance 例に number を明示する
+- **skills:** 新規テストの ScopedEnvVar を env_test_lock 配下に置く
+- **verify:** 検証プロセスが agent の低優先度を継承して飢餓する問題を修正 (#4405)
+- **verify:** Lease 保持者の CPU 上限解除を専用スレッドへ移す (#4405)
+- **verify:** Unix では優先度による保持者救済が不可能であることを記録し回帰テストを修正する (#4405)
+- **verify:** 継承した nice の出所を launcher の実測値で示す (#4405)
+- **verify:** CPU を得られない保持者と待ちで止まった保持者を区別する (#4405)
+- **issue-monitor:** 死んだ行の GUI 復旧導線と実装 Agent 全断の可視化を追加する
+- **issue-monitor:** Blackout の Playwright 期待値を notification center 移行に追随させる
+- **issue-monitor:** 意図的な launch 停止中は agent_blackout を上げない
+- **issue-monitor:** Status fixture に agent_blackout を追加してビルドを通す
+- **issue-monitor:** CLI テストの AgentStatus initializer に agent_blackout を追加する
+- **issue-monitor:** Blackout E2E の badge selector を Issue row の実装に合わせる
+- **agent:** Windows で dead code になる test helper を cfg で塞ぐ
+- **index:** Index.repair 待ちの停止状態で search を即時・リトライ不可で失敗させる
+- **hook:** PM セッションで title-summary gate を発火させない
+- **ci:** PR 単位の concurrency と docs-only path filter で CI queue の飽和を抑える
+
+### Documentation
+
+- **hook:** WorkflowContext の intra-doc link を移動先の正しいパスに直す
+
+### Miscellaneous Tasks
+
+- **work:** #4405 の Work event を記録
+- **work:** Record work event shards
+- **work:** Work event shard を記録する
+- **work:** Issue #3628 の Work event shard を記録する
+- **work:** Issue #3628 の終端 Work event を記録する
+- **work:** Issue #3628 の Work event shard を記録する
+- **work:** Issue #3628の受け入れ条件監査を記録する
+- **work:** Issue #3628 の Work event shard を記録する
+- **work:** Issue #3628 の Work event shard を記録する
+- **work:** Issue #3628 の Work event shard を記録する
+- **work:** Record issue 3808 work event receipts
+- **work:** Record issue 3808 work event receipts
+- **work:** Develop 追従世代の Work イベントを記録する
+- **work:** Issue #3628 の後継世代 Work event shard を記録する
+- **work:** Issue #4442 の Work event shard を記録する
+- **work:** Issue #4442 の PR 作成 Work event shard を記録する
+- **work:** Issue #4119 の Work event shard を記録
+- **work:** Issue #4119 の Work event shard を記録
+- **work:** Issue #4119 の terminal Work event shard を記録
+- **work:** Issue #4119 のセッション再開 Work event shard を記録する
+- **work:** Issue #4119 の Work event shard を記録
+- **work:** Issue #4133 の Work event shard を記録する
+- **work:** Issue #4133 の Work event shard を記録する
+- **work:** Issue #4133 の終端 Work event shard を記録する
+- **work:** 調査世代の Work イベントを記録する
+- **work:** Settlement 世代の Work イベントを記録する
+
+### Styling
+
+- **issue-monitor:** Cargo fmt を適用する
+
+### Testing
+
+- **skills:** Env 不在で生成された待機例の実行を検証する
+- **issue-monitor:** Playwright の requeue action id を row-action model に合わせる
+- **index:** 既存のrepair yield修正を取り込みCIの順序依存失敗を解消する
+- 既存のmaterializer lock排他テスト修正を取り込む
+
+### Ci
+
+- **cache:** Develop/main への push で cargo キャッシュを暖める
+
 ## [9.100.0] - 2026-09-16
 
 ### Bug Fixes
