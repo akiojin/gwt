@@ -201,33 +201,61 @@ pub(crate) fn classify_terminal_window(facts: &TerminalWindowFacts) -> TerminalC
     Ineligible("not_terminal")
 }
 
-/// Ineligibility causes that mean "the canonical facts could not be read",
-/// not "the Work is still live".
+/// Issue #4441: translate one close-side ineligibility cause into a
+/// restore-side admission.
 ///
-/// Issue #4143: the close observer must fail closed on these (never close a
-/// window on an unreadable fact), but automatic *restore* has the opposite
-/// polarity — spawning on an unreadable fact is what turned one descriptor
-/// exhaustion (#4142) into 254 respawned windows, 135 of which died before
-/// PTY start. A restore therefore also fails closed here: it does not spawn,
-/// and it keeps the placeholder, because an unreadable fact is no evidence
-/// that the window is finished.
-const RESTORE_UNPROVABLE_CAUSES: &[&str] = &[
-    "monitor_unreadable",
-    "execution_unreadable",
-    "session_unreadable",
-];
-
-/// Issue #4441 (AC-3): ineligibility causes that mean "the Issue Monitor is
-/// holding this row", not "the Work is still live".
+/// [`classify_terminal_window`] answers a single question — *may the runtime
+/// close this window?* — so every fact it cannot prove comes back as
+/// `Ineligible`, which is the safe answer for closing. Restore has the
+/// opposite polarity, and it used to read the whole `Ineligible` family as
+/// permission to spawn. That inversion is why `issue.monitor.stop` respawned
+/// the row it stopped: the stop writes `failed_issues`, which reads as
+/// `failure_hold`, which the close side reports as "do not close" and restore
+/// then took as "do spawn". The operator's only lever recreated the window it
+/// was pressed to remove.
 ///
-/// [`classify_terminal_window`] is written for the close side, where an
-/// operator stop hold or a `needs_human` park must never let the runtime close
-/// a window out from under the human who asked for it. Restore inherited that
-/// polarity and read the same holds as permission to *spawn*, which is why a
-/// row the PM had stopped with `issue.monitor.stop` came back on every startup.
-/// A hold is reversible, so unlike a terminal Work it leaves the placeholder
-/// and the restore flag alone: releasing the row brings the window back.
-const RESTORE_HELD_CAUSES: &[&str] = &["needs_human", "failure_hold"];
+/// So the mapping is an allowlist. Only the causes that positively establish
+/// that the Work is still live admit a restore; everything else refuses, and
+/// **a cause added to the close predicate later refuses by default** instead of
+/// silently becoming a new way to respawn a finished window.
+fn restore_admission_for_ineligible(cause: &'static str) -> RestoreAdmission {
+    match cause {
+        // The Work is live, or there is no Issue-linked Work to read at all
+        // (a PM pane, a manual launch). These are the restores that should
+        // happen.
+        //
+        // `execution_blocked_or_corrupt` and `session_interrupted` belong here:
+        // a blocked execution is recovered by adopting and reopening it, and an
+        // interrupted Session is precisely what auto-resume exists to continue
+        // ([`gwt_agent::Session::exact_auto_resume_candidate`] accepts it).
+        "no_linked_issue"
+        | "not_terminal"
+        | "monitor_tracking_unsettled"
+        | "obligation_open"
+        | "execution_blocked_or_corrupt"
+        | "session_interrupted" => RestoreAdmission::Admit,
+        // Issue #4441 (AC-3): the Issue Monitor is holding this row. A hold is
+        // reversible, so the placeholder and the restore flag stay: releasing
+        // the row brings the window back.
+        "needs_human" | "failure_hold" => RestoreAdmission::RefuseHeld(cause),
+        // Issue #4143: the canonical facts could not be read. Spawning on an
+        // unreadable fact is what turned one descriptor exhaustion (#4142) into
+        // 254 respawned windows, 135 of which died before PTY start. An
+        // unreadable fact is no evidence that the window is finished either, so
+        // the placeholder survives for the next generation to answer.
+        //
+        // `window_error` is the same answer for a different reason: an error
+        // pane is a diagnostic the operator may still need, and respawning it
+        // automatically is what #4143 (AC-3) removed.
+        "session_unreadable" | "monitor_unreadable" | "execution_unreadable" | "window_error" => {
+            RestoreAdmission::RefuseUnprovable(cause)
+        }
+        // A cause this function does not name is, by definition, one it could
+        // not establish. Refusing here is what keeps a later addition to the
+        // close predicate from becoming a new way to respawn a finished window.
+        _ => RestoreAdmission::RefuseUnprovable(cause),
+    }
+}
 
 /// Issue #4143 (AC-2): the admission decision for one restore candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,15 +750,7 @@ impl AppRuntime {
                 RestoreAdmission::Admit
             }
             TerminalCloseEligibility::Eligible(reason) => RestoreAdmission::RefuseTerminal(reason),
-            TerminalCloseEligibility::Ineligible(cause)
-                if RESTORE_UNPROVABLE_CAUSES.contains(&cause) =>
-            {
-                RestoreAdmission::RefuseUnprovable(cause)
-            }
-            TerminalCloseEligibility::Ineligible(cause) if RESTORE_HELD_CAUSES.contains(&cause) => {
-                RestoreAdmission::RefuseHeld(cause)
-            }
-            TerminalCloseEligibility::Ineligible(_) => RestoreAdmission::Admit,
+            TerminalCloseEligibility::Ineligible(cause) => restore_admission_for_ineligible(cause),
         }
     }
 
@@ -771,6 +791,55 @@ impl AppRuntime {
 mod tests {
     use super::*;
     use gwt::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
+
+    /// Issue #4441: every ineligibility cause the close predicate can emit is
+    /// answered by name on the restore side.
+    ///
+    /// The defect this guards is drift, not a wrong verdict: a cause added to
+    /// [`classify_terminal_window`] for the close side used to become a new way
+    /// for restore to respawn a finished window, silently, because the restore
+    /// mapping treated "not closable" as "spawnable". Scanning the source keeps
+    /// the check honest without a second list to maintain.
+    #[test]
+    fn every_close_ineligibility_cause_is_answered_by_the_restore_mapping() {
+        let source = include_str!("terminal_convergence.rs");
+        let classify = source
+            .split_once("pub(crate) fn classify_terminal_window")
+            .expect("close predicate")
+            .1
+            .split_once("\nfn restore_admission_for_ineligible")
+            .expect("restore mapping follows the close predicate")
+            .0;
+        let mapping = source
+            .split_once("fn restore_admission_for_ineligible")
+            .expect("restore mapping")
+            .1
+            .split_once("\n/// Issue #4143 (AC-2)")
+            .expect("restore mapping body")
+            .0;
+
+        let causes = classify
+            .match_indices("Ineligible(\"")
+            .map(|(index, marker)| {
+                let rest = &classify[index + marker.len()..];
+                rest.split_once('"').expect("terminated cause").0
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            causes.len() >= 8,
+            "expected the close predicate's cause set, found {causes:?}"
+        );
+
+        let unmapped = causes
+            .iter()
+            .filter(|cause| !mapping.contains(&format!("\"{cause}\"")))
+            .collect::<Vec<_>>();
+        assert!(
+            unmapped.is_empty(),
+            "restore_admission_for_ineligible must answer each close-side cause by name, \
+             or it will inherit the close side's polarity for it; unmapped: {unmapped:?}"
+        );
+    }
 
     fn settled_execution(owner: u64) -> ExecutionTerminalFacts {
         ExecutionTerminalFacts {

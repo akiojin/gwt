@@ -70480,6 +70480,100 @@ fn startup_restore_collapses_duplicate_owner_issue_windows() {
     }
 }
 
+/// Issue #4441 AC-3: a row the operator stopped with `issue.monitor.stop` does
+/// not come back as a restored window on the next startup.
+///
+/// This is the case that silently defeated the operator's only lever. The stop
+/// parks the row for a human and records a failure hold; the close predicate
+/// reports both as "do not close"; restore read that as "do spawn". So every
+/// row the PM stopped was recreated at the next launch, and the refill looked
+/// like volume rather than like the stop itself.
+///
+/// The fixture drives the Monitor through the same call `stop_only` makes, then
+/// persists the prefs, so the test asserts over the durable product of the
+/// operator's action rather than over a hand-written flag.
+#[test]
+fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![
+        ("agent-stopped".to_string(), "session-stopped".to_string()),
+        ("agent-live".to_string(), "session-live".to_string()),
+    ];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (session_id, worktree, issue) in [
+        ("session-stopped", "wt-stopped", 4286u64),
+        ("session-live", "wt-live", 4288),
+    ] {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            session_id,
+            &temp.path().join(worktree),
+            Some(&format!("native-{session_id}")),
+            Some(issue),
+        );
+    }
+
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    // The exact park `IssueMonitorState::stop_only` performs: it is what turns
+    // an operator stop into a durable `failed_issues` entry.
+    monitor.escalate_to_needs_human(
+        4286,
+        gwt::NeedsHumanKind::UserChoiceRequired,
+        "stopped: PM held this row while adjudicating",
+    );
+    let prefs = monitor.prefs();
+    assert!(
+        prefs
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == 4286),
+        "the stop must be durable for this test to mean anything"
+    );
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed monitor prefs");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored,
+        vec!["session-live"],
+        "a stopped row must not be recreated by the next startup"
+    );
+    let refusal = restore_admission_refusals(&logs)
+        .get("session-stopped")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        refusal.starts_with("monitor_hold:"),
+        "the refusal must name the hold, got {refusal:?}"
+    );
+
+    // The stop is reversible: releasing the row must bring the window back, so
+    // neither the placeholder nor the restore flag is discarded.
+    assert!(runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .any(|window| window.session_id.as_deref() == Some("session-stopped")));
+    let session = gwt_agent::Session::load(&runtime.sessions_dir.join("session-stopped.toml"))
+        .expect("load stopped session");
+    assert!(session.restore_window_on_startup);
+}
+
 /// Issue #4441 AC-3: a window whose Monitor row the operator is holding does
 /// not respawn.
 ///
