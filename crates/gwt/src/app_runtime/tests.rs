@@ -3726,6 +3726,7 @@ fn sample_runtime_with_events(
         pm_wake_seen: HashMap::new(),
         pending_pm_wakes: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
+        deferred_issue_monitor_launches: None,
         startup_worktree_inventories: HashMap::new(),
         pending_pm_worktree_preparations: HashSet::new(),
         pending_launch_feedback_contexts: HashMap::new(),
@@ -24533,11 +24534,22 @@ fn startup_repairs_activated_fresh_execution_without_process_local_pending_state
         &[],
     );
     let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    restarted.blocking_tasks = spawner;
     assert!(restarted.pending_fresh_execution_launches.is_empty());
     assert!(restarted.active_agent_sessions.is_empty());
     assert!(restarted.agent_capability_tokens.is_empty());
 
     restarted.bootstrap();
+    // Issue #4378 AC-2: the generation reaper runs on the blocking worker.
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
 
     let restart_binding =
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
@@ -34829,6 +34841,211 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
     );
 }
 
+/// Issue #4378 AC-1: bootstrap lists each project's worktrees once and hands
+/// that inventory to the startup ingest, which carries it back for the
+/// reconcile. Neither later step lists the worktrees again.
+#[test]
+fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.bootstrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let inventory = loop {
+        let carried = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find_map(|event| match event {
+                UserEvent::WorkEventsIngested {
+                    worktree_inventory, ..
+                } => Some(worktree_inventory.clone()),
+                _ => None,
+            });
+        if let Some(carried) = carried {
+            break carried;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the startup ingest never completed"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let inventory = inventory.expect("the startup ingest must carry the bootstrap inventory");
+    assert!(
+        inventory
+            .iter()
+            .any(|entry| same_worktree_path(&entry.path, &repo)),
+        "the carried inventory is the one bootstrap listed: {inventory:?}"
+    );
+}
+
+thread_local! {
+    static WORKTREE_LISTINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_worktree_listing(_started: Instant) {
+    WORKTREE_LISTINGS.with(|count| count.set(count.get() + 1));
+}
+
+/// `git worktree list` runs made on the calling thread (Issue #4378 AC-1).
+/// The observer is per process; counting per thread keeps parallel tests
+/// from seeing each other's listings.
+fn worktree_listings_on_this_thread() -> u64 {
+    gwt_git::worktree::set_worktree_list_observer(count_worktree_listing);
+    WORKTREE_LISTINGS.with(std::cell::Cell::get)
+}
+
+/// Issue #4378 AC-1: bootstrap lists each project's worktrees once on the
+/// startup path. The orphan intake prune plan used to list them a second time
+/// on the GUI thread; the ingest and reconcile reuse is pinned above.
+#[test]
+fn bootstrap_lists_the_worktrees_once_on_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let before = worktree_listings_on_this_thread();
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        worktree_listings_on_this_thread() - before,
+        1,
+        "bootstrap must list the worktrees exactly once"
+    );
+}
+
+/// Issue #4378 AC-2: bootstrap no longer runs the generation reaper on the
+/// startup path. It runs on the blocking worker and reports back with an
+/// event. Issue Monitor launch deliveries that arrive first wait for that
+/// event, so a launch never races a generation the reaper is about to reap.
+#[test]
+fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("defunct-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/defunct-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 4378,
+    };
+    seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/defunct-owner",
+        owner,
+        "startup-off-loop-holder",
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let effective_status = || {
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status()
+    };
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+        "the reaper must not run synchronously inside bootstrap"
+    );
+    let delivery_id = "launch:startup-reaper-gate";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message: "seeded so the replay settles without a launch".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+        },
+    );
+    let early = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &repo,
+        owner.number,
+        gwt::LinkedIssueKind::Issue,
+        Some(delivery_id.to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    assert!(
+        early.is_empty(),
+        "a launch delivery must wait for the startup reaper"
+    );
+    assert_eq!(
+        runtime
+            .deferred_issue_monitor_launches
+            .as_ref()
+            .map(Vec::len),
+        Some(1)
+    );
+
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+
+    assert_eq!(
+        effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the deferred reaper must still reap the defunct holder"
+    );
+    assert!(events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|event| matches!(event, UserEvent::StartupGenerationReaperCompleted)));
+    runtime.handle_startup_generation_reaper_completed();
+    assert!(
+        runtime.deferred_issue_monitor_launches.is_none(),
+        "the reaper completion releases the held deliveries"
+    );
+}
+
 #[test]
 fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() {
     let source = include_str!("startup.rs");
@@ -34846,7 +35063,7 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         .find("self.queue_startup_auto_resume_sessions")
         .expect("restore selection");
     let generation_reaper = bootstrap
-        .find("self.reap_startup_defunct_active_generations")
+        .find("self.spawn_startup_generation_reaper")
         .expect("generation reaper");
     let pm_queue = bootstrap
         .find("self.pending_startup_pm_tabs")
@@ -58537,18 +58754,55 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
     gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
         .expect("seed work record");
 
-    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false);
+    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false, None);
     assert!(
         unchanged.is_empty(),
         "no-op ingest must not rebroadcast the projection"
     );
 
-    let changed = runtime.handle_work_events_ingested(repo, true);
+    let changed = runtime.handle_work_events_ingested(repo, true, None);
     assert!(
         changed
             .iter()
             .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
         "changed ingest rebroadcasts the projection"
+    );
+}
+
+/// Issue #4378 AC-1: the startup ingest hands back the worktree inventory the
+/// bootstrap already listed, so the reconcile reads it instead of running
+/// `git worktree list` again. The project root is not a repository, so a
+/// listing of its own would fail and record no local branches.
+#[test]
+fn handle_work_events_ingested_reconciles_from_the_startup_inventory() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("not-a-repo");
+    fs::create_dir_all(&repo).expect("project root");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let inventory = Arc::new(vec![gwt::worktree_inventory::WorktreeEntry {
+        id: "shared".to_string(),
+        kind: gwt::worktree_inventory::WorktreeEntryKind::Workspace,
+        path: temp.path().join("worktrees").join("shared"),
+        label: "work/shared".to_string(),
+        branch: Some("work/shared".to_string()),
+        is_active: false,
+    }]);
+
+    runtime.handle_work_events_ingested(repo.clone(), false, Some(inventory));
+
+    assert!(
+        runtime
+            .local_worktree_branches
+            .borrow()
+            .get(&repo)
+            .is_some_and(|branches| branches.contains("work/shared")),
+        "the reconcile must use the inventory the startup ingest carried back"
     );
 }
 
