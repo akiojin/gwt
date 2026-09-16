@@ -432,6 +432,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 clear,
             })
         }
+        "issue.monitor.wait.invalidate" | "issue.monitor.wait-invalidate" => {
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                // An unexplained invalidation is exactly the record AC-2 needs.
+                reason: required_string(params, "reason")?,
+                by: optional_string(params, "by")?,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -669,12 +678,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
+            let headed_e2e_commands = optional_string_vec(params, "headed_e2e_commands")?;
+            if headed_e2e_commands
+                .iter()
+                .any(|command| !commands.contains(command))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "headed_e2e_commands must name exact entries in commands".to_string(),
+                ));
+            }
             // Issue #3913: bound on the host admission wait.
             let max_wait_secs = optional_u64(params, "max_wait_secs")?;
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands,
                 max_wait_secs,
                 user_verification_result: optional_string(params, "user_verification_result")?,
+                headed_e2e_commands,
             })
         }
         "verify.adjudicate" => {
@@ -2162,6 +2181,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: Some(2),
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -2170,6 +2190,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -2179,6 +2200,20 @@ mod tests {
                 json!({"commands": ["git --version"], "max_wait_secs": "soon"})
             ),
             CliParseError::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn verify_run_rejects_unlisted_headed_command() {
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({
+                    "commands": ["cargo test"],
+                    "headed_e2e_commands": ["npx playwright test"]
+                })
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 
@@ -2259,10 +2294,7 @@ mod tests {
         let output = String::from_utf8_lossy(&env.stdout);
         assert_ne!(code, 0, "{output}");
         assert!(output.contains("autonomous"), "{output}");
-        assert!(
-            output.contains("deferred (autonomous execution)"),
-            "{output}"
-        );
+        assert!(output.contains("n/a (autonomous)"), "{output}");
         assert!(output.contains("verify.run"), "{output}");
         assert!(!repo.join("must-not-run").exists());
         assert_eq!(
@@ -2276,7 +2308,7 @@ mod tests {
             "verify.run",
             json!({
                 "commands": ["git --version"],
-                "user_verification_result": "deferred (autonomous execution)"
+                "user_verification_result": "n/a (autonomous)"
             }),
         );
         assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
@@ -2286,7 +2318,7 @@ mod tests {
                 .unwrap()
                 .user_verification_result
                 .as_deref(),
-            Some("deferred (autonomous execution)")
+            Some("n/a (autonomous)")
         );
 
         let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
@@ -3344,6 +3376,50 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
+        ));
+    }
+
+    /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
+    /// target and the reason are mandatory because an unexplained
+    /// invalidation is exactly the record AC-2 says must exist.
+    #[test]
+    fn issue_monitor_wait_invalidate_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({ "number": 42, "reason": "bootstrap build needs no lease" })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: None,
+                number: 42,
+                reason: "bootstrap build needs no lease".to_string(),
+                by: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 42,
+                    "reason": "ruled out",
+                    "by": "session:pm",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 42,
+                reason: "ruled out".to_string(),
+                by: Some("session:pm".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
         ));
     }
 

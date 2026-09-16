@@ -49,6 +49,8 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+pub mod headed_e2e;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationCommandResult {
     pub command: String,
@@ -56,6 +58,9 @@ pub struct VerificationCommandResult {
     /// Bounded stdout/stderr tail retained only when the command fails.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_tail: String,
+    /// Measured by the command-local Playwright reporter, never by PR prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headed_e2e: Option<headed_e2e::HeadedE2eEvidence>,
 }
 
 /// Plan-bound request to classify one exact Rust/libtest failure. The
@@ -324,6 +329,27 @@ pub struct VerificationRunRecord {
     /// pre-P9a record, accepted for one release cycle (see execution_state).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
+}
+
+impl VerificationRunRecord {
+    pub fn headed_e2e_passed(&self) -> bool {
+        headed_e2e_passed(&self.commands)
+    }
+}
+
+fn headed_e2e_passed(commands: &[VerificationCommandResult]) -> bool {
+    let mut dark = false;
+    let mut light = false;
+    for command in commands {
+        if let Some(evidence) = &command.headed_e2e {
+            if command.exit_code != 0 || !evidence.passed() {
+                return false;
+            }
+            dark |= evidence.chromium_dark_passed > 0;
+            light |= evidence.chromium_light_passed > 0;
+        }
+    }
+    dark && light
 }
 
 /// Compute the integrity hash for a record (content with the hash emptied).
@@ -2410,14 +2436,6 @@ fn apply_child_environment_contract(process: &mut std::process::Command) {
 
 use crate::cli::daemon::verification_host::VerificationHost;
 
-fn execute_command(
-    worktree: &Path,
-    command: &str,
-    host: &VerificationHost,
-) -> Result<(i32, String), String> {
-    execute_command_with_isolation(worktree, command, false, host)
-}
-
 /// The exact environment a `verify.run` child receives, as a complete list.
 ///
 /// The daemon clears its own environment and applies this, so a delegated
@@ -2449,31 +2467,98 @@ fn execute_command_with_isolation(
     worktree: &Path,
     command: &str,
     isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
     host: &VerificationHost,
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
     match host {
-        VerificationHost::Daemon(endpoint) => {
-            execute_command_on_daemon(worktree, command, &args, isolated_baseline, endpoint)
-        }
+        VerificationHost::Daemon(endpoint) => execute_command_on_daemon(
+            worktree,
+            command,
+            &args,
+            isolated_baseline,
+            capture,
+            endpoint,
+        ),
         VerificationHost::Inherit => {
             let mut process = gwt_core::process::hidden_command(&args[0]);
             process.args(&args[1..]).current_dir(worktree);
             apply_child_environment_contract(&mut process);
+            if let Some(capture) = capture {
+                capture.configure(&mut process);
+            }
             if isolated_baseline {
                 gwt_core::process::scrub_git_env(&mut process);
                 process.env_remove("CARGO_TARGET_DIR");
             }
-            let output = match process.output() {
+            process
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            // Issue #4405: this process runs inside the agent tree, whose
+            // launch policy lowers priority; the workload must not inherit
+            // that. Issue #4409 removes the inheritance at its source by
+            // launching from the daemon instead, but this branch is still
+            // taken whenever the launcher is already at baseline priority or
+            // has declared that it accepts its own.
+            let output = match gwt_core::process_tree::spawn_at_normal_priority(&mut process)
+                .and_then(|spawned| {
+                    let priority = spawned.priority.clone();
+                    spawned.wait_with_output().map(|output| (output, priority))
+                }) {
                 Ok(output) => output,
                 Err(err) => return Ok(spawn_failure_result(command, &err.to_string())),
             };
+            let (output, priority) = output;
             let exit_code = output.status.code().unwrap_or(-1);
-            Ok((
-                exit_code,
-                render_streams(&[("stdout", &output.stdout), ("stderr", &output.stderr)]),
-            ))
+            let mut tail = String::new();
+            if !priority.restored {
+                tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+            }
+            tail.push_str(&render_streams(&[
+                ("stdout", &output.stdout),
+                ("stderr", &output.stderr),
+            ]));
+            Ok((exit_code, tail))
         }
+    }
+}
+
+/// Build the request that describes one delegated command to the daemon.
+///
+/// A delegated child is assembled from an explicit program/args/env request
+/// rather than from a `Command`, so anything the in-process path expresses by
+/// configuring a `Command` has to be restated here. The headed E2E reporter is
+/// the case that bites: it is *both* arguments and an environment variable,
+/// and dropping either half leaves the run looking healthy while producing no
+/// evidence — every headed command would report `status: "missing"` and no
+/// Ready gate could ever pass through a daemon.
+///
+/// Split out from the spawn so that correspondence is testable without a live
+/// daemon, which is the whole reason the omission was easy to make.
+fn delegated_spawn_request(
+    worktree: &Path,
+    args: &[String],
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    stdout_path: std::path::PathBuf,
+    stderr_path: std::path::PathBuf,
+) -> gwt_core::daemon::VerificationSpawnRequest {
+    let mut child_args = args[1..].to_vec();
+    let mut env = resolved_child_environment(isolated_baseline);
+    if let Some(capture) = capture {
+        child_args.extend(capture.arguments());
+        let (key, value) = capture.environment();
+        env.retain(|(existing, _)| existing != &key);
+        env.push((key, value));
+    }
+    gwt_core::daemon::VerificationSpawnRequest {
+        program: args[0].clone(),
+        args: child_args,
+        cwd: worktree.to_path_buf(),
+        env,
+        stdout_path,
+        stderr_path,
     }
 }
 
@@ -2483,19 +2568,20 @@ fn execute_command_on_daemon(
     command: &str,
     args: &[String],
     isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
     endpoint: &gwt_core::daemon::DaemonEndpoint,
 ) -> Result<(i32, String), String> {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let stdout_path = temp.path().join("stdout");
     let stderr_path = temp.path().join("stderr");
-    let request = gwt_core::daemon::VerificationSpawnRequest {
-        program: args[0].clone(),
-        args: args[1..].to_vec(),
-        cwd: worktree.to_path_buf(),
-        env: resolved_child_environment(isolated_baseline),
-        stdout_path: stdout_path.clone(),
-        stderr_path: stderr_path.clone(),
-    };
+    let request = delegated_spawn_request(
+        worktree,
+        args,
+        isolated_baseline,
+        capture,
+        stdout_path.clone(),
+        stderr_path.clone(),
+    );
     let delegated = match crate::cli::daemon::verification_host::run(endpoint, &request) {
         Ok(delegated) => delegated,
         // A daemon that cannot take the command is a spawn failure like any
@@ -2601,7 +2687,7 @@ fn measure_baseline(
         ],
     )?;
     let (exit_code, output) =
-        execute_command_with_isolation(&checkout, &request.baseline_command, true, host)?;
+        execute_command_with_isolation(&checkout, &request.baseline_command, true, None, host)?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
     }
@@ -2714,17 +2800,28 @@ pub fn run_verification(
     // property of the caller-facing operation — it is decided from the
     // launcher's inherited priority and the daemon it can reach, neither of
     // which a fixture is exercising — and it is tested on its own in
-    // `gwt_core::verification_priority` and `daemon::verification_host`.
+    // `gwt_core::verification_priority` and `daemon::verification_host`. That
+    // is what `VerificationHost::Inherit` being the default expresses.
     run_verification_inner(
         worktree,
         session_id,
         commands,
         None,
         &[],
-        None,
-        VerificationHost::Inherit,
+        RunOptions::default(),
         || {},
     )
+}
+
+#[derive(Default)]
+struct RunOptions<'a> {
+    user_verification_result: Option<&'a str>,
+    headed_e2e_commands: &'a [String],
+    /// Where this run launches its commands from (Issue #4409). It belongs
+    /// with the run's other inputs rather than being threaded separately: it
+    /// is resolved once for the whole run, and every caller that has an
+    /// opinion about the other options has one about this too.
+    host: VerificationHost,
 }
 
 fn run_verification_for_caller(
@@ -2733,8 +2830,7 @@ fn run_verification_for_caller(
     commands: &[String],
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    user_verification_result: Option<&str>,
-    host: VerificationHost,
+    options: RunOptions<'_>,
 ) -> Result<(VerificationRunRecord, String), String> {
     run_verification_inner(
         worktree,
@@ -2742,8 +2838,7 @@ fn run_verification_for_caller(
         commands,
         Some(authority),
         prepared_quarantines,
-        user_verification_result,
-        host,
+        options,
         || {},
     )
 }
@@ -2758,13 +2853,19 @@ fn run_verification_inner<F>(
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    user_verification_result: Option<&str>,
-    host: VerificationHost,
+    options: RunOptions<'_>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
     F: FnOnce(),
 {
+    if options
+        .headed_e2e_commands
+        .iter()
+        .any(|command| !commands.contains(command))
+    {
+        return Err("headed_e2e_commands must name exact entries in commands".to_string());
+    }
     // Snapshot owner, plan, and worktree together. Commands deliberately run
     // outside the lease; the final commit reacquires it and rejects any
     // interleaving writer by invalidating the evidence snapshot.
@@ -2813,17 +2914,51 @@ where
     }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
-        let (exit_code, tail) = execute_command(worktree, command, &host)?;
+        let capture = options
+            .headed_e2e_commands
+            .contains(command)
+            .then(headed_e2e::Capture::new)
+            .transpose()
+            .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
+        let (exit_code, tail) = execute_command_with_isolation(
+            worktree,
+            command,
+            false,
+            capture.as_ref(),
+            &options.host,
+        )?;
+        let headed_e2e = capture.as_ref().map(|capture| {
+            capture.evidence().unwrap_or(headed_e2e::HeadedE2eEvidence {
+                chromium_dark_passed: 0,
+                chromium_light_passed: 0,
+                failed: 0,
+                status: "missing".to_string(),
+            })
+        });
         transcript.push_str(&tail);
         transcript.push_str(&format!("exit: {exit_code}\n"));
         results.push(VerificationCommandResult {
             command: command.clone(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
+            headed_e2e,
         });
     }
     after_commands();
-    let all_passed = results.iter().all(|result| result.exit_code == 0);
+    let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
+    let visual_passed = headed_e2e_passed(&results);
+    if has_headed_e2e {
+        transcript.push_str(&format!(
+            "Agent Visual Check: {}\n",
+            if visual_passed {
+                "pass"
+            } else {
+                "fail(headed Chromium dark/light execution evidence missing or failing)"
+            }
+        ));
+    }
+    let all_passed =
+        results.iter().all(|result| result.exit_code == 0) && (!has_headed_e2e || visual_passed);
     let mut quarantined_failures = Vec::new();
     if !all_passed {
         let head_sha = current_head_sha(worktree);
@@ -2859,7 +2994,8 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &host) {
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host)
+                {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
                             "quarantine: {test_identity} is typed non-blocking via owner #{} and PR #{}; merge-base {merge_base_sha} reported exact PASS\n",
@@ -2909,7 +3045,7 @@ where
     let mut record = VerificationRunRecord {
         record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
-        user_verification_result: user_verification_result.map(str::to_owned),
+        user_verification_result: options.user_verification_result.map(str::to_owned),
         owner_number,
         execution_binding: execution_binding.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
@@ -3462,6 +3598,16 @@ fn evaluate_evidence_snapshot_inner(
     if record.worktree_fingerprint != current_fingerprint {
         return EvidenceStatus::StaleFingerprint;
     }
+    // Missing or failing nominated browser evidence cannot be waived by
+    // command quarantine or Board adjudication, even with a zero raw exit.
+    if record
+        .commands
+        .iter()
+        .any(|command| command.headed_e2e.is_some())
+        && !record.headed_e2e_passed()
+    {
+        return EvidenceStatus::Failing;
+    }
     let has_typed_quarantine = if record.all_passed {
         if !record.quarantined_failures.is_empty() {
             return EvidenceStatus::Failing;
@@ -3919,6 +4065,7 @@ pub enum VerifyCommand {
         /// Issue #3913: bound on the host admission wait (seconds).
         max_wait_secs: Option<u64>,
         user_verification_result: Option<String>,
+        headed_e2e_commands: Vec<String>,
     },
     /// Attach one existing Board decision to one exact failing command in the
     /// latest canonical record. The Board remains the decision audit source;
@@ -3968,9 +4115,10 @@ pub(super) fn autonomous_confirmation_refusal(
     Some(format!(
         "User Verification Result: confirmed is refused for autonomous execution ({source}). \
          Generated launch instructions, hooks, and Board messages are not human verification. \
-         Record `deferred (autonomous execution)` for a UI surface or `n/a` for no UI surface \
-         (`n/a (autonomous)` remains supported), then retry `verify.run` or `pr.create` / \
-         `pr.edit` with the corrected result. Deferred PRs stay Draft.\n"
+         Record `n/a (autonomous)` and a separate `Agent Visual Check`, then retry \
+         `verify.run` or `pr.create` / `pr.edit` with the corrected result. \
+         Fresh passing automated verification and, for UI work, measured headed E2E \
+         evidence permit Ready and CI auto-merge.\n"
     ))
 }
 
@@ -4105,6 +4253,7 @@ pub(super) fn run<E: CliEnv>(
             commands,
             max_wait_secs,
             user_verification_result,
+            headed_e2e_commands,
         } => {
             if let Some(refusal) = user_verification_result
                 .as_deref()
@@ -4141,8 +4290,18 @@ pub(super) fn run<E: CliEnv>(
                 &commands,
                 &authority,
                 &prepared_quarantines,
-                user_verification_result.as_deref(),
-                host,
+                RunOptions {
+                    user_verification_result: if crate::cli::execution_state::session_launch_route(
+                        Some(&session_id),
+                    ) == Some(gwt_agent::LaunchRoute::Autonomous)
+                    {
+                        Some("n/a (autonomous)")
+                    } else {
+                        user_verification_result.as_deref()
+                    },
+                    headed_e2e_commands: &headed_e2e_commands,
+                    host,
+                },
             );
             // Release the in-process lease before the (lease-free) evidence
             // evaluation so the next claimant starts as soon as the commands
@@ -4250,6 +4409,7 @@ pub(crate) mod tests {
             execution_binding: None,
             worktree_fingerprint: fingerprint.to_string(),
             commands: vec![VerificationCommandResult {
+                headed_e2e: None,
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
@@ -4633,6 +4793,104 @@ pub(crate) mod tests {
         assert!(serialized.get("output_tail").is_none(), "{serialized}");
     }
 
+    /// Issue #4409: the daemon-hosted path assembles its child from an
+    /// explicit request instead of a `Command`, so everything the in-process
+    /// path expresses through `Capture::configure` has to be restated. Both
+    /// halves matter — arguments alone give the run no report path, the
+    /// environment variable alone gives it no reporter — and losing either one
+    /// fails silently: the command still passes, the evidence is just never
+    /// written, and every headed command reads as `status: "missing"`.
+    #[test]
+    fn a_delegated_headed_command_carries_the_same_reporter_the_in_process_one_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = headed_e2e::Capture::new().unwrap();
+        let args = vec!["bunx".to_string(), "playwright".to_string()];
+        let request = delegated_spawn_request(
+            dir.path(),
+            &args,
+            false,
+            Some(&capture),
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+
+        for argument in capture.arguments() {
+            assert!(
+                request.args.contains(&argument),
+                "delegated child lost {argument}: {:?}",
+                request.args
+            );
+        }
+        assert_eq!(
+            request.args[0], "playwright",
+            "the reporter arguments must be appended to the command's own, not replace them"
+        );
+        let (key, value) = capture.environment();
+        assert_eq!(
+            request
+                .env
+                .iter()
+                .filter(|(existing, _)| *existing == key)
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec![value.as_str()],
+            "the report path must be present exactly once"
+        );
+
+        // Without a capture the request stays exactly the command asked for,
+        // so an ordinary matrix entry never picks up headed flags.
+        let plain = delegated_spawn_request(
+            dir.path(),
+            &args,
+            false,
+            None,
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+        assert_eq!(plain.args, vec!["playwright".to_string()]);
+        assert!(!plain.env.iter().any(|(existing, _)| *existing == key));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn missing_headed_report_cannot_be_adjudicated_as_passing() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec!["sh -c 'exit 0'".to_string()];
+        let (record, transcript) = run_verification_inner(
+            dir.path(),
+            "sess-headed",
+            &commands,
+            None,
+            &[],
+            RunOptions {
+                user_verification_result: None,
+                headed_e2e_commands: &commands,
+                ..RunOptions::default()
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
+        assert!(!record.all_passed, "{transcript}");
+        assert!(
+            record.commands[0].headed_e2e.is_some(),
+            "missing nominated evidence must remain visible"
+        );
+        assert_eq!(
+            evaluate_evidence_snapshot_inner(
+                dir.path(),
+                "sess-headed",
+                None,
+                None,
+                &record,
+                false,
+                true,
+            ),
+            EvidenceStatus::Failing,
+            "adjudication must not waive missing browser evidence"
+        );
+    }
+
     #[test]
     fn failed_output_is_sanitized_before_persistence() {
         let sanitized = bounded_output_tail(
@@ -4777,6 +5035,7 @@ mod tests {
             execution_binding: None,
             worktree_fingerprint: "abc".to_string(),
             commands: vec![VerificationCommandResult {
+                headed_e2e: None,
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
@@ -5480,8 +5739,7 @@ mod tests {
             &[failed_command],
             None,
             &[prepared],
-            None,
-            VerificationHost::Inherit,
+            RunOptions::default(),
             || {},
         )
         .unwrap();
@@ -5702,8 +5960,7 @@ mod tests {
             &commands,
             None,
             &[],
-            None,
-            VerificationHost::Inherit,
+            RunOptions::default(),
             || {
                 fs::create_dir_all(dir.path().join("artifacts")).unwrap();
                 fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
@@ -5825,8 +6082,7 @@ mod tests {
             &commands,
             None,
             &[],
-            None,
-            VerificationHost::Inherit,
+            RunOptions::default(),
             || {
                 fs::write(dir.path().join("report.json"), "{}").unwrap();
                 fs::write(dir.path().join("src.txt"), "v2").unwrap();
@@ -6038,6 +6294,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             }),
         )
@@ -6106,6 +6363,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             }),
         )
@@ -6141,6 +6399,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             }),
         )
@@ -6643,6 +6902,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -6783,6 +7043,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -6848,6 +7109,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: commands.clone(),
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -6912,6 +7174,7 @@ mod tests {
                 VerifyCommand::Run {
                     commands: commands.clone(),
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 },
             )
@@ -7003,6 +7266,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -7053,8 +7317,7 @@ mod tests {
             &commands,
             Some(&authority),
             &[],
-            None,
-            VerificationHost::Inherit,
+            RunOptions::default(),
             move || {
                 advance_generation_scoped_session_binding(&session_for_hook, current);
             },

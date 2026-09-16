@@ -21,6 +21,8 @@ use crate::cli::CliEnv;
 
 /// Issue #3913: `verify.run` host admission — the lease's in-process claimant.
 pub(crate) mod admission;
+/// Issue #4405: starved-versus-progressing reading of the lease holder.
+pub(crate) mod holder_activity;
 
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
@@ -60,7 +62,9 @@ pub(super) fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     match command {
         VerificationLeaseCommand::Status => {
-            render(out, "held", "free", &status()?);
+            let mut status = status()?;
+            observe_holder_activity(&mut status);
+            render(out, "held", "free", &status);
             Ok(0)
         }
         VerificationLeaseCommand::Acquire { .. }
@@ -174,6 +178,27 @@ struct LeaseStatusSnapshot {
     remaining_batches: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     estimated_remaining_ms: Option<u64>,
+    /// Issue #4405 AC-3: how long the holder has held the lease, the CPU
+    /// its process tree gets, and whether that reads as starved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_held_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_cpu_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_state: Option<String>,
+}
+
+/// Fill in the holder's activity; only the status report pays for the
+/// process-table read.
+fn observe_holder_activity(status: &mut LeaseStatusSnapshot) {
+    let Some(pid) = status.owner_pid.filter(|_| status.held) else {
+        return;
+    };
+    if let Some(activity) = holder_activity::observe(pid, status.acquired_at_ms) {
+        status.holder_held_ms = Some(activity.held_ms);
+        status.holder_cpu_percent = Some(activity.cpu_percent);
+        status.holder_state = Some(activity.state().to_string());
+    }
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
@@ -194,6 +219,9 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             holder_spawn_host: status.holder_spawn_host,
             remaining_batches: status.remaining_batches,
             estimated_remaining_ms: status.estimated_remaining_ms,
+            holder_held_ms: None,
+            holder_cpu_percent: None,
+            holder_state: None,
         }
     }
 }
@@ -316,6 +344,15 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     if let Some(estimate) = status.estimated_remaining_ms {
         out.push_str(&format!("estimated_remaining_ms: {estimate}\n"));
     }
+    if let Some(held) = status.holder_held_ms {
+        out.push_str(&format!("holder_held_ms: {held}\n"));
+    }
+    if let Some(cpu) = status.holder_cpu_percent {
+        out.push_str(&format!("holder_cpu_percent: {cpu:.1}\n"));
+    }
+    if let Some(state) = &status.holder_state {
+        out.push_str(&format!("holder_state: {state}\n"));
+    }
     out.push_str(&format!("pending: {}\n", status.pending));
     // Issue #4169 AC-2: `pending` is a count, and a count cannot tell an agent
     // whether it is next or fifth. The queue names every claimant and how long
@@ -404,6 +441,9 @@ mod tests {
                 holder_spawn_host: Some("daemon".to_string()),
                 remaining_batches: None,
                 estimated_remaining_ms: Some(60_000),
+                holder_held_ms: None,
+                holder_cpu_percent: None,
+                holder_state: None,
             },
         );
         // Issue #4169 AC-2: the waiters are named in service order, each with

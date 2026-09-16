@@ -1674,6 +1674,14 @@ enum IssueMonitorControl {
         issue_number: u64,
         at: String,
     },
+    /// Issue #4286 AC-1/AC-2: the PM ruled the wait condition void; record
+    /// who / when / why and hand the row back to ordinary stuck detection.
+    WaitInvalidated {
+        issue_number: u64,
+        by: String,
+        reason: String,
+        at: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
@@ -1770,6 +1778,14 @@ enum IssueMonitorControl {
     /// operation. The exact identity is mandatory, window included.
     TerminalDelivered {
         target: crate::IssueMonitorStopTarget,
+    },
+    /// Issue #3628 (AC-3): release the failure holding one issue out of the
+    /// queue. Deliberately identity-free — the rows this exists for have no
+    /// launch left to name — and refused by the driver for any row a launch
+    /// still owns.
+    Requeue {
+        issue_number: u64,
+        reason: String,
     },
 }
 
@@ -2231,7 +2247,7 @@ fn try_apply_typed_issue_monitor_failure(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
             )
@@ -2348,6 +2364,17 @@ fn apply_routine_issue_monitor_control(
             let _ = monitor.clear_autonomous_wait(issue_number, &at);
             false
         }
+        IssueMonitorControl::WaitInvalidated {
+            issue_number,
+            by,
+            reason,
+            at,
+        } => {
+            // Not agent liveness: the next scan applies the ordinary rule
+            // from the agent's own last heartbeat.
+            let _ = monitor.invalidate_autonomous_wait(issue_number, &by, &reason, &at);
+            false
+        }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents(max_active_agents);
             true
@@ -2436,7 +2463,7 @@ fn apply_routine_issue_monitor_control(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
+                    evidence.map(|evidence| *evidence),
                     now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
@@ -2488,6 +2515,18 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::IdleRelease { number, reason } => {
             monitor.request_idle_release(number, reason);
             true
+        }
+        IssueMonitorControl::Requeue {
+            issue_number,
+            reason,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            // A refusal asks for no scan: nothing changed, and claiming
+            // otherwise is how a caller learns to trust a no-op.
+            matches!(
+                monitor.requeue_failed_issue(issue_number, &reason, &now),
+                crate::IssueMonitorRequeueOutcome::Requeued { .. }
+            )
         }
         IssueMonitorControl::TerminalDelivered { target } => {
             monitor.settle_exact_terminal_delivery(&target).is_ok()
@@ -2878,6 +2917,22 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .get("reason")
                     .and_then(serde_json::Value::as_str)?
                     .to_string();
+                if wait
+                    .get("invalidate")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    let by = wait
+                        .get("by")
+                        .and_then(serde_json::Value::as_str)?
+                        .to_string();
+                    return Some(IssueMonitorControl::WaitInvalidated {
+                        issue_number,
+                        by,
+                        reason,
+                        at,
+                    });
+                }
                 let resume_condition = wait
                     .get("resume_condition")
                     .and_then(serde_json::Value::as_str)?
@@ -3085,6 +3140,18 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     window_id: Some(delivered.get("window_id")?.as_str()?.to_string()),
                 };
                 return Some(IssueMonitorControl::TerminalDelivered { target });
+            }
+            if let Some(requeue) = payload.get("requeue") {
+                let issue_number = requeue.get("issue_number")?.as_u64()?;
+                let reason = requeue
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("operator requeue")
+                    .to_string();
+                return Some(IssueMonitorControl::Requeue {
+                    issue_number,
+                    reason,
+                });
             }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers
@@ -7313,6 +7380,10 @@ exit 0
         );
         let mut reconciled = monitor.agent_status();
         reconciled.scan_stall = projected.scan_stall.clone();
+        // Issue #3628 AC-5: the fleet-outage check is clock-bound for the same
+        // reason, and is reconciled here rather than compared, so this test
+        // keeps asserting what it was written to assert.
+        reconciled.agent_blackout = projected.agent_blackout.clone();
         assert_eq!(
             projected, reconciled,
             "retry ACK follows the reconciled agent projection"
@@ -7853,6 +7924,86 @@ exit 0
         );
     }
 
+    /// Issue #3628 AC-3/AC-6: the GUI recovery reaches the canonical driver,
+    /// and the exact-identity safety the CLI operation enforces survives the
+    /// trip through the control plane.
+    ///
+    /// Seeded in the 2026-08-17 shape: a persisted `agent_failed` hold with no
+    /// launch left to name, next to an unrelated live launch that must not be
+    /// touched.
+    #[test]
+    fn issue_monitor_requeue_control_releases_a_dead_hold_and_spares_a_live_launch() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: "an execution generation already exists for issue #42".to_string(),
+                    window_id: Some("tab-1::agent-dead".to_string()),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        let live =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "requeue": { "issue_number": 43, "reason": "operator recovery" }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("requeue decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, live),
+            "a row a launch still owns must not be recovered by this control"
+        );
+        assert_eq!(
+            monitor.launched_window_issue("tab-1::agent-live"),
+            Some(43),
+            "the live launch must be untouched"
+        );
+
+        let dead =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "requeue": { "issue_number": 42, "reason": "operator recovery" }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("requeue decodes");
+        assert!(
+            apply_issue_monitor_control(&mut monitor, dead),
+            "releasing a dead hold must request a scan so the row runs now"
+        );
+        let prefs = monitor.prefs();
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "the persisted hold must be gone: {:?}",
+            prefs.failed_issues
+        );
+        assert_eq!(
+            prefs
+                .released_failures
+                .iter()
+                .map(|release| release.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42],
+            "the release must be published so other processes converge on it"
+        );
+        assert_eq!(
+            prefs.launched_issues.len(),
+            1,
+            "the unrelated live launch must survive the recovery"
+        );
+    }
+
     #[test]
     fn issue_monitor_wait_control_declares_and_clears_the_wait() {
         // Issue #3844 AC-1/AC-2: the `wait` control carries the agent's
@@ -7915,6 +8066,62 @@ exit 0
             monitor.stuck_autonomous_issues("2026-06-29T02:31:00Z"),
             vec![42],
             "ordinary detection resumes from the clearing heartbeat"
+        );
+    }
+
+    #[test]
+    fn issue_monitor_wait_control_invalidates_the_wait() {
+        // Issue #4286 AC-1/AC-2: `wait.invalidate:true` from the PM records
+        // who / when / why on the declaration and hands the row back to
+        // ordinary stuck detection without counting as agent liveness.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "host lease 待ち",
+            "verify.lease.acquire が granted を返す",
+            "2026-06-29T00:10:00Z",
+        );
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "wait": {
+                    "issue_number": 42,
+                    "invalidate": true,
+                    "by": "session:pm",
+                    "reason": "bootstrap build needs no lease",
+                    "at": "2026-06-29T00:20:00Z",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("invalidate decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, control),
+            "an invalidation does not request a scan"
+        );
+        let waiting = monitor.autonomous_wait(42).expect("declaration kept");
+        let invalidated = waiting.invalidated.as_ref().expect("invalidation recorded");
+        assert_eq!(invalidated.by, "session:pm");
+        assert_eq!(invalidated.reason, "bootstrap build needs no lease");
+        assert_eq!(invalidated.at, "2026-06-29T00:20:00Z");
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T00:41:00Z"),
+            vec![42],
+            "ordinary detection resumes from the agent's last heartbeat"
         );
     }
 

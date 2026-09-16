@@ -23,10 +23,16 @@ use super::client::DaemonClient;
 /// Resolved once per run rather than per command: the answer cannot change
 /// mid-run, and a per-command resolution would put a daemon lookup in front of
 /// every matrix entry.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) enum VerificationHost {
     /// Launch from the calling process. Chosen only when that process is
     /// already at baseline priority, so there is nothing to escape.
+    ///
+    /// This is the default because a caller that never resolved a host has not
+    /// asked to escape anything — internal fixtures and the low-level
+    /// `run_verification` primitive. Defaulting the other way would put a
+    /// daemon lookup in front of every such run.
+    #[default]
     Inherit,
     /// Launch from the daemon, outside the caller's process tree.
     Daemon(Box<DaemonEndpoint>),
