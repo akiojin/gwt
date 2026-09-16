@@ -3245,12 +3245,12 @@ fn repoint_and_refresh_pm_assets(
     let result = crate::managed_assets::with_pm_repoint_transaction(worktree, target, || {
         let refresh = (|| {
             // A self-heal writer may have run since the initial preflight.
-            // This lock remains held until checkout and regeneration end.
+            // This lock remains held until the advance and regeneration end.
             normalize_previous_generated_hook_configs(worktree)?;
             manager
                 .fast_forward_resident_branch(worktree, target)
                 .map_err(|error| {
-                    io::Error::other(format!("managed artifacts: repoint failed: {error}"))
+                    io::Error::other(format!("managed artifacts: fast-forward failed: {error}"))
                 })?;
             stage = PmWorktreeRefreshFailureStage::ManagedAssets;
             crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
@@ -3259,8 +3259,9 @@ fn repoint_and_refresh_pm_assets(
                 })
         })();
         if let Err(error) = refresh {
-            // Git can advance HEAD and then report failure from post-checkout.
-            // Inspect the actual commit before restoring displaced assets.
+            // A blocked fast-forward leaves HEAD alone, but regeneration runs
+            // after the branch has already moved. Inspect the actual commit
+            // before restoring displaced assets.
             let rollback = pm_worktree_head_sha(worktree).and_then(|head| {
                 if head.as_deref() == Some(old_head) {
                     return Ok(());

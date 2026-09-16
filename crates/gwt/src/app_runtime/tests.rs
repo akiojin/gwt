@@ -60693,8 +60693,8 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
     );
     assert_eq!(
         git_stdout(&linked_pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the local fallback must still materialize a detached PM worktree"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the local fallback must still materialize the resident PM branch"
     );
     let freshness = gwt::pm_registry::load_pm_prefs(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.linked),
@@ -61405,8 +61405,8 @@ fn pm_ensure_refreshes_existing_unregistered_pm_worktree_to_latest_origin_develo
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the refreshed PM worktree must remain detached"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the refreshed PM worktree must run on its resident branch"
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
@@ -62227,7 +62227,7 @@ fn bare_layout_remote_unavailable_materializes_bare_head_for_fresh_spawn() {
     );
     assert_eq!(
         git_stdout(&outcome.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD"
+        gwt::pm_registry::PM_WORKTREE_BRANCH
     );
     assert_eq!(
         outcome.freshness.state,
@@ -62285,8 +62285,8 @@ fn pm_ensure_migrates_legacy_notes_before_refreshing_existing_unregistered_pm_wo
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the refreshed PM worktree must remain detached"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the refreshed PM worktree must run on its resident branch"
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),

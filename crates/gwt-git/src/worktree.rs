@@ -435,6 +435,12 @@ impl WorktreeManager {
     /// commits are rejected. The mutation uses an ordinary detached checkout,
     /// so Git also rejects an untracked file that would be overwritten while
     /// leaving ignored build output alone.
+    ///
+    /// Only for worktrees whose commits are disposable, such as ephemeral
+    /// intake worktrees. The detached-only guard protects a commit by proving
+    /// no ref reaches it, which stops being true the moment it is pushed, so a
+    /// worktree whose commits must survive belongs on a resident branch —
+    /// see [`Self::resident_branch_advance_safety`] (Issue #4448).
     pub fn repoint_detached(&self, path: &Path, target: &str) -> Result<()> {
         if target.trim().is_empty() || target.starts_with('-') {
             return Err(GwtError::Git(format!(
