@@ -2055,7 +2055,7 @@ pub(super) fn launch_config_from_persisted_session(
     }
     if let Some(scratch) = pm_scratch {
         config.env_vars.insert(
-            "GWT_PM_SCRATCH_DIR".to_string(),
+            gwt::pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
             scratch.to_string_lossy().into_owned(),
         );
         config.suppress_execution_control = true;
