@@ -277,11 +277,32 @@ mod tests {
         tempfile::tempdir().expect("temp dir")
     }
 
+    /// Hold the env lock with `GWT_VERIFY_SPAWN_HOST` cleared.
+    ///
+    /// `resolve_with` consults that variable before anything else, so a test
+    /// asserting what gwt *chooses* is otherwise decided by whoever launched
+    /// the test binary. That is not hypothetical: an agent worktree cannot run
+    /// `verify.run` on a host without a current daemon unless it declares
+    /// `inherit`, and under that declaration the refusal test below inverts —
+    /// it was observed failing for exactly this reason. The placement tests
+    /// have to pin the variable rather than inherit it.
+    fn without_declared_spawn_host() -> (
+        std::sync::MutexGuard<'static, ()>,
+        gwt_core::test_support::ScopedEnvVar,
+    ) {
+        let guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cleared = gwt_core::test_support::ScopedEnvVar::unset(SPAWN_HOST_ENV);
+        (guard, cleared)
+    }
+
     /// AC-5: a degraded launcher with no daemon to escape to is refused. The
     /// refusal is the point — an in-tree fallback here would silently hand the
     /// matrix the agent's nice value, which is the defect #4409 exists to fix.
     #[test]
     fn a_degraded_launcher_without_a_daemon_is_refused() {
+        let _env = without_declared_spawn_host();
         let dir = scratch();
         let error = resolve_with(dir.path(), LauncherPriority { nice: Some(10) })
             .expect_err("no daemon can host this worktree");
@@ -294,6 +315,7 @@ mod tests {
     /// CI invocation for no gain.
     #[test]
     fn a_baseline_launcher_runs_in_place_without_a_daemon() {
+        let _env = without_declared_spawn_host();
         let dir = scratch();
         let (host, note) =
             resolve_with(dir.path(), LauncherPriority { nice: Some(0) }).expect("no escape needed");
@@ -305,6 +327,7 @@ mod tests {
     /// sees a spawn host that disagrees with what the run actually did.
     #[test]
     fn the_lease_description_names_the_same_host_the_run_uses() {
+        let _env = without_declared_spawn_host();
         let dir = scratch();
         let (label, _) = describe_for_lease(dir.path());
         assert!(
