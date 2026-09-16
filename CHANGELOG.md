@@ -1,6 +1,54 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.100.2] - 2026-09-16
+
+### Bug Fixes
+
+- **launch:** 並行起動のPrepared候補を復旧対象に含める
+- **execution:** Adopt bridge の 500 internal を解消し復旧操作を agent に届ける
+- **execution:** Adopt bridge の診断 doc link を実在する型に修正する
+- **execution:** Execution.status の available_recoveries を authority gate で絞り recovery_hint を返す
+- **execution:** Workspace.update の復旧候補を Host の binding 判定と一致させる
+
+### Miscellaneous Tasks
+
+- **work:** #4395 の Work event を記録
+- **work:** #4395 継続世代の Work イベントを記録
+- **work:** Issue #4443 の terminal Work event shard を記録する
+- **work:** Issue #4443 の terminal Work event receipt を記録する
+- **work:** #4029 の実行イベント receipt を記録する
+- Issue #4029 の再開記録を保存する
+- Issue #4029 の実行イベント receipt を記録する
+- **work:** Issue #4029 の完了 Work 記録を保存する
+- **work:** #4378 の Work event を記録
+- **work:** #4378 の Work event を記録
+- **work:** #4378 の Work event を記録
+- **work:** #4378 の Work event を記録
+- **work:** Work event を記録
+- **work:** #4406 の Work event shard を記録する
+- **work:** #4406 の Work event shard を記録する
+- **work:** #4406 の完了 Work event を記録する
+- **work:** #4406 の Work event shard を記録する
+- **work:** #4406 の Work event shard を記録する
+- **work:** #4407 の Work event shard を記録する
+- **work:** #4407 の Work event shard を記録する
+- **work:** #4407 の Work event shard を記録する
+- **work:** #4407 の Work event shard を記録する
+- **work:** #4407 の Work event shard を記録する
+
+### Performance
+
+- **startup:** 起動時の worktree 列挙を 1 回に減らし generation reaper を起動経路から外す
+- **startup:** Orphan intake prune も起動時 inventory を使い worktree 列挙を 1 回にする
+- **board:** Board 投影更新を GUI event loop 外へ移し、1 投稿あたりの再走査をなくす
+- **workspace:** Active Work の再投影を GUI event loop の外へ出す
+
+### Testing
+
+- **execution:** 復旧候補の期待値を dead-holder adopt に合わせる
+- **gwt-terminal:** Caret 表記の DSR エコーで PTY 読み取りが早期終了する flake を修正する
+
 ## [9.100.1] - 2026-09-16
 
 ### Bug Fixes

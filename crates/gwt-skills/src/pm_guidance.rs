@@ -612,6 +612,25 @@ Hard limits, no exceptions:
   In particular, do not use the legacy paths `tasks/todo.md`,
   `tasks/pm-notes.md`, or root `pm-notes.md`.
 
+## PM worktree branch and PR branches
+
+The PM worktree is checked out on the resident branch `pm/resident`, and
+gwt only ever fast-forwards it. A commit the PM makes there survives every
+worktree refresh, whether or not it has been pushed yet: refresh reports
+itself degraded and names the retained commit instead of rewinding the
+branch, then resumes on its own once that commit reaches `origin/develop`.
+
+- Commit PM-owned changes on `pm/resident` as usual. Do not create,
+  switch, or delete branches: `git checkout`, `git switch`, and
+  `git branch -D` stay forbidden.
+- To open a PR from a PM commit, push that commit straight to its own
+  remote branch and leave the local HEAD where it is:
+  `git push origin HEAD:refs/heads/pm/<topic>`. This is the canonical
+  procedure, not a workaround — it needs no local branch of its own.
+  Then run `pr.create` against that branch.
+- After the PR lands, the merge carries the commit into `origin/develop`
+  and the next refresh fast-forwards `pm/resident` past it.
+
 ## gwtd execution isolation
 
 Keep the PM turn responsive even when gwtd or its endpoint is slow.
@@ -1732,6 +1751,32 @@ mod tests {
             !execution.contains("outer wall-clock deadline of 10 seconds"),
             "the superseded 10-second foreground ceiling must not remain"
         );
+    }
+
+    /// Issue #4448 AC-4: the PM worktree runs on a resident branch, so the PM
+    /// must be told how to open a PR from one of its commits without the
+    /// `git checkout` / `git switch` it is forbidden to run.
+    #[test]
+    fn contract_documents_the_resident_pm_branch_and_its_pr_push() {
+        let section = SKILL_BODY_EN
+            .split_once("## PM worktree branch and PR branches")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
+            .expect("PM worktree branch section must be present");
+
+        for phrase in [
+            "`pm/resident`",
+            "only ever fast-forwards",
+            "survives every",
+            "`git push origin HEAD:refs/heads/pm/<topic>`",
+            "not a workaround",
+            "`pr.create`",
+        ] {
+            assert!(
+                section.contains(phrase),
+                "PM branch contract is missing: {phrase}"
+            );
+        }
     }
 
     /// Issue #3825 AC-1〜AC-3: the resident observer must never gate the same

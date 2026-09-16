@@ -132,13 +132,16 @@
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
 
-### Ready PR Gate（Draft / Ready 運用）
+### Ready PR Gate（Ready 運用）
 
-- `feat` / `fix` / `refactor` の途中成果は **Draft PR** のみ許可する。未完了・未検証・受け入れ未達・既知 blocker ありの変更は **Ready PR 禁止**。
-- Ready PR は、その PR スコープが**単独で配信可能**であり、残件が配信 blocker ではない後続タスクとして明確な場合だけ許可する。
-- 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。
-- Draft PR は CI / 共有 / 早期レビュー用とし、PR 本文に未完了項目、既知 blocker、Remaining acceptance を明記する。Draft PR で完了や配信可能性を主張しない。
-- Ready 化前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了、既知 blocker なしを確認する。
+> 🚨 **Draft PR は廃止する（ユーザー裁定 2026-09-16）。PR は常に Ready で作成し、auto-merge を有効にする。**
+
+- **Draft PR を作成しない。** `pr.create` は常に非 draft で行い、既存の Draft を見つけたら `pr.ready` で Ready 化する。「まだ途中だから Draft」という運用は行わない。
+- **すべての PR に `auto-merge` を有効にする。** CI が緑になった時点で着地させる。配信の可否は CI の必須チェック 9 件が判定する。
+- この裁定により、**配信可否の唯一のゲートは CI になる。** 「未完了だから Draft に留める」という緩衝は無くなるので、**PR のスコープを最初から単独で配信可能な大きさに切ること**が以前より重要になる。大きすぎる変更は 1 本の PR に詰めず分割する。
+- 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。残件がある場合は PR 本文に後続タスクとして明記し、**Draft に倒すのではなく follow-up Issue を立てる。**
+- PR 作成前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了を確認する。**これは Ready 化の条件ではなく PR 作成の条件になった。**
+- **検証が通らない変更は PR を作らない。** Draft という逃げ道が無くなったため、「とりあえず Draft で出して CI を見る」ことはできない。ローカルで検証してから PR を作る。
 - **起動経路は実行記録から判定する（Issue #4217 FR-002）。** `execution.status` の `launch_route` が `autonomous` なら自動実行、`manual` または不明なら手動起動として扱う。`GWT_AUTONOMOUS_EXECUTION` は legacy シグナルであり、**設定されていることは autonomous の証拠になるが、設定されていないことは manual の証拠にならない**。この env は「プロジェクトが unattended mode を opt-in したか」でのみ書かれるため、Issue Monitor 起動でも未設定になり、実際に 2 窓が「手動起動」と誤判定して視覚検証待ちで停止した（#3777 / #3697）。
 - **自動実行（`launch_route: autonomous`）では、実装・自動検証・Ready PR Gate を満たしたら Ready PR を作成し、既存の CI 自動マージまで完結させる（Issue #4326）。** ユーザーへ視覚確認を依頼せず、UI surface の有無にかかわらず `User Verification Result: n/a (autonomous)` を記録する。agent 自身の確認を人間の `confirmed` と偽ってはならない。
 - **旧 `deferred (autonomous execution)` は移行互換として扱う。** 既存の自動実行 PR は本文を書き換えず、fresh な検証証跡と他の Ready Gate 条件を満たせば `pr.ready` / 非 draft の `pr.create` を実行できる。`pr.list` の `deferred_user_verification` は新旧の自動実行値では `false`、manual / 一般の deferred では `true` とする。本文を hydrate していない場合はフィールドを省略する。
