@@ -237,6 +237,14 @@ pub fn record_operation(operation: &str, elapsed: Duration, read_only: bool) {
     with_runtime(|runtime| runtime.record_operation(operation, elapsed, read_only));
 }
 
+/// Startup milestones occur once, rather than at a sampling frequency. Keep
+/// each milestone while retaining the same disabled sink and retention policy.
+pub(crate) fn record_startup_sample(record: &PerfRecord) {
+    with_runtime(|runtime| {
+        let _ = runtime.sink.append(record);
+    });
+}
+
 /// Scope guard recording a route measurement when it drops.
 ///
 /// Instrumented routes are full of early returns and `?` propagation; a guard
@@ -410,9 +418,12 @@ mod tests {
         assert!(install(&PerfConfig::default()) || is_installed());
 
         let mut clock = RoutePhaseClock::start(PerfRoute::PaneCreate);
+        let initial_mark = clock.last_mark;
         std::thread::sleep(Duration::from_millis(20));
         clock.mark("worktree");
+        let first_mark = clock.last_mark;
         clock.mark("docker");
+        let second_mark = clock.last_mark;
 
         let records: Vec<_> = read_all()
             .into_iter()
@@ -420,10 +431,12 @@ mod tests {
             .collect();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].target, "phase:pane.create.worktree");
-        assert!(records[0].value >= 20.0, "first mark spans the sleep");
+        let first_span_ms = first_mark.duration_since(initial_mark).as_secs_f64() * 1000.0;
+        assert!((records[0].value - first_span_ms).abs() < 1e-6);
         assert_eq!(records[1].target, "phase:pane.create.docker");
+        let second_span_ms = second_mark.duration_since(first_mark).as_secs_f64() * 1000.0;
         assert!(
-            records[1].value < 20.0,
+            (records[1].value - second_span_ms).abs() < 1e-6,
             "second mark spans only its own step"
         );
     }

@@ -49,6 +49,8 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+pub mod headed_e2e;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationCommandResult {
     pub command: String,
@@ -56,6 +58,9 @@ pub struct VerificationCommandResult {
     /// Bounded stdout/stderr tail retained only when the command fails.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_tail: String,
+    /// Measured by the command-local Playwright reporter, never by PR prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headed_e2e: Option<headed_e2e::HeadedE2eEvidence>,
 }
 
 /// Plan-bound request to classify one exact Rust/libtest failure. The
@@ -324,6 +329,27 @@ pub struct VerificationRunRecord {
     /// pre-P9a record, accepted for one release cycle (see execution_state).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
+}
+
+impl VerificationRunRecord {
+    pub fn headed_e2e_passed(&self) -> bool {
+        headed_e2e_passed(&self.commands)
+    }
+}
+
+fn headed_e2e_passed(commands: &[VerificationCommandResult]) -> bool {
+    let mut dark = false;
+    let mut light = false;
+    for command in commands {
+        if let Some(evidence) = &command.headed_e2e {
+            if command.exit_code != 0 || !evidence.passed() {
+                return false;
+            }
+            dark |= evidence.chromium_dark_passed > 0;
+            light |= evidence.chromium_light_passed > 0;
+        }
+    }
+    dark && light
 }
 
 /// Compute the integrity hash for a record (content with the hash emptied).
@@ -2409,32 +2435,50 @@ fn apply_child_environment_contract(process: &mut std::process::Command) {
 }
 
 fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
-    execute_command_with_isolation(worktree, command, false)
+    execute_command_with_isolation(worktree, command, false, None)
 }
 
 fn execute_command_with_isolation(
     worktree: &Path,
     command: &str,
     isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
     let mut process = gwt_core::process::hidden_command(&args[0]);
     process.args(&args[1..]).current_dir(worktree);
     apply_child_environment_contract(&mut process);
+    if let Some(capture) = capture {
+        capture.configure(&mut process);
+    }
     if isolated_baseline {
         gwt_core::process::scrub_git_env(&mut process);
         process.env_remove("CARGO_TARGET_DIR");
     }
-    let output = match process.output() {
-        Ok(output) => output,
-        Err(err) => {
-            let diagnostic = format!("failed to spawn '{command}': {err}");
-            let clipped = bounded_output_tail(diagnostic.as_bytes());
-            return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
-        }
-    };
+    process
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // Issue #4405: this process runs inside the agent tree, whose launch
+    // policy lowers priority; the workload must not inherit that.
+    let output =
+        match gwt_core::process_tree::spawn_at_normal_priority(&mut process).and_then(|spawned| {
+            let priority = spawned.priority.clone();
+            spawned.wait_with_output().map(|output| (output, priority))
+        }) {
+            Ok(output) => output,
+            Err(err) => {
+                let diagnostic = format!("failed to spawn '{command}': {err}");
+                let clipped = bounded_output_tail(diagnostic.as_bytes());
+                return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
+            }
+        };
+    let (output, priority) = output;
     let exit_code = output.status.code().unwrap_or(-1);
     let mut tail = String::new();
+    if !priority.restored {
+        tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+    }
     for (label, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
         if bytes.is_empty() {
             continue;
@@ -2504,7 +2548,7 @@ fn measure_baseline(
         ],
     )?;
     let (exit_code, output) =
-        execute_command_with_isolation(&checkout, &request.baseline_command, true)?;
+        execute_command_with_isolation(&checkout, &request.baseline_command, true, None)?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
     }
@@ -2613,7 +2657,21 @@ pub fn run_verification(
     session_id: &str,
     commands: &[String],
 ) -> Result<(VerificationRunRecord, String), String> {
-    run_verification_inner(worktree, session_id, commands, None, &[], None, || {})
+    run_verification_inner(
+        worktree,
+        session_id,
+        commands,
+        None,
+        &[],
+        RunOptions::default(),
+        || {},
+    )
+}
+
+#[derive(Default)]
+struct RunOptions<'a> {
+    user_verification_result: Option<&'a str>,
+    headed_e2e_commands: &'a [String],
 }
 
 fn run_verification_for_caller(
@@ -2622,7 +2680,7 @@ fn run_verification_for_caller(
     commands: &[String],
     authority: &VerificationCallerAuthority,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    user_verification_result: Option<&str>,
+    options: RunOptions<'_>,
 ) -> Result<(VerificationRunRecord, String), String> {
     run_verification_inner(
         worktree,
@@ -2630,7 +2688,7 @@ fn run_verification_for_caller(
         commands,
         Some(authority),
         prepared_quarantines,
-        user_verification_result,
+        options,
         || {},
     )
 }
@@ -2641,12 +2699,19 @@ fn run_verification_inner<F>(
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    user_verification_result: Option<&str>,
+    options: RunOptions<'_>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
     F: FnOnce(),
 {
+    if options
+        .headed_e2e_commands
+        .iter()
+        .any(|command| !commands.contains(command))
+    {
+        return Err("headed_e2e_commands must name exact entries in commands".to_string());
+    }
     // Snapshot owner, plan, and worktree together. Commands deliberately run
     // outside the lease; the final commit reacquires it and rejects any
     // interleaving writer by invalidating the evidence snapshot.
@@ -2695,17 +2760,50 @@ where
     }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
-        let (exit_code, tail) = execute_command(worktree, command)?;
+        let capture = options
+            .headed_e2e_commands
+            .contains(command)
+            .then(headed_e2e::Capture::new)
+            .transpose()
+            .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
+        let (exit_code, tail) = match capture.as_ref() {
+            Some(capture) => {
+                execute_command_with_isolation(worktree, command, false, Some(capture))?
+            }
+            None => execute_command(worktree, command)?,
+        };
+        let headed_e2e = capture.as_ref().map(|capture| {
+            capture.evidence().unwrap_or(headed_e2e::HeadedE2eEvidence {
+                chromium_dark_passed: 0,
+                chromium_light_passed: 0,
+                failed: 0,
+                status: "missing".to_string(),
+            })
+        });
         transcript.push_str(&tail);
         transcript.push_str(&format!("exit: {exit_code}\n"));
         results.push(VerificationCommandResult {
             command: command.clone(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
+            headed_e2e,
         });
     }
     after_commands();
-    let all_passed = results.iter().all(|result| result.exit_code == 0);
+    let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
+    let visual_passed = headed_e2e_passed(&results);
+    if has_headed_e2e {
+        transcript.push_str(&format!(
+            "Agent Visual Check: {}\n",
+            if visual_passed {
+                "pass"
+            } else {
+                "fail(headed Chromium dark/light execution evidence missing or failing)"
+            }
+        ));
+    }
+    let all_passed =
+        results.iter().all(|result| result.exit_code == 0) && (!has_headed_e2e || visual_passed);
     let mut quarantined_failures = Vec::new();
     if !all_passed {
         let head_sha = current_head_sha(worktree);
@@ -2791,7 +2889,7 @@ where
     let mut record = VerificationRunRecord {
         record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
-        user_verification_result: user_verification_result.map(str::to_owned),
+        user_verification_result: options.user_verification_result.map(str::to_owned),
         owner_number,
         execution_binding: execution_binding.clone(),
         worktree_fingerprint: fingerprint_before.clone(),
@@ -3344,6 +3442,16 @@ fn evaluate_evidence_snapshot_inner(
     if record.worktree_fingerprint != current_fingerprint {
         return EvidenceStatus::StaleFingerprint;
     }
+    // Missing or failing nominated browser evidence cannot be waived by
+    // command quarantine or Board adjudication, even with a zero raw exit.
+    if record
+        .commands
+        .iter()
+        .any(|command| command.headed_e2e.is_some())
+        && !record.headed_e2e_passed()
+    {
+        return EvidenceStatus::Failing;
+    }
     let has_typed_quarantine = if record.all_passed {
         if !record.quarantined_failures.is_empty() {
             return EvidenceStatus::Failing;
@@ -3416,6 +3524,15 @@ fn verification_caller_authority_error() -> io::Error {
         ErrorKind::PermissionDenied,
         "verify.* requires current verification authority; relaunch or continue the owning Session before retrying",
     )
+}
+
+/// Whether `verify.plan` / `verify.run` would accept `session_id` right now.
+///
+/// `execution.status` advertises the verification recoveries through this
+/// exact gate so the listing never names an operation the caller cannot run
+/// (Issue #4029). Read-only: it snapshots authority without mutating it.
+pub(crate) fn caller_has_verification_authority(worktree: &Path, session_id: &str) -> bool {
+    snapshot_verification_caller_authority(worktree, session_id).is_ok()
 }
 
 fn snapshot_verification_caller_authority(
@@ -3801,6 +3918,7 @@ pub enum VerifyCommand {
         /// Issue #3913: bound on the host admission wait (seconds).
         max_wait_secs: Option<u64>,
         user_verification_result: Option<String>,
+        headed_e2e_commands: Vec<String>,
     },
     /// Attach one existing Board decision to one exact failing command in the
     /// latest canonical record. The Board remains the decision audit source;
@@ -3850,9 +3968,10 @@ pub(super) fn autonomous_confirmation_refusal(
     Some(format!(
         "User Verification Result: confirmed is refused for autonomous execution ({source}). \
          Generated launch instructions, hooks, and Board messages are not human verification. \
-         Record `deferred (autonomous execution)` for a UI surface or `n/a` for no UI surface \
-         (`n/a (autonomous)` remains supported), then retry `verify.run` or `pr.create` / \
-         `pr.edit` with the corrected result. Deferred PRs stay Draft.\n"
+         Record `n/a (autonomous)` and a separate `Agent Visual Check`, then retry \
+         `verify.run` or `pr.create` / `pr.edit` with the corrected result. \
+         Fresh passing automated verification and, for UI work, measured headed E2E \
+         evidence permit Ready and CI auto-merge.\n"
     ))
 }
 
@@ -3987,6 +4106,7 @@ pub(super) fn run<E: CliEnv>(
             commands,
             max_wait_secs,
             user_verification_result,
+            headed_e2e_commands,
         } => {
             if let Some(refusal) = user_verification_result
                 .as_deref()
@@ -4017,7 +4137,17 @@ pub(super) fn run<E: CliEnv>(
                 &commands,
                 &authority,
                 &prepared_quarantines,
-                user_verification_result.as_deref(),
+                RunOptions {
+                    user_verification_result: if crate::cli::execution_state::session_launch_route(
+                        Some(&session_id),
+                    ) == Some(gwt_agent::LaunchRoute::Autonomous)
+                    {
+                        Some("n/a (autonomous)")
+                    } else {
+                        user_verification_result.as_deref()
+                    },
+                    headed_e2e_commands: &headed_e2e_commands,
+                },
             );
             // Release the in-process lease before the (lease-free) evidence
             // evaluation so the next claimant starts as soon as the commands
@@ -4125,6 +4255,7 @@ pub(crate) mod tests {
             execution_binding: None,
             worktree_fingerprint: fingerprint.to_string(),
             commands: vec![VerificationCommandResult {
+                headed_e2e: None,
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
@@ -4509,6 +4640,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn missing_headed_report_cannot_be_adjudicated_as_passing() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec!["sh -c 'exit 0'".to_string()];
+        let (record, transcript) = run_verification_inner(
+            dir.path(),
+            "sess-headed",
+            &commands,
+            None,
+            &[],
+            RunOptions {
+                user_verification_result: None,
+                headed_e2e_commands: &commands,
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
+        assert!(!record.all_passed, "{transcript}");
+        assert!(
+            record.commands[0].headed_e2e.is_some(),
+            "missing nominated evidence must remain visible"
+        );
+        assert_eq!(
+            evaluate_evidence_snapshot_inner(
+                dir.path(),
+                "sess-headed",
+                None,
+                None,
+                &record,
+                false,
+                true,
+            ),
+            EvidenceStatus::Failing,
+            "adjudication must not waive missing browser evidence"
+        );
+    }
+
+    #[test]
     fn failed_output_is_sanitized_before_persistence() {
         let sanitized = bounded_output_tail(
             b"\x1b[31mAuthorization: Bearer ghp_abcdef0123456789abcdef\x1b[0m\n",
@@ -4652,6 +4822,7 @@ mod tests {
             execution_binding: None,
             worktree_fingerprint: "abc".to_string(),
             commands: vec![VerificationCommandResult {
+                headed_e2e: None,
                 command: "git --version".to_string(),
                 exit_code: 0,
                 output_tail: String::new(),
@@ -5355,7 +5526,7 @@ mod tests {
             &[failed_command],
             None,
             &[prepared],
-            None,
+            RunOptions::default(),
             || {},
         )
         .unwrap();
@@ -5576,7 +5747,7 @@ mod tests {
             &commands,
             None,
             &[],
-            None,
+            RunOptions::default(),
             || {
                 fs::create_dir_all(dir.path().join("artifacts")).unwrap();
                 fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
@@ -5692,12 +5863,19 @@ mod tests {
         )
         .unwrap();
 
-        let (record, _) =
-            run_verification_inner(dir.path(), "sess-mixed", &commands, None, &[], None, || {
+        let (record, _) = run_verification_inner(
+            dir.path(),
+            "sess-mixed",
+            &commands,
+            None,
+            &[],
+            RunOptions::default(),
+            || {
                 fs::write(dir.path().join("report.json"), "{}").unwrap();
                 fs::write(dir.path().join("src.txt"), "v2").unwrap();
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert_eq!(
             record.worktree_fingerprint,
             "invalidated-by-concurrent-change"
@@ -5903,6 +6081,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             }),
         )
@@ -5970,6 +6149,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             }),
         )
@@ -6005,6 +6185,7 @@ mod tests {
             crate::cli::CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             }),
         )
@@ -6507,6 +6688,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -6647,6 +6829,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -6661,6 +6844,100 @@ mod tests {
             artifacts_before,
             "terminal authority denial must not mutate verification evidence"
         );
+    }
+
+    // Issue #4029 AC-1 / AC-2 / AC-3: `execution.status` advertises
+    // `verify.plan` / `verify.run` through the exact gate `verify.*` enforces.
+    // The owning Session of a Blocked (terminal) record keeps them; another
+    // Session loses them but can adopt the dead holder's record (Issue #4154).
+    #[test]
+    fn execution_status_advertises_verify_recoveries_only_to_the_authorized_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().expect("blocked status recovery repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner_session = "session-4029-owner";
+        let other_session = "session-4029-other";
+
+        let active = initialize_generation_scoped_execution(dir.path(), owner_session);
+        persist_generation_scoped_session(dir.path(), owner_session, active.clone(), 1);
+        persist_generation_scoped_session(dir.path(), other_session, active, 1);
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                dir.path(),
+                owner_session,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "startup recovery found only dead Hosts".to_string(),
+                    missing_verification: Some("startup Active holder liveness".to_string()),
+                },
+            )
+            .expect("settle blocked generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+
+        let owner_status = crate::cli::execution_state::diagnose(dir.path(), Some(owner_session));
+        assert_eq!(
+            owner_status.binding_state,
+            crate::cli::execution_state::ExecutionBindingState::Terminal
+        );
+        assert!(
+            snapshot_verification_caller_authority(dir.path(), owner_session).is_ok(),
+            "the owning Session keeps verification authority on a Blocked record"
+        );
+        for operation in ["verify.plan", "verify.run"] {
+            assert!(
+                owner_status
+                    .available_recoveries
+                    .contains(&operation.to_string()),
+                "owning Session must keep `{operation}`: {:?}",
+                owner_status.available_recoveries
+            );
+        }
+        assert_eq!(
+            owner_status.recovery_hint, None,
+            "the owning Session can still recover in place"
+        );
+
+        let other_status = crate::cli::execution_state::diagnose(dir.path(), Some(other_session));
+        assert_eq!(
+            other_status.binding_state,
+            crate::cli::execution_state::ExecutionBindingState::Terminal
+        );
+        let denial = snapshot_verification_caller_authority(dir.path(), other_session)
+            .expect_err("another Session has no verification authority")
+            .to_string();
+        assert!(
+            denial.contains("current verification authority"),
+            "denial must be the same gate `verify.*` enforces: {denial}"
+        );
+        assert_eq!(
+            other_status.available_recoveries,
+            vec!["execution.adopt"],
+            "another Session can adopt the dead holder's record, but cannot run `verify.*`"
+        );
+        assert_eq!(
+            other_status.recovery_hint, None,
+            "a Session with an available ownership transfer does not need a fresh launch"
+        );
+        for operation in ["verify.plan", "verify.run"] {
+            let probe = other_status
+                .recovery_probes
+                .iter()
+                .find(|probe| probe.operation == operation)
+                .unwrap_or_else(|| panic!("{operation} probe"));
+            assert_eq!(
+                probe.state,
+                crate::cli::governance::RecoveryProbeState::Unavailable
+            );
+            assert_eq!(
+                probe.governance.cause,
+                Some(crate::cli::governance::GovernanceCause::Authority)
+            );
+        }
     }
 
     #[test]
@@ -6711,6 +6988,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: commands.clone(),
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -6774,6 +7052,7 @@ mod tests {
                 VerifyCommand::Run {
                     commands: commands.clone(),
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 },
             )
@@ -6864,6 +7143,7 @@ mod tests {
             VerifyCommand::Run {
                 commands: vec![format!("touch {}", marker.display())],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             },
         )
@@ -6914,7 +7194,7 @@ mod tests {
             &commands,
             Some(&authority),
             &[],
-            None,
+            RunOptions::default(),
             move || {
                 advance_generation_scoped_session_binding(&session_for_hook, current);
             },

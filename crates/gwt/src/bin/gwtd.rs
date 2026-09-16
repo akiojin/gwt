@@ -147,6 +147,7 @@ fn format_perf_help() -> String {
         "",
         "Operations:",
         "  perf.summary                            p50 / p95 / worst per stream and target",
+        "  perf.startup                            Latest startup phases and first-frame budget",
         "  perf.violations                         Sustained budget violations of the period",
         "",
         "Key params:",
@@ -267,7 +268,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
-        "  issue.monitor.wait",
+        "  issue.monitor.wait | issue.monitor.wait.invalidate",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
         "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
@@ -288,6 +289,9 @@ fn format_issue_help() -> String {
         "  reason, resume_condition, clear       issue.monitor.wait declares that the",
         "                                        current launch is waiting (stuck detection",
         "                                        pauses, max 3h); clear=true when resumed",
+        "  number, reason, by?                   issue.monitor.wait.invalidate: the PM",
+        "                                        voids a wait whose condition no longer",
+        "                                        holds; stuck detection resumes next scan",
         "  provider, reason                      issue.monitor.quota_hold.clear releases a",
         "                                        provider-wide quota hold (e.g. codex / claude;",
         "                                        any agent id the hold is keyed by)",
@@ -413,10 +417,21 @@ fn format_index_help() -> String {
         "Operations:",
         "  index.status                            Show index runtime and asset status",
         "  index.rebuild                           Rebuild a specific scope",
+        "  index.repair                            Recover the issues index",
+        "  index.cancel                            Request cancellation of an issues rebuild",
         "",
         "Key params:",
         "  scope                                   all|issues|specs|memory|discussions|board|files|files-docs",
         "                                          JSON also accepts files_docs",
+        "                                          index.repair and index.cancel take issues only",
+        "  wait                                    index.repair only. Default false: submit the",
+        "                                          job to a detached worker and answer at once",
+        "                                          with the collection, the job id and the",
+        "                                          index's own repair state. true blocks until",
+        "                                          the job settles and reports the result.",
+        "",
+        "Notes:",
+        "  - index.repair always answers; follow a submitted job with index.status.",
         "",
     ]
     .join("\n")
@@ -1147,6 +1162,9 @@ mod tests {
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",
+            // Issue #4286: the only way the PM can void a wait whose condition
+            // its ruling removed, short of waiting out the 3h cap.
+            "issue.monitor.wait.invalidate",
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",
