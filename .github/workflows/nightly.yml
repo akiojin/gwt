@@ -14,6 +14,13 @@ on:
     - cron: '0 18 * * *'
   workflow_dispatch:
 
+# Issue #4119: a manual dispatch supersedes a still-running scheduled run. The
+# three-pass job below costs ~47 minutes, so without this group a dispatch
+# during the nightly window would hold two Windows runners for the same proof.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   issues: write
