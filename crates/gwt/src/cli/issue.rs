@@ -2759,7 +2759,7 @@ fn run_monitor_wait<E: CliEnv>(
             &serde_json::json!({
                 "status": "refused",
                 "refusal": "issue_unknown",
-                "detail": "pass params.number, or run inside a monitor-launched session where GWT_AUTONOMOUS_ISSUE names the owner Issue",
+                "detail": "pass params.number, or run inside a monitor-launched session where GWT_AUTONOMOUS_ISSUE names the owner Issue. This refusal changed nothing: it does not release your verification lease or any other exclusivity, so retry with an explicit params.number instead of tearing down held resources in a finally block.",
             })
             .to_string(),
         );
@@ -7163,128 +7163,149 @@ mod tests {
     /// in the durable prefs and `issue.monitor.status` shows the row waiting.
     #[test]
     fn monitor_wait_records_the_declaration_durably_without_a_publish_transport() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _launch = ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo dir");
-        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
-        crate::save_issue_monitor_prefs(
-            &prefs_path,
-            &crate::IssueMonitorPrefs {
-                enabled: true,
-                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
-                    issue_number: 42,
-                    window_id: "tab-1::agent-live".to_string(),
-                }],
-                ..crate::IssueMonitorPrefs::default()
-            },
-        )
-        .expect("save prefs");
-        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
-        gwt_github::Cache::new(cache_root)
-            .write_snapshot(&IssueSnapshot {
-                number: IssueNumber(42),
-                title: "Waiting on the host lease".to_string(),
-                body: String::new(),
-                labels: Vec::new(),
-                state: IssueState::Open,
-                updated_at: UpdatedAt::new("2026-09-07T00:00:00Z"),
-                comments: Vec::new(),
-            })
-            .expect("write cache candidate");
+        gwt_skills::generate_coordination_guidance(tmp.path()).expect("generate guidance");
+        // Issue #4334 AC-5: execute the shipped JSON verbatim without the
+        // launch env, including the decoder used by bootstrap scripts.
+        for runtime in [".claude", ".codex"] {
+            let guidance = std::fs::read_to_string(
+                tmp.path()
+                    .join(runtime)
+                    .join("skills/gwt-coordination/SKILL.md"),
+            )
+            .expect("generated skill");
+            let examples: Vec<_> = guidance
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with('{'))
+                .filter(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .is_ok_and(|value| value["operation"] == "issue.monitor.wait")
+                })
+                .collect();
+            assert_eq!(examples.len(), 2, "{runtime}: declare and clear examples");
+            let dispatch_example = |env: &mut crate::cli::TestEnv, example: &str| {
+                env.stdin = example.to_string();
+                env.stdout.clear();
+                let code = crate::cli::json_envelope::dispatch(env, "gwtd");
+                assert_eq!(
+                    code,
+                    0,
+                    "{runtime}: {}",
+                    String::from_utf8_lossy(&env.stdout)
+                );
+                let response: serde_json::Value =
+                    serde_json::from_slice(&env.stdout).expect("JSON envelope");
+                response["output"]
+                    .as_str()
+                    .expect("command output")
+                    .to_string()
+            };
+            let repo = tmp.path().join(format!("repo{runtime}"));
+            std::fs::create_dir_all(&repo).expect("repo dir");
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+            crate::save_issue_monitor_prefs(
+                &prefs_path,
+                &crate::IssueMonitorPrefs {
+                    enabled: true,
+                    launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                        issue_number: 4324,
+                        window_id: "tab-1::agent-live".to_string(),
+                    }],
+                    ..crate::IssueMonitorPrefs::default()
+                },
+            )
+            .expect("save prefs");
+            let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
+            gwt_github::Cache::new(cache_root)
+                .write_snapshot(&IssueSnapshot {
+                    number: IssueNumber(4324),
+                    title: "Waiting on the host lease".to_string(),
+                    body: String::new(),
+                    labels: Vec::new(),
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new("2026-09-07T00:00:00Z"),
+                    comments: Vec::new(),
+                })
+                .expect("write cache candidate");
 
-        let mut env = crate::cli::TestEnv::new(repo.clone());
-        let mut out = String::new();
-        let code = run(
-            &mut env,
-            IssueCommand::MonitorWait {
-                project_root: Some(repo.clone()),
-                number: Some(42),
-                reason: Some("host 排他の順番待ち".to_string()),
-                resume_condition: Some("verify lease の解放".to_string()),
-                clear: false,
-            },
-            &mut out,
-        )
-        .expect("wait runs");
-        assert_eq!(code, 0, "{out}");
-        let declared: serde_json::Value =
-            serde_json::from_str(out.trim()).expect("declare json: {out}");
-        assert_eq!(declared["status"], "waiting", "{out}");
-        assert_eq!(declared["reason"], "host 排他の順番待ち", "{out}");
-        assert_eq!(declared["resume_condition"], "verify lease の解放", "{out}");
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let out = dispatch_example(&mut env, examples[0]);
+            let declared: serde_json::Value =
+                serde_json::from_str(out.trim()).expect("declare json: {out}");
+            assert_eq!(declared["status"], "waiting", "{out}");
+            assert_eq!(declared["reason"], "host 排他の順番待ち", "{out}");
+            assert_eq!(
+                declared["resume_condition"], "Issue 3791 の verify.run が完了する",
+                "{out}"
+            );
 
-        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
-        let record = persisted
-            .autonomous_records
-            .iter()
-            .find(|record| record.issue_number == 42)
-            .expect("autonomous record for 42");
-        let wait = record.wait.as_ref().expect("durable wait declaration");
-        assert_eq!(wait.reason, "host 排他の順番待ち");
-        assert_eq!(wait.resume_condition, "verify lease の解放");
-        assert!(
-            record.last_heartbeat.is_some(),
-            "declaring is itself a liveness signal"
-        );
-
-        let mut status_out = String::new();
-        run(
-            &mut env,
-            IssueCommand::MonitorStatus {
-                project_root: Some(repo.clone()),
-            },
-            &mut status_out,
-        )
-        .expect("status runs");
-        let status: serde_json::Value =
-            serde_json::from_str(status_out.trim()).expect("status json: {status_out}");
-        let row = status["inbox"]
-            .as_array()
-            .expect("inbox array")
-            .iter()
-            .find(|row| row["issue_number"] == 42)
-            .expect("inbox row 42");
-        assert_eq!(
-            row["waiting"]["reason"], "host 排他の順番待ち",
-            "{status_out}"
-        );
-        assert_eq!(
-            row["waiting"]["resume_condition"], "verify lease の解放",
-            "{status_out}"
-        );
-        assert_eq!(row["waiting"]["since"], wait.since, "{status_out}");
-        assert!(
-            row["waiting"]["expires_at"].is_string(),
-            "{status_out}: the PM reads when the declaration stops protecting the row"
-        );
-
-        let mut clear_out = String::new();
-        let code = run(
-            &mut env,
-            IssueCommand::MonitorWait {
-                project_root: Some(repo.clone()),
-                number: Some(42),
-                reason: None,
-                resume_condition: None,
-                clear: true,
-            },
-            &mut clear_out,
-        )
-        .expect("clear runs");
-        assert_eq!(code, 0, "{clear_out}");
-        assert!(clear_out.contains("\"status\":\"cleared\""), "{clear_out}");
-        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
-        assert!(
-            persisted
+            let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+            let record = persisted
                 .autonomous_records
                 .iter()
-                .find(|record| record.issue_number == 42)
-                .expect("autonomous record for 42")
-                .wait
-                .is_none(),
-            "clearing must be durable too, or the row stays protected forever"
-        );
+                .find(|record| record.issue_number == 4324)
+                .expect("autonomous record for 4324");
+            let wait = record.wait.as_ref().expect("durable wait declaration");
+            assert_eq!(wait.reason, "host 排他の順番待ち");
+            assert_eq!(wait.resume_condition, "Issue 3791 の verify.run が完了する");
+            assert!(
+                record.last_heartbeat.is_some(),
+                "declaring is itself a liveness signal"
+            );
+
+            let mut status_out = String::new();
+            run(
+                &mut env,
+                IssueCommand::MonitorStatus {
+                    project_root: Some(repo.clone()),
+                },
+                &mut status_out,
+            )
+            .expect("status runs");
+            let status: serde_json::Value =
+                serde_json::from_str(status_out.trim()).expect("status json: {status_out}");
+            let row = status["inbox"]
+                .as_array()
+                .expect("inbox array")
+                .iter()
+                .find(|row| row["issue_number"] == 4324)
+                .expect("inbox row 4324");
+            assert_eq!(
+                row["waiting"]["reason"], "host 排他の順番待ち",
+                "{status_out}"
+            );
+            assert_eq!(
+                row["waiting"]["resume_condition"], "Issue 3791 の verify.run が完了する",
+                "{status_out}"
+            );
+            assert_eq!(row["waiting"]["since"], wait.since, "{status_out}");
+            assert!(
+                row["waiting"]["expires_at"].is_string(),
+                "{status_out}: the PM reads when the declaration stops protecting the row"
+            );
+
+            let clear_out = dispatch_example(&mut env, examples[1]);
+            assert!(clear_out.contains("\"status\":\"cleared\""), "{clear_out}");
+            let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+            assert!(
+                persisted
+                    .autonomous_records
+                    .iter()
+                    .find(|record| record.issue_number == 4324)
+                    .expect("autonomous record for 4324")
+                    .wait
+                    .is_none(),
+                "clearing must be durable too, or the row stays protected forever"
+            );
+        }
     }
 
     /// Issue #4286 AC-1/AC-2: without a daemon the PM's invalidation lands in
@@ -7432,6 +7453,58 @@ mod tests {
         );
         assert_eq!(resolve_monitor_wait_issue_number(None, Some(" ")), None);
         assert_eq!(resolve_monitor_wait_issue_number(None, None), None);
+    }
+
+    /// Issue #4334 AC-3: with no launch context and no `number`, the refusal
+    /// must say that nothing was released.
+    ///
+    /// Agents put the clear call in a `finally`, so a refusal there raises
+    /// through a block that also tears down the verification lease the agent
+    /// still holds — "I only cleared my wait" silently became "I gave up host
+    /// exclusivity" in #4324. The refusal text is the only thing the caller
+    /// sees, so it has to carry that instruction itself.
+    #[test]
+    fn monitor_wait_refusal_without_a_number_states_it_released_nothing() {
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _launch = ScopedEnvVar::unset(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorWait {
+                project_root: Some(repo.clone()),
+                number: None,
+                reason: None,
+                resume_condition: None,
+                clear: true,
+            },
+            &mut out,
+        )
+        .expect("wait runs");
+        assert_eq!(code, 1, "{out}");
+        let response: serde_json::Value = serde_json::from_str(out.trim()).expect("json response");
+        assert_eq!(response["refusal"], "issue_unknown", "{out}");
+        let detail = response["detail"].as_str().expect("detail string");
+        assert!(
+            detail.contains("params.number"),
+            "the refusal must name the parameter that fixes it: {detail}"
+        );
+        assert!(
+            detail.contains("lease"),
+            "the refusal must name the lease it did not touch: {detail}"
+        );
+        assert!(
+            detail.contains("does not release"),
+            "the refusal must state that it released nothing: {detail}"
+        );
     }
 
     /// Issue #4077 AC-3: a requeue that leaves a live foreign claim in place
