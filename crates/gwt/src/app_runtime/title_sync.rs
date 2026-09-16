@@ -81,20 +81,16 @@ impl AppRuntime {
         if dynamic_title_changed {
             events.push(self.workspace_state_broadcast());
         }
-        // Issue #3783: watcher notifications run directly on the Tao event
-        // loop. Merge the already-loaded payload into the last materialized
-        // view before replaying it; a full Session/WorkItems rebuild here
-        // blocks every pane request, while replaying the cache without this
-        // merge publishes stale title/status fields.
-        self.merge_workspace_projection_into_cached_active_work(project_root, projection);
-        // Issue #3752: the Board milestone path (`BoardProjectionChanged`)
-        // used to rebuild inline here — 9-18 s per Board post with ~200 Work
-        // rows. It now replays the merged cache like the watcher path and
-        // hands the authoritative rebuild to the blocking worker.
         let projection_event = if cache_only {
+            // Issue #3783: watcher notifications run directly on the Tao event
+            // loop. Merge the already-loaded watcher payload into the last
+            // materialized view before replaying it; a full Session/WorkItems
+            // rebuild here blocks every pane request, while replaying the
+            // cache without this merge publishes stale title/status fields.
+            self.merge_workspace_projection_into_cached_active_work(project_root, projection);
             self.cached_active_work_projection_broadcast_for_workspace_watcher()
         } else {
-            self.deferred_active_work_projection_broadcast_for_active_tab()
+            self.active_work_projection_broadcast_for_active_tab()
         };
         if let Some(event) = projection_event {
             events.push(event);

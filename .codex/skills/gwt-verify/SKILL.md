@@ -110,64 +110,48 @@ Record the detected mode on the evidence bundle's `Launch mode:` line.
 
 In `autonomous` mode:
 
-- **Skip the User Verification Handoff phase entirely.** Do not prepare an
-  instance, do not share a URL, and do not call the platform's question tool —
-  in an autonomous session a question is converted into a NeedsHuman handoff
-  that parks the owner Issue, so asking ends the execution instead of pausing
-  it.
-- **Never settle the execution as blocked over a missing visual check.**
-  `execution.blocked` is terminal, not a pause: it defers every open
-  obligation and revokes `pr.edit`, so the stall it records is also a closed
-  loop the agent cannot leave (#4214). gwt refuses such a settlement on an
-  autonomous route. Hand off a **Draft PR** and settle the execution normally
-  instead — that is what frees the slot.
-- Record the result according to whether a UI surface is actually in scope:
+- **Skip the User Verification Handoff phase entirely.** Do not prepare a
+  user handoff instance, share a verification URL, or call the question tool.
+  Prepare an isolated instance for the agent's own headed E2E when UI is in
+  scope; for gwt use `browser-check` and the current checkout with a fresh HOME.
+- Record `User Verification Result: n/a (autonomous)` for new work, with or
+  without a UI surface. This is a launch-mode fact, never `skipped(<reason>)`
+  or `confirmed`. The agent's own check does not confirm a human check.
+- Require `Agent Visual Check: pass` for UI work and `n/a (no UI surface)`
+  otherwise. Automated test, headed E2E, or CI failures and known blockers must
+  be repaired; absent human visual confirmation is not a blocker.
+- After fresh passing verification and the other Ready PR Gate conditions,
+  create a Ready PR or call `pr.ready`, then follow the existing CI auto-merge
+  path until merged. Do not stop at a Draft PR or call `execution.blocked`
+  merely because no human performed a visual check.
 
-  | UI surface in scope | Recorded value | What it means |
-  |---|---|---|
-  | yes | `User Verification Result: deferred (autonomous execution)` | The check was **postponed**, not performed and not unnecessary. The PR stays Draft; the owner sweeps it later. |
-  | no | `User Verification Result: n/a` | There was nothing for a human to look at. |
+### Legacy deferred results
 
-  These are launch-mode facts, not judgement calls. Neither is
-  interchangeable with `skipped(<reason>)`, which still means *an agent decided
-  to defer a check a human could have done*, and neither may be written as
-  `confirmed` — never claim a human looked. `n/a (autonomous)` is the older
-  spelling of these two values and is still accepted on existing PRs; new work
-  records the value from the table.
-- A UI surface in scope is covered instead by the agent's own automated headed
-  run — see **Agent Visual Check** below. A deferred user verification never
-  excuses a missing or failing Agent Visual Check.
-- A PR carrying `deferred (autonomous execution)` **stays Draft**: `pr.ready`
-  and non-draft `pr.create` refuse it, so `auto-merge.yml` (which acts only on
-  `draft == false`) never sees it. Automation ends at PR creation; the merge
-  decision stays the owner's.
+The legacy `deferred (autonomous execution)` value remains readable on
+existing autonomous PRs. Fresh passing verification permits Ready and the
+existing CI auto-merge path without rewriting that PR body or requiring human
+confirmation. This compatibility does not waive automated evidence or any
+other Ready Gate condition. Manual launch verification is unchanged.
 
-### Sweeping the deferred PRs (owner-facing)
-
-The owner reviews postponed checks in one pass rather than by walking back
-through the Board:
-
-```
-gwtd <<'JSON'
-{"schema_version":1,"operation":"pr.list","params":{"include":["body","checks"]}}
-JSON
-```
-
-Rows carry `deferred_user_verification`: `true` is waiting on the owner,
-`false` is settled, and **absent means the read did not hydrate bodies** —
-pass `include: ["body"]` or the answer is unknown, not negative.
+`pr.list` with `include: ["body"]` still exposes
+`deferred_user_verification`: both `n/a (autonomous)` and the legacy autonomous
+deferred value yield `false`; manual or generic deferred results yield `true`.
+An absent field means bodies were not hydrated, so the value is unknown.
 
 Record the same result in the tool-generated execution evidence: pass
 `params.user_verification_result` to `verify.run` with the exact
-`User Verification Result` value used in the report and PR body. The result
-is persisted in the integrity-protected Verification Run Record and printed
-in the run output. An omitted value remains unknown; it never means
-`confirmed` or `n/a`. Automated command success does not confirm a human check.
+`User Verification Result` value used in the report and new PR body. An existing
+legacy deferred body may remain unchanged while new autonomous evidence records
+`n/a (autonomous)`. The result is persisted in the integrity-protected
+Verification Run Record and printed in the run output. For manual launches, an omitted value remains
+unknown; it never means `confirmed` or `n/a`. Autonomous launches normalize the
+result to `n/a (autonomous)`. Automated command success does not
+confirm a human check.
 
 For an autonomous run with a UI surface, for example:
 
 ```json
-{"schema_version":1,"operation":"verify.run","params":{"commands":["<planned command>"],"user_verification_result":"deferred (autonomous execution)"}}
+{"schema_version":1,"operation":"verify.run","params":{"commands":["<planned Playwright command>"],"headed_e2e_commands":["<planned Playwright command>"],"user_verification_result":"n/a (autonomous)"}}
 ```
 
 ## Agent Visual Check (the agent's own browser-check)
@@ -189,6 +173,17 @@ surface)`, and list the executed headed command under `Executed` so the claim
 is backed by a `PASS` entry. In `autonomous` mode this is the GUI quality bar
 that replaces the human's eyes, so `Agent Visual Check: fail(<reason>)` — or a
 UI surface in scope with no Agent Visual Check at all — makes `Overall: FAIL`.
+
+For an autonomous UI Ready handoff, a prose `Agent Visual Check: pass` alone
+is insufficient. Pass `params.headed_e2e_commands` to `verify.run`, selecting
+exact strings already present in `params.commands`. Use Playwright commands
+or project scripts that forward extra Playwright arguments. gwtd adds
+`--headed`, `--trace=on`, and its embedded reporter, then reads the actual
+browser launch and context settings from Playwright traces to count passing
+Chromium tests for dark and light themes. Both themes must have passing
+executed tests in the same fresh verification record; skipped tests, metadata
+claims, or a headless run cannot satisfy this evidence requirement. The E2E
+suite remains responsible for console/page-error checks and behavior assertions.
 
 ## Invocation Sequence
 
@@ -325,13 +320,14 @@ Rules:
 - `Overall: PASS` requires **both** every entry in `Executed` reporting `PASS`
   **and** `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
   deferred (autonomous execution), skipped(<reason>)}`. `pending` must never
-  resolve to `PASS`. A `deferred` result reaches `PASS` but hands off a **Draft**
-  PR only — it is postponement, not approval.
+  resolve to `PASS`. The legacy deferred value is accepted for autonomous
+  launches under the same fresh evidence and Ready PR Gate requirements.
 - When a UI surface is in scope, `Overall: PASS` additionally requires
   `Agent Visual Check: pass`. In `autonomous` mode that line carries the GUI
   quality bar on its own, so a missing or failing Agent Visual Check is
-  `Overall: FAIL` even though `User Verification Result` is
-  `deferred (autonomous execution)` (or the older `n/a (autonomous)`).
+  `Overall: FAIL` even when the launch waives the human handoff. An autonomous
+  UI Ready handoff also requires measured passing headed Chromium results for
+  dark and light themes in the same fresh `verify.run` record.
 - Every acceptance boundary in scope must map to either a reachable manual
   checkbox or an Automated-only Evidence item that names the exact command and
   test. An Automated-only Evidence item must match a `PASS` entry under
@@ -365,9 +361,8 @@ summoned.
 ## User Verification Handoff (post-Executed)
 
 This phase runs in `interactive` launch mode only. In `autonomous` mode, skip
-straight to recording the launch-mode result from the **Launch mode** table
-above — `deferred (autonomous execution)` when a UI surface is in scope, `n/a`
-when none is — plus the `Agent Visual Check:` line, then finalize `Overall`. Do
+straight to recording `User Verification Result: n/a (autonomous)` plus the
+`Agent Visual Check:` line, then finalize `Overall`. Do
 not execute any step below, and in particular do not call the question tool in
 step 5.
 
@@ -478,6 +473,21 @@ verification workload, report its run / PID and timing evidence to the
 PM. `verify.lease.release` remains available to drain a legacy holder
 without killing its process.
 
+### gwtd bootstrap order
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
+
 ## Stop Conditions
 
 Stop and surface a blocker to the caller when:
@@ -540,8 +550,8 @@ On `Overall: PASS`, the caller proceeds:
 
 - `gwt-build-spec` Phase 3 → Phase 4 (PR Flow via `gwt-manage-pr`), provided
   `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
-  deferred (autonomous execution), skipped(<reason>)}`. A `deferred` result
-  authorizes a **Draft** PR only.
+  deferred (autonomous execution), skipped(<reason>)}`. The legacy deferred
+  value follows the autonomous compatibility rule above.
 - `gwt-manage-pr` → PR create / update, provided the same User Verification
   Result gate is satisfied.
 - Manual invocation → return the evidence bundle to the user.

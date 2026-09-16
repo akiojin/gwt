@@ -3676,7 +3676,7 @@ impl AppRuntime {
             outcome,
         );
         events.push(self.workspace_state_broadcast());
-        if let Some(projection) = self.deferred_active_work_projection_broadcast_for_active_tab() {
+        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(projection);
         }
         Some(events)
@@ -5449,7 +5449,7 @@ impl AppRuntime {
             cached_outcome,
         ));
         events.push(self.workspace_state_broadcast());
-        if let Some(projection) = self.deferred_active_work_projection_broadcast_for_active_tab() {
+        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(projection);
         }
         events
@@ -6274,7 +6274,7 @@ impl AppRuntime {
         // client is not told a started agent is still unready.
         self.window_details.remove(window_id);
         let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(projection) = self.deferred_active_work_projection_broadcast_for_active_tab() {
+        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(projection);
         }
         let composed_status = self
@@ -7052,7 +7052,7 @@ impl AppRuntime {
         let mut events =
             self.continue_work_pending_outcome_events(&pending, pending.outcome, None, None, false);
         events.push(self.workspace_state_broadcast());
-        if let Some(projection) = self.deferred_active_work_projection_broadcast_for_active_tab() {
+        if let Some(projection) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(projection);
         }
         events

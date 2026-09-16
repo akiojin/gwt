@@ -686,6 +686,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("issue_monitor_launch_now", "issue_monitor")
                 .target(issue_number.to_string())
         }
+        // Issue #3628 (AC-3): an operator recovery that changes launch
+        // eligibility is exactly the kind of deliberate action worth a record.
+        FrontendEvent::IssueMonitorRequeue { issue_number } => {
+            FrontendUserActionLog::new("issue_monitor_requeue", "issue_monitor")
+                .target(issue_number.to_string())
+        }
         FrontendEvent::IssueMonitorConfigureIssue { issue_number, .. } => {
             FrontendUserActionLog::new("issue_monitor_configure_issue", "issue_monitor")
                 .target(issue_number.to_string())
@@ -718,6 +724,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
+        | FrontendEvent::StartupFirstFrame { .. }
+        | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }

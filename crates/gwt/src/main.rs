@@ -50,6 +50,9 @@ mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+// Unix has no tree-wide CPU cap to lift (Issue #4405).
+#[cfg(windows)]
+mod verification_cap_relief;
 mod work_events_ingest;
 mod workspace_session_registry;
 
@@ -114,7 +117,8 @@ pub(crate) use launch_runtime::{
 pub(crate) use launch_runtime::{
     apply_windows_host_shell_wrapper, build_shell_process_launch,
     ensure_docker_launch_runtime_ready_for_runtime, execute_orphan_intake_worktree_prune,
-    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune, resolve_launch_worktree,
+    install_launch_gwt_bin_env, plan_orphan_intake_worktree_prune,
+    plan_orphan_intake_worktree_prune_from_inventory, resolve_launch_worktree,
     resolve_shell_launch_worktree, OrphanIntakePrunePlan,
 };
 #[cfg(test)]
@@ -234,13 +238,17 @@ fn spawn_project_index_status_check(
     _runtime: &Runtime,
     proxy: EventLoopProxy<UserEvent>,
     project_root: Option<PathBuf>,
+    startup_inventory: Option<std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
 ) {
     dispatch_project_index_status_check_with(
         AppEventProxy::new(proxy),
         project_root,
         |proxy, root| {
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
-                .spawn(proxy, root)
+            let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::global();
+            match startup_inventory {
+                Some(inventory) => service.spawn_with_startup_inventory(proxy, root, inventory),
+                None => service.spawn(proxy, root),
+            }
         },
     );
 }
@@ -1006,6 +1014,111 @@ fn spawn_workspace_projection_watcher(
     })
 }
 
+/// Issue #4406: Board refreshes run off the GUI event loop, one per project at
+/// a time. Changes that land while one runs collapse into a single rerun, and
+/// the scoped views travel with the refresh so each post applies incrementally.
+#[derive(Default)]
+struct BoardRefreshQueue {
+    in_flight: HashSet<PathBuf>,
+    rerun: HashSet<PathBuf>,
+    views: HashMap<PathBuf, app_runtime::BoardScopedViews>,
+}
+
+impl BoardRefreshQueue {
+    /// The views to start a refresh with, or `None` while one is already
+    /// running for the project (it reruns once that finishes).
+    fn begin(&mut self, project_root: &Path) -> Option<app_runtime::BoardScopedViews> {
+        if !self.in_flight.insert(project_root.to_path_buf()) {
+            self.rerun.insert(project_root.to_path_buf());
+            return None;
+        }
+        Some(self.views.remove(project_root).unwrap_or_default())
+    }
+
+    /// Record a finished refresh; `true` when a change arrived meanwhile.
+    fn finish(&mut self, project_root: &Path, views: app_runtime::BoardScopedViews) -> bool {
+        self.in_flight.remove(project_root);
+        self.views.insert(project_root.to_path_buf(), views);
+        self.rerun.remove(project_root)
+    }
+}
+
+/// Issue #4406: Active Work rebuilds run off the GUI event loop, one per
+/// project at a time. Requests that land while one runs collapse into a single
+/// rerun, so a burst of background scan completions costs one rebuild.
+#[derive(Default)]
+struct ActiveWorkRefreshQueue {
+    in_flight: HashSet<PathBuf>,
+    rerun: HashSet<PathBuf>,
+}
+
+impl ActiveWorkRefreshQueue {
+    /// `true` when the caller owns the refresh; `false` while one is already
+    /// running for the project (it reruns once that finishes).
+    fn begin(&mut self, project_root: &Path) -> bool {
+        if !self.in_flight.insert(project_root.to_path_buf()) {
+            self.rerun.insert(project_root.to_path_buf());
+            return false;
+        }
+        true
+    }
+
+    /// Record a finished refresh; `true` when a request arrived meanwhile.
+    fn finish(&mut self, project_root: &Path) -> bool {
+        self.in_flight.remove(project_root);
+        self.rerun.remove(project_root)
+    }
+}
+
+fn spawn_active_work_projection_refresh(
+    handle: &tokio::runtime::Handle,
+    proxy: &EventLoopProxy<UserEvent>,
+    job: app_runtime::ActiveWorkProjectionJob,
+) {
+    let proxy = proxy.clone();
+    let project_root = job.project_root.clone();
+    let tab_id = job.tab_id.clone();
+    drop(handle.spawn_blocking(move || {
+        // A panic must still report back, or the project stays in flight and
+        // its Workspace rail never refreshes again.
+        let refreshed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app_runtime::run_active_work_projection_refresh(job)
+        }))
+        .unwrap_or(app_runtime::ActiveWorkProjectionRefreshed {
+            tab_id,
+            view: None,
+            completed: false,
+        });
+        let _ = proxy.send_event(UserEvent::ActiveWorkProjectionRefreshed {
+            project_root,
+            refreshed: Box::new(refreshed),
+        });
+    }));
+}
+
+fn spawn_board_projection_refresh(
+    handle: &tokio::runtime::Handle,
+    proxy: &EventLoopProxy<UserEvent>,
+    job: app_runtime::BoardProjectionRefreshJob,
+    views: app_runtime::BoardScopedViews,
+) {
+    let proxy = proxy.clone();
+    drop(handle.spawn_blocking(move || {
+        let project_root = job.project_root.clone();
+        // A panic must still report back, or the project stays in flight and
+        // its Board never refreshes again.
+        let (refreshed, views) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app_runtime::run_board_projection_refresh(job, views)
+        }))
+        .unwrap_or_default();
+        let _ = proxy.send_event(UserEvent::BoardProjectionRefreshed {
+            project_root,
+            refreshed: Box::new(refreshed),
+            views,
+        });
+    }));
+}
+
 /// Daemon broadcast subscriber registry — one [`DaemonSubscriber`]
 /// per active project. Mirrors [`BoardProjectionWatcherRegistry`] but
 /// listens for `DaemonFrame::Event { channel: "board" }` from a running
@@ -1391,6 +1504,24 @@ enum UserEvent {
     BoardProjectionChanged {
         project_root: PathBuf,
     },
+    /// Issue #4406: a Board refresh finished off the GUI event loop.
+    BoardProjectionRefreshed {
+        project_root: PathBuf,
+        refreshed: Box<app_runtime::BoardProjectionRefreshed>,
+        views: app_runtime::BoardScopedViews,
+    },
+    /// Issue #4406 AC-3/AC-4: something a Workspace row shows changed, so the
+    /// project's Active Work projection needs rebuilding. The rebuild reads the
+    /// home works.json, every session ledger TOML and one execution diagnosis
+    /// per row, so it runs off the GUI event loop.
+    ActiveWorkProjectionChanged {
+        project_root: PathBuf,
+    },
+    /// Issue #4406: an Active Work rebuild finished off the GUI event loop.
+    ActiveWorkProjectionRefreshed {
+        project_root: PathBuf,
+        refreshed: Box<app_runtime::ActiveWorkProjectionRefreshed>,
+    },
     /// SPEC-2359 W-15 (FR-386): result of the background merged-branch scan.
     /// The runtime caches the set and rebroadcasts the Workspace projection
     /// so rows can show the "safe to delete" badge.
@@ -1436,18 +1567,13 @@ enum UserEvent {
     WorkEventsIngested {
         project_root: PathBuf,
         changed: bool,
-        /// Issue #3752: the worker's worktree reconcile result (normalized
-        /// local branch names); `None` keeps the previous set.
-        local_worktree_branches: Option<std::collections::HashSet<String>>,
+        /// Issue #4378 AC-1: the worktree listing the startup ingest reused,
+        /// handed back so the reconcile does not list the worktrees again.
+        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
     },
-    /// Issue #3752: a background Active Work projection build finished. The
-    /// handler stores the view, broadcasts it for the active tab, and drops
-    /// a result whose generation a newer build already superseded.
-    ActiveWorkProjectionBuilt {
-        tab_id: String,
-        generation: u64,
-        view: Option<Box<gwt::ActiveWorkProjectionView>>,
-    },
+    /// Issue #4378 AC-2: the startup generation reaper finished on the
+    /// blocking worker; Issue Monitor launch deliveries held meanwhile replay.
+    StartupGenerationReaperCompleted,
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -1576,6 +1702,15 @@ enum UserEvent {
     LaunchComplete {
         window_id: String,
         result: Box<AgentLaunchResult>,
+    },
+    /// Issue #4375: one PM worktree preparation finished on a blocking worker.
+    /// The Git work it covers (`git worktree add`, `git fetch`) used to run
+    /// inside the canvas-ready restore drain and held the GUI event loop for
+    /// seconds on a repository with many worktrees; the spawn it gates resumes
+    /// from this event instead.
+    PmWorktreePrepared {
+        continuation: Box<crate::app_runtime::pm::PmWorktreeContinuation>,
+        result: Result<PathBuf, String>,
     },
     ShellLaunchComplete {
         window_id: String,
@@ -2146,6 +2281,7 @@ mod tests {
             launch_profile_summary: "configure before auto start".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
+            agent_blackout: None,
             quota_hold: None,
             update_drain: None,
             launch_profile_candidates: Vec::new(),
@@ -3002,6 +3138,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn board_refresh_queue_runs_one_refresh_per_project_and_collapses_changes() {
+        // Issue #4406: a burst of Board changes (file watcher + daemon) must
+        // not stack refreshes; the ones during a refresh collapse into one.
+        let mut queue = crate::BoardRefreshQueue::default();
+        let root = std::path::PathBuf::from("repo");
+        let views = queue.begin(&root).expect("first change starts a refresh");
+        assert!(queue.begin(&root).is_none(), "a refresh is already running");
+        assert!(queue.begin(&root).is_none());
+        assert!(
+            queue.begin(std::path::Path::new("other-repo")).is_some(),
+            "projects refresh independently"
+        );
+        assert!(
+            queue.finish(&root, views),
+            "changes meanwhile rerun it once"
+        );
+        let views = queue.begin(&root).expect("the rerun starts");
+        assert!(!queue.finish(&root, views), "no change, no rerun");
+    }
+
     fn drain_client_payloads(queue: &crate::embedded_server::ClientQueue) -> Vec<String> {
         let mut payloads = Vec::new();
         while let Some(payload) = queue.try_recv() {
@@ -3409,6 +3566,9 @@ mod tests {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            deferred_issue_monitor_launches: None,
+            startup_worktree_inventories: HashMap::new(),
+            pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -3428,11 +3588,13 @@ mod tests {
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
-            session_ledger_cache: std::cell::RefCell::new(
+            session_ledger_cache: Arc::new(Mutex::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
-            ),
+            )),
+            work_items_cache: Arc::new(Mutex::new(
+                gwt_core::workspace_projection::WorkItemsCache::new(),
+            )),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
-            active_work_projection_builds: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -3444,6 +3606,7 @@ mod tests {
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             provider_quota_holds: std::collections::HashMap::new(),
             provider_quota_candidates: std::collections::HashMap::new(),
+            released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
@@ -4701,7 +4864,7 @@ mod tests {
         assert_eq!(close_events.len(), 3);
         assert!(matches!(
             close_events[0].event,
-            BackendEvent::ActiveWorkProjectionPatch { .. }
+            BackendEvent::ActiveWorkProjection { .. }
         ));
         assert!(matches!(
             close_events[1].event,
@@ -8672,6 +8835,7 @@ fn main() -> std::io::Result<()> {
     // can be measured. Fail-open — a disabled kill switch or an unwritable log
     // directory leaves every later `record_*` call a no-op.
     gwt::perf::install_from_settings();
+    gwt::perf::startup::begin(*PROCESS_STARTED_AT.get().expect("process start instant"));
 
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
@@ -8762,7 +8926,11 @@ fn main() -> std::io::Result<()> {
         ),
     };
 
-    let runtime = Runtime::new().expect("tokio runtime");
+    let runtime = {
+        let _phase =
+            gwt::perf::startup::PhaseTimer::start(gwt::perf::startup::StartupPhase::RuntimeInit);
+        Runtime::new().expect("tokio runtime")
+    };
 
     // SPEC-3287 FR-028..FR-030: commit the embedded-server port before any
     // server task or browser URL can be published. Explicit `--port` values
@@ -8992,6 +9160,8 @@ fn main() -> std::io::Result<()> {
             let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
         }),
     );
+    #[cfg(windows)]
+    verification_cap_relief::spawn(pty_writers.clone());
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
@@ -9005,10 +9175,15 @@ fn main() -> std::io::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
+    let mut startup_index_project = app
+        .active_project_root()
+        .map(|root| root.display().to_string());
+    let startup_worktree_inventory = app.take_startup_worktree_inventory();
     spawn_project_index_status_check(
         &runtime,
         proxy.clone(),
         app.active_project_root().map(Path::to_path_buf),
+        startup_worktree_inventory,
     );
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
@@ -9123,6 +9298,8 @@ fn main() -> std::io::Result<()> {
     // plain quit once the ACKs land.
     let mut deferred_quit_reason: Option<GuiShutdownReason> = None;
     let mut gui_shutdown_backstop_armed = false;
+    let mut board_refresh_queue = BoardRefreshQueue::default();
+    let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -9224,6 +9401,7 @@ fn main() -> std::io::Result<()> {
                         &runtime,
                         proxy.clone(),
                         app.active_project_root().map(Path::to_path_buf),
+                        None,
                     );
                 }
             }
@@ -9320,28 +9498,67 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::DaemonRuntimeApprovalOverlay { id, waiting }) => {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
+                if active_work_refresh_queue.begin(&project_root) {
+                    match app.active_work_projection_refresh_job(&project_root) {
+                        Some(job) => spawn_active_work_projection_refresh(
+                            runtime.handle(),
+                            &proxy,
+                            job,
+                        ),
+                        // No open tab owns the project — nothing to rebuild.
+                        None => drop(active_work_refresh_queue.finish(&project_root)),
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionRefreshed {
+                project_root,
+                refreshed,
+            }) => {
+                clients.dispatch(app.apply_active_work_projection_refresh(*refreshed));
+                if active_work_refresh_queue.finish(&project_root)
+                    && active_work_refresh_queue.begin(&project_root)
+                {
+                    match app.active_work_projection_refresh_job(&project_root) {
+                        Some(job) => spawn_active_work_projection_refresh(
+                            runtime.handle(),
+                            &proxy,
+                            job,
+                        ),
+                        None => drop(active_work_refresh_queue.finish(&project_root)),
+                    }
+                }
+            }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
-                let events = app.handle_board_projection_changed_events(&project_root);
-                clients.dispatch(events);
+                if let Some(views) = board_refresh_queue.begin(&project_root) {
+                    let job = app.board_projection_refresh_job(&project_root);
+                    spawn_board_projection_refresh(runtime.handle(), &proxy, job, views);
+                }
+            }
+            Event::UserEvent(UserEvent::BoardProjectionRefreshed {
+                project_root,
+                refreshed,
+                views,
+            }) => {
+                clients.dispatch(app.apply_board_projection_refresh(*refreshed));
+                if board_refresh_queue.finish(&project_root, views) {
+                    if let Some(views) = board_refresh_queue.begin(&project_root) {
+                        let job = app.board_projection_refresh_job(&project_root);
+                        spawn_board_projection_refresh(runtime.handle(), &proxy, job, views);
+                    }
+                }
             }
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
-                local_worktree_branches,
+                worktree_inventory,
             }) => {
-                let events = app.handle_work_events_ingested(
-                    project_root,
-                    changed,
-                    local_worktree_branches,
-                );
+                let events =
+                    app.handle_work_events_ingested(project_root, changed, worktree_inventory);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::ActiveWorkProjectionBuilt {
-                tab_id,
-                generation,
-                view,
-            }) => {
-                let events = app.handle_active_work_projection_built(&tab_id, generation, view);
+            Event::UserEvent(UserEvent::StartupGenerationReaperCompleted) => {
+                let events = app.handle_startup_generation_reaper_completed();
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {
@@ -9580,6 +9797,15 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 status,
             }) => {
+                if startup_index_project.as_deref() == Some(project_root.as_str()) {
+                    if status.state == gwt::ProjectIndexStatusState::Ready {
+                        gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::IndexRuntimeReady);
+                        startup_index_project = None;
+                    } else if matches!(status.state, gwt::ProjectIndexStatusState::Error | gwt::ProjectIndexStatusState::Skipped) {
+                        // A later manual repair/open is not startup readiness.
+                        startup_index_project = None;
+                    }
+                }
                 clients.dispatch(vec![OutboundEvent::broadcast(
                     BackendEvent::ProjectIndexStatus {
                         project_root,
@@ -9589,6 +9815,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::PmWorktreePrepared {
+                continuation,
+                result,
+            }) => {
+                let events = app.handle_pm_worktree_prepared(*continuation, result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {

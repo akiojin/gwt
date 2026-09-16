@@ -4,7 +4,55 @@ on:
   pull_request:
     branches: [develop, main]
 
+# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
+# update-branch `synchronize` starts a fresh run, and without this group the
+# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
+# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
+# only this PR's older run of this workflow. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
+  # cannot affect skip instead of queueing a Windows runner. Only jobs that are
+  # NOT a develop required status check may depend on this job: GitHub reports
+  # a skipped job as Success to branch protection, so gating a required check
+  # here would let a PR merge without running it. The gated jobs condition on
+  # `!cancelled() && needs.changes.outputs.docs_only != 'true'`, so a failed
+  # classification (API error) falls open to running them. Both properties are
+  # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
+  changes:
+    name: Classify changed files
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Classify changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          # Documentation is Markdown anywhere plus docs/. Markdown the binaries
+          # embed is code: CHANGELOG.md (include_str! in gwt-core) and
+          # .claude/ + .codex/ (include_dir! in gwt-skills).
+          docs_only=true
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              CHANGELOG.md|.claude/*|.codex/*) docs_only=false ;;
+              docs/*|*.md) ;;
+              *) docs_only=false ;;
+            esac
+          done <<<"$files"
+          echo "$files"
+          echo "docs_only=$docs_only"
+          echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
+
   test:
     name: Test (Rust)
     runs-on: ubuntu-latest
@@ -20,11 +68,25 @@ jobs:
       # changed package set can never be served the previous archive. The
       # extra packages passed below are not in that hash, so the key prefix
       # names them (Issue #4134 AC-4 adds `dbus` for `dbus-run-session`).
+      #
+      # Issue #4268: that prefix also put this job in its own cache namespace.
+      # With no restore-keys the key hit only on an exact match, so `Test
+      # (Rust)` could never reuse the archives `Build` / `Clippy` had already
+      # warmed under `gwt-apt-gtk-` even though `gtk-deps` is a strict subset of
+      # `gtk-deps xvfb dbus` — and its own key was written only by a run that
+      # succeeded, which is the run that kept failing. That is the asymmetry
+      # behind `Test (Rust)` failing while the other Linux jobs passed, and it
+      # is why a stalled mirror had all 59.2 MB to stall on. The second
+      # fallback reaches the shared namespace; only xvfb and dbus are then
+      # missing from it.
       - name: Cache Linux GTK dependency packages
         uses: actions/cache@v6
         with:
           path: ~/.cache/gwt-apt-archives
           key: gwt-apt-gtk-xvfb-dbus-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
+          restore-keys: |
+            gwt-apt-gtk-xvfb-dbus-${{ runner.os }}-
+            gwt-apt-gtk-${{ runner.os }}-
         timeout-minutes: 5
       # Issue #4191: measured over the last 60 green runs this step takes p50
       # 29s, p90 48s, p95 60s, max 106s, so the previous 5-minute cap sat at
@@ -39,7 +101,14 @@ jobs:
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps xvfb dbus
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
+      # Issue #4133: naming the scope is what lets cache-warm.yml populate it
+      # from develop/main. Without `shared-key` the key embeds GITHUB_JOB, so
+      # only a job with this exact id could ever write a cache this job reads —
+      # and no push-triggered workflow did, which is why every PR's first Rust
+      # job rebuilt 377 crates.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       # Issue #4055: 21 green runs measured this step at 500–725s (p95 ~660s)
       # and a slow runner crossed the old 15-minute cap with every suite ok
@@ -103,6 +172,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       - uses: actions/setup-python@v7
         with:
@@ -134,6 +205,8 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Run managed hook self-heal regressions
         shell: bash
@@ -224,6 +297,8 @@ jobs:
   # develop rather than of one pull request.
   test-windows-agent-launch-e2e:
     name: Test (Windows agent launch)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -232,6 +307,8 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
         continue-on-error: true
       # Issue #4134 AC-2: the four provider/selector combinations used to be a
       # four-way matrix, and every shard paid the same 279s cold build to run
@@ -268,6 +345,8 @@ jobs:
 
   test-frontend:
     name: Test (Frontend + WebView E2E)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -275,6 +354,8 @@ jobs:
         with:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
+      - name: Run verification reporter regressions
+        run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs
       - name: Run frontend unit tests
         run: bash scripts/run-frontend-unit-tests.sh
         timeout-minutes: 10

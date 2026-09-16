@@ -656,6 +656,69 @@ pub fn finish_pm_delivery_receipt(
     })
 }
 
+/// Env var carrying the resident PM session's scratch directory into its pane.
+///
+/// Both PM launch paths write it next to `suppress_execution_control` — the
+/// fresh launch in `app_runtime::pm::pm_launch_config` and the restore path in
+/// `app_runtime::launch` — so its presence is coextensive with "this pane is
+/// the resident PM, and therefore owns no Execution Control Record". Issue
+/// #4442 reads it as that marker, exactly as
+/// [`crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV`] marks a review
+/// dispatch window, which is why no launch-path change was needed there.
+pub const GWT_PM_SCRATCH_DIR_ENV: &str = "GWT_PM_SCRATCH_DIR";
+
+/// Pure reader for [`GWT_PM_SCRATCH_DIR_ENV`]: only a non-empty value marks a
+/// PM session, so an empty or whitespace-only value fails closed onto the
+/// ordinary producing-session gates.
+pub fn pm_session_from_env<F>(read: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    read(GWT_PM_SCRATCH_DIR_ENV).is_some_and(|value| !value.trim().is_empty())
+}
+
+/// [`pm_session_from_env`] against the process environment.
+pub fn pm_session_active() -> bool {
+    pm_session_from_env(|name| std::env::var(name).ok())
+}
+
+/// Issue #4442: does this session get the PM's exemption from the Agent
+/// Workspace identity gate?
+///
+/// The resident PM pane is launched with `suppress_execution_control`, so it
+/// owns no Execution Control Record and its authority never leaves
+/// `Inspection`. Both routes to an identity are refused structurally:
+/// `workspace.update` at the execution-binding bridge
+/// (`execution_binding_mismatch`), and `workspace.ensure` earlier still, at the
+/// prerequisite probe — passing `purpose` and `current_focus` does not help,
+/// because the probe fails on the missing binding, not on the arguments.
+/// Demanding the title first would deny Bash, Write, Edit and every `pr.*` /
+/// `board.post` envelope for the whole life of the window, including the
+/// `execution.blocked` the window would need in order to declare that it was
+/// stuck. This is the same trap Issue #3984 removed for review dispatch; the PM
+/// half of it was simply never done.
+///
+/// The absence of an Execution Control Record is required alongside the marker:
+/// a session that holds one can satisfy the gate, so a stale or inherited
+/// marker must never lift it.
+#[must_use]
+pub fn pm_identity_exempt_session(
+    pm_marker_present: bool,
+    execution_control_present: bool,
+) -> bool {
+    pm_marker_present && !execution_control_present
+}
+
+/// [`pm_identity_exempt_session`] against the process environment and the
+/// worktree's trusted store.
+#[must_use]
+pub fn pm_identity_exempt_session_for_worktree(worktree: &Path) -> bool {
+    pm_identity_exempt_session(
+        pm_session_active(),
+        crate::cli::trusted_store::under_trusted_management(worktree),
+    )
+}
+
 /// Canonical worktree for the project's resident PM session.
 pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
@@ -4637,6 +4700,11 @@ pub struct PmRepositoryRegistrationView {
     /// Whether this row is the store the report was asked about. A `false` row
     /// is a PM this store cannot see through its own `pm.json`.
     pub is_current_store: bool,
+    /// Issue #4394 AC-4: `false` for a Session that is live, or still
+    /// restorable, in one of this repository's PM worktrees without holding a
+    /// registration. It has no PM authority, yet it can still post to the
+    /// Board, so the PM has to be able to see it and `pm.stop` it.
+    pub registered: bool,
 }
 
 /// Build the repository-scoped rows for `repo_path`'s report.
@@ -4645,7 +4713,13 @@ pub fn pm_repository_registration_views(repo_path: &Path) -> Vec<PmRepositoryReg
         return Vec::new();
     };
     let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
-    pm_registrations_for_repository(&repository_key)
+    let registrations = pm_registrations_for_repository(&repository_key);
+    let unregistered = unregistered_pm_worktree_sessions(
+        &repository_key,
+        &registrations,
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let mut views: Vec<PmRepositoryRegistrationView> = registrations
         .into_iter()
         .map(|record| PmRepositoryRegistrationView {
             is_current_store: record.project_dir == own_project_dir,
@@ -4653,8 +4727,63 @@ pub fn pm_repository_registration_views(repo_path: &Path) -> Vec<PmRepositoryReg
             session_id: record.registration.session_id,
             agent_id: record.registration.agent_id,
             worktree_path: record.registration.worktree_path,
+            registered: true,
         })
-        .collect()
+        .collect();
+    views.extend(unregistered.into_iter().filter_map(|session| {
+        let project_dir = pm_worktree_store_dir(&session.worktree_path)?;
+        Some(PmRepositoryRegistrationView {
+            is_current_store: paths_are_same_store(&project_dir, &own_project_dir),
+            project_dir: project_dir.display().to_string(),
+            session_id: session.id,
+            agent_id: session.agent_id.command().to_string(),
+            worktree_path: session.worktree_path.display().to_string(),
+            registered: false,
+        })
+    }));
+    views
+}
+
+/// Issue #4394 AC-4: Sessions in one of `repository_key`'s PM worktrees that
+/// hold none of `registrations` and are still live or restorable.
+///
+/// Restore used to bring such Sessions back as extra PM windows that neither
+/// `pm.status` nor `pm.stop` could address. Only records naming a PM worktree
+/// path are parsed, so the scan stays cheap on a store with thousands of
+/// stopped Sessions.
+pub fn unregistered_pm_worktree_sessions(
+    repository_key: &Path,
+    registrations: &[PmStoreRegistration],
+    sessions_dir: &Path,
+) -> Vec<gwt_agent::Session> {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<gwt_agent::Session> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter(|path| {
+            fs::read_to_string(path).is_ok_and(|content| {
+                content.contains("pm/worktree") || content.contains("pm\\worktree")
+            })
+        })
+        .filter_map(|path| gwt_agent::Session::load(&path).ok())
+        .filter(|session| {
+            !registrations
+                .iter()
+                .any(|record| record.registration.session_id == session.id)
+                && (session.restore_window_on_startup
+                    || !matches!(
+                        session.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    ))
+                && pm_worktree_store_dir(&session.worktree_path).is_some()
+                && pm_repository_key(&session.worktree_path).as_deref() == Some(repository_key)
+        })
+        .collect();
+    sessions.sort_by(|left, right| left.id.cmp(&right.id));
+    sessions
 }
 
 /// Build the `pm.status` report from loaded prefs. The durable-session probe

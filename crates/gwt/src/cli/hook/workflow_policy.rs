@@ -21,6 +21,7 @@ use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
 
 use crate::discussion_resume::PendingDiscussionGoal;
+use crate::pm_registry::pm_identity_exempt_session_for_worktree;
 
 use super::{block_bash_policy, effect_classifier, HookError, HookEvent, HookOutput};
 
@@ -33,6 +34,11 @@ pub struct WorkflowContext {
     /// Record). Its contract is the inverse of a producing session's: publish
     /// the verdict, touch nothing the implementer produced.
     pub review_dispatch_session: bool,
+    /// Issue #4442: this session is the project's resident PM window, which is
+    /// launched with `suppress_execution_control` and therefore can never
+    /// satisfy the identity gate. Decided by
+    /// [`crate::pm_registry::pm_identity_exempt_session`].
+    pub pm_session: bool,
 }
 
 impl WorkflowContext {
@@ -55,6 +61,11 @@ impl WorkflowContext {
 
     pub fn with_review_dispatch_session(mut self, review_dispatch_session: bool) -> Self {
         self.review_dispatch_session = review_dispatch_session;
+        self
+    }
+
+    pub fn with_pm_session(mut self, pm_session: bool) -> Self {
+        self.pm_session = pm_session;
         self
     }
 }
@@ -81,9 +92,13 @@ pub fn evaluate_with_context(
     // so `workspace.update` can never succeed there. Demanding the title first
     // would deny every non-read-only command — including the verdict publish
     // that is the window's entire job — for the whole life of the session.
+    // Issue #4442: the resident PM window is the other session launched with
+    // `suppress_execution_control`, and the gate traps it the same way. It is
+    // exempted here rather than through the review guard above, because
+    // draining `pr.*` and delivering rulings on the Board is the PM's job.
     let title_summary = evaluate_title_summary_guard(
         event,
-        context.title_summary_missing && !context.review_dispatch_session,
+        context.title_summary_missing && !context.review_dispatch_session && !context.pm_session,
     )?;
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
@@ -97,17 +112,15 @@ pub fn evaluate_with_context(
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
-    let context =
-        WorkflowContext::default()
-            .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
-            .with_pending_discussion_goal(
-                crate::discussion_resume::load_pending_goal(worktree_root)
-                    .ok()
-                    .flatten(),
-            )
-            .with_review_dispatch_session(
-                crate::issue_monitor_review::review_dispatch_session_active(),
-            );
+    let context = WorkflowContext::default()
+        .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
+        .with_pending_discussion_goal(
+            crate::discussion_resume::load_pending_goal(worktree_root)
+                .ok()
+                .flatten(),
+        )
+        .with_review_dispatch_session(crate::issue_monitor_review::review_dispatch_session_active())
+        .with_pm_session(pm_identity_exempt_session_for_worktree(worktree_root));
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -628,6 +641,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "pane.list"
             | "pane.read"
             | "perf.summary"
+            | "perf.startup"
             | "perf.violations"
             | "pm.status"
             | "search"
@@ -1202,6 +1216,184 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    use crate::pm_registry::pm_identity_exempt_session;
+
+    fn pm_context() -> WorkflowContext {
+        // The PM window is launched with `suppress_execution_control`: the
+        // title is missing and can never be set, which is exactly the state
+        // that used to deny everything for the life of the window.
+        WorkflowContext::unknown()
+            .with_title_summary_missing(true)
+            .with_pm_session(true)
+    }
+
+    /// Issue #4442 AC-1: the resident PM window keeps Bash / Write / Edit for
+    /// its whole life even though its identity can never be set.
+    #[test]
+    fn pm_session_keeps_its_tools_without_a_title_summary() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let events = [
+            bash_event("git log --oneline -20"),
+            bash_event("cargo test -p gwt --bin gwt workflow_policy"),
+            HookEvent {
+                tool_name: Some("Write".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": worktree.join("pm-notes.md").to_string_lossy(),
+                    "content": "cycle notes",
+                })),
+                transcript_path: None,
+                cwd: None,
+            },
+            HookEvent {
+                tool_name: Some("Edit".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": worktree.join("pm-notes.md").to_string_lossy(),
+                    "old_string": "a",
+                    "new_string": "b",
+                })),
+                transcript_path: None,
+                cwd: None,
+            },
+        ];
+        for event in events {
+            assert_eq!(
+                evaluate_with_context(&event, worktree, &pm_context()).expect("guard output"),
+                HookOutput::Silent,
+                "{:?}",
+                event.tool_name
+            );
+        }
+    }
+
+    /// Issue #4442 AC-2: the PM's own job — draining PRs and delivering
+    /// rulings on the Board — must run. The review dispatch guard denies
+    /// `pr.*` and it must not reach the PM.
+    #[test]
+    fn pm_session_may_run_pr_operations_and_post_to_the_board() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            envelope_command("pr.update_branch", r#"{"number":4410}"#),
+            envelope_command("pr.ready", r#"{"number":4374}"#),
+            envelope_command("pr.comment", r#"{"number":4428,"body":"ruling"}"#),
+            envelope_command("board.post", r#"{"kind":"decision","body":"ruling"}"#),
+            envelope_command("issue.comment", r#"{"number":4442,"body":"ruling"}"#),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &pm_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4442 AC-4: a window that is both marked and dispatched for
+    /// review keeps the stricter review contract. The PM exemption lifts the
+    /// identity gate; it never opens the reviewer's write surface.
+    #[test]
+    fn pm_marker_does_not_loosen_the_review_dispatch_contract() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let context = pm_context().with_review_dispatch_session(true);
+        let command = envelope_command("pr.edit", r#"{"number":4000,"body":"approved"}"#);
+        assert!(
+            matches!(
+                evaluate_with_context(&bash_event(&command), worktree, &context)
+                    .expect("guard output"),
+                HookOutput::PreToolUsePermission { .. }
+            ),
+            "review dispatch must keep denying `pr.edit`"
+        );
+    }
+
+    /// Issue #4442 AC-3 / AC-5: the three cases that decide the exemption.
+    /// The marker alone is not enough — a session that holds an Execution
+    /// Control Record can satisfy `workspace.update`, so it keeps the gate
+    /// even if a stale or inherited marker is in its environment.
+    #[test]
+    fn pm_identity_exemption_requires_the_marker_and_the_absence_of_an_execution_record() {
+        assert!(
+            pm_identity_exempt_session(true, false),
+            "marker present, no Execution Control Record: the PM case"
+        );
+        assert!(
+            !pm_identity_exempt_session(false, false),
+            "no marker: an ordinary ownerless session keeps the gate"
+        );
+        assert!(
+            !pm_identity_exempt_session(true, true),
+            "an Execution Control Record can satisfy the gate, so the gate applies"
+        );
+    }
+
+    /// Issue #4442 AC-5, at the policy level: the same three cases decide
+    /// whether the identity gate fires.
+    #[test]
+    fn the_title_summary_gate_fires_for_every_session_but_the_pm() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let event = bash_event("cargo test -p gwt");
+        for (pm_marker, execution_control, expect_gate) in [
+            (true, false, false),
+            (false, false, true),
+            (true, true, true),
+        ] {
+            let context = WorkflowContext::unknown()
+                .with_title_summary_missing(true)
+                .with_pm_session(pm_identity_exempt_session(pm_marker, execution_control));
+            let output = evaluate_with_context(&event, worktree, &context).expect("guard output");
+            assert_eq!(
+                matches!(output, HookOutput::PreToolUsePermission { .. }),
+                expect_gate,
+                "marker={pm_marker} execution_control={execution_control}"
+            );
+        }
+    }
+
+    /// Issue #4442 AC-1, restated as the escape it exists for: a PM window
+    /// trapped by the gate could not even declare that it was stuck. The
+    /// settlement and reporting envelopes must run.
+    #[test]
+    fn pm_session_can_declare_its_own_state() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            envelope_command("execution.blocked", r#"{"reason":"stuck"}"#),
+            envelope_command("board.post", r#"{"kind":"blocked","body":"stuck"}"#),
+            "git add -A".to_string(),
+            "git commit -m 'chore(work): notes'".to_string(),
+            "git push origin HEAD".to_string(),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &pm_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4442 AC-3: the marker is read from the environment both PM
+    /// launch paths already write, and only a non-empty value counts.
+    #[test]
+    fn the_pm_marker_is_read_from_the_existing_launch_environment() {
+        use crate::pm_registry::{pm_session_from_env, GWT_PM_SCRATCH_DIR_ENV};
+
+        let present = |value: &'static str| {
+            pm_session_from_env(move |name| {
+                (name == GWT_PM_SCRATCH_DIR_ENV).then(|| value.to_string())
+            })
+        };
+        assert!(present(
+            "/Users/x/.gwt/projects/abc/project-state/pm-scratch"
+        ));
+        assert!(!present(""));
+        assert!(!present("   "));
+        assert!(!pm_session_from_env(|_| None));
     }
 
     /// Non-regression: the review contract applies only to review windows. An
