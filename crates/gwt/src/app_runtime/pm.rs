@@ -2270,7 +2270,7 @@ impl AppRuntime {
         config.suppress_execution_control = true;
         if let Some(scratch) = pm_registry::pm_scratch_dir_for_pm_worktree(worktree) {
             config.env_vars.insert(
-                "GWT_PM_SCRATCH_DIR".to_string(),
+                pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
                 scratch.to_string_lossy().into_owned(),
             );
         }
