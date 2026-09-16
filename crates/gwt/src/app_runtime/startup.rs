@@ -1547,7 +1547,7 @@ impl AppRuntime {
     /// no placeholder left on the canvas, so the next startup sees one PM.
     fn refuse_unregistered_pm_restore(&mut self, tab_id: &str, session_id: &str) {
         mark_auto_resume_source_completed(&self.sessions_dir, session_id);
-        self.remove_stale_paused_agent_window(tab_id, session_id);
+        self.remove_stale_paused_agent_window(tab_id, session_id, None);
         let _ = self.persist();
     }
 

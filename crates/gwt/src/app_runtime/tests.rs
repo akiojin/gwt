@@ -61498,25 +61498,21 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     session.restore_window_on_startup = true;
     session.update_status(gwt_agent::AgentStatus::Stopped);
     session.save(&runtime.sessions_dir).expect("save session");
+    // Reopened #4143 AC-5/8: the exemption rests on the registration, not on
+    // the path. Sitting in the canonical PM worktree is not yet being the
+    // resident PM, so until the store names this Session the landed-branch
+    // gate refuses it like any other landed checkout.
+    assert_eq!(
+        runtime.restore_admission(&session, &repo, None),
+        Err(super::startup::RestoreRefusal::LandedWorktree),
+        "a canonical PM path alone does not authorize a landed restore"
+    );
     gwt::pm_registry::try_register_pm(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
         pm_registration_fixture("session-own-pm", &own_pm_worktree),
         |_| false,
     )
     .expect("register the store's own PM");
-
-    assert_eq!(
-        runtime.restore_admission(&session, &repo, None),
-        Err(super::startup::RestoreRefusal::LandedWorktree),
-        "a canonical PM path alone does not authorize a landed restore"
-    );
-    gwt::pm_registry::mutate_pm_prefs(
-        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
-        |prefs| {
-            prefs.registration = Some(pm_registration_fixture(&session.id, &own_pm_worktree));
-        },
-    )
-    .expect("register the resident PM");
 
     runtime.restore_open_project_windows("tab-current");
 
