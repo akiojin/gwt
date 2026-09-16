@@ -4,6 +4,16 @@ on:
   pull_request:
     branches: [develop, main]
 
+# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
+# update-branch `synchronize` starts a fresh run, and without this group the
+# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
+# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
+# only this PR's older run of this workflow. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Issue #4134 AC-3: this job is redundant on Linux. `cargo test --workspace
   # --all-features` in test.yml compiles the same crates with the same features
@@ -49,6 +59,8 @@ jobs:
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       - name: Build workspace targets
         run: cargo build -p gwt-core -p gwt --all-features
@@ -61,7 +73,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-windows
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Check Windows compilation
         run: cargo check -p gwt-core -p gwt
@@ -82,7 +94,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-macos
+          shared-key: macos-workspace
         continue-on-error: true
       - name: Check macOS compilation
         run: cargo check -p gwt-core -p gwt
