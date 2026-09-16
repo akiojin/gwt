@@ -5395,6 +5395,16 @@ body {
   color: var(--color-text-muted);
 }
 
+/* Issue #4433: the socket dropped mid-cleanup. The cleanup itself is still
+   running, so this reads as a waiting state, not a failure. */
+.branch-cleanup-connection-status {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-state-needs-input);
+}
+
 .branch-cleanup-progress-list {
   display: grid;
   gap: 6px;
