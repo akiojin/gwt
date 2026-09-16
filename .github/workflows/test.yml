@@ -295,6 +295,8 @@ jobs:
         with:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
+      - name: Run verification reporter regressions
+        run: node --test crates/gwt/src/cli/verification_record/headed_e2e_reporter.test.cjs
       - name: Run frontend unit tests
         run: bash scripts/run-frontend-unit-tests.sh
         timeout-minutes: 10
