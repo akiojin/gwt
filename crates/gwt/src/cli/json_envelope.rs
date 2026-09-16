@@ -678,12 +678,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
+            let headed_e2e_commands = optional_string_vec(params, "headed_e2e_commands")?;
+            if headed_e2e_commands
+                .iter()
+                .any(|command| !commands.contains(command))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "headed_e2e_commands must name exact entries in commands".to_string(),
+                ));
+            }
             // Issue #3913: bound on the host admission wait.
             let max_wait_secs = optional_u64(params, "max_wait_secs")?;
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands,
                 max_wait_secs,
                 user_verification_result: optional_string(params, "user_verification_result")?,
+                headed_e2e_commands,
             })
         }
         "verify.adjudicate" => {
@@ -2171,6 +2181,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: Some(2),
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -2179,6 +2190,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -2188,6 +2200,20 @@ mod tests {
                 json!({"commands": ["git --version"], "max_wait_secs": "soon"})
             ),
             CliParseError::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn verify_run_rejects_unlisted_headed_command() {
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({
+                    "commands": ["cargo test"],
+                    "headed_e2e_commands": ["npx playwright test"]
+                })
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 
@@ -2266,10 +2292,7 @@ mod tests {
         let output = String::from_utf8_lossy(&env.stdout);
         assert_ne!(code, 0, "{output}");
         assert!(output.contains("autonomous"), "{output}");
-        assert!(
-            output.contains("deferred (autonomous execution)"),
-            "{output}"
-        );
+        assert!(output.contains("n/a (autonomous)"), "{output}");
         assert!(output.contains("verify.run"), "{output}");
         assert!(!repo.join("must-not-run").exists());
         assert_eq!(
@@ -2283,7 +2306,7 @@ mod tests {
             "verify.run",
             json!({
                 "commands": ["git --version"],
-                "user_verification_result": "deferred (autonomous execution)"
+                "user_verification_result": "n/a (autonomous)"
             }),
         );
         assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
@@ -2293,7 +2316,7 @@ mod tests {
                 .unwrap()
                 .user_verification_result
                 .as_deref(),
-            Some("deferred (autonomous execution)")
+            Some("n/a (autonomous)")
         );
 
         let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
