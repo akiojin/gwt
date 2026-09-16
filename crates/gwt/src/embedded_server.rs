@@ -1523,10 +1523,13 @@ impl gwt::cli::execution_state::ExecutionAdoptionPublisher for AgentAdoptionPubl
     }
 
     fn publish(&mut self, binding: gwt_agent::SessionExecutionBinding) {
-        let mut guard = self
-            .guard
-            .take()
-            .expect("adoption acquired its exact grant");
+        // Issue #4443 AC-10: publication without a held guard means the
+        // transaction never acquired this grant. Dropping the publication is a
+        // refusal the caller reports; panicking here reached the agent as an
+        // opaque `500 code=internal` from the adoption handler instead.
+        let Some(mut guard) = self.guard.take() else {
+            return;
+        };
         let mut principal = self.grant.principal().clone();
         principal.execution_authority = AgentExecutionAuthority::Active(Box::new(binding.clone()));
         guard
@@ -1967,11 +1970,20 @@ impl AgentCapabilityRegistry {
             request,
             &mut publisher,
         )?;
+        // Issue #4443 AC-10: a success that published no binding leaves the
+        // capability registry behind the durable record, so there is no receipt
+        // to return. Report it as the conflict it is — the `.expect()` that
+        // stood here panicked inside `spawn_blocking` and the handler's
+        // `Err(_)` arm answered `500 code=internal`.
+        let published = publisher.published.ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                "Host adoption settled the durable record but published no capability binding; run JSON operation `execution.status` and follow its `available_recoveries` before retrying",
+            )
+        })?;
         Ok(gwt::AgentExecutionAdoptionReceipt {
             schema_version: 1,
-            execution_binding: publisher
-                .published
-                .expect("successful Host adoption publishes its binding"),
+            execution_binding: published,
         })
     }
 
@@ -3642,9 +3654,13 @@ fn execution_binding_error_response(diagnostic_reason: &'static str) -> Response
         reason = diagnostic_reason,
         "Host-managed operation rejected an execution binding"
     );
+    // Issue #4443 AC-2: `authority_mismatch` is the refusal agents got stuck
+    // on, and "relaunch the Session" is not something an agent can do. Name the
+    // diagnosis operation it can run, whose `available_recoveries` resolves to
+    // the exact next operation for this record.
     let mut error = AgentWorkspaceUpdateError::new(
         AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
-        "Execution binding is missing, stale, or no longer current; relaunch the Session before retrying",
+        "Execution binding is missing, stale, or no longer current; run JSON operation `execution.status` and follow its `available_recoveries`, or relaunch the Session",
     );
     error.diagnostic_reason = Some(diagnostic_reason.into());
     workspace_update_error_response(StatusCode::CONFLICT, error)
@@ -3659,6 +3675,10 @@ struct AgentWorkspaceUpdateErrorResponse {
     diagnostic_reason: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mismatched_fields: Vec<String>,
+    /// Issue #4443 AC-2: the route out, as canonical operation names the agent
+    /// bridge is allowed to surface.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recovery_operations: Vec<String>,
 }
 
 fn workspace_update_error_response(
@@ -3683,6 +3703,7 @@ fn workspace_update_error_response(
             message: error.message,
             diagnostic_reason: error.diagnostic_reason,
             mismatched_fields: error.mismatched_fields,
+            recovery_operations: error.recovery_operations,
         }),
     )
         .into_response()
@@ -7762,6 +7783,176 @@ mod tests {
             HttpStatusCode::OK,
             "{}",
             response.text().unwrap()
+        );
+        server.shutdown();
+    }
+
+    /// Issue #4443 AC-10 / AC-2: no request may drive the adoption bridge to
+    /// `http_status=500 code=internal`, the shape the PM recorded when #3697's
+    /// 409 turned into a 500 in the same session. A caller-input refusal answers
+    /// `400 invalid_request`, and a state refusal answers `409` carrying the
+    /// operation the agent can actually run.
+    #[test]
+    fn execution_adoption_refuses_without_an_internal_server_error() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/legacy-adoption"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/legacy-adoption.git",
+            ],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            assert!(gwt_core::process::run_git_logged(&args, Some(&repo))
+                .unwrap()
+                .status
+                .success());
+        }
+        let repo = dunce::canonicalize(repo).unwrap();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4443,
+        };
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/legacy-adoption", gwt_agent::AgentId::Codex);
+        session.id = "legacy-adoption-successor".into();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            "legacy-adoption-predecessor",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        // The dead host left the flat record behind without its owner
+        // generation ledger: the state the relaunched Session inherits.
+        let trusted = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("trusted store for the fixture worktree");
+        let owners = trusted
+            .parent()
+            .expect("trusted store root")
+            .join("execution-owners");
+        assert!(owners.is_dir(), "fixture never wrote an owner ledger");
+        std::fs::remove_dir_all(&owners).unwrap();
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+        let runtime = Runtime::new().unwrap();
+        let (proxy, _) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue_bound(&repo, &session.id, binding.clone())
+            .unwrap();
+        let client = reqwest::blocking::Client::new();
+        let mut url = reqwest::Url::parse(&target.url).unwrap();
+        url.set_path("/internal/execution-adoption");
+        let adopt = |reason: &str| {
+            let response = client
+                .post(url.clone())
+                .bearer_auth(&target.token)
+                .json(&serde_json::json!({
+                    "schema_version": 1,
+                    "claimed_session_id": session.id,
+                    "reason": reason,
+                }))
+                .send()
+                .unwrap();
+            (response.status(), response.text().unwrap())
+        };
+
+        // A reserved-namespace reason is a caller input error. It used to reach
+        // the CLI guard and come back as an opaque `500 code=internal`.
+        let (status, body) = adopt("gwt:execution-recovery:v1:forged");
+        assert_ne!(
+            status,
+            HttpStatusCode::INTERNAL_SERVER_ERROR,
+            "a caller input error answered as an unhandled exception: {body}"
+        );
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST, "{body}");
+
+        // The inherited record refuses on state, and the refusal must name the
+        // operation this agent can run to get out of it.
+        let (status, body) = adopt("recover the dead host's record");
+        assert_ne!(
+            status,
+            HttpStatusCode::INTERNAL_SERVER_ERROR,
+            "a state refusal answered as an unhandled exception: {body}"
+        );
+        assert_eq!(status, HttpStatusCode::CONFLICT, "{body}");
+        let refusal = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(
+            refusal["recovery_operations"],
+            serde_json::json!(["execution.repair"]),
+            "the refusal names no recovery operation: {body}"
+        );
+
+        // AC-2: the route out must survive the agent-side bridge client, which
+        // previously reported only `code=` and `bridge_reason=`.
+        let bridge_target = gwt::HookForwardTarget {
+            url: target.url.clone(),
+            token: target.token.clone(),
+        };
+        let bridged = gwt::daemon_runtime::send_execution_adoption_via_agent_bridge(
+            &bridge_target,
+            &gwt::AgentExecutionAdoptionRequest {
+                schema_version: 1,
+                claimed_session_id: session.id.clone(),
+                reason: "recover the dead host's record".into(),
+            },
+            &session,
+        )
+        .expect_err("the inherited record refuses adoption");
+        assert!(
+            bridged.contains("execution.repair"),
+            "the agent-visible refusal dropped the Host's recovery route: {bridged}"
+        );
+        assert!(
+            !binding.identity.generation_id.is_empty(),
+            "fixture binding is structurally valid"
         );
         server.shutdown();
     }
