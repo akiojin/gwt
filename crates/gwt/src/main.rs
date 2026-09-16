@@ -1560,16 +1560,17 @@ enum UserEvent {
         project_root: PathBuf,
         ai_summaries: std::collections::HashMap<String, String>,
     },
-    /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
-    /// The handler runs the worktree reconcile AFTER the intake (so branches
-    /// already recorded elsewhere are not redundantly backfilled) and
+    /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished, and
+    /// ran the worktree reconcile AFTER the intake (so branches already
+    /// recorded elsewhere are not redundantly backfilled). The handler
     /// rebroadcasts the Workspace projection when anything was applied.
     WorkEventsIngested {
         project_root: PathBuf,
         changed: bool,
-        /// Issue #4378 AC-1: the worktree listing the startup ingest reused,
-        /// handed back so the reconcile does not list the worktrees again.
-        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
+        /// Issue #3752: the reconcile's local-branch result, computed on the
+        /// ingest worker. The reconcile used to run in the handler and stalled
+        /// the GUI event loop — and with it every pane request — for seconds.
+        local_worktree_branches: std::collections::HashSet<String>,
     },
     /// Issue #4378 AC-2: the startup generation reaper finished on the
     /// blocking worker; Issue Monitor launch deliveries held meanwhile replay.
@@ -9551,10 +9552,10 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
-                worktree_inventory,
+                local_worktree_branches,
             }) => {
                 let events =
-                    app.handle_work_events_ingested(project_root, changed, worktree_inventory);
+                    app.handle_work_events_ingested(project_root, changed, local_worktree_branches);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::StartupGenerationReaperCompleted) => {

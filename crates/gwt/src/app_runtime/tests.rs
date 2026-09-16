@@ -34945,8 +34945,12 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
 }
 
 /// Issue #4378 AC-1: bootstrap lists each project's worktrees once and hands
-/// that inventory to the startup ingest, which carries it back for the
-/// reconcile. Neither later step lists the worktrees again.
+/// that inventory to the startup ingest, whose reconcile reuses it instead of
+/// listing again. Issue #3752 moved that reconcile from the GUI event loop onto
+/// the ingest worker, so the completion event now carries the reconcile's
+/// result rather than the inventory. The reuse itself is pinned by
+/// `handle_work_events_ingested_reconciles_from_the_startup_inventory`, which
+/// hands the reconcile an inventory for a path that is not a repository at all.
 #[test]
 fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
     let _env_lock = env_test_lock()
@@ -34966,15 +34970,16 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
     runtime.bootstrap();
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    let inventory = loop {
+    let branches = loop {
         let carried = events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find_map(|event| match event {
                 UserEvent::WorkEventsIngested {
-                    worktree_inventory, ..
-                } => Some(worktree_inventory.clone()),
+                    local_worktree_branches,
+                    ..
+                } => Some(local_worktree_branches.clone()),
                 _ => None,
             });
         if let Some(carried) = carried {
@@ -34986,12 +34991,9 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
         );
         thread::sleep(Duration::from_millis(20));
     };
-    let inventory = inventory.expect("the startup ingest must carry the bootstrap inventory");
     assert!(
-        inventory
-            .iter()
-            .any(|entry| same_worktree_path(&entry.path, &repo)),
-        "the carried inventory is the one bootstrap listed: {inventory:?}"
+        branches.contains("develop"),
+        "the worker's reconcile ran over the bootstrap listing and handed back          its branch set: {branches:?}"
     );
 }
 
@@ -56353,8 +56355,14 @@ fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
     // on a previously launched project).
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.reconcile_workspace_worktrees(&repo);
-    runtime.reconcile_workspace_worktrees(&repo);
+    runtime.install_local_worktree_branches(
+        &repo,
+        super::reconcile_workspace_worktrees_off_loop(&repo, None),
+    );
+    runtime.install_local_worktree_branches(
+        &repo,
+        super::reconcile_workspace_worktrees_off_loop(&repo, None),
+    );
 
     let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
     let projection =
@@ -56649,7 +56657,10 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     );
     session.save(&runtime.sessions_dir).expect("save session");
 
-    runtime.reconcile_workspace_worktrees(&repo);
+    runtime.install_local_worktree_branches(
+        &repo,
+        super::reconcile_workspace_worktrees_off_loop(&repo, None),
+    );
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -59202,9 +59213,10 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
     );
 }
 
-/// SPEC-2359 W-16 (FR-387): the ingest completion handler runs the worktree
-/// reconcile AFTER the intake (intake → reconcile order) and rebroadcasts
-/// the projection only when the intake applied events.
+/// SPEC-2359 W-16 (FR-387): the ingest completion handler installs the branch
+/// set the worker's reconcile produced (Issue #3752 moved the reconcile itself
+/// onto that worker, keeping intake → reconcile order) and rebroadcasts the
+/// projection only when the intake applied events.
 #[test]
 fn handle_work_events_ingested_broadcasts_only_on_change() {
     let _env_lock = env_test_lock()
@@ -59236,7 +59248,7 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
     gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
         .expect("seed work record");
 
-    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false, None);
+    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false, HashSet::new());
     assert!(
         unchanged.is_empty(),
         "no-op ingest must not rebroadcast the projection"
@@ -59247,7 +59259,7 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
         "a no-op ingest must not even ask for a rebuild"
     );
 
-    let changed = runtime.handle_work_events_ingested(repo.clone(), true, None);
+    let changed = runtime.handle_work_events_ingested(repo.clone(), true, HashSet::new());
     assert!(
         changed
             .iter()
@@ -59291,7 +59303,17 @@ fn handle_work_events_ingested_reconciles_from_the_startup_inventory() {
         is_active: false,
     }]);
 
-    runtime.handle_work_events_ingested(repo.clone(), false, Some(inventory));
+    // Issue #3752: the reconcile now runs on the ingest worker, so this is the
+    // worker's half — it must still read the inventory the startup ingest
+    // carried back instead of enumerating the worktrees again.
+    let local_branches = super::reconcile_workspace_worktrees_off_loop(&repo, Some(&inventory));
+    assert!(
+        local_branches.contains("work/shared"),
+        "the reconcile must use the inventory the startup ingest carried back"
+    );
+
+    // ...and the handler's half installs it for the remote_only view marking.
+    runtime.handle_work_events_ingested(repo.clone(), false, local_branches);
 
     assert!(
         runtime
@@ -59299,7 +59321,7 @@ fn handle_work_events_ingested_reconciles_from_the_startup_inventory() {
             .borrow()
             .get(&repo)
             .is_some_and(|branches| branches.contains("work/shared")),
-        "the reconcile must use the inventory the startup ingest carried back"
+        "the branch set must reach the runtime the view reads"
     );
 }
 

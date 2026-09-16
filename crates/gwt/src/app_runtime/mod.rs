@@ -3045,16 +3045,16 @@ impl AppRuntime {
     }
 
     /// SPEC-2359 W-16 (FR-387): run the cross-machine work events ingest on a
-    /// background thread, then hand control back to the event loop via
-    /// [`UserEvent::WorkEventsIngested`] so the worktree reconcile runs in
-    /// intake → reconcile order (plan decision 9).
+    /// background thread, which then runs the worktree reconcile in
+    /// intake → reconcile order (plan decision 9) and hands the event loop its
+    /// result through [`UserEvent::WorkEventsIngested`].
     pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
         self.spawn_work_events_ingest_with_inventory(project_root, force, None);
     }
 
     /// Issue #4378 AC-1: `worktree_inventory` is a listing the caller already
-    /// holds. The ingest reads its worktree sources from it and hands it back
-    /// through [`UserEvent::WorkEventsIngested`] for the reconcile.
+    /// holds. The ingest reads its worktree sources from it and the worker's
+    /// reconcile reuses it instead of enumerating the worktrees again.
     pub(crate) fn spawn_work_events_ingest_with_inventory(
         &self,
         project_root: PathBuf,
@@ -3115,27 +3115,36 @@ impl AppRuntime {
                 tracing::warn!(%error, "resume owner bleed repair failed");
                 false
             });
+            // Issue #3752: the reconcile only has to follow the intake — it
+            // never had to run on the GUI event loop, where it blocked every
+            // pane request behind a `git worktree` enumeration and a home
+            // projection backfill. Run it here, still strictly after the
+            // intake, and hand the loop the one result it installs.
+            let local_worktree_branches = reconcile_workspace_worktrees_off_loop(
+                &project_root,
+                worktree_inventory.as_deref().map(Vec::as_slice),
+            );
             proxy.send(UserEvent::WorkEventsIngested {
                 project_root,
                 changed: summary.changed() || repaired,
-                worktree_inventory,
+                local_worktree_branches,
             });
         });
     }
 
-    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]:
-    /// reconcile worktrees after the intake, kick the merge scan, and
+    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]: install
+    /// the branch set the worker's reconcile produced, kick the merge scan, and
     /// rebroadcast the projection when the intake applied anything.
     pub(crate) fn handle_work_events_ingested(
         &mut self,
         project_root: PathBuf,
         changed: bool,
-        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
+        local_worktree_branches: std::collections::HashSet<String>,
     ) -> Vec<OutboundEvent> {
-        match worktree_inventory {
-            Some(entries) => self.reconcile_workspace_worktrees_from(&project_root, &entries),
-            None => self.reconcile_workspace_worktrees(&project_root),
-        }
+        // Issue #3752: the reconcile itself already ran on the ingest worker,
+        // in intake → reconcile order. Installing its branch set is the only
+        // part that needs the event loop.
+        self.install_local_worktree_branches(&project_root, local_worktree_branches);
         self.spawn_work_merge_status_scan(project_root.clone());
         self.spawn_work_tip_subjects_scan(project_root.clone());
         self.spawn_work_pr_titles_scan(project_root.clone());
@@ -3439,63 +3448,19 @@ impl AppRuntime {
         });
     }
 
-    /// SPEC-2359 Phase W-15 (FR-379/FR-380/FR-382): reconcile locally existing
-    /// worktrees with the persisted Work records. Worktrees without a record
-    /// are backfilled (event into the worktree's own `.gwt/work/events.jsonl`
-    /// plus the home works projection) so the Workspace list shows the union
-    /// of existing worktrees and unclosed records. Errors are logged and
-    /// swallowed — reconciliation must never block startup or project open.
-    pub(crate) fn reconcile_workspace_worktrees(&self, project_root: &Path) {
-        let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
-            Ok(entries) => entries,
-            Err(error) => {
-                tracing::warn!(
-                    "workspace worktree reconcile: enumerate failed for {}: {error}",
-                    project_root.display()
-                );
-                return;
-            }
-        };
-        self.reconcile_workspace_worktrees_from(project_root, &entries);
-    }
-
-    /// Issue #4378 AC-1: the reconcile against a listing the caller holds.
-    pub(crate) fn reconcile_workspace_worktrees_from(
+    /// SPEC-2359 W16-3 (FR-390): publish the local-worktree branch set the
+    /// remote_only view marking reads (cache lookup only — no git spawn at
+    /// view time). This is the whole loop-visible result of a reconcile, which
+    /// is why Issue #3752 can run the reconcile itself off the event loop and
+    /// hand only this back.
+    pub(crate) fn install_local_worktree_branches(
         &self,
         project_root: &Path,
-        entries: &[gwt::worktree_inventory::WorktreeEntry],
+        local_branches: std::collections::HashSet<String>,
     ) {
-        // SPEC-2359 W16-3 (FR-390): refresh the local-worktree branch set the
-        // remote_only view marking reads (cache lookup only — no git spawn at
-        // view time).
-        let local_branches: std::collections::HashSet<String> = entries
-            .iter()
-            .filter_map(|entry| entry.branch.as_deref())
-            .map(crate::runtime_support::normalize_branch_name)
-            .filter(|branch| !branch.is_empty())
-            .collect();
         self.local_worktree_branches
             .borrow_mut()
             .insert(project_root.to_path_buf(), local_branches);
-        let sources = gwt::worktree_inventory::worktree_reconcile_sources(entries);
-        if sources.is_empty() {
-            return;
-        }
-        match gwt_core::workspace_projection::reconcile_worktree_work_items(
-            project_root,
-            &sources,
-            chrono::Utc::now(),
-        ) {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(
-                "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
-                project_root.display()
-            ),
-            Err(error) => tracing::warn!(
-                "workspace worktree reconcile failed for {}: {error}",
-                project_root.display()
-            ),
-        }
     }
 
     /// SPEC-2970 FR-009/FR-013: persist the Claude account-usage opt-in and
@@ -9282,6 +9247,70 @@ impl AppRuntime {
         self.persist_dispatcher.enqueue(snapshot);
         Ok(())
     }
+}
+
+/// SPEC-2359 Phase W-15 (FR-379/FR-380/FR-382): reconcile locally existing
+/// worktrees with the persisted Work records. Worktrees without a record are
+/// backfilled (event into the worktree's own `.gwt/work/events.jsonl` plus the
+/// home works projection) so the Workspace list shows the union of existing
+/// worktrees and unclosed records. Errors are logged and swallowed —
+/// reconciliation must never block startup or project open.
+///
+/// Issue #3752: this enumerates `git worktree` and writes the home projection,
+/// and it ran on the GUI event loop as the `WorkEventsIngested` continuation —
+/// 3,225ms of measured stall in one burst. The GUI event loop is also what
+/// answers the pane WebSocket, so a `pane.close` / `pane.list` round trip waits
+/// behind it. It is a free function taking no runtime borrow so the ingest
+/// worker that already ran the intake can run it too, in the same
+/// intake → reconcile order; the caller installs the returned branch set, which
+/// is the reconcile's only loop-visible result.
+pub(crate) fn reconcile_workspace_worktrees_off_loop(
+    project_root: &Path,
+    inventory: Option<&[gwt::worktree_inventory::WorktreeEntry]>,
+) -> std::collections::HashSet<String> {
+    let enumerated;
+    let entries = match inventory {
+        Some(entries) => entries,
+        None => match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
+            Ok(entries) => {
+                enumerated = entries;
+                enumerated.as_slice()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "workspace worktree reconcile: enumerate failed for {}: {error}",
+                    project_root.display()
+                );
+                return std::collections::HashSet::new();
+            }
+        },
+    };
+    let local_branches: std::collections::HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| entry.branch.as_deref())
+        .map(crate::runtime_support::normalize_branch_name)
+        .filter(|branch| !branch.is_empty())
+        .collect();
+    let sources = gwt::worktree_inventory::worktree_reconcile_sources(entries);
+    if sources.is_empty() {
+        return local_branches;
+    }
+    match gwt_core::workspace_projection::reconcile_worktree_work_items(
+        project_root,
+        &sources,
+        chrono::Utc::now(),
+    ) {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(
+            "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
+            project_root.display()
+        ),
+        Err(error) => tracing::warn!(
+            "workspace worktree reconcile failed for {}: {error}",
+            project_root.display()
+        ),
+    }
+    local_branches
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
