@@ -178,11 +178,25 @@ fn format_workspace_help() -> String {
         "  workspace.update                       Set Work status fields and Agent purpose/focus",
         "  workspace.create | workspace.ensure    Create or ensure a Work assignment",
         "  workspace.join | workspace.candidates  Join/list Work candidates",
+        "  workspace.work_prune                   Repair stale Works: close closed-owner Works,",
+        "                                         discard orphaned placeholders, detach container",
+        "                                         refs owned by another canonical Work",
+        "  workspace.projection_list              List Workspace projections (--stale/--all)",
+        "  workspace.projection_prune             Archive/delete stale Workspace projections",
+        "  workspace.store_consolidate            Move durable Workspace state to the split root",
         "",
         "Key params:",
         "  purpose                                Short Agent/window title purpose",
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
+        "  ids                                    Scope work_prune/projection_prune to these ids",
+        "  dry_run                                Both prune operations default to dry-run;",
+        "                                         pass false to apply",
+        "",
+        "Resolving an ambiguous execution container:",
+        "  1. workspace.candidates                List the Works on this container",
+        "  2. workspace.work_prune {\"ids\":[<stale Work id>]}   Detach the stale ref (dry-run first)",
+        "  3. workspace.join {\"workspace_id\":<canonical Work id>}  Attach explicitly if needed",
         "",
     ]
     .join("\n")
@@ -946,6 +960,32 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "actions help must mention {expected}, got:\n{help}"
+            );
+        }
+    }
+
+    /// Issue #4465 AC-6'': every workspace operation that exists must be
+    /// discoverable from `gwtd --help workspace`. `workspace.work_prune` and
+    /// the projection operations were absent, so a refusal telling an agent to
+    /// prune had no discoverable route at all — the help, the refusal text and
+    /// four guessed names all missed on 2026-09-16.
+    #[test]
+    fn workspace_family_help_lists_every_workspace_operation() {
+        let help = family_help("workspace").expect("workspace family help");
+        for expected in [
+            "workspace.update",
+            "workspace.create",
+            "workspace.ensure",
+            "workspace.join",
+            "workspace.candidates",
+            "workspace.work_prune",
+            "workspace.projection_list",
+            "workspace.projection_prune",
+            "workspace.store_consolidate",
+        ] {
+            assert!(
+                help.contains(expected),
+                "workspace help must mention {expected}, got:\n{help}"
             );
         }
     }
