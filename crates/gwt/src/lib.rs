@@ -116,14 +116,16 @@ pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_search::{search_project_index, work_advisory};
 pub use index_worker::{
-    aggregate_current_worktree_index_status_for_path, aggregate_project_index_status_for_path,
-    auto_repair_unhealthy_scopes, auto_repair_unhealthy_targets, build_aggregated_status_view,
-    collect_unhealthy_rebuild_targets, collect_unhealthy_rebuild_targets_for_project_root,
-    default_rebuild_runner, global_aggregated_status_cache, list_worktree_probe_inputs,
-    manual_rebuild_runner, parse_scope_health, rebuild_index_target, AggregatedStatusCache,
-    IndexRebuildRunnerFn, IndexRebuildScope, IndexRebuildSpawner, ProjectIndexScopes,
-    ProjectIndexStatusState, ProjectIndexStatusView, RebuildProgress, RebuildTarget,
-    ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
+    aggregate_current_worktree_index_status_for_path,
+    aggregate_current_worktree_index_status_with_inventory,
+    aggregate_project_index_status_for_path, auto_repair_unhealthy_scopes,
+    auto_repair_unhealthy_targets, build_aggregated_status_view, collect_unhealthy_rebuild_targets,
+    collect_unhealthy_rebuild_targets_for_project_root, default_rebuild_runner,
+    global_aggregated_status_cache, list_worktree_probe_inputs, manual_rebuild_runner,
+    parse_scope_health, rebuild_index_target, AggregatedStatusCache, IndexRebuildRunnerFn,
+    IndexRebuildScope, IndexRebuildSpawner, ProjectIndexScopes, ProjectIndexStatusState,
+    ProjectIndexStatusView, RebuildProgress, RebuildTarget, ScopeHealthView, WorktreeMeta,
+    WorktreeProbeInput, WorktreeProbeOutcome,
 };
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,

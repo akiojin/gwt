@@ -724,16 +724,38 @@ Rest of the body is human prose, not a real SPEC.\n"
         leftover.iter().map(|e| e.file_name()).collect::<Vec<_>>()
     );
 
-    // load_entry must NOT surface this entry: the SPEC header is present
-    // but parse failed, so exposing an empty SpecBody would let
-    // `SpecOps::write_section` recompute the routing from scratch and
-    // overwrite the body's sections index, orphaning any content in
-    // comments referenced by the malformed index.
+    // Issue #4392: load_entry surfaces the entry with an empty SpecBody and
+    // the parse error, instead of hiding it. Hiding it made every validated
+    // read (issue.view / edit / comment) fail forever, because the receipt
+    // renewal could never reload what it had just written.
+    // `SpecOps::write_section` refuses entries carrying the marker, so the
+    // orphaned-comment hazard stays closed.
+    let entry = cache
+        .load_entry(IssueNumber(123))
+        .expect("load_entry must surface header-present-but-malformed entries");
+    assert_eq!(entry.snapshot.body, body);
+    assert!(entry.spec_body.sections.is_empty());
     assert!(
-        cache.load_entry(IssueNumber(123)).is_none(),
-        "load_entry must hide header-present-but-malformed entries to \
-         prevent SpecOps::write_section from corrupting them"
+        entry
+            .spec_parse_error
+            .as_deref()
+            .is_some_and(|error| error.contains("broken index map")),
+        "{:?}",
+        entry.spec_parse_error
     );
+
+    assert!(
+        cache
+            .renew_validation_receipt_if_current(&snapshot)
+            .unwrap(),
+        "a malformed SPEC body must still receive a validation receipt"
+    );
+    assert!(matches!(
+        cache
+            .load_validated_entry(IssueNumber(123), Duration::from_secs(60))
+            .unwrap(),
+        ValidatedCacheEntry::Fresh(_)
+    ));
 }
 
 // Companion to the previous test: a plain Issue (no `<!-- gwt-spec id=...`
