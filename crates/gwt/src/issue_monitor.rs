@@ -29748,6 +29748,10 @@ mod tests {
 
     #[test]
     fn quota_account_switch_releases_provider_and_issue_holds_across_rebase() {
+        // This test is about which account a hold belongs to across a rebase,
+        // not about how many refusals form one (Issue #4366), so the single
+        // refusal below stands in for a formed hold.
+        let _quota_hold = hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = account_bound_quota_fixture();
         let before = monitor.prefs();
         assert!(!monitor.reconcile_provider_account("codex", "account-a", "2026-09-02T09:02:00Z"));
