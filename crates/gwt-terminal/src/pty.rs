@@ -825,6 +825,22 @@ impl PtyHandle {
             })
     }
 
+    /// Issue #4405 AC-2: lift this tree's CPU cap while it contains the
+    /// host-wide verification lease holder, and restore it afterwards.
+    /// Returns whether the cap changed.
+    pub fn relieve_cap_for_lease_holder(
+        &self,
+        holder_pid: Option<u32>,
+    ) -> Result<bool, TerminalError> {
+        let mut group = match self.process_group.lock() {
+            Ok(group) => group,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group
+            .relieve_cap_for_lease_holder(holder_pid)
+            .map_err(|details| TerminalError::PtyIoError { details })
+    }
+
     /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
     /// run on the GUI event loop and freeze every `pane.*` operation during
     /// consecutive live-PTY closes (Issue #3705).
