@@ -529,3 +529,257 @@ async function installBranchDetailCheckBackend(page) {
     });
   });
 }
+
+/* Issue #4433 — cleanup progress/result used to be replied to the originating
+ * client only, so a WebView reload mid-cleanup left the new client with no
+ * events and the UI rendered a failure that never happened. This spec drives
+ * the reachable Workspace cleanup surface in a real Chromium (dark + light
+ * projects) and proves the reconnect path.
+ */
+test.describe("Issue #4433 branch cleanup reconnect", () => {
+  test.use({
+    deviceScaleFactor: 1,
+    viewport: { width: 1440, height: 900 },
+  });
+
+  test("a reconnect mid-cleanup re-syncs instead of showing a false failure", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installWorkspaceCleanupBackend(page);
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-overview-root")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.locator("[data-action='cleanup-merged-workspaces']").click();
+    const modal = page.locator("#branch-cleanup-modal");
+    await expect(modal).toHaveClass(/open/);
+    await modal.getByRole("button", { name: "Run cleanup" }).click();
+
+    // AC-1: the run is tagged so the backend can address it by operation.
+    await page.waitForFunction(() =>
+      (window as any).__sent?.some((m: any) => m.kind === "run_branch_cleanup"),
+    );
+    const runCall = await page.evaluate(() =>
+      (window as any).__sent.find((m: any) => m.kind === "run_branch_cleanup"),
+    );
+    expect(typeof runCall.operation_id).toBe("string");
+    expect(runCall.operation_id.length).toBeGreaterThan(0);
+
+    await page.evaluate((operationId) => {
+      (window as any).__cleanupFixture.emit({
+        kind: "branch_cleanup_progress",
+        id: "workspace-window-1",
+        operation_id: operationId,
+        branch: "work/cleanup-one",
+        execution_branch: "work/cleanup-one",
+        index: 1,
+        total: 1,
+        phase: "running",
+        message: "Removing worktree for work/cleanup-one",
+      });
+    }, runCall.operation_id);
+    await expect(modal).toContainText("Cleaning 1 of 1: work/cleanup-one");
+
+    // The socket drops mid-cleanup, exactly as a WebView reload would.
+    await page.evaluate(() => (window as any).__cleanupFixture.close());
+
+    // AC-5: the cleanup is still running on the backend, so the UI must not
+    // claim it failed.
+    await expect(modal).toContainText("Reconnecting to cleanup status");
+    await expect(modal).not.toContainText("Cleanup result");
+    await expect(modal).not.toContainText("Connection lost");
+    await expect(modal.locator("h2")).toHaveText("Cleaning up branches");
+
+    // AC-2: the reconnected client re-subscribes and the fixture replays the
+    // operation's final state to it.
+    await page.waitForFunction(
+      (operationId) =>
+        (window as any).__sent?.some(
+          (m: any) =>
+            m.kind === "sync_branch_cleanup" && m.operation_id === operationId,
+        ),
+      runCall.operation_id,
+      { timeout: 15_000 },
+    );
+    await expect(modal).toContainText("Cleanup result");
+    await expect(modal).toContainText("success 1");
+    await expect(modal).toContainText("Deleted local branch and worktree");
+
+    // AC-3: closing the result releases the backend snapshot.
+    await modal.getByRole("button", { name: "Close" }).click();
+    const clearCall = await page.evaluate(() =>
+      (window as any).__sent.find(
+        (m: any) => m.kind === "clear_branch_cleanup_status",
+      ),
+    );
+    expect(clearCall).toMatchObject({
+      kind: "clear_branch_cleanup_status",
+      id: "workspace-window-1",
+    });
+    expect(clearCall.operation_id).toBe(runCall.operation_id);
+
+    expect(consoleErrors.join(" | ")).toBe("");
+    expect(pageErrors.join(" | ")).toBe("");
+  });
+});
+
+async function installWorkspaceCleanupBackend(page: any) {
+  await page.addInitScript(() => {
+    (window as any).__sent = [];
+
+    const workspaceState = {
+      kind: "workspace_state",
+      workspace: {
+        app_version: "playwright",
+        tabs: [
+          {
+            id: "tab-1",
+            title: "Fixture Project",
+            project_root: "/fixture",
+            kind: "git",
+            workspace: {
+              viewport: { x: 0, y: 0, zoom: 1 },
+              windows: [
+                {
+                  id: "workspace-window-1",
+                  title: "Workspace",
+                  preset: "work",
+                  geometry: { x: 80, y: 80, width: 1280, height: 760 },
+                  z_index: 1,
+                  status: "running",
+                  minimized: false,
+                  maximized: false,
+                  pre_maximize_geometry: null,
+                  persist: true,
+                  purpose_title: null,
+                  dynamic_title: null,
+                  dynamic_title_detail: null,
+                  agent_id: null,
+                  agent_color: null,
+                  tab_group_id: null,
+                  tab_group_active: false,
+                },
+              ],
+            },
+          },
+        ],
+        active_tab_id: "tab-1",
+        recent_projects: [],
+      },
+    };
+
+    const projection = {
+      kind: "active_work_projection",
+      projection: {
+        id: "workspace-current",
+        title: "Fixture",
+        status_category: "active",
+        status_text: "",
+        summary: "",
+        owner: null,
+        branch: null,
+        workspaces: [],
+        active_works: [
+          {
+            id: "work-cleanup-one",
+            title: "Merged work",
+            status_category: "idle",
+            lifecycle_state: "paused",
+            branch: "work/cleanup-one",
+            worktree_path: "/fixture/work/cleanup-one",
+            merged_into_base: true,
+            active_agents: 0,
+            blocked_agents: 0,
+            agents: [],
+            cleanup_candidate: {
+              branch: "work/cleanup-one",
+              remote_delete_available: false,
+              reason: "merged",
+            },
+          },
+        ],
+        unassigned_agents: [],
+        agents: [],
+        journal_entries: [],
+      },
+    };
+
+    const cleanupResult = {
+      kind: "branch_cleanup_result",
+      id: "workspace-window-1",
+      results: [
+        {
+          branch: "work/cleanup-one",
+          execution_branch: "work/cleanup-one",
+          status: "success",
+          message: "Deleted local branch and worktree",
+        },
+      ],
+    };
+
+    class FixtureWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      url: string;
+      readyState: number;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        this.readyState = FixtureWebSocket.CONNECTING;
+        (window as any).__cleanupFixture = this;
+        setTimeout(() => {
+          this.readyState = FixtureWebSocket.OPEN;
+          this.dispatchEvent(new Event("open"));
+        }, 0);
+      }
+
+      send(raw: string) {
+        const message = JSON.parse(raw);
+        (window as any).__sent.push(message);
+        if (message.kind === "frontend_ready") {
+          this.emit(workspaceState);
+          setTimeout(() => this.emit(projection), 0);
+          return;
+        }
+        if (message.kind === "sync_branch_cleanup") {
+          // The backend replays the operation's current state to whichever
+          // client asks, not just the one that started it.
+          this.emit({ ...cleanupResult, operation_id: message.operation_id });
+        }
+      }
+
+      close() {
+        this.readyState = FixtureWebSocket.CLOSED;
+        this.dispatchEvent(new CloseEvent("close"));
+      }
+
+      emit(payload: unknown) {
+        setTimeout(() => {
+          if (this.readyState !== FixtureWebSocket.OPEN) return;
+          this.dispatchEvent(
+            new MessageEvent("message", { data: JSON.stringify(payload) }),
+          );
+        }, 0);
+      }
+    }
+
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      value: FixtureWebSocket,
+    });
+  });
+}
