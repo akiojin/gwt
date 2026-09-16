@@ -50,6 +50,9 @@ mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+// Unix has no tree-wide CPU cap to lift (Issue #4405).
+#[cfg(windows)]
+mod verification_cap_relief;
 mod work_events_ingest;
 mod workspace_session_registry;
 
@@ -9004,6 +9007,8 @@ fn main() -> std::io::Result<()> {
             let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
         }),
     );
+    #[cfg(windows)]
+    verification_cap_relief::spawn(pty_writers.clone());
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
