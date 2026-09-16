@@ -205,7 +205,11 @@ fn degraded_qos_class() -> Option<&'static str> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+// Only `spawn` reads this, and `spawn` exists as a real implementation on Unix
+// alone — Windows gets the stub below. Without the `unix` half of the gate the
+// function is unreachable there and `-D warnings` fails the Windows Lint job
+// while every macOS and Linux check stays green.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn degraded_qos_class() -> Option<&'static str> {
     None
 }
@@ -232,6 +236,10 @@ pub fn spawn(_request: &VerificationSpawnRequest) -> Result<VerificationChild, S
 
 /// Explain a child that did not inherit the scheduling treatment the work
 /// deserves (AC-6). `None` means it did.
+///
+/// Unix-only for the same reason as [`degraded_qos_class`]: its only caller is
+/// the Unix `spawn`.
+#[cfg(unix)]
 fn priority_reason(nice: Option<i32>, degraded_qos: Option<&str>) -> Option<String> {
     let mut reasons = Vec::new();
     match nice {
@@ -267,11 +275,7 @@ fn observed_nice(pid: u32) -> Option<i32> {
     Some(unsafe { libc::getpriority(libc::PRIO_PROCESS as _, pid as libc::id_t) })
 }
 
-#[cfg(not(unix))]
-fn observed_nice(_pid: u32) -> Option<i32> {
-    None
-}
-
+#[cfg(unix)]
 fn open_transcript(path: &std::path::Path) -> Result<std::fs::File, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

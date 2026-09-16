@@ -48,13 +48,13 @@ impl VerificationHost {
     }
 }
 
-/// Decide where a run's commands are launched, or refuse the run.
+/// Decide where a run's commands are launched.
 ///
-/// A refusal is deliberate and final (AC-5): the calling process runs at a
-/// degraded nice value it cannot lower, so spawning in place would hand every
-/// command the agent launch policy's priority — the 54x starvation #4405
-/// measured. Silently doing it anyway is the failure mode the check exists to
-/// prevent, so there is no fallback.
+/// The only error this returns is a malformed [`SPAWN_HOST_ENV`]. Placement
+/// itself always succeeds: when no daemon can take the workload it stays in the
+/// agent tree and the note explains why, rather than refusing. See
+/// [`gwt_core::verification_priority::decide_placement`] for why the refusal is
+/// a separate change.
 pub(crate) fn resolve(worktree: &Path) -> Result<(VerificationHost, String), String> {
     resolve_with(
         worktree,
@@ -65,17 +65,15 @@ pub(crate) fn resolve(worktree: &Path) -> Result<(VerificationHost, String), Str
 /// Set by a launcher that has already decided its priority is acceptable, so
 /// gwt must not look for an escape.
 ///
-/// This is what makes the refusal above a refusal of *implicit* fallback
-/// rather than of the whole in-tree path: a harness that started gwtd itself,
-/// or a test exercising the record rather than the placement, states the
-/// decision instead of having gwt guess it. Every such run says so in its
-/// transcript and in its lease record, so the choice never travels silently
-/// with the evidence.
+/// A harness that started gwtd itself, or a test exercising the record rather
+/// than the placement, states the decision instead of having gwt guess it.
+/// Every such run says so in its transcript and in its lease record, so the
+/// choice never travels silently with the evidence.
 const SPAWN_HOST_ENV: &str = "GWT_VERIFY_SPAWN_HOST";
 const SPAWN_HOST_ENV_INHERIT: &str = "inherit";
 
 /// [`resolve`] with the launcher's priority supplied rather than observed, so
-/// the refusal can be tested without renicing the test runner.
+/// placement can be tested without renicing the test runner.
 fn resolve_with(
     worktree: &Path,
     launcher: gwt_core::verification_priority::LauncherPriority,
@@ -108,7 +106,6 @@ fn resolve_with(
 
     let (availability, endpoint) = locate(worktree);
     match decide_placement(launcher, &availability) {
-        SpawnPlacement::Reject { message } => Err(message),
         SpawnPlacement::Inherit { reason } => Ok((
             VerificationHost::Inherit,
             format!("spawn-host: inherit ({reason})\n"),
@@ -134,14 +131,14 @@ fn resolve_with(
 /// The lease record's answer to "is this holder's workload inside the agent
 /// tree, and at what priority" (Issue #4409 AC-4).
 ///
-/// `refused` is a real answer, not an error: a holder that cannot escape the
-/// tree will not run anything, and a waiter deciding whether to keep queueing
-/// needs to see that.
+/// `unknown` covers the one case placement cannot answer — a malformed
+/// [`SPAWN_HOST_ENV`] — because a waiter reading this is deciding whether to
+/// keep queueing and needs a value rather than a gap.
 pub(crate) fn describe_for_lease(worktree: &Path) -> (String, Option<i32>) {
     let nice = gwt_core::verification_priority::LauncherPriority::current().nice;
     let label = match resolve(worktree) {
         Ok((host, _)) => host.label().to_string(),
-        Err(_) => "refused".to_string(),
+        Err(_) => "unknown".to_string(),
     };
     (label, nice)
 }
@@ -297,17 +294,21 @@ mod tests {
         (guard, cleared)
     }
 
-    /// AC-5: a degraded launcher with no daemon to escape to is refused. The
-    /// refusal is the point — an in-tree fallback here would silently hand the
-    /// matrix the agent's nice value, which is the defect #4409 exists to fix.
+    /// A degraded launcher with no daemon to escape to runs in place, and the
+    /// note carries the reason into the run's transcript and lease record.
+    ///
+    /// Refusing instead is the change that has to wait: it would have stopped
+    /// every agent worktree, starting with the one implementing it.
     #[test]
-    fn a_degraded_launcher_without_a_daemon_is_refused() {
+    fn a_degraded_launcher_without_a_daemon_runs_in_place_and_says_why() {
         let _env = without_declared_spawn_host();
         let dir = scratch();
-        let error = resolve_with(dir.path(), LauncherPriority { nice: Some(10) })
-            .expect_err("no daemon can host this worktree");
-        assert!(error.contains("nice 10"), "{error}");
-        assert!(error.contains("no gwt daemon is reachable"), "{error}");
+        let (host, note) = resolve_with(dir.path(), LauncherPriority { nice: Some(10) })
+            .expect("placement never refuses");
+        assert_eq!(host.label(), "inherit");
+        assert!(note.contains("nice 10"), "{note}");
+        assert!(note.contains("no gwt daemon is reachable"), "{note}");
+        assert!(note.contains("The run continues"), "{note}");
     }
 
     /// The same launcher at baseline priority runs in place: there is nothing
@@ -331,7 +332,7 @@ mod tests {
         let dir = scratch();
         let (label, _) = describe_for_lease(dir.path());
         assert!(
-            matches!(label.as_str(), "inherit" | "daemon" | "refused"),
+            matches!(label.as_str(), "inherit" | "daemon"),
             "unexpected lease spawn-host label: {label}"
         );
     }

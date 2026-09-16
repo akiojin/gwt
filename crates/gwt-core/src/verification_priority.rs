@@ -59,26 +59,28 @@ pub enum DaemonAvailability {
 /// How the verification command should be launched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnPlacement {
-    /// Launch it directly from this process: nothing would be gained by
-    /// escaping, because this process is already at baseline priority.
+    /// Launch it directly from this process, and say why the escape did not
+    /// happen so the run's own record carries the answer.
     Inherit { reason: String },
     /// Hand it to the daemon, which launches it outside the agent tree.
     Delegate,
-    /// Refuse to run. Escaping is required and no host can do it.
-    Reject { message: String },
 }
 
 /// Decide where one verification command is launched from.
 ///
-/// The two refusal-shaped conditions are deliberately *not* symmetric
-/// (Issue #4409 AC-5 / AC-6):
+/// **This never refuses.** An earlier revision refused when a degraded
+/// launcher had no daemon to escape to, on the reasoning that a missing daemon
+/// is a configuration problem the caller can fix. Shipping that gate on its own
+/// would have stopped verification across the whole fleet, and it was caught
+/// the only way such a thing gets caught — the gate rejected this very change's
+/// own `verify.run`, from inside an agent worktree, because no host had a
+/// daemon new enough yet.
 ///
-/// - a missing daemon is a **configuration** problem the caller can fix, so it
-///   is refused rather than silently downgraded back into the agent tree;
-/// - a nice value that cannot be lowered is an **environment** problem the
-///   caller cannot fix, so the run proceeds and records what it got. That case
-///   is decided by the launching host, not here — see
-///   [`crate::daemon::VerificationSpawnAccepted`].
+/// The gate is not wrong, it is just not deliverable before the escape route
+/// it depends on actually works in production. It lands as its own change once
+/// `Delegate` is the normal outcome rather than the rare one, and until then a
+/// launcher that cannot escape runs in place and records the fact — the
+/// behaviour that predates this module, plus an explanation.
 pub fn decide_placement(launcher: LauncherPriority, daemon: &DaemonAvailability) -> SpawnPlacement {
     if !launcher.is_degraded() {
         return SpawnPlacement::Inherit {
@@ -93,16 +95,16 @@ pub fn decide_placement(launcher: LauncherPriority, daemon: &DaemonAvailability)
     match daemon {
         DaemonAvailability::Available => SpawnPlacement::Delegate,
         DaemonAvailability::Absent | DaemonAvailability::Incompatible { .. } => {
-            SpawnPlacement::Reject {
-                message: rejection_message(launcher, daemon),
+            SpawnPlacement::Inherit {
+                reason: unescaped_reason(launcher, daemon),
             }
         }
     }
 }
 
-/// Explain a refusal in the terms the caller needs: why baseline priority
-/// cannot be guaranteed here, and what to do next (Issue #4409 AC-5).
-fn rejection_message(launcher: LauncherPriority, daemon: &DaemonAvailability) -> String {
+/// Explain a workload that stayed in the agent tree: why baseline priority
+/// could not be given to it, and what would change that (Issue #4409 AC-6).
+fn unescaped_reason(launcher: LauncherPriority, daemon: &DaemonAvailability) -> String {
     let nice = launcher
         .nice
         .map(|nice| nice.to_string())
@@ -115,17 +117,15 @@ fn rejection_message(launcher: LauncherPriority, daemon: &DaemonAvailability) ->
             "the running gwt daemon speaks protocol {protocol_version}, which predates the \
              verification spawn frames"
         ),
-        DaemonAvailability::Available => unreachable!("Available is never refused"),
+        DaemonAvailability::Available => unreachable!("Available never lands here"),
     };
     format!(
-        "verify.run refuses to launch verification from this process: it runs at nice {nice}, \
-         and a non-privileged process cannot lower its own nice value, so every command it \
-         spawns would inherit the agent launch policy's degraded priority (SPEC #1921 Phase 86; \
-         measured as a 54x slowdown in Issue #4405). Baseline priority can only be guaranteed by \
-         launching from the gwt daemon, and {cause}. Falling back to an in-tree spawn is not \
-         offered, because a silent fallback reproduces the starvation this check exists to \
-         prevent. Next: start the gwt GUI for this project (it owns the daemon), or run \
-         `gwtd daemon status` to see why the daemon is not reachable, then retry verify.run."
+        "launcher runs at nice {nice} and could not escape the agent process tree, so its \
+         commands inherit that priority (SPEC #1921 Phase 86; measured as a 54x slowdown in \
+         Issue #4405). Baseline priority can only be given by launching from the gwt daemon, and \
+         {cause}. The run continues at the inherited priority; expect it to be slower under agent \
+         load. To get baseline priority, run a gwt GUI whose daemon is new enough to accept \
+         verification spawns"
     )
 }
 
@@ -188,38 +188,43 @@ mod tests {
         );
     }
 
-    /// AC-5: a missing daemon is refused outright. The whole point of the
-    /// refusal is that an implicit in-tree fallback would silently reproduce
-    /// the starvation, so `Inherit` must never be the answer here.
+    /// A degraded launcher with nowhere to escape to runs in place and says so.
+    ///
+    /// Refusing here is the tempting answer and it is what an earlier revision
+    /// did, but a gate with no working escape route stops every agent instead
+    /// of protecting them — this change's own verification was the first thing
+    /// it blocked. The reason string is the deliverable part: it has to name
+    /// the priority, the cause, and the fact that the run continued.
     #[test]
-    fn a_degraded_launcher_without_a_daemon_is_refused_not_downgraded() {
+    fn a_degraded_launcher_without_a_daemon_runs_in_place_and_records_why() {
         let placement = decide_placement(degraded(), &DaemonAvailability::Absent);
-        let SpawnPlacement::Reject { message } = placement else {
-            panic!("an in-tree fallback reproduces the starvation: {placement:?}");
+        let SpawnPlacement::Inherit { reason } = placement else {
+            panic!("a launcher with no daemon has no way to delegate: {placement:?}");
         };
-        assert!(message.contains("nice 10"), "{message}");
+        assert!(reason.contains("nice 10"), "{reason}");
         assert!(
-            message.contains("no gwt daemon is reachable"),
-            "the refusal must say why baseline priority cannot be guaranteed: {message}"
+            reason.contains("no gwt daemon is reachable"),
+            "the record must say why baseline priority could not be given: {reason}"
         );
         assert!(
-            message.contains("retry verify.run"),
-            "the refusal must name the next operation: {message}"
+            reason.contains("The run continues"),
+            "the record must say the run was not refused: {reason}"
         );
     }
 
     #[test]
-    fn an_outdated_daemon_is_refused_and_names_its_protocol() {
+    fn an_outdated_daemon_runs_in_place_and_names_its_protocol() {
         let placement = decide_placement(
             degraded(),
             &DaemonAvailability::Incompatible {
                 protocol_version: 3,
             },
         );
-        let SpawnPlacement::Reject { message } = placement else {
-            panic!("an daemon that cannot spawn is as good as absent: {placement:?}");
+        let SpawnPlacement::Inherit { reason } = placement else {
+            panic!("a daemon that cannot spawn is as good as absent: {placement:?}");
         };
-        assert!(message.contains("protocol 3"), "{message}");
+        assert!(reason.contains("protocol 3"), "{reason}");
+        assert!(reason.contains("The run continues"), "{reason}");
     }
 
     #[test]
