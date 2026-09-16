@@ -34220,13 +34220,22 @@ fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_ta
 }
 
 #[test]
-fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age() {
-    // Issue #2942: a session whose status drifted to Stopped (idle timeout)
-    // AND is older than the 24h freshness window must STILL resume on
-    // startup when its agent window is still present in the workspace (the
-    // user did not explicitly close it). Both the status-candidate gate and
-    // the freshness gate would exclude this session on the orphan path; only
-    // the "unclosed placeholder" path can restore it.
+fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
+    // Issue #2942: a session whose status drifted to Stopped (an idle timeout)
+    // must STILL resume on startup when its agent window is still present in
+    // the workspace — the user did not explicitly close it. The
+    // status-candidate gate would exclude this session on the orphan path;
+    // only the "unclosed placeholder" path can restore it.
+    //
+    // Issue #4441 supersedes the *age* half of that contract, which this test
+    // used to assert at 30 hours. #2942 read a surviving placeholder as proof
+    // that the user had left the window open, because closing a window removes
+    // it from the workspace. Agent panes never close themselves, so in practice
+    // the placeholder set became every launch the machine ever performed: 72
+    // windows, 55 of them stuck in `starting`, one Issue restored eight times
+    // over. "Not explicitly closed" is not the same fact as "open at the last
+    // exit", so the 24-hour bound now applies to this path too, and the case is
+    // asserted at both ends below.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -34275,13 +34284,16 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age(
     session.agent_session_id = Some("native-unclosed".to_string());
     session.record_hook_event("Stop");
     session.record_completed_stop();
-    // Status drifted to Stopped (would fail the candidate gate)...
+    // A launch marks the window as one to restore; this is what separates a
+    // window the user left open from one whose agent settled (Issue #4441).
+    session.restore_window_on_startup = true;
+    // Status drifted to Stopped (would fail the candidate gate on the orphan
+    // path) but the window is recent.
     session.update_status(gwt_agent::AgentStatus::Stopped);
-    // ...and the session is older than the 24h freshness window.
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(2);
     session
         .save(&runtime.sessions_dir)
-        .expect("save stale stopped session");
+        .expect("save stopped session");
 
     runtime.bootstrap();
     runtime.handle_frontend_event(
@@ -34302,12 +34314,89 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age(
         .count();
     assert_eq!(
         agent_windows, 1,
-        "an unclosed agent window must resume despite Stopped status and >24h age"
+        "an unclosed agent window must resume despite Stopped status"
     );
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),
         1,
         "the resumed unclosed window must track its source session"
+    );
+}
+
+/// Issue #4441: the other end of the case above — the same unclosed window,
+/// aged past the freshness bound, does not come back.
+///
+/// This is the half of Issue #2942 that #4441 supersedes. Keeping the two
+/// assertions adjacent is deliberate: the difference between them is the entire
+/// behavioural change, and reading one without the other makes it look like
+/// either #2942 or #4441 was simply dropped.
+#[test]
+fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_bound() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("stale-unclosed");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/stale-unclosed",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("sess-stale".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-stale".to_string(),
+        title: "Stale".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-stale"));
+
+    let mut session = gwt_agent::Session::new(
+        &worktree,
+        "work/stale-unclosed",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "sess-stale".to_string();
+    session.agent_session_id = Some("native-stale".to_string());
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save stale stopped session");
+
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "a placeholder older than the freshness bound is relaunch history, not the last-open set"
     );
 }
 
@@ -61295,8 +61384,8 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
     );
     assert_eq!(
         git_stdout(&linked_pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the local fallback must still materialize a detached PM worktree"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the local fallback must still materialize the resident PM branch"
     );
     let freshness = gwt::pm_registry::load_pm_prefs(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.linked),
@@ -62007,8 +62096,8 @@ fn pm_ensure_refreshes_existing_unregistered_pm_worktree_to_latest_origin_develo
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the refreshed PM worktree must remain detached"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the refreshed PM worktree must run on its resident branch"
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
@@ -62103,9 +62192,11 @@ fn pm_refresh_restores_old_checkout_and_assets_when_regeneration_fails() {
     assert_pm_refresh_failure_restores_old_checkout_and_assets(temp.path(), false);
 }
 
-#[cfg(unix)]
+/// Issue #4448: the advance is now a fast-forward merge of the resident
+/// branch, so the tree transition is blocked by an untracked file the incoming
+/// commit would overwrite rather than by a `post-checkout` hook.
 #[test]
-fn pm_refresh_restores_old_checkout_when_post_checkout_hook_fails() {
+fn pm_refresh_restores_old_checkout_when_the_fast_forward_is_blocked() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -62118,7 +62209,7 @@ fn pm_refresh_restores_old_checkout_when_post_checkout_hook_fails() {
 
 fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
     temp: &Path,
-    fail_checkout_hook: bool,
+    fail_tree_transition: bool,
 ) {
     let repo = temp.join("repo");
     let origin = init_git_clone_with_origin(&repo);
@@ -62131,7 +62222,12 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
     }
     fs::write(pm_worktree.join(relative), "original generated bytes\n").unwrap();
     fs::write(seed.join(relative), "incoming tracked bytes\n").unwrap();
-    if !fail_checkout_hook {
+    if fail_tree_transition {
+        // Not a managed asset, so the refresh transaction does not displace it:
+        // the fast-forward aborts on the collision with HEAD still in place.
+        fs::write(seed.join("UPSTREAM.md"), "incoming upstream bytes\n").unwrap();
+        fs::write(pm_worktree.join("UPSTREAM.md"), "untracked PM bytes\n").unwrap();
+    } else {
         fs::write(
             seed.join(".claude/skills/gwt-pm"),
             "file obstructing skill directory\n",
@@ -62139,18 +62235,14 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
         .unwrap();
     }
     run_git(&seed, &["add", "--force", "--", ".claude"]);
+    if fail_tree_transition {
+        run_git(&seed, &["add", "--", "UPSTREAM.md"]);
+    }
     run_git(
         &seed,
         &["commit", "-qm", "track managed asset and failure fixture"],
     );
     run_git(&seed, &["push", origin.to_str().unwrap(), "develop"]);
-    #[cfg(unix)]
-    if fail_checkout_hook {
-        use std::os::unix::fs::PermissionsExt;
-        let hook = repo.join(".git/hooks/post-checkout");
-        fs::write(&hook, format!("#!/bin/sh\n[ \"$2\" = \"{old_head}\" ]\n")).unwrap();
-        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
 
     let refresh = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo);
 
@@ -62170,7 +62262,7 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
             .unwrap();
     assert_eq!(
         freshness.failure_stage,
-        Some(if fail_checkout_hook {
+        Some(if fail_tree_transition {
             gwt::pm_registry::PmWorktreeRefreshFailureStage::Repoint
         } else {
             gwt::pm_registry::PmWorktreeRefreshFailureStage::ManagedAssets
@@ -62826,7 +62918,7 @@ fn bare_layout_remote_unavailable_materializes_bare_head_for_fresh_spawn() {
     );
     assert_eq!(
         git_stdout(&outcome.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD"
+        gwt::pm_registry::PM_WORKTREE_BRANCH
     );
     assert_eq!(
         outcome.freshness.state,
@@ -62884,8 +62976,8 @@ fn pm_ensure_migrates_legacy_notes_before_refreshing_existing_unregistered_pm_wo
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the refreshed PM worktree must remain detached"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the refreshed PM worktree must run on its resident branch"
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
@@ -63042,6 +63134,199 @@ fn pm_ensure_preserves_tracked_local_work_and_records_local_work_stage() {
     let reason = freshness.failure_reason.expect("local-work diagnosis");
     assert!(reason.contains("user-owned changes"), "{reason}");
     assert!(reason.contains("README.md"), "{reason}");
+}
+
+/// Commit one PM change in `worktree` and return its SHA.
+fn commit_pm_worktree_change(worktree: &Path, file: &str, contents: &str, message: &str) -> String {
+    fs::write(worktree.join(file), contents).expect("write PM change");
+    run_git(worktree, &["add", file]);
+    run_git(worktree, &["commit", "-qm", message]);
+    git_stdout(worktree, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn pm_ensure_materializes_the_resident_branch_instead_of_a_detached_head() {
+    // Issue #4448 AC-1: a detached PM worktree lets refresh move HEAD off the
+    // PM's own commits. The canonical materialization must check out the
+    // resident branch so Git itself refuses to rewind it.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the PM worktree must run on its resident branch, not a detached HEAD"
+    );
+}
+
+#[test]
+fn pm_refresh_keeps_a_pushed_but_unmerged_pm_commit_on_the_resident_branch() {
+    // Issue #4448 AC-2/AC-5: the PM pushes each commit to its own remote ref
+    // before opening a PR, which made the commit reachable from
+    // `--remotes` and therefore invisible to the detached-only-commit guard.
+    // The next refresh then repointed HEAD to origin/develop and the commit
+    // silently left the worktree.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    let pm_commit = commit_pm_worktree_change(
+        &pm_worktree,
+        "AGENTS.md",
+        "PM ruling applied\n",
+        "docs(agents): PM ruling",
+    );
+    run_git(
+        &pm_worktree,
+        &["push", "-q", "origin", "HEAD:refs/heads/pm/ruling"],
+    );
+    let target = advance_origin_develop_by_one_commit(&repo, &origin);
+    assert_ne!(pm_commit, target);
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        pm_commit,
+        "refresh must not move HEAD off a PM commit origin/develop does not contain"
+    );
+    assert_eq!(
+        fs::read_to_string(pm_worktree.join("AGENTS.md")).expect("read PM commit bytes"),
+        "PM ruling applied\n"
+    );
+    let freshness =
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .expect("PM prefs")
+            .worktree_freshness
+            .expect("retained-commit freshness");
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::LocalWork),
+        "the retained commit must be reported, not silently dropped"
+    );
+    assert_eq!(freshness.target_sha.as_deref(), Some(target.as_str()));
+}
+
+#[test]
+fn pm_refresh_fast_forwards_the_resident_branch_when_it_has_no_local_commits() {
+    // Issue #4448 AC-2: keeping PM commits must not stop an ordinary refresh.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    let target = advance_origin_develop_by_one_commit(&repo, &origin);
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        target,
+        "a PM worktree without local commits must still fast-forward"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        gwt::pm_registry::PM_WORKTREE_BRANCH
+    );
+    let freshness =
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .expect("PM prefs")
+            .worktree_freshness
+            .expect("fresh freshness");
+    assert_eq!(freshness.failure_stage, None, "{freshness:?}");
+    assert_eq!(freshness.behind, Some(0));
+}
+
+#[test]
+fn pm_refresh_adopts_a_legacy_detached_worktree_onto_the_resident_branch() {
+    // Issue #4448 AC-1/AC-3: PM worktrees already materialized detached must
+    // migrate onto the resident branch without losing the commit they hold.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    run_git(&pm_worktree, &["config", "user.name", "Codex"]);
+    run_git(&pm_worktree, &["config", "user.email", "codex@example.com"]);
+    let pm_commit = commit_pm_worktree_change(
+        &pm_worktree,
+        "AGENTS.md",
+        "legacy detached PM commit\n",
+        "docs(agents): legacy detached PM commit",
+    );
+    run_git(
+        &pm_worktree,
+        &["push", "-q", "origin", "HEAD:refs/heads/pm/legacy"],
+    );
+    advance_origin_develop_by_one_commit(&repo, &origin);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the legacy detached worktree must be adopted onto the resident branch"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        pm_commit,
+        "adoption must preserve the commit the detached HEAD held"
+    );
 }
 
 #[test]
@@ -70902,6 +71187,409 @@ fn startup_restore_limits_a_large_history_to_unterminated_windows() {
     assert_eq!(
         summary.fields.get("suppressed").map(String::as_str),
         Some(TERMINAL.to_string().as_str())
+    );
+}
+
+/// Issue #4441: backdate a restore fixture Session so it reads as history
+/// rather than as a window that was open at the last exit.
+fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: chrono::Duration) {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = gwt_agent::Session::load(&path).expect("load restore fixture session");
+    session.last_activity_at = chrono::Utc::now() - age;
+    session
+        .save(sessions_dir)
+        .expect("save aged fixture session");
+}
+
+/// Issue #4441 AC-1 / AC-5 / AC-6: the canvas comes back with the windows that
+/// were open at the last exit, not with one window per relaunch this machine
+/// ever performed.
+///
+/// A `Stopped` agent placeholder used to be unconditional permission to restore
+/// (Issue #2942), and agent panes never close themselves, so every launch that
+/// ever opened a window left one behind forever — 55 of them on the fleet that
+/// reported this.
+#[test]
+fn startup_restore_limits_windows_to_the_last_open_set() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    const HISTORY: usize = 10;
+
+    let mut placeholders = vec![
+        ("agent-open-0".to_string(), "session-open-0".to_string()),
+        ("agent-open-1".to_string(), "session-open-1".to_string()),
+    ];
+    for index in 0..HISTORY {
+        placeholders.push((
+            format!("agent-history-{index}"),
+            format!("session-history-{index}"),
+        ));
+    }
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    for index in 0..2 {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &format!("session-open-{index}"),
+            &temp.path().join(format!("wt-open-{index}")),
+            Some(&format!("native-open-{index}")),
+            Some(4_441_000 + index as u64),
+        );
+    }
+    for index in 0..HISTORY {
+        let session_id = format!("session-history-{index}");
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            &temp.path().join(format!("wt-history-{index}")),
+            Some(&format!("native-history-{index}")),
+            Some(4_442_000 + index as u64),
+        );
+        // Every one of these kept its placeholder: nobody closed the window by
+        // hand, which is exactly why they accumulated.
+        age_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            chrono::Duration::hours(48),
+        );
+    }
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let mut restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.clone())
+        .collect::<Vec<_>>();
+    restored.sort();
+    assert_eq!(
+        restored,
+        vec!["session-open-0".to_string(), "session-open-1".to_string()],
+        "AC-1 requires only the last-open set to restore"
+    );
+
+    let refusals = restore_admission_refusals(&logs);
+    for index in 0..HISTORY {
+        assert_eq!(
+            refusals
+                .get(&format!("session-history-{index}"))
+                .map(String::as_str),
+            Some("stale"),
+            "AC-1: a placeholder must not exempt history from the freshness bound: {refusals:?}"
+        );
+    }
+
+    // AC-5: the restored count and the time the selection took are both on the
+    // one summary line, so "restore is slow" is measurable next time.
+    let summary = restore_admission_summary(&logs);
+    assert_eq!(
+        summary.fields.get("restored").map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        summary.fields.get("suppressed").map(String::as_str),
+        Some(HISTORY.to_string().as_str())
+    );
+    assert!(
+        summary.fields.contains_key("elapsed_ms"),
+        "AC-5 requires the selection duration on the summary line, got {:?}",
+        summary.fields
+    );
+}
+
+/// Issue #4441 AC-2: one owner Issue restores one window.
+///
+/// Each relaunch mints a fresh conversation handle, so the existing
+/// native-session dedupe never collapsed them — the reporting fleet restored
+/// `#4257` eight times.
+#[test]
+fn startup_restore_collapses_duplicate_owner_issue_windows() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+
+    let placeholders = (0..3)
+        .map(|index| {
+            (
+                format!("agent-relaunch-{index}"),
+                format!("session-relaunch-{index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for index in 0..3 {
+        let session_id = format!("session-relaunch-{index}");
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            &temp.path().join(format!("wt-relaunch-{index}")),
+            Some(&format!("native-relaunch-{index}")),
+            Some(4257),
+        );
+        // The newest relaunch is the one that should come back.
+        age_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            chrono::Duration::minutes(10 * (2 - index as i64)),
+        );
+    }
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored,
+        vec!["session-relaunch-2"],
+        "AC-2 requires one window per owner Issue, newest first"
+    );
+    let refusals = restore_admission_refusals(&logs);
+    for index in 0..2 {
+        assert_eq!(
+            refusals
+                .get(&format!("session-relaunch-{index}"))
+                .map(String::as_str),
+            Some("duplicate_owner_issue"),
+            "{refusals:?}"
+        );
+    }
+}
+
+/// Issue #4441 AC-3: a row the operator stopped with `issue.monitor.stop` does
+/// not come back as a restored window on the next startup.
+///
+/// This is the case that silently defeated the operator's only lever. The stop
+/// parks the row for a human and records a failure hold; the close predicate
+/// reports both as "do not close"; restore read that as "do spawn". So every
+/// row the PM stopped was recreated at the next launch, and the refill looked
+/// like volume rather than like the stop itself.
+///
+/// The fixture drives the Monitor through the same call `stop_only` makes, then
+/// persists the prefs, so the test asserts over the durable product of the
+/// operator's action rather than over a hand-written flag.
+#[test]
+fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![
+        ("agent-stopped".to_string(), "session-stopped".to_string()),
+        ("agent-live".to_string(), "session-live".to_string()),
+    ];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (session_id, worktree, issue) in [
+        ("session-stopped", "wt-stopped", 4286u64),
+        ("session-live", "wt-live", 4288),
+    ] {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            session_id,
+            &temp.path().join(worktree),
+            Some(&format!("native-{session_id}")),
+            Some(issue),
+        );
+    }
+
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    // The exact park `IssueMonitorState::stop_only` performs: it is what turns
+    // an operator stop into a durable `failed_issues` entry.
+    monitor.escalate_to_needs_human(
+        4286,
+        gwt::NeedsHumanKind::UserChoiceRequired,
+        "stopped: PM held this row while adjudicating",
+    );
+    let prefs = monitor.prefs();
+    assert!(
+        prefs
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == 4286),
+        "the stop must be durable for this test to mean anything"
+    );
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed monitor prefs");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored,
+        vec!["session-live"],
+        "a stopped row must not be recreated by the next startup"
+    );
+    let refusal = restore_admission_refusals(&logs)
+        .get("session-stopped")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        refusal.starts_with("monitor_hold:"),
+        "the refusal must name the hold, got {refusal:?}"
+    );
+
+    // The stop is reversible: releasing the row must bring the window back, so
+    // neither the placeholder nor the restore flag is discarded.
+    assert!(runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .any(|window| window.session_id.as_deref() == Some("session-stopped")));
+    let session = gwt_agent::Session::load(&runtime.sessions_dir.join("session-stopped.toml"))
+        .expect("load stopped session");
+    assert!(session.restore_window_on_startup);
+}
+
+/// Issue #4441 AC-3: a window whose Monitor row the operator is holding does
+/// not respawn.
+///
+/// `classify_terminal_window` was written for the *close* side, where an
+/// unproven fact must never close a window. Restore reused it and read every
+/// such `Ineligible` — `failure_hold` from `issue.monitor.stop` included — as
+/// permission to spawn.
+#[test]
+fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![
+        ("agent-held".to_string(), "session-held".to_string()),
+        ("agent-parked".to_string(), "session-parked".to_string()),
+        ("agent-live".to_string(), "session-live".to_string()),
+    ];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (session_id, worktree, issue) in [
+        ("session-held", "wt-held", 4286u64),
+        ("session-parked", "wt-parked", 4287),
+        ("session-live", "wt-live", 4288),
+    ] {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            session_id,
+            &temp.path().join(worktree),
+            Some(&format!("native-{session_id}")),
+            Some(issue),
+        );
+    }
+    let prefs = gwt::IssueMonitorPrefs {
+        failed_issues: vec![gwt::IssueMonitorFailedIssue {
+            issue_number: 4286,
+            message: "operator stop hold".to_string(),
+            window_id: None,
+        }],
+        autonomous_records: vec![gwt::AutonomousIssueRecord {
+            phase: gwt::AutonomousPhase::NeedsHuman,
+            ..gwt::AutonomousIssueRecord::new(4287)
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed monitor prefs");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(restored, vec!["session-live"]);
+    let refusals = restore_admission_refusals(&logs);
+    assert_eq!(
+        refusals.get("session-held").map(String::as_str),
+        Some("monitor_hold:failure_hold"),
+        "{refusals:?}"
+    );
+    assert_eq!(
+        refusals.get("session-parked").map(String::as_str),
+        Some("monitor_hold:needs_human"),
+        "{refusals:?}"
+    );
+
+    // A hold is not terminal: the window comes back once the operator releases
+    // the row, so neither the placeholder nor the restore flag is discarded.
+    for session_id in ["session-held", "session-parked"] {
+        assert!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .any(|window| window.session_id.as_deref() == Some(session_id)),
+            "{session_id} placeholder must survive a Monitor hold"
+        );
+        let session =
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+                .expect("load held session");
+        assert!(session.restore_window_on_startup);
+    }
+}
+
+/// Issue #4441 AC-1: the restore flag is honored on the placeholder path too.
+///
+/// A settled agent whose window nobody closed by hand keeps its placeholder;
+/// the flag is the only durable record that the window is finished.
+#[test]
+fn startup_restore_honors_a_cleared_restore_flag_on_a_surviving_placeholder() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![("agent-settled".to_string(), "session-settled".to_string())];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-settled",
+        &temp.path().join("wt-settled"),
+        Some("native-settled"),
+        Some(4_441_777),
+    );
+    let path = runtime.sessions_dir.join("session-settled.toml");
+    let mut session = gwt_agent::Session::load(&path).expect("load settled session");
+    session.restore_window_on_startup = false;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save settled session");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    assert_eq!(
+        restore_admission_refusals(&logs)
+            .get("session-settled")
+            .map(String::as_str),
+        Some("window_not_open")
     );
 }
 
