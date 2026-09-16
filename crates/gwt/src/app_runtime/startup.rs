@@ -22,6 +22,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     thread::JoinHandle,
+    time::Instant,
 };
 
 use super::continuation::ActiveOwnerLiveness;
@@ -38,6 +39,55 @@ use super::{
 /// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
 /// startup so a pathological pile-up cannot stall boot.
 const MAX_STARTUP_INTAKE_PRUNE: usize = 32;
+
+/// Issue #4375 AC-4: a restore-drain phase that held the GUI event loop for at
+/// least this long is reported by name, so a startup stall is attributable to
+/// the phase that caused it instead of only to the dispatch total.
+const RESTORE_DRAIN_PHASE_STALL_MS: u64 = 100;
+
+/// The warning text for a restore drain whose phases blocked the GUI event
+/// loop, or `None` when every phase stayed inside the budget.
+///
+/// Split out from the logger so the threshold is directly testable, the same
+/// shape `gui_event_loop_stall_warning` uses for whole dispatches.
+pub(super) fn restore_drain_stall_warning(phases: &[(&str, u64)]) -> Option<String> {
+    let stalled = phases
+        .iter()
+        .filter(|(_, elapsed_ms)| *elapsed_ms >= RESTORE_DRAIN_PHASE_STALL_MS)
+        .map(|(phase, elapsed_ms)| format!("{phase} {elapsed_ms}ms"))
+        .collect::<Vec<_>>();
+    (!stalled.is_empty()).then(|| {
+        format!(
+            "restore_drain blocked the GUI event loop: {}",
+            stalled.join(", ")
+        )
+    })
+}
+
+/// Issue #4375 AC-4: record the restore drain's own breakdown on the same
+/// `gwt.frontend.timing` target the event-loop stall warnings use, so the
+/// dispatch total and the phases inside it read as one series.
+fn log_restore_drain_breakdown(resumed_sessions: usize, resume_ms: u64, pm_ensure_ms: u64) {
+    let phases = [("resume", resume_ms), ("pm_ensure", pm_ensure_ms)];
+    match restore_drain_stall_warning(&phases) {
+        Some(message) => tracing::warn!(
+            target: "gwt.frontend.timing",
+            event = "StartupAutoResumeReady",
+            resumed_sessions,
+            resume_ms,
+            pm_ensure_ms,
+            "{message}"
+        ),
+        None => tracing::debug!(
+            target: "gwt.frontend.timing",
+            event = "StartupAutoResumeReady",
+            resumed_sessions,
+            resume_ms,
+            pm_ensure_ms,
+            "restore_drain phase breakdown"
+        ),
+    }
+}
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
@@ -537,22 +587,33 @@ impl AppRuntime {
         let _phase = gwt::perf::startup::PhaseTimer::start(
             gwt::perf::startup::StartupPhase::ProjectStateLoad,
         );
+        // Issue #4398 AC-3: keep each project's listing so the startup index
+        // status probe reuses it instead of listing the worktrees again.
+        let mut startup_worktree_inventories = std::collections::HashMap::new();
         let startup_worktrees = self
             .tabs
             .iter()
             .flat_map(|tab| {
-                gwt::worktree_inventory::enumerate_worktrees(&tab.project_root, None)
-                    .map(|entries| entries.into_iter().map(|entry| entry.path).collect())
-                    .unwrap_or_else(|error| {
+                match gwt::worktree_inventory::enumerate_worktrees(&tab.project_root, None) {
+                    Ok(entries) => {
+                        let paths: Vec<PathBuf> =
+                            entries.iter().map(|entry| entry.path.clone()).collect();
+                        startup_worktree_inventories
+                            .insert(tab.project_root.clone(), std::sync::Arc::new(entries));
+                        paths
+                    }
+                    Err(error) => {
                         tracing::warn!(
                             project_root = %tab.project_root.display(),
                             %error,
                             "managed hook startup self-heal inventory failed"
                         );
                         vec![tab.project_root.clone()]
-                    })
+                    }
+                }
             })
             .collect::<Vec<_>>();
+        self.startup_worktree_inventories = startup_worktree_inventories;
         // Issue #3808 AC-4: this sweep audited every worktree of the repo
         // (235 here) for 191 s on the startup path, ahead of the embedded
         // server bind. Launches refresh the managed assets of the worktree
@@ -1067,11 +1128,8 @@ impl AppRuntime {
         // sink, so the bootstrap-time settle is recorded here, on the first
         // canvas-ready round trip, where a client is guaranteed to listen.
         let mut events = self.update_resume_notice_events();
-        if self.pending_startup_auto_resume_sessions.is_empty() {
-            events.extend(self.startup_pm_ensure_ready_events());
-            return events;
-        }
 
+        let resume_started = Instant::now();
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
         let total = pending.len();
         for (index, pending_session) in pending.into_iter().enumerate() {
@@ -1086,7 +1144,14 @@ impl AppRuntime {
             );
             events.append(&mut spawned);
         }
+        let resume_ms = resume_started.elapsed().as_millis() as u64;
+
+        let pm_ensure_started = Instant::now();
         events.extend(self.startup_pm_ensure_ready_events());
+        let pm_ensure_ms = pm_ensure_started.elapsed().as_millis() as u64;
+
+        // Issue #4375 AC-4: the drain's internals, not just its total.
+        log_restore_drain_breakdown(total, resume_ms, pm_ensure_ms);
         events
     }
 
@@ -1130,19 +1195,50 @@ impl AppRuntime {
         if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
             return Vec::new();
         }
-        if gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
-            if let Err(error) =
-                gwt::pm_registry::refresh_pm_worktree_at_safe_boundary(&session.worktree_path)
-            {
-                tracing::warn!(
-                    session_id = %session.id,
-                    worktree = %session.worktree_path.display(),
-                    %error,
-                    "failed to refresh the resident PM before resume"
-                );
-                return Vec::new();
-            }
+        if self.restore_would_resurrect_an_unregistered_pm(tab_id, &session) {
+            self.refuse_unregistered_pm_restore(tab_id, &session.id);
+            return Vec::new();
         }
+        // Issue #4375: refreshing the resident PM's worktree is Git work whose
+        // cost scales with the repository, and this path runs inside the
+        // canvas-ready restore drain. Prepare it off the event loop and resume
+        // the spawn from the completion event.
+        if gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
+            let Some(project_root) = self.tab(tab_id).map(|tab| tab.project_root.clone()) else {
+                return Vec::new();
+            };
+            return self.spawn_pm_worktree_preparation(
+                super::pm::PmWorktreeContinuation::ResumeSession {
+                    tab_id: tab_id.to_string(),
+                    project_root,
+                    session: Box::new(session),
+                    workspace_resume_context,
+                    fallback_geometry,
+                    origin,
+                    register_pm_launch: false,
+                },
+            );
+        }
+        self.spawn_prepared_restored_agent_session(
+            tab_id,
+            session,
+            workspace_resume_context,
+            fallback_geometry,
+            origin,
+        )
+    }
+
+    /// The part of [`Self::spawn_restored_agent_session`] that runs once the PM
+    /// worktree — when the Session lives in one — has been prepared off the
+    /// GUI event loop.
+    pub(super) fn spawn_prepared_restored_agent_session(
+        &mut self,
+        tab_id: &str,
+        session: gwt_agent::Session,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+        origin: RestoreOrigin,
+    ) -> Vec<OutboundEvent> {
         let mut config = launch_config_from_persisted_session(&session);
         if origin == RestoreOrigin::UserRequested {
             config.launch_route = gwt_agent::LaunchRoute::Manual;
@@ -1232,6 +1328,45 @@ impl AppRuntime {
             "restore refused: the session belongs to another project store's PM worktree"
         );
         true
+    }
+
+    /// Issue #4394 AC-1: refuse to restore a Session in this store's own
+    /// `pm/worktree` that `pm.json` does not name.
+    ///
+    /// The foreign-store gate above compares stores only, so every PM Session
+    /// ever left restorable here came back on GUI restart — three PM windows,
+    /// one registration. The registered PM's own resume still passes, and its
+    /// successor is re-registered at launch completion.
+    fn restore_would_resurrect_an_unregistered_pm(
+        &self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+    ) -> bool {
+        let Some(tab) = self.tab(tab_id) else {
+            return false;
+        };
+        if !gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
+            return false;
+        }
+        let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&tab.project_root);
+        if gwt::pm_registry::session_is_registered_pm(&prefs_path, &session.id) {
+            return false;
+        }
+        tracing::warn!(
+            tab_id,
+            session_id = %session.id,
+            worktree_path = %session.worktree_path.display(),
+            "restore refused: the PM worktree session is not the registered PM"
+        );
+        true
+    }
+
+    /// Retire an unregistered PM Session for good: never restorable again and
+    /// no placeholder left on the canvas, so the next startup sees one PM.
+    fn refuse_unregistered_pm_restore(&mut self, tab_id: &str, session_id: &str) {
+        mark_auto_resume_source_completed(&self.sessions_dir, session_id);
+        self.remove_stale_paused_agent_window(tab_id, session_id);
+        let _ = self.persist();
     }
 
     /// SPEC-2356 安心 Addendum (FR-044): relaunch a stopped/errored `Agent`
