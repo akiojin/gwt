@@ -598,6 +598,12 @@ agreement.
   registered PM of the same repository may call it. With no
   `session_id` it retires you, which is how an orphaned PM stands down
   on its own.
+- A row with `registered` false is a Session live, or still restorable,
+  in one of this repository's PM worktrees without holding the
+  registration — typically a PM window that session restore brought
+  back. It has no PM authority, but it can still post to the Board.
+  `pm.stop` with its `session_id` marks it stopped and unrestorable
+  without touching the registration.
 - `pm.stop` does not close the pane. It ends PM authority and the loop;
   the window is left for the user to close.
 
