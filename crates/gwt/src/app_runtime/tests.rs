@@ -43194,7 +43194,12 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     .with_origin_agent_id("codex")
     .with_origin_branch("work/20260504-1234");
 
-    let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
+    // Issue #3752: the milestone acknowledgement replays the rail the event
+    // loop already holds and asks for the authoritative rebuild off the loop.
+    // Drain that rebuild the way the event loop does — the assertions below are
+    // unchanged, so the deferred rail is still the same rail.
+    let events = drain_active_work_projection_refresh(&mut runtime, &repo);
     let event = events
         .iter()
         .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
@@ -43415,7 +43420,9 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
     )
     .with_origin_session_id("session-1");
 
-    let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &next);
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &next);
+    // Issue #3752: see above — the authoritative rail now arrives off the loop.
+    let events = drain_active_work_projection_refresh(&mut runtime, &repo);
     let event = events
         .iter()
         .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
@@ -53505,6 +53512,66 @@ fn drain_active_work_projection_refresh(
     };
     let refreshed = super::run_active_work_projection_refresh(job);
     runtime.apply_active_work_projection_refresh(refreshed)
+}
+
+#[test]
+fn stopping_a_window_refreshes_active_work_off_the_gui_event_loop() {
+    // Issue #3752: `pane.close` and `pane.list` block on the GUI event loop
+    // answering the pane WebSocket, so a disk-backed Active Work rebuild on
+    // that loop is what the operator measures as a multi-second round trip and,
+    // in a burst, as `pane_backend_unresponsive` after 15,000ms. Issue #4406
+    // moved the background scan completions off the loop but left the direct
+    // lifecycle broadcasts on it, and the window stop path is one of them —
+    // `stop_all_windows_events` runs it once per window.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (mut runtime, events, window_id) = active_work_off_loop_setup(temp.path(), &repo);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let before = active_work_refresh_requests(&events, &repo);
+    let stop_events = runtime.stop_window_events(&window_id);
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "stopping a window must not enter the disk-backed projection builder"
+    );
+    assert_eq!(
+        active_work_refresh_requests(&events, &repo),
+        before + 1,
+        "the authoritative rebuild is asked for off the loop instead"
+    );
+    // The acknowledgement still carries a rail, so the operator sees the
+    // window leave `Running` immediately rather than after the rebuild.
+    assert!(
+        stop_events
+            .iter()
+            .any(|event| matches!(&event.event, BackendEvent::ActiveWorkProjection { .. })),
+        "the stop acknowledgement still publishes a projection: {stop_events:?}"
+    );
+
+    // The deferred rail is not a weaker rail: draining the refresh yields the
+    // same row set the on-loop build would have produced.
+    let applied = drain_active_work_projection_refresh(&mut runtime, &repo);
+    let projection = applied
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection.clone()),
+            _ => None,
+        })
+        .expect("the off-loop refresh broadcasts the rebuilt rail");
+    assert!(
+        projection
+            .active_works
+            .iter()
+            .any(|work| work.branch.as_deref() == Some("work/off-loop")),
+        "the rebuilt rail still carries the Work row"
+    );
 }
 
 #[test]

@@ -1026,7 +1026,7 @@ impl AppRuntime {
                 WindowProcessStatus::Error | WindowProcessStatus::Stopped
             )
         {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            if let Some(event) = self.deferred_active_work_projection_broadcast_for_active_tab() {
                 events.push(event);
             }
         }

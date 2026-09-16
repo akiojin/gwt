@@ -3602,10 +3602,26 @@ impl AppRuntime {
         .unwrap_or_default()
     }
 
-    pub(crate) fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
+    /// Issue #3752: the GUI event loop is also what answers the pane
+    /// WebSocket, so a `pane.close` / `pane.list` round trip waits behind
+    /// whatever that loop is doing. Issue #4406 took the background scan
+    /// completions off the loop, but every lifecycle broadcast still went
+    /// straight into [`Self::active_work_projection_for_tab`], which reads the
+    /// home works.json, every session ledger TOML and one execution diagnosis
+    /// per Work row before returning — the operator measures that as a
+    /// multi-second close and, in a burst, as `pane_backend_unresponsive` once
+    /// the 15,000ms backend deadline expires.
+    ///
+    /// Publish the rail the loop already holds and hand the authoritative
+    /// rebuild to the Issue #4406 refresh queue. Requests collapse per project,
+    /// so a burst of lifecycle events costs one rebuild, off the loop.
+    pub(crate) fn deferred_active_work_projection_broadcast_for_active_tab(
+        &self,
+    ) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        let projection = self.active_work_projection_for_tab(tab_id, tab)?;
+        let projection = self.cached_or_in_memory_active_work_projection_for_tab(tab_id, tab);
+        self.request_active_work_projection_refresh(&tab.project_root);
         Some(OutboundEvent::broadcast(
             BackendEvent::ActiveWorkProjection {
                 projection: Box::new(projection),

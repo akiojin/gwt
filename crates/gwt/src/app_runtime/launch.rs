@@ -5874,7 +5874,7 @@ impl AppRuntime {
 
         // Broadcast the refreshed projection so the Work leaves the active
         // surface for every connected client.
-        self.active_work_projection_broadcast_for_active_tab()
+        self.deferred_active_work_projection_broadcast_for_active_tab()
             .into_iter()
             .collect()
     }

@@ -8815,7 +8815,7 @@ impl AppRuntime {
         events: &mut Vec<OutboundEvent>,
     ) {
         events.push(self.workspace_state_broadcast());
-        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+        if let Some(event) = self.deferred_active_work_projection_broadcast_for_active_tab() {
             events.push(event);
         }
     }

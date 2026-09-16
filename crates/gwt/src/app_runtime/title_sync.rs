@@ -90,7 +90,7 @@ impl AppRuntime {
             self.merge_workspace_projection_into_cached_active_work(project_root, projection);
             self.cached_active_work_projection_broadcast_for_workspace_watcher()
         } else {
-            self.active_work_projection_broadcast_for_active_tab()
+            self.deferred_active_work_projection_broadcast_for_active_tab()
         };
         if let Some(event) = projection_event {
             events.push(event);
