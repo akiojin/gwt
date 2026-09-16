@@ -1,6 +1,145 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.100.0] - 2026-09-16
+
+### Bug Fixes
+
+- **work:** Work event に PR メタデータを引き継ぐ
+- **work:** PR metadata の同期対象を厳密に選択する
+- **work:** Linked Work の PR リンクと検証を補完する
+- **gui:** Linked Work から Work に紐づく PR を開けるようにする
+- **pr:** PrStatus fixture に head_ref_name を追加してテストビルドを直す
+- **usage:** アカウント切り替え時に古いquota待機を解除
+- **issue-monitor:** PM が待機宣言を無効化でき、沈黙した待機行を status で可視化する
+- **pr:** PR一覧の未変更チェック再取得を抑制する
+- **execution:** Adopt 時の Host と Session の権限同期を修正
+- **gui:** Work events ingest の失敗再読と複製で GUI RSS が一過性に跳ねる問題を修正
+- **work:** 凍結された legacy events.jsonl をトリガーごとに全文読みしない
+- **verification:** Workspace clippy の単一要素 loop を修正
+- **skills:** ブラウザ検証環境の自動エージェント起動を抑止する
+- **issue:** SPEC 構造を解析できない Issue でも issue.view / edit / comment を拒否しない
+- **issue-monitor:** 解析不能な SPEC の cache entry を readiness に使わず parse 失敗を報告する
+- **pm:** 登録を持たない PM worktree session を restore で復元しない
+- **pane:** 無応答時の回復性と再試行手順を明示する
+
+### Features
+
+- **startup:** 起動フェーズと入力受付時刻を永続計測する
+- **verification:** 自動実行を検証済みReady PRから自動マージへ進める
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3697 の検証結果と確認待ちを記録する
+- **work:** Work イベント shard を記録する
+- **work:** Work イベント shard を記録する
+- **work:** Work イベント shard を記録する
+- **work:** Issue #3697 の検証結果と配信状態を記録する
+- **work:** #4286 の Work event shard を記録
+- **work:** 実行イベントシャードを記録
+- **work:** 検証再実行前に実行イベントシャードを記録
+- **work:** #4278 の終端 Work イベント receipt を記録する
+- **work:** #4278 の settlement 前 Work イベントを記録する
+- **work:** #4278 の settlement 再試行時の Work イベントを記録する
+- **work:** #4278 settlement 再試行の Work イベントを記録する
+- **work:** Work event receipt を記録する
+- **work:** Work event receipt を記録する
+- **work:** #4371 の Work event shard を記録する
+- **work:** Issue 4281 の develop 統合と検証結果を記録
+- **work:** Record issue 3808 work event receipts
+- **work:** Record issue 4377 work event receipts
+- **work:** Record issue 4377 work event receipts
+- **work:** Record issue 4377 work event receipts
+- **work:** Record issue 4377 work event receipts
+- **work:** Issue #3697 の work event shard を記録する
+- **work:** Develop 追従世代の Work イベントを記録する
+- **work:** 継続世代の Work イベントと develop 追従を記録する
+- **work:** #4392 の Work イベントを記録
+- **work:** #4392 の既存修正監査と引き継ぎを記録
+- **work:** #4392 の Work event shard を記録する
+- **work:** #4392 の terminal Work update receipt を記録する
+
+### Performance
+
+- **gui:** Pane 生成の npm/npx probe 結果を永続化し phase 内訳を perf stream に記録する
+- **startup:** Managed hook self-heal を起動経路から外し ledger snapshot を 1 回に減らす
+- **startup:** 起動時の session 全件同期走査を復元候補だけに絞る
+- **startup:** PM worktree の準備を GUI event loop の外に出す
+- **index:** 起動時の index status probe が worktree を再列挙せず起動時 inventory を再利用する
+
+### Refactor
+
+- **gui:** Issue #4371 の範囲外だった snapshot 共有配信と RSS サンプラーを取り除く
+
+### Testing
+
+- **pr:** Windows の project_root 表記差で落ちる PR metadata 回帰テストを直す
+- **usage:** 環境ロックのpoison回復規約に準拠
+- **index:** 修復中の検索を再現し集約テストを安定化
+- **playwright:** Startup-metrics.js を embedded route helper の ROOT_MODULES に登録する
+- **playwright:** Focus cycle の command 検査から startup telemetry を除外する
+- **app-runtime:** PM ensure 系テストを off-loop 完了イベント経由に揃える
+- **verification:** 自動実行ゲートの期待値と時間計測テストを修正
+- **index:** 起動時 inventory 再利用テストが env_test_lock を保持する
+- **app-runtime:** PM restore テストを off-loop 準備と登録前提に揃える
+
+## [9.99.0] - 2026-09-15
+
+### Bug Fixes
+
+- **gui:** Work 行ごとの hook health 監査が GUI event loop を塞ぎ pane.* が応答しない問題を修正
+- **index-coordinator:** Heavy queue の到着順をミリ秒から連番へ移し newcomer の追い越しを塞ぐ
+
+### Miscellaneous Tasks
+
+- **work:** #4257 の Work event を記録
+- **work:** #4257 の Work event を記録
+- **work:** #4210 の Work イベントシャードを記録する
+- **work:** #4210 の終端 Work イベントを記録する
+
+### Styling
+
+- **test:** Hook_health_test の rustfmt 差分を解消
+
+## [9.98.0] - 2026-09-15
+
+### Bug Fixes
+
+- **skills:** Gwtd bootstrap の順序を canonical guidance に定義し lease 契約の循環を解消する
+- **issue-monitor:** Statusと操作のlaunch識別子を統一する
+- **launch:** Auto-resume successor の Active authority を復元する
+- **ci:** Apt の acquire を境界付けし停滞の原因をログに出す
+- **ci:** Windows で未使用になる定数を unix 限定モジュールへ移す
+- **verification:** Pre-push から重量級 Cargo ジョブを外して lease 外の CPU 飽和を止める
+- **verification:** Pre-push の markdownlint が git 無視の tasks/ を検査しないようにする
+- **terminal:** Pane が読み手のない生行バッファを無制限に保持しないようにする
+- **cli:** Issue.monitor.status に gwt GUI process の RSS と飽和警告を出す
+
+### Miscellaneous Tasks
+
+- **work:** Issue 4352 の Work event shard を記録する
+- **work:** Issue 4352 の terminal Work event shard を記録する
+- **work:** Issue 3732の検証済み作業状態を記録する
+- **work:** Issue 3625 の受け入れ監査を記録
+- **work:** Issue 3625 の完了 Work イベントを記録
+- **work:** Issue 3625 の terminal Work 更新を記録
+- **work:** #4324 の統合レビューと検証引き渡しを記録
+- **work:** #4324 の再起動世代の統合と検証引き渡しを記録
+- **work:** #4268 の Work event receipt を記録する
+- **work:** #4268 継続 launch の Work event receipt を記録
+- **work:** #4268 の AC 評価世代の Work event shard を記録する
+- **work:** Runtime が書き出した work event shard を記録する
+- **work:** Repair 後の work event shard を記録する
+- **work:** Verify 再実行前の work event shard を記録する
+- **work:** 世代の terminal Work receipt を記録する
+- **work:** #4234 の Work イベントを記録
+- **work:** #4234 の Work 完了イベントを記録
+
+### Testing
+
+- **issue-monitor:** Launch識別子不整合の回帰を再現する
+- **launch:** Auto-resume successor 回帰を明確化する
+
 ## [9.97.0] - 2026-09-15
 
 ### Bug Fixes

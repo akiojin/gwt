@@ -149,6 +149,13 @@ past it the ordinary rule applies again. Clear it the moment you resume:
 Do not fake activity instead (periodic `workspace.update` or Board posts
 to look alive) - a declared wait is the honest signal.
 
+The PM can void your declaration with `issue.monitor.wait.invalidate`
+when its ruling removes the condition (Issue #4286). Your row then reads
+`waiting.in_force:false` with `waiting.invalidated` naming who and why,
+and ordinary stuck detection applies from your last activity, so read
+the Board when you come back: act on the ruling, and declare again only
+if you are genuinely waiting on something else.
+
 ### Proposing new Issues to the PM
 
 Do not call `issue.create`. When you find something that deserves its own
@@ -259,6 +266,29 @@ gwtd binary:
 
 There is no standalone `gwt-search` executable.
 
+## Autonomous delivery
+
+Read the launch route from `execution.status`. With `launch_route: autonomous`,
+record `User Verification Result: n/a (autonomous)` and continue verified work
+through a Ready PR and the existing CI auto-merge path until merged. Do not
+request human visual confirmation, send a verification URL, or stop at a Draft
+PR merely because nobody performed a human check. Manual launches retain their
+user-verification contract and require an explicit request to drive to merge.
+
+Automated test / headed E2E / CI failures, known blockers, and all other Ready
+Gate conditions still require repair. For UI work, use the project's isolated
+headed E2E setup and record `Agent Visual Check: pass` separately from the user
+result (`n/a (no UI surface)` otherwise). Select Playwright commands already in
+`verify.run`'s `params.commands` with `params.headed_e2e_commands`; the same fresh
+record must contain actual passing headed Chromium results for dark and light
+themes. The E2E suite must check console/page errors and the changed behavior.
+The agent's own check is never human `confirmed`.
+
+Existing autonomous PRs may retain the legacy `deferred (autonomous execution)`
+body value. Fresh passing evidence permits Ready without rewriting that body or
+obtaining human confirmation. Do not call terminal `execution.blocked` merely
+because human visual confirmation is absent.
+
 ## GitHub reads and mutations
 
 Read-only `gh` commands are allowed and recorded on the shared GitHub budget
@@ -285,6 +315,21 @@ reserving a lease. Use `verify.lease.status` to inspect contention;
 `verify.run` waits up to `params.max_wait_secs` and returns `deferred`
 when admission times out. Inspect the reported holder before retrying;
 there is no manual acquire loop or fixed retry schedule.
+
+### gwtd bootstrap order
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
 
 ## Persisted Work files
 
@@ -457,6 +502,12 @@ stuck 判定が自分の Issue をスキップし、PM は `issue.monitor.status
 生存を装うために定期的な `workspace.update` や Board 投稿で活動を偽装しない
 でください。待機の申告が正直なシグナルです。
 
+PM の裁定で待機条件が消えた場合、PM は `issue.monitor.wait.invalidate` で
+申告を無効化できます（Issue #4286）。自分の行は `waiting.in_force:false` と
+なり `waiting.invalidated` に誰が・なぜが残り、最後の活動時刻から通常の
+stuck 判定に戻ります。戻ってきたら Board を読んで裁定に従い、別のものを
+本当に待つ場合にだけ再申告してください。
+
 ### Issue 化は PM へ提案する
 
 `issue.create` を直接呼ばないでください。Issue 化すべき事象を見つけたら
@@ -577,6 +628,21 @@ canonical な検証記録は `verify.plan` → `verify.run` で生成します�
 `verify.run` は `params.max_wait_secs` まで待機し、時間切れなら
 `deferred` を返します。報告された holder を確認してから再試行してください。
 手動 acquire のループや固定の再試行間隔はありません。
+
+### gwtd bootstrap order
+
+gwtd をソースから build する checkout（gwt リポジトリ自身）では、初回の
+`cargo build -p gwt --bin gwtd` は lease 不要の bootstrap step であり、heavy な
+検証コマンドではありません。順序は build → `verify.plan` → `verify.run` です。
+lease を保持・待機せずに checkout binary を build し、その後にはじめて
+canonical 検証をその binary で実行します。
+
+先に checkout binary が必要かを判断します。必要なのは checkout のコードを
+実行する operation だけです: `execution.*`、`workspace.*`、`build.*`、
+`verify.*`、および checkout で追加した operation。読み取りの `issue.*`、
+`pr.*`、`board.*`、`search` は解決済みの installed gwtd（`GWT_BIN_PATH` /
+PATH）で実行します。Issue / PR / Board の状態を知るためだけに build や
+lease を待たないでください。
 
 ## Persisted Work files
 
@@ -782,6 +848,52 @@ mod tests {
             assert!(!body.contains("even a single focused test"));
         }
         assert!(SKILL_BODY_JA.contains("canonical `verify.run` だけ"));
+    }
+
+    /// Issue #4352 AC-1 / AC-3: the gwtd bootstrap order is defined once in
+    /// the canonical source, names which operations need the checkout
+    /// binary, and reaches both generated mirrors byte-identically.
+    #[test]
+    fn bootstrap_build_is_a_lease_free_step_that_precedes_canonical_verification() {
+        for phrase in [
+            "### gwtd bootstrap order",
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`search`",
+            "`GWT_BIN_PATH`",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+        assert!(SKILL_BODY_EN.contains("lease-free bootstrap step"));
+        assert!(SKILL_BODY_JA.contains("lease \u{4e0d}\u{8981}\u{306e} bootstrap step"));
+
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        let claude =
+            std::fs::read_to_string(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        let codex =
+            std::fs::read_to_string(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        assert_eq!(
+            claude, codex,
+            "both mirrors must carry the same bootstrap contract"
+        );
+        assert!(claude.contains("lease-free bootstrap step"));
     }
 
     #[test]
