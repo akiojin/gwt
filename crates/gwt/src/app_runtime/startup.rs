@@ -587,22 +587,33 @@ impl AppRuntime {
         let _phase = gwt::perf::startup::PhaseTimer::start(
             gwt::perf::startup::StartupPhase::ProjectStateLoad,
         );
+        // Issue #4398 AC-3: keep each project's listing so the startup index
+        // status probe reuses it instead of listing the worktrees again.
+        let mut startup_worktree_inventories = std::collections::HashMap::new();
         let startup_worktrees = self
             .tabs
             .iter()
             .flat_map(|tab| {
-                gwt::worktree_inventory::enumerate_worktrees(&tab.project_root, None)
-                    .map(|entries| entries.into_iter().map(|entry| entry.path).collect())
-                    .unwrap_or_else(|error| {
+                match gwt::worktree_inventory::enumerate_worktrees(&tab.project_root, None) {
+                    Ok(entries) => {
+                        let paths: Vec<PathBuf> =
+                            entries.iter().map(|entry| entry.path.clone()).collect();
+                        startup_worktree_inventories
+                            .insert(tab.project_root.clone(), std::sync::Arc::new(entries));
+                        paths
+                    }
+                    Err(error) => {
                         tracing::warn!(
                             project_root = %tab.project_root.display(),
                             %error,
                             "managed hook startup self-heal inventory failed"
                         );
                         vec![tab.project_root.clone()]
-                    })
+                    }
+                }
             })
             .collect::<Vec<_>>();
+        self.startup_worktree_inventories = startup_worktree_inventories;
         // Issue #3808 AC-4: this sweep audited every worktree of the repo
         // (235 here) for 191 s on the startup path, ahead of the embedded
         // server bind. Launches refresh the managed assets of the worktree
@@ -1184,6 +1195,10 @@ impl AppRuntime {
         if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
             return Vec::new();
         }
+        if self.restore_would_resurrect_an_unregistered_pm(tab_id, &session) {
+            self.refuse_unregistered_pm_restore(tab_id, &session.id);
+            return Vec::new();
+        }
         // Issue #4375: refreshing the resident PM's worktree is Git work whose
         // cost scales with the repository, and this path runs inside the
         // canvas-ready restore drain. Prepare it off the event loop and resume
@@ -1313,6 +1328,45 @@ impl AppRuntime {
             "restore refused: the session belongs to another project store's PM worktree"
         );
         true
+    }
+
+    /// Issue #4394 AC-1: refuse to restore a Session in this store's own
+    /// `pm/worktree` that `pm.json` does not name.
+    ///
+    /// The foreign-store gate above compares stores only, so every PM Session
+    /// ever left restorable here came back on GUI restart — three PM windows,
+    /// one registration. The registered PM's own resume still passes, and its
+    /// successor is re-registered at launch completion.
+    fn restore_would_resurrect_an_unregistered_pm(
+        &self,
+        tab_id: &str,
+        session: &gwt_agent::Session,
+    ) -> bool {
+        let Some(tab) = self.tab(tab_id) else {
+            return false;
+        };
+        if !gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
+            return false;
+        }
+        let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&tab.project_root);
+        if gwt::pm_registry::session_is_registered_pm(&prefs_path, &session.id) {
+            return false;
+        }
+        tracing::warn!(
+            tab_id,
+            session_id = %session.id,
+            worktree_path = %session.worktree_path.display(),
+            "restore refused: the PM worktree session is not the registered PM"
+        );
+        true
+    }
+
+    /// Retire an unregistered PM Session for good: never restorable again and
+    /// no placeholder left on the canvas, so the next startup sees one PM.
+    fn refuse_unregistered_pm_restore(&mut self, tab_id: &str, session_id: &str) {
+        mark_auto_resume_source_completed(&self.sessions_dir, session_id);
+        self.remove_stale_paused_agent_window(tab_id, session_id);
+        let _ = self.persist();
     }
 
     /// SPEC-2356 安心 Addendum (FR-044): relaunch a stopped/errored `Agent`
