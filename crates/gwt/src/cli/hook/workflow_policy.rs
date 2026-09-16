@@ -36,7 +36,8 @@ pub struct WorkflowContext {
     pub review_dispatch_session: bool,
     /// Issue #4442: this session is the project's resident PM window, which is
     /// launched with `suppress_execution_control` and therefore can never
-    /// satisfy the identity gate. Decided by [`pm_identity_exempt_session`].
+    /// satisfy the identity gate. Decided by
+    /// [`crate::pm_registry::pm_identity_exempt_session`].
     pub pm_session: bool,
 }
 
