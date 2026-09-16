@@ -9500,7 +9500,13 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
-                if active_work_refresh_queue.begin(&project_root) {
+                // `begin` claims the per-project rebuild slot, so it must not
+                // become a match guard: a guard that returns false falls
+                // through to the next arm, and the claim it just took would
+                // never be finished. Bind the claim first — that also keeps
+                // `collapsible_match` from proposing the guard.
+                let claimed_rebuild_slot = active_work_refresh_queue.begin(&project_root);
+                if claimed_rebuild_slot {
                     match app.active_work_projection_refresh_job(&project_root) {
                         Some(job) => spawn_active_work_projection_refresh(
                             runtime.handle(),
