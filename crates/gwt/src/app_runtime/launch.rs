@@ -50,7 +50,7 @@ use super::{
     resolve_docker_agent_program_with_binding, resolve_launch_spec_with_fallback,
     resolve_launch_worktree, same_worktree_path, save_resumed_workspace_projection,
     save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DockerLaunchBinding,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, DockerLaunchBinding,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
     PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
     WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
@@ -4086,16 +4086,20 @@ impl AppRuntime {
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {
-                            if let Some(tab) = self.tab(&tab_id) {
-                                if let Some(projection) =
-                                    self.active_work_projection_for_tab(&tab_id, tab)
-                                {
-                                    events.push(OutboundEvent::broadcast(
-                                        BackendEvent::ActiveWorkProjection {
-                                            projection: Box::new(projection),
-                                        },
-                                    ));
-                                }
+                            // Issue #4406 AC-5: acknowledge the launch from the
+                            // cached rail and rebuild off the event loop.
+                            // Rebuilding here made `LaunchComplete` the second
+                            // heaviest dispatch of the 20 minute window
+                            // (436,894ms over 71 launches).
+                            if let Some(event) =
+                                self.cached_active_work_projection_broadcast_for_active_tab()
+                            {
+                                events.push(event);
+                            }
+                            if let Some(project_root) =
+                                self.tab(&tab_id).map(|tab| tab.project_root.clone())
+                            {
+                                self.request_active_work_projection_refresh(&project_root);
                             }
                         }
                         let composed_status = self
