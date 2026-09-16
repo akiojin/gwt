@@ -353,7 +353,7 @@ struct WorkspaceBridgeDiagnosticResponse {
     /// Issue #4443 AC-2: the recovery operations the caller may actually run.
     /// The Host's free-form `message` stays withheld — it can carry host-side
     /// paths and identifiers — so the route out crosses as canonical operation
-    /// names alone, filtered against [`safe_recovery_operation`].
+    /// names alone, resolved through [`RecoveryOperationSet`].
     #[serde(default)]
     recovery_operations: Option<Vec<String>>,
     #[serde(default)]
