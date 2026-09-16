@@ -1482,6 +1482,11 @@ pub struct AppRuntime {
     /// windows. Reset every time the user reopens the picker, so this is a
     /// transient in-memory map and is not persisted with the session state.
     pub(crate) file_tree_worktree_roots: HashMap<String, PathBuf>,
+    /// Issue #4433: latest Branch Cleanup status per cleanup surface, so a
+    /// client that reconnects mid-cleanup can pull the in-flight operation's
+    /// state instead of reporting a failure that never happened. Shared with
+    /// the cleanup worker threads, and not persisted with the session state.
+    pub(crate) branch_cleanup_operations: Arc<gwt::BranchCleanupOperationStore>,
     /// SPEC-2785 FR-E: embedded server URL captured after the axum bind so
     /// `open_server_url_events` can reject requests whose origin differs from
     /// the bound URL. `None` before the server is started (e.g. during early
@@ -2977,6 +2982,7 @@ impl AppRuntime {
             attachment_uploads,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            branch_cleanup_operations: Arc::new(gwt::BranchCleanupOperationStore::new()),
             server_url: None,
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -7474,23 +7480,33 @@ impl AppRuntime {
                 branches,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id,
             } => self.run_branch_cleanup_events(
                 &client_id,
                 &id,
                 &branches,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id.as_deref(),
             ),
             FrontendEvent::RunWorkspaceCleanup {
                 branch,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id,
             } => self.run_workspace_cleanup_events(
                 &client_id,
                 &branch,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id.as_deref(),
             ),
+            FrontendEvent::SyncBranchCleanup { id, operation_id } => {
+                self.sync_branch_cleanup_events(&client_id, &id, &operation_id)
+            }
+            FrontendEvent::ClearBranchCleanupStatus { id, operation_id } => {
+                self.clear_branch_cleanup_status_events(&id, &operation_id)
+            }
             FrontendEvent::RebuildIndexCell {
                 project_root,
                 scope,
@@ -8636,6 +8652,11 @@ impl AppRuntime {
         // for another roundtrip.
         events.extend(self.migration_detected_replies(client_id));
         events.extend(self.migration_recovery_replies(client_id));
+        // Issue #4433 AC-2: a WebView reload wipes the page's cleanup state, so
+        // the reloaded client cannot name the operation to re-sync. Hand it
+        // every live cleanup here instead, or it would see nothing until the
+        // worker happens to emit again.
+        events.extend(self.live_branch_cleanup_replies(client_id));
         events
     }
 }

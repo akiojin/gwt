@@ -3802,6 +3802,7 @@ fn sample_runtime_with_events(
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
         persist_dispatcher,
         file_tree_worktree_roots: HashMap::new(),
+        branch_cleanup_operations: std::sync::Arc::new(gwt::BranchCleanupOperationStore::new()),
         server_url: None,
         usage_refresh: None,
         image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -37097,7 +37098,8 @@ fn workspace_cleanup_failure_does_not_emit_done_work_item() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let immediate_events = runtime.run_workspace_cleanup_events("client-1", branch, false, false);
+    let immediate_events =
+        runtime.run_workspace_cleanup_events("client-1", branch, false, false, None);
 
     assert!(immediate_events.is_empty());
     wait_for_recorded_event("workspace cleanup failure", &events, |events| {
