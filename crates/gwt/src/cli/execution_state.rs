@@ -10774,6 +10774,49 @@ pub fn settle(
     })
 }
 
+/// Identity of the Session holding a worktree's execution control record when
+/// the caller is not that Session (Issue #4454).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignExecutionRecordHolder {
+    pub holder_session_id: String,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+}
+
+/// Prove that `session_id` holds no execution authority over this worktree's
+/// Work, and name the Session that does (Issue #4454).
+///
+/// Stop gates use this to tell an orphan window from an authority holder
+/// before demanding a settlement. Every refusal path stays conservative: a
+/// missing record (never launched, so the settlement operations accept the
+/// caller), a failed integrity check (the execution control gate owns that
+/// case and blocks first), and a concurrent generation owned by `session_id`
+/// all return `None`. A Session that might hold authority is therefore never
+/// mistaken for an orphan.
+pub(crate) fn foreign_record_holder(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<ForeignExecutionRecordHolder>> {
+    let Some(flat) = load(worktree)? else {
+        return Ok(None);
+    };
+    if !integrity_ok(&flat) || flat.primary_session_id == session_id {
+        return Ok(None);
+    }
+    let owner = ExecutionOwnerKey {
+        kind: flat.owner_kind,
+        number: flat.owner_number,
+    };
+    if concurrent_generation_record_for_session(worktree, owner, session_id)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(ForeignExecutionRecordHolder {
+        holder_session_id: flat.primary_session_id,
+        owner_kind: flat.owner_kind,
+        owner_number: flat.owner_number,
+    }))
+}
+
 /// SPEC #3590 FR-009: the execution projection a Session owns when the flat
 /// one names a concurrent Session instead.
 ///
