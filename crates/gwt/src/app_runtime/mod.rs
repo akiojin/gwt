@@ -241,6 +241,10 @@ use attachments::{
     PreparedFileAttachment,
 };
 pub use board::BoardPostRequest;
+pub(crate) use board::{
+    run_board_projection_refresh, BoardProjectionRefreshJob, BoardProjectionRefreshed,
+    BoardScopedViews,
+};
 #[cfg(test)]
 use frontend_action_log::frontend_user_action_log;
 use frontend_action_log::log_frontend_user_action;
@@ -264,6 +268,9 @@ use launch::{
 };
 pub(crate) use launch::{
     continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
+};
+pub(crate) use workspace_views::{
+    run_active_work_projection_refresh, ActiveWorkProjectionJob, ActiveWorkProjectionRefreshed,
 };
 // Production callers only ever pass this through from
 // `AppRuntime::readiness_pane_evidence`, so the name itself is needed by the
@@ -1374,13 +1381,12 @@ pub struct AppRuntime {
     pub(crate) work_ai_summaries: HashMap<PathBuf, HashMap<String, String>>,
     /// Incremental loader for the machine-local session ledger; keeps
     /// projection rebuilds from re-parsing thousands of unchanged TOMLs
-    /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
-    /// the single event-loop thread and the projection builder takes `&self`.
-    pub(crate) session_ledger_cache:
-        std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
+    /// (window-close latency fix, 2026-06-11). Issue #4406: shared rather than
+    /// `RefCell`, because the projection build now runs off the event loop.
+    pub(crate) session_ledger_cache: Arc<Mutex<crate::session_ledger_cache::SessionLedgerCache>>,
     /// Same root fix for the home works.json (megabytes of Work items +
     /// events): cache hit clones instead of re-parsing per projection event.
-    pub(crate) work_items_cache: std::cell::RefCell<gwt_core::workspace_projection::WorkItemsCache>,
+    pub(crate) work_items_cache: Arc<Mutex<gwt_core::workspace_projection::WorkItemsCache>>,
     /// SPEC-3170 FR-076: latest fully built projection per tab. FrontendReady
     /// replays this snapshot (or a live-session-only fallback) without
     /// entering disk-backed projection loading on the GUI event loop.
@@ -2938,12 +2944,12 @@ impl AppRuntime {
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
-            session_ledger_cache: std::cell::RefCell::new(
+            session_ledger_cache: Arc::new(Mutex::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
-            ),
-            work_items_cache: std::cell::RefCell::new(
+            )),
+            work_items_cache: Arc::new(Mutex::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
-            ),
+            )),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
