@@ -50,6 +50,9 @@ mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+// Unix has no tree-wide CPU cap to lift (Issue #4405).
+#[cfg(windows)]
+mod verification_cap_relief;
 mod work_events_ingest;
 mod workspace_session_registry;
 
@@ -234,13 +237,17 @@ fn spawn_project_index_status_check(
     _runtime: &Runtime,
     proxy: EventLoopProxy<UserEvent>,
     project_root: Option<PathBuf>,
+    startup_inventory: Option<std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
 ) {
     dispatch_project_index_status_check_with(
         AppEventProxy::new(proxy),
         project_root,
         |proxy, root| {
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
-                .spawn(proxy, root)
+            let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::global();
+            match startup_inventory {
+                Some(inventory) => service.spawn_with_startup_inventory(proxy, root, inventory),
+                None => service.spawn(proxy, root),
+            }
         },
     );
 }
@@ -2144,6 +2151,7 @@ mod tests {
             launch_profile_summary: "configure before auto start".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
+            agent_blackout: None,
             quota_hold: None,
             update_drain: None,
             launch_profile_candidates: Vec::new(),
@@ -3407,6 +3415,7 @@ mod tests {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            startup_worktree_inventories: HashMap::new(),
             pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             restore_launch_windows: HashMap::new(),
@@ -8999,6 +9008,8 @@ fn main() -> std::io::Result<()> {
             let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
         }),
     );
+    #[cfg(windows)]
+    verification_cap_relief::spawn(pty_writers.clone());
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
@@ -9015,10 +9026,12 @@ fn main() -> std::io::Result<()> {
     let mut startup_index_project = app
         .active_project_root()
         .map(|root| root.display().to_string());
+    let startup_worktree_inventory = app.take_startup_worktree_inventory();
     spawn_project_index_status_check(
         &runtime,
         proxy.clone(),
         app.active_project_root().map(Path::to_path_buf),
+        startup_worktree_inventory,
     );
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
@@ -9234,6 +9247,7 @@ fn main() -> std::io::Result<()> {
                         &runtime,
                         proxy.clone(),
                         app.active_project_root().map(Path::to_path_buf),
+                        None,
                     );
                 }
             }
