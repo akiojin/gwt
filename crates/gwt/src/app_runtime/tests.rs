@@ -34194,13 +34194,22 @@ fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_ta
 }
 
 #[test]
-fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age() {
-    // Issue #2942: a session whose status drifted to Stopped (idle timeout)
-    // AND is older than the 24h freshness window must STILL resume on
-    // startup when its agent window is still present in the workspace (the
-    // user did not explicitly close it). Both the status-candidate gate and
-    // the freshness gate would exclude this session on the orphan path; only
-    // the "unclosed placeholder" path can restore it.
+fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
+    // Issue #2942: a session whose status drifted to Stopped (an idle timeout)
+    // must STILL resume on startup when its agent window is still present in
+    // the workspace — the user did not explicitly close it. The
+    // status-candidate gate would exclude this session on the orphan path;
+    // only the "unclosed placeholder" path can restore it.
+    //
+    // Issue #4441 supersedes the *age* half of that contract, which this test
+    // used to assert at 30 hours. #2942 read a surviving placeholder as proof
+    // that the user had left the window open, because closing a window removes
+    // it from the workspace. Agent panes never close themselves, so in practice
+    // the placeholder set became every launch the machine ever performed: 72
+    // windows, 55 of them stuck in `starting`, one Issue restored eight times
+    // over. "Not explicitly closed" is not the same fact as "open at the last
+    // exit", so the 24-hour bound now applies to this path too, and the case is
+    // asserted at both ends below.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -34249,13 +34258,16 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age(
     session.agent_session_id = Some("native-unclosed".to_string());
     session.record_hook_event("Stop");
     session.record_completed_stop();
-    // Status drifted to Stopped (would fail the candidate gate)...
+    // A launch marks the window as one to restore; this is what separates a
+    // window the user left open from one whose agent settled (Issue #4441).
+    session.restore_window_on_startup = true;
+    // Status drifted to Stopped (would fail the candidate gate on the orphan
+    // path) but the window is recent.
     session.update_status(gwt_agent::AgentStatus::Stopped);
-    // ...and the session is older than the 24h freshness window.
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(2);
     session
         .save(&runtime.sessions_dir)
-        .expect("save stale stopped session");
+        .expect("save stopped session");
 
     runtime.bootstrap();
     runtime.handle_frontend_event(
@@ -34276,12 +34288,89 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age(
         .count();
     assert_eq!(
         agent_windows, 1,
-        "an unclosed agent window must resume despite Stopped status and >24h age"
+        "an unclosed agent window must resume despite Stopped status"
     );
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),
         1,
         "the resumed unclosed window must track its source session"
+    );
+}
+
+/// Issue #4441: the other end of the case above — the same unclosed window,
+/// aged past the freshness bound, does not come back.
+///
+/// This is the half of Issue #2942 that #4441 supersedes. Keeping the two
+/// assertions adjacent is deliberate: the difference between them is the entire
+/// behavioural change, and reading one without the other makes it look like
+/// either #2942 or #4441 was simply dropped.
+#[test]
+fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_bound() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("stale-unclosed");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/stale-unclosed",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("sess-stale".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-stale".to_string(),
+        title: "Stale".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-stale"));
+
+    let mut session = gwt_agent::Session::new(
+        &worktree,
+        "work/stale-unclosed",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "sess-stale".to_string();
+    session.agent_session_id = Some("native-stale".to_string());
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save stale stopped session");
+
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "a placeholder older than the freshness bound is relaunch history, not the last-open set"
     );
 }
 
