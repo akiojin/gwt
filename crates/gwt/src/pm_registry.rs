@@ -2294,6 +2294,15 @@ pub fn migrate_legacy_pm_scratch_preserving_project_content(worktree: &Path) -> 
 
 pub const PM_WORKTREE_BASE_REF: &str = "origin/develop";
 
+/// Resident branch the PM worktree is checked out on (Issue #4448).
+///
+/// The PM worktree used to run detached, so a refresh could repoint HEAD past
+/// the PM's own commits as soon as they were pushed — pushing made them
+/// reachable from `--remotes` and therefore invisible to the detached-only
+/// guard. A branch makes the protection structural: a refresh may only
+/// fast-forward it, so it can gain commits but never lose them.
+pub const PM_WORKTREE_BRANCH: &str = "pm/resident";
+
 /// Result of one serialized PM worktree refresh attempt. A degraded outcome
 /// remains launchable only when a usable worktree was materialized or
 /// preserved; `freshness` explains why it could not advance.
@@ -2348,7 +2357,7 @@ fn git_sha(repo: &Path, revision: &str) -> io::Result<Option<String>> {
     Ok((!sha.is_empty()).then_some(sha))
 }
 
-fn detached_worktree_head_sha(worktree: &Path) -> io::Result<Option<String>> {
+fn pm_worktree_head_sha(worktree: &Path) -> io::Result<Option<String>> {
     let dot_git = worktree.join(".git");
     let metadata = match fs::symlink_metadata(&dot_git) {
         Ok(metadata) => metadata,
@@ -2443,7 +2452,7 @@ fn pm_refresh_failure(
     stage: PmWorktreeRefreshFailureStage,
     reason: impl Into<String>,
 ) -> PmWorktreeFreshness {
-    let head_sha = detached_worktree_head_sha(worktree).ok().flatten();
+    let head_sha = pm_worktree_head_sha(worktree).ok().flatten();
     let behind = git_behind(git_root, head_sha.as_deref(), target_sha.as_deref());
     let state = match (&head_sha, &target_sha) {
         (Some(head), Some(target)) if head != target => PmWorktreeFreshnessState::Stale,
@@ -2482,7 +2491,7 @@ fn persist_unknown_pm_worktree_failure(
     let freshness = PmWorktreeFreshness {
         state: PmWorktreeFreshnessState::Unknown,
         base_ref: PM_WORKTREE_BASE_REF.to_string(),
-        head_sha: detached_worktree_head_sha(worktree).ok().flatten(),
+        head_sha: pm_worktree_head_sha(worktree).ok().flatten(),
         target_sha: None,
         behind: None,
         target_observation: PmWorktreeTargetObservation::Unavailable,
@@ -3145,6 +3154,87 @@ fn tracked_pm_work_diagnosis(worktree: &Path) -> String {
     format!("PM worktree has tracked or index changes; {groups}")
 }
 
+/// Decide whether the existing PM worktree may be advanced to `target_sha`,
+/// adopting a still-detached worktree onto the resident branch on the way
+/// (Issue #4448). `None` means a fast-forward loses nothing; `Some` carries the
+/// degradation to report instead of moving HEAD.
+fn pm_resident_branch_advance_failure(
+    manager: &gwt_git::WorktreeManager,
+    worktree: &Path,
+    target_sha: &str,
+) -> Option<(PmWorktreeRefreshFailureStage, String)> {
+    use gwt_git::worktree::{ResidentBranchAdoption, ResidentBranchAdvanceSafety};
+
+    // At most one adoption: a worktree still detached afterwards is a
+    // Git-level surprise, not something to retry.
+    for attempt in 0..2 {
+        let safety = match manager.resident_branch_advance_safety(
+            worktree,
+            PM_WORKTREE_BRANCH,
+            target_sha,
+        ) {
+            Ok(safety) => safety,
+            Err(error) => {
+                return Some((PmWorktreeRefreshFailureStage::Inspect, error.to_string()));
+            }
+        };
+        match safety {
+            ResidentBranchAdvanceSafety::Ready => return None,
+            ResidentBranchAdvanceSafety::TrackedOrIndexChanges => {
+                return Some((
+                    PmWorktreeRefreshFailureStage::LocalWork,
+                    tracked_pm_work_diagnosis(worktree),
+                ));
+            }
+            ResidentBranchAdvanceSafety::LocalCommits { head } => {
+                return Some((
+                    PmWorktreeRefreshFailureStage::LocalWork,
+                    format!(
+                        "PM worktree branch {PM_WORKTREE_BRANCH} holds commit {head}, which \
+                         {PM_WORKTREE_BASE_REF} does not contain; refresh keeps it instead of \
+                         rewinding the branch"
+                    ),
+                ));
+            }
+            ResidentBranchAdvanceSafety::ForeignBranch { branch } => {
+                return Some((
+                    PmWorktreeRefreshFailureStage::Inspect,
+                    format!(
+                        "PM worktree HEAD is on {branch}, not the resident branch \
+                         {PM_WORKTREE_BRANCH}"
+                    ),
+                ));
+            }
+            ResidentBranchAdvanceSafety::DetachedHead if attempt > 0 => break,
+            ResidentBranchAdvanceSafety::DetachedHead => {
+                match manager.adopt_resident_branch(worktree, PM_WORKTREE_BRANCH) {
+                    Ok(ResidentBranchAdoption::Adopted) => {}
+                    Ok(ResidentBranchAdoption::RefusedBranchAhead { branch_head }) => {
+                        return Some((
+                            PmWorktreeRefreshFailureStage::LocalWork,
+                            format!(
+                                "PM worktree branch {PM_WORKTREE_BRANCH} holds commit \
+                                 {branch_head}, which the detached HEAD does not contain; refresh \
+                                 keeps both instead of rewinding the branch"
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Some((
+                            PmWorktreeRefreshFailureStage::Repoint,
+                            format!("adopting the resident PM branch failed: {error}"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Some((
+        PmWorktreeRefreshFailureStage::Repoint,
+        format!("PM worktree is still detached after adopting {PM_WORKTREE_BRANCH}"),
+    ))
+}
+
 fn repoint_and_refresh_pm_assets(
     manager: &gwt_git::WorktreeManager,
     worktree: &Path,
@@ -3158,7 +3248,7 @@ fn repoint_and_refresh_pm_assets(
             // This lock remains held until checkout and regeneration end.
             normalize_previous_generated_hook_configs(worktree)?;
             manager
-                .repoint_detached(worktree, target)
+                .fast_forward_resident_branch(worktree, target)
                 .map_err(|error| {
                     io::Error::other(format!("managed artifacts: repoint failed: {error}"))
                 })?;
@@ -3171,7 +3261,7 @@ fn repoint_and_refresh_pm_assets(
         if let Err(error) = refresh {
             // Git can advance HEAD and then report failure from post-checkout.
             // Inspect the actual commit before restoring displaced assets.
-            let rollback = detached_worktree_head_sha(worktree).and_then(|head| {
+            let rollback = pm_worktree_head_sha(worktree).and_then(|head| {
                 if head.as_deref() == Some(old_head) {
                     return Ok(());
                 }
@@ -3182,7 +3272,7 @@ fn repoint_and_refresh_pm_assets(
                 }
                 normalize_previous_generated_hook_configs(worktree)?;
                 manager
-                    .repoint_detached(worktree, old_head)
+                    .reset_resident_branch(worktree, old_head)
                     .map_err(|error| io::Error::other(error.to_string()))
             });
             let mut reason = error.to_string();
@@ -3378,7 +3468,11 @@ fn refresh_pm_worktree_at_locked(
                         return Err(create_error);
                     }
                 }
-                if let Err(create_error) = manager.create_detached(materialization_sha, worktree) {
+                if let Err(create_error) = manager.create_on_resident_branch(
+                    PM_WORKTREE_BRANCH,
+                    materialization_sha,
+                    worktree,
+                ) {
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
@@ -3425,7 +3519,7 @@ fn refresh_pm_worktree_at_locked(
         };
 
         let old_head = if existed {
-            match detached_worktree_head_sha(worktree) {
+            match pm_worktree_head_sha(worktree) {
                 Ok(head) => head,
                 Err(error) => {
                     let freshness = pm_refresh_failure(
@@ -3443,25 +3537,7 @@ fn refresh_pm_worktree_at_locked(
             None
         };
         if existed {
-            let safety = manager
-                .detached_repoint_safety(worktree)
-                .map_err(|error| io::Error::other(error.to_string()));
-            let failure = match safety {
-                Ok(gwt_git::worktree::DetachedRepointSafety::Ready) => None,
-                Ok(gwt_git::worktree::DetachedRepointSafety::SymbolicHead { branch }) => Some((
-                    PmWorktreeRefreshFailureStage::Inspect,
-                    format!("PM worktree HEAD is symbolic ({branch})"),
-                )),
-                Ok(gwt_git::worktree::DetachedRepointSafety::TrackedOrIndexChanges) => Some((
-                    PmWorktreeRefreshFailureStage::LocalWork,
-                    tracked_pm_work_diagnosis(worktree),
-                )),
-                Ok(gwt_git::worktree::DetachedRepointSafety::DetachedOnlyCommit) => Some((
-                    PmWorktreeRefreshFailureStage::LocalWork,
-                    "PM worktree has a detached-only commit".to_string(),
-                )),
-                Err(error) => Some((PmWorktreeRefreshFailureStage::Inspect, error.to_string())),
-            };
+            let failure = pm_resident_branch_advance_failure(&manager, worktree, &target_sha);
             if let Some((stage, reason)) = failure {
                 let freshness = pm_refresh_failure(
                     git_root,
@@ -3522,17 +3598,40 @@ fn refresh_pm_worktree_at_locked(
                     return Err(error);
                 }
             }
-            if let Err(error) = manager.create_detached(&target_sha, worktree) {
-                let freshness = pm_refresh_failure(
-                    git_root,
-                    worktree,
-                    Some(target_sha),
-                    PmWorktreeTargetObservation::Fresh,
-                    PmWorktreeRefreshFailureStage::Repoint,
-                    error.to_string(),
-                );
-                persist_pm_worktree_freshness(project_dir, &freshness)?;
-                return Err(io::Error::other(error.to_string()));
+            match manager.create_on_resident_branch(PM_WORKTREE_BRANCH, &target_sha, worktree) {
+                Ok(gwt_git::worktree::ResidentBranchMaterialization::AtBase) => {}
+                // A resident branch left behind by an earlier PM worktree may
+                // still carry commits develop has not taken. Adopting it where
+                // it stands keeps them; the caller only learns it is behind.
+                Ok(gwt_git::worktree::ResidentBranchMaterialization::RetainedBranchHead {
+                    head,
+                }) => {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        Some(target_sha),
+                        PmWorktreeTargetObservation::Fresh,
+                        PmWorktreeRefreshFailureStage::LocalWork,
+                        format!(
+                            "PM worktree branch {PM_WORKTREE_BRANCH} holds commit {head}, which \
+                             {PM_WORKTREE_BASE_REF} does not contain; the worktree adopted the \
+                             branch instead of rewinding it"
+                        ),
+                    );
+                    return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+                }
+                Err(error) => {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        Some(target_sha),
+                        PmWorktreeTargetObservation::Fresh,
+                        PmWorktreeRefreshFailureStage::Repoint,
+                        error.to_string(),
+                    );
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(io::Error::other(error.to_string()));
+                }
             }
         }
 
@@ -3553,7 +3652,7 @@ fn refresh_pm_worktree_at_locked(
             }
         }
 
-        let observed_head = match detached_worktree_head_sha(worktree) {
+        let observed_head = match pm_worktree_head_sha(worktree) {
             Ok(head) => head,
             Err(error) => {
                 let freshness = pm_refresh_failure(
