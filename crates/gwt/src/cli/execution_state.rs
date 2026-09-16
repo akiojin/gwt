@@ -2335,6 +2335,9 @@ pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool 
             ) | (
                 SuccessorPredecessorStatus::Completed,
                 MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+            ) | (
+                SuccessorPredecessorStatus::Active,
+                CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
             )
         )
 }
@@ -7328,6 +7331,9 @@ pub fn prepared_owner_launch_successor_for_predecessor(
         .filter(|attempt| {
             attempt.status == ContinuationAttemptStatus::Prepared
                 && is_owner_launch_successor_attempt(attempt)
+                // Concurrent launches are independent requests, not a replay
+                // of the terminal predecessor's manual launch.
+                && attempt.predecessor_status != SuccessorPredecessorStatus::Active
                 && attempt.predecessor.generation_id == current.identity.generation_id
         });
     let candidate = candidates.next().cloned();
