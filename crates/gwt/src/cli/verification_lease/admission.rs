@@ -18,7 +18,7 @@ use gwt_core::index_coordinator::{
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::board::{BoardCommand, BoardPostCommand};
-use crate::cli::verification_lease::holder_activity::HolderActivity;
+use crate::cli::verification_lease::holder_activity::{HolderActivity, HolderProbe};
 use crate::cli::verification_lease::{self, DEFAULT_TTL_MINUTES};
 use crate::cli::CliEnv;
 
@@ -219,16 +219,18 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
     }
 }
 
-fn describe_holder(coordinator: &IndexCoordinator) -> HolderNotice {
+/// `probe` is kept across the wait loop's polls on purpose: it makes the
+/// window between readings the poll interval instead of one this call has to
+/// sleep through, and a longer window is what keeps a slow-but-moving holder
+/// off the "may be hung" verdict (Issue #4409 AC-9/AC-10).
+fn describe_holder(coordinator: &IndexCoordinator, probe: &mut HolderProbe) -> HolderNotice {
     match coordinator.heavy_lease_status() {
         Ok(status) => {
             let activity = status
                 .owner
                 .as_ref()
                 .filter(|_| status.held)
-                .and_then(|owner| {
-                    verification_lease::holder_activity::observe(owner.pid, status.acquired_at_ms)
-                });
+                .and_then(|owner| probe.observe(owner.pid, status.acquired_at_ms));
             holder_notice(&status, activity.as_ref())
         }
         Err(err) => HolderNotice {
@@ -350,12 +352,13 @@ pub(crate) fn admit<E: CliEnv>(
             }
         }
     };
+    let mut probe = HolderProbe::default();
     let lease = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match guard.acquire_heavy_with_ttl(remaining.min(POLL), LEASE_TTL) {
             Ok(lease) => break lease,
             Err(CoordinatorError::Timeout { .. }) => {
-                let holder = describe_holder(&coordinator);
+                let holder = describe_holder(&coordinator, &mut probe);
                 if Instant::now() >= deadline {
                     let _ = guard.complete(JobOutcome::Failed {
                         message: "host admission deferred".to_string(),
@@ -588,7 +591,10 @@ mod tests {
         let starved = HolderActivity {
             held_ms: 7_260_000,
             cpu_percent: 1.4,
-            processes: 3,
+            cpu_gained_ms: 17,
+            turnover: false,
+            processes: 1,
+            window_ms: 1_200,
             host_cpu_percent: Some(95.0),
         };
         let notice = holder_notice(&status, Some(&starved));
@@ -599,7 +605,10 @@ mod tests {
         let progressing = HolderActivity {
             held_ms: 600_000,
             cpu_percent: 380.0,
+            cpu_gained_ms: 4_560,
+            turnover: true,
             processes: 5,
+            window_ms: 1_200,
             host_cpu_percent: Some(95.0),
         };
         let notice = holder_notice(&status, Some(&progressing));
