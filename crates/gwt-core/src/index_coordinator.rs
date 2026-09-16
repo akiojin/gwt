@@ -317,8 +317,11 @@ impl HeavyYieldReason {
 }
 
 /// Read-only view of the host-wide heavy lease (SPEC #3576 US-1). The kernel
-/// lock decides `held`; the ticket only enriches a lock that is genuinely
-/// taken, so crash residue can never be mistaken for a live holder.
+/// lock decides whether the lock file is taken and the ticket enriches a lock
+/// that is genuinely held, so crash residue can never be mistaken for a live
+/// holder. `held` also requires the ticket's holder to still be there:
+/// a locked file whose ticket names a finished or vanished holder is residue,
+/// not a lease (Issue #4470).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeavyLeaseStatus {
     pub held: bool,
@@ -343,6 +346,17 @@ pub struct HeavyLeaseStatus {
     /// Best-effort wait estimate: the TTL remainder for a verification
     /// holder, `remaining_batches × batch_ms` for an index holder.
     pub estimated_remaining_ms: Option<u64>,
+    /// Issue #4470 AC-2: whether the ticket owner's process still exists.
+    /// `None` when no ticket describes the lock.
+    pub holder_alive: Option<bool>,
+    /// Issue #4470 AC-1: the job status the ticket's owner last published for
+    /// the target it holds the lease for. `None` when that target published
+    /// nothing, or published it under a different owner.
+    pub holder_job_status: Option<JobStatus>,
+    /// The ticket describes a holder that is gone: its process no longer
+    /// exists, or it published a terminal job status. Such a ticket is
+    /// residue, so `held` is false and no TTL is worth waiting out.
+    pub holder_stale: bool,
 }
 
 /// Outcome of a shared job, as observed by the owner or a joined waiter.
@@ -359,11 +373,28 @@ pub enum JobOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum JobStatus {
+pub enum JobStatus {
     Running,
     Completed,
     Failed,
     Abandoned,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobStatus::Running => "running",
+            JobStatus::Completed => "completed",
+            JobStatus::Failed => "failed",
+            JobStatus::Abandoned => "abandoned",
+        }
+    }
+
+    /// A job that will never publish anything again. Its holder cannot still
+    /// be verifying, whatever its ticket's TTL says (Issue #4470).
+    fn is_terminal(self) -> bool {
+        !matches!(self, JobStatus::Running)
+    }
 }
 
 /// Per-target job state, published atomically for waiters and diagnostics.
@@ -758,8 +789,15 @@ impl IndexCoordinator {
 
     /// Snapshot the host-wide heavy lease without joining the queue
     /// (SPEC #3576 US-1). Probing the kernel lock — not the ticket — decides
-    /// whether the lease is held, so a ticket left behind by a crashed holder
-    /// reads as free and is reconciled while the probe owns the lock.
+    /// whether the lock file is taken, so a ticket left behind by a crashed
+    /// holder reads as free and is reconciled while the probe owns the lock.
+    ///
+    /// A locked file is not by itself a live lease: an inherited descriptor
+    /// outlives the process it was forked from, and the ticket beside it then
+    /// reports a full TTL to every waiter (Issue #4470). So a taken lock is
+    /// only reported as `held` while its ticket's holder is still there —
+    /// process alive, and no terminal status published for the target it took
+    /// the lease for.
     pub fn heavy_lease_status(&self) -> Result<HeavyLeaseStatus, CoordinatorError> {
         let queue = published_heavy_queue(&self.heavy_pending_dir())?;
         let pending = queue.len();
@@ -786,8 +824,44 @@ impl IndexCoordinator {
             });
         };
         let now = now_ms();
-        let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
         let holder_kind = HeavyHolderKind::of_target(&ticket.target);
+        // Issue #4470: the kernel lock says the file is locked, not that a
+        // verification is running. A descriptor forked out of a holder keeps
+        // the `flock` alive past its owner, and the ticket left next to it
+        // then counts its full TTL down at every waiter. Ask the holder
+        // itself: a process that no longer exists, or one that already
+        // published a terminal status for the target it took the lease for,
+        // is not holding anything.
+        let holder_alive = Some(process_is_alive(ticket.owner.pid));
+        let holder_job_status = read_state(&target_state_path_for(&self.root, &ticket.target))
+            .filter(|state| state.owner == ticket.owner)
+            .map(|state| state.status);
+        let holder_stale =
+            holder_alive == Some(false) || holder_job_status.is_some_and(JobStatus::is_terminal);
+        if holder_stale {
+            return Ok(HeavyLeaseStatus {
+                held: false,
+                lease_id: ticket.lease_id,
+                target: Some(ticket.target),
+                owner: Some(ticket.owner),
+                priority: Some(ticket.priority),
+                acquired_at_ms: Some(ticket.acquired_at_ms),
+                // No live holder means no honest deadline: a TTL remainder
+                // here is exactly the number that told waiters to sit still.
+                expires_at_ms: None,
+                remaining_ms: None,
+                expired: false,
+                pending,
+                queue,
+                holder_kind: Some(holder_kind),
+                remaining_batches: None,
+                estimated_remaining_ms: None,
+                holder_alive,
+                holder_job_status,
+                holder_stale,
+            });
+        }
+        let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
         let progress = match holder_kind {
             HeavyHolderKind::Index => self.read_heavy_progress().filter(|progress| {
                 progress.target == ticket.target && progress.updated_at_ms >= ticket.acquired_at_ms
@@ -819,6 +893,9 @@ impl IndexCoordinator {
             holder_kind: Some(holder_kind),
             remaining_batches,
             estimated_remaining_ms,
+            holder_alive,
+            holder_job_status,
+            holder_stale,
         })
     }
 
@@ -1455,8 +1532,52 @@ fn target_ticket_path(root: &Path, key: &TargetKey) -> PathBuf {
 }
 
 fn target_state_path(root: &Path, key: &TargetKey) -> PathBuf {
-    root.join("targets")
-        .join(format!("{}.state.json", key.file_stem()))
+    target_state_path_for(root, &key.file_stem())
+}
+
+/// The state path of a target named by its file stem. A heavy ticket carries
+/// the stem rather than the key it was built from, so reading the holder's
+/// own published status needs this form (Issue #4470).
+fn target_state_path_for(root: &Path, stem: &str) -> PathBuf {
+    root.join("targets").join(format!("{stem}.state.json"))
+}
+
+/// Whether `pid` still names a process on this host.
+///
+/// Diagnostics only, exactly like [`OwnerIdentity`]: a recycled PID reads as
+/// alive, which keeps the answer on the safe side — residue is only ever
+/// declared when the process is definitely gone.
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid == 0 {
+            return false;
+        }
+        // Signal 0 performs the existence and permission checks without
+        // delivering anything. `EPERM` means the process exists under
+        // another user.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: OpenProcess returns a new owned handle for the exact PID.
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+        else {
+            return false;
+        };
+        let mut code = 0u32;
+        // SAFETY: `handle` is open and `code` outlives the call.
+        let alive = unsafe { GetExitCodeProcess(handle, &mut code) }.is_ok()
+            && code == STILL_ACTIVE.0 as u32;
+        // SAFETY: the handle was opened above and is not used afterwards.
+        let _ = unsafe { CloseHandle(handle) };
+        alive
+    }
 }
 
 fn target_waiters_dir(root: &Path, key: &TargetKey) -> PathBuf {

@@ -180,6 +180,15 @@ struct LeaseStatusSnapshot {
     holder_cpu_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     holder_state: Option<String>,
+    /// Issue #4470 AC-3: whether the ticket's owner process still exists and
+    /// what job status it last published, so a waiter can tell a working
+    /// holder from residue without reading the coordinator's files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_job_status: Option<String>,
+    #[serde(default)]
+    holder_stale: bool,
 }
 
 /// Fill in the holder's activity; only the status report pays for the
@@ -214,6 +223,9 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             holder_held_ms: None,
             holder_cpu_percent: None,
             holder_state: None,
+            holder_alive: status.holder_alive,
+            holder_job_status: status.holder_job_status.map(|job| job.as_str().to_string()),
+            holder_stale: status.holder_stale,
         }
     }
 }
@@ -324,6 +336,15 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     if let Some(kind) = &status.holder_kind {
         out.push_str(&format!("holder_kind: {kind}\n"));
     }
+    if let Some(alive) = status.holder_alive {
+        out.push_str(&format!("holder_alive: {alive}\n"));
+    }
+    if let Some(job) = &status.holder_job_status {
+        out.push_str(&format!("holder_job_status: {job}\n"));
+    }
+    if status.holder_stale {
+        out.push_str("holder_stale: true\n");
+    }
     if let Some(batches) = status.remaining_batches {
         out.push_str(&format!("remaining_batches: {batches}\n"));
     }
@@ -428,6 +449,9 @@ mod tests {
                 holder_held_ms: None,
                 holder_cpu_percent: None,
                 holder_state: None,
+                holder_alive: Some(true),
+                holder_job_status: Some("running".to_string()),
+                holder_stale: false,
             },
         );
         // Issue #4169 AC-2: the waiters are named in service order, each with
@@ -443,6 +467,8 @@ mod tests {
              remaining_ms: 60000\n\
              expired: false\n\
              holder_kind: verification\n\
+             holder_alive: true\n\
+             holder_job_status: running\n\
              estimated_remaining_ms: 60000\n\
              pending: 2\n\
              queue[0]: target=repo--verification--early priority=manual-rebuild \
