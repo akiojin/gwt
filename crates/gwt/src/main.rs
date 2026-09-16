@@ -9499,7 +9499,12 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
-                if active_work_refresh_queue.begin(&project_root) {
+                // `begin` is a side effect: it either hands this event the
+                // in-flight slot or queues a rerun. Keep it a named step rather
+                // than a match guard, so the queue is never mutated while the
+                // event is still being matched.
+                let owns_refresh = active_work_refresh_queue.begin(&project_root);
+                if owns_refresh {
                     match app.active_work_projection_refresh_job(&project_root) {
                         Some(job) => spawn_active_work_projection_refresh(
                             runtime.handle(),
