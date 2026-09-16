@@ -51,7 +51,7 @@ pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-c
 /// silently rewrite this independently hashed record.
 pub const EXECUTION_GENERATION_POINTER_STATE_RELATIVE: &str =
     ".gwt/skill-state/execution-generation-pointer.json";
-const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
+pub(crate) const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
 const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
@@ -9929,8 +9929,18 @@ fn update_exact_recovery_session_with_publisher<T>(
         },
     ) {
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated((value, binding))) => {
-            if let Some(publisher) = publisher.as_mut() {
-                publisher.publish(binding.expect("Host adoption retains its Session binding"));
+            // Issue #4443 AC-10: an unbound Session here is a refusal, not an
+            // invariant violation. Panicking crossed the `spawn_blocking`
+            // boundary and the adoption handler answered `500 code=internal`.
+            match (publisher.as_mut(), binding) {
+                (Some(publisher), Some(binding)) => publisher.publish(binding),
+                (Some(_), None) => {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "Host adoption cannot publish authority: the durable Session carries no execution binding; run JSON operation `execution.continue` to bind canonical authority first",
+                    ))
+                }
+                (None, _) => {}
             }
             Ok(value)
         }
@@ -11696,6 +11706,49 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
     "workspace.update",
     "workspace.ensure",
 ];
+
+/// Issue #4443 AC-2: the gwtd operations a Host refusal may name to an agent.
+///
+/// A refusal that reaches an agent over the capability bridge carries operation
+/// names from this list and nothing else. Membership is the truthfulness check:
+/// #4396 stalled an agent for over an hour by naming `workspace.prune`, which
+/// does not exist, and free-form refusal prose cannot cross the bridge because
+/// it may carry host-side paths and identifiers.
+///
+/// Ordered so that a name containing another is matched first;
+/// [`recovery_operations_named_in`] then reports the specific operation rather
+/// than the one embedded in it.
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 11] = [
+    "execution.release_prepared",
+    "execution.continue",
+    "execution.status",
+    "execution.repair",
+    "execution.reopen",
+    "execution.adopt",
+    "workspace.ensure",
+    "workspace.update",
+    "build.abort",
+    "verify.plan",
+    "verify.run",
+];
+
+/// The recovery operations `message` names, deduplicated and ordered as in
+/// [`AGENT_RECOVERY_OPERATIONS`]. Refusals already state their route in prose;
+/// this lifts it into a structured field the agent bridge is allowed to carry.
+#[must_use]
+pub fn recovery_operations_named_in(message: &str) -> Vec<String> {
+    let mut remaining = message.to_string();
+    let mut named = Vec::new();
+    for operation in AGENT_RECOVERY_OPERATIONS {
+        if remaining.contains(operation) {
+            // Blank the match so `execution.continue` is not also reported as
+            // `execution.repair`'s shorter neighbours in a later pass.
+            remaining = remaining.replace(operation, " ");
+            named.push(operation.to_string());
+        }
+    }
+    named
+}
 
 /// Recoveries that need no session identity or execution authority, so naming
 /// one is always truthful (Issue #4074 AC-3).
@@ -14957,10 +15010,13 @@ pub(crate) fn adopt_for_authenticated_host(
         &mut out,
         Some(publisher),
     )
-    .map_err(|_| {
+    // Issue #4443 AC-10: the underlying refusal already names the repair route
+    // (`execution.repair`, `verify.plan` ...). Replacing it with a fixed
+    // sentence left the agent with a bare `code=internal` and no way forward.
+    .map_err(|error| {
         AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::Internal,
-            "Host adoption did not complete; inspect execution.status before retrying",
+            format!("Host adoption did not complete: {error}"),
         )
     })?;
     if code != 0 {
