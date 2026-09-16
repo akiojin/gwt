@@ -1453,7 +1453,8 @@ impl AppRuntime {
         if let Some(branch) = work_item_branch.as_deref() {
             let agent_sessions = self
                 .session_ledger_cache
-                .borrow_mut()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .load(&self.sessions_dir);
             let project_repo_hash = gwt_core::repo_hash::detect_repo_hash(&project_root);
             let registry = crate::workspace_session_registry::branch_session_registry(
@@ -2139,6 +2140,18 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
+        // Issue #4378 AC-2: hold deliveries until the startup generation
+        // reaper reports back, so a launch never races a stale generation.
+        if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
+            deferred.push(super::DeferredIssueMonitorLaunch {
+                project_root: project_root.to_path_buf(),
+                issue_number,
+                linked_issue_kind,
+                delivery_id,
+                launch_session_strategy,
+            });
+            return Vec::new();
+        }
         let mut recovery_events = Vec::new();
         if let Some(delivery_id) = delivery_id.as_deref() {
             match self

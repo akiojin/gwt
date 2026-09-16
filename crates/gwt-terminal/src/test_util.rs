@@ -220,28 +220,39 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     }
 }
 
+/// Length of the escape introducer at `data[i]`: the ESC byte itself, or its
+/// caret notation `^[`, which the line discipline echoes instead of the raw
+/// byte when ECHOCTL is set (the Linux default, Issue #4407).
+fn escape_len(data: &[u8], i: usize) -> Option<usize> {
+    const ESC: u8 = 0x1b;
+    match data.get(i) {
+        Some(&ESC) => Some(1),
+        Some(b'^') if data.get(i + 1) == Some(&b'[') => Some(2),
+        _ => None,
+    }
+}
+
 /// Drop every ANSI escape sequence from `data`: CSI (`ESC [ … final`), the
 /// string sequences OSC / DCS / SOS / PM / APC (terminated by BEL or ST), and
-/// plain two-byte escapes.
+/// plain two-byte escapes. ESC may be the raw byte or its caret echo `^[`.
 ///
 /// An unterminated sequence at the end of the buffer is dropped too, so a
 /// partially read sequence never counts as program output.
 fn strip_ansi_sequences(data: &[u8]) -> Vec<u8> {
-    const ESC: u8 = 0x1b;
     const BEL: u8 = 0x07;
 
     let mut out = Vec::with_capacity(data.len());
     let mut i = 0;
     while i < data.len() {
-        if data[i] != ESC {
+        let Some(esc) = escape_len(data, i) else {
             out.push(data[i]);
             i += 1;
             continue;
-        }
-        let Some(&introducer) = data.get(i + 1) else {
+        };
+        let Some(&introducer) = data.get(i + esc) else {
             break;
         };
-        i += 2;
+        i += esc + 1;
         match introducer {
             b'[' => {
                 while i < data.len() && !(0x40..=0x7e).contains(&data[i]) {
@@ -255,9 +266,11 @@ fn strip_ansi_sequences(data: &[u8]) -> Vec<u8> {
                         i += 1;
                         break;
                     }
-                    if data[i] == ESC && data.get(i + 1) == Some(&b'\\') {
-                        i += 2;
-                        break;
+                    if let Some(esc) = escape_len(data, i) {
+                        if data.get(i + esc) == Some(&b'\\') {
+                            i += esc + 1;
+                            break;
+                        }
                     }
                     i += 1;
                 }
@@ -268,25 +281,28 @@ fn strip_ansi_sequences(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Whether `data` holds output the spawned program actually wrote.
+/// The text the spawned program actually wrote, with terminal chatter removed.
 ///
-/// Terminal chatter must not count: the shell's cursor-position query
-/// (`ESC[6n`) and the DSR answer `answer_cursor_position_query` writes back
-/// (`ESC[1;1R`, echoed by the line discipline) are both built from printable
-/// bytes, so they have to be stripped as sequences rather than filtered as
-/// control characters (Issue #3514).
-fn has_non_status_output(data: &[u8]) -> bool {
-    String::from_utf8_lossy(&strip_ansi_sequences(data))
-        .chars()
-        .any(|ch| !ch.is_control())
+/// The shell's cursor-position query (`ESC[6n`) and the DSR answer
+/// `answer_cursor_position_query` writes back (`ESC[1;1R`, or `^[[1;1R` when
+/// echoed under ECHOCTL) are built from printable bytes, so they have to be
+/// stripped as sequences rather than filtered as control characters
+/// (Issues #3514, #4407).
+pub fn program_text(data: &[u8]) -> String {
+    String::from_utf8_lossy(&strip_ansi_sequences(data)).into_owned()
 }
 
-/// Read from a PTY reader in a separate thread with timeout.
+/// Read from a PTY reader in a separate thread until the program's text
+/// satisfies `is_complete`, or `timeout` passes.
 ///
-/// Returns accumulated output bytes, or an error message on failure/timeout.
+/// Completion is decided by the expected content, never by an idle gap after
+/// the first bytes: the echoed DSR answer arrives at once while the program
+/// may print much later (Issue #4407). `is_complete` sees `program_text`, so
+/// terminal chatter alone can never complete a read.
 pub fn read_with_timeout(
     mut reader: Box<dyn Read + Send>,
     timeout: Duration,
+    is_complete: impl Fn(&str) -> bool,
 ) -> Result<Vec<u8>, String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -309,82 +325,42 @@ pub fn read_with_timeout(
 
     let mut last_output = Vec::new();
     let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(data)) => last_output = data,
-            Ok(Err(e)) => return Err(e),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if has_non_status_output(&last_output) {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Ok(data)) => {
+                last_output = data;
+                if is_complete(&program_text(&last_output)) {
                     return Ok(last_output);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(Err(e)) => return Err(e),
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    if last_output.is_empty() {
-        Err("Timed out with no output".to_string())
-    } else {
-        Ok(last_output)
-    }
+    Err(format!(
+        "Timed out before the expected output; last output: {:?}",
+        String::from_utf8_lossy(&last_output)
+    ))
 }
 
 pub fn read_until_contains(
-    mut reader: Box<dyn Read + Send>,
+    reader: Box<dyn Read + Send>,
     timeout: Duration,
     needle: &str,
 ) -> Result<Vec<u8>, String> {
-    let needle = needle.to_string();
-    let reader_needle = needle.clone();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = vec![0u8; 4096];
-        let mut output = Vec::new();
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    output.extend_from_slice(&buf[..n]);
-                    let text = String::from_utf8_lossy(&output);
-                    let _ = tx.send(Ok((output.clone(), text.contains(&reader_needle))));
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e.to_string()));
-                    break;
-                }
-            }
-        }
-    });
-
-    let mut last_output = Vec::new();
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok((data, found))) => {
-                last_output = data;
-                if found {
-                    return Ok(last_output);
-                }
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    if last_output.is_empty() {
-        Err(format!("Timed out before seeing {needle:?} with no output"))
-    } else {
-        Err(format!(
-            "Timed out before seeing {needle:?}; last output: {}",
-            String::from_utf8_lossy(&last_output)
-        ))
-    }
+    read_with_timeout(reader, timeout, |text| text.contains(needle))
+        .map_err(|e| format!("{e} (waiting for {needle:?})"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::has_non_status_output;
+    use super::program_text;
+
+    fn is_chatter_only(data: &[u8]) -> bool {
+        program_text(data).trim().is_empty()
+    }
 
     #[test]
     fn echoed_cursor_position_report_is_not_program_output() {
@@ -392,15 +368,27 @@ mod tests {
         // and the line discipline echoes it right back. Its bytes are all
         // printable, so read_with_timeout used to accept it as program output
         // and stop reading before the child wrote anything (Issue #3514).
-        assert!(!has_non_status_output(b"\x1b[1;1R"));
-        assert!(!has_non_status_output(b"\x1b[6n\x1b[1;1R\r\n"));
-        assert!(!has_non_status_output(b"\x1b]0;window title\x07"));
+        assert!(is_chatter_only(b"\x1b[1;1R"));
+        assert!(is_chatter_only(b"\x1b[6n\x1b[1;1R\r\n"));
+        assert!(is_chatter_only(b"\x1b]0;window title\x07"));
+    }
+
+    #[test]
+    fn caret_echoed_cursor_position_report_is_not_program_output() {
+        // With ECHOCTL (the Linux default) the line discipline echoes the DSR
+        // answer's ESC in caret notation, so the echo arrives as the printable
+        // bytes `^[[1;1R` (Issue #4407).
+        assert!(is_chatter_only(b"^[[1;1R"));
+        assert!(is_chatter_only(b"^[[1;1R\r\n"));
+        assert!(is_chatter_only(b"^[]0;window title^[\\"));
     }
 
     #[test]
     fn program_output_after_control_sequences_is_detected() {
-        assert!(has_non_status_output(
-            b"\x1b[1;1R\x1b]0;window title\x07/private/tmp\r\n"
-        ));
+        assert_eq!(
+            program_text(b"\x1b[1;1R\x1b]0;window title\x07/private/tmp\r\n").trim(),
+            "/private/tmp"
+        );
+        assert_eq!(program_text(b"^[[1;1R/tmp\r\n").trim(), "/tmp");
     }
 }
