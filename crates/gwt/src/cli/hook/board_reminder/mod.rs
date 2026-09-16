@@ -207,6 +207,15 @@ fn agent_title_summary_missing_in_projection(
     if crate::issue_monitor_review::review_dispatch_session_active() {
         return Ok(false);
     }
+    // Issue #4442: the resident PM window is the other `suppress_execution_control`
+    // session, and the title instruction is just as unfollowable there — see
+    // `pm_registry::pm_identity_exempt_session` for why neither `workspace.update`
+    // nor `workspace.ensure` can ever succeed in it.
+    if crate::pm_registry::pm_identity_exempt_session_for_worktree(&session.worktree_path) {
+        return Ok(false);
+    }
+    // Issue #3777 AC-1: the projection is the caller's single snapshot — this
+    // hot path must not re-read it per prompt.
     if !title_summary_missing_in_projection(projection, &session.id) {
         return Ok(false);
     }
@@ -1690,6 +1699,62 @@ mod tests {
         assert!(
             !agent_title_summary_missing(&session).expect("branchless title check"),
             "a branchless worktree cannot record Work state, so it must not be asked to"
+        );
+    }
+
+    /// Issue #4442 AC-1: the resident PM window is launched with
+    /// `suppress_execution_control`, so `workspace.update` and
+    /// `workspace.ensure` are both refused there for the life of the window.
+    /// Re-injecting the title instruction every turn is the same
+    /// unfollowable-instruction case as the branchless worktree above.
+    #[test]
+    fn agent_title_summary_missing_stays_silent_for_the_resident_pm_window() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "pm/worktree"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output = gwt_core::process::run_git_logged(&args, Some(&repo)).expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        }
+        let repo = dunce::canonicalize(&repo).expect("canonical repo");
+        let session = make_session(&repo, "pm/worktree", "Claude Code");
+
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut agent = workspace_agent(
+            &session.id,
+            None,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        agent.title_summary = None;
+        agent.worktree_path = Some(repo.clone());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save projection");
+
+        std::env::remove_var(crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV);
+        assert!(
+            agent_title_summary_missing(&session).expect("ordinary session title check"),
+            "an ordinary agent without a title must still be reminded"
+        );
+
+        std::env::set_var(
+            crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV,
+            temp.path().join("pm-scratch"),
+        );
+        let pm_result = agent_title_summary_missing(&session);
+        std::env::remove_var(crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV);
+
+        assert!(
+            !pm_result.expect("pm session title check"),
+            "the PM window can never record a title, so it must not be asked to"
         );
     }
 

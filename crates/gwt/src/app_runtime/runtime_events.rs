@@ -1507,12 +1507,24 @@ impl AppRuntime {
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
         ) {
+            // Issue #4406 AC-4: acknowledge the ended pane from the cached
+            // projection and rebuild off the event loop. Rebuilding here read
+            // the home works.json, every session ledger TOML and one execution
+            // diagnosis per Work row, holding the GUI thread for up to 35,982ms.
+            if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
+                events.push(event);
+            }
+            // Issue #3777 AC-2: the rebuild itself is scheduled off the event
+            // loop, carrying the content-free RuntimeHook profile labels.
             if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
                 self.schedule_runtime_hook_active_work_projection_refresh(
                     &project_root,
                     runtime_hook_source_event_profile_label(event.source_event.as_deref()),
                     runtime_hook_composed_state_profile_label(composed_state),
                 );
+            }
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                self.request_active_work_projection_refresh(project_root);
             }
         }
         if hook_state_changed || effective_before != Some(composed_state) {

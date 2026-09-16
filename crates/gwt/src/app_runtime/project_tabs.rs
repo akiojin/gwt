@@ -528,6 +528,7 @@ impl AppRuntime {
                         tab.project_root.clone(),
                         switch.project_key,
                         false,
+                        None,
                     );
                 }
                 Vec::new()
@@ -593,6 +594,7 @@ impl AppRuntime {
                 prepared.target.project_root.clone(),
                 prepared.project_key,
                 true,
+                None,
             );
         }
         // Window restore and PM ensure may report intermediate PM state.

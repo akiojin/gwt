@@ -508,6 +508,18 @@ pub fn load_snapshot_for_scope(
     provider_for(worktree_root).load_snapshot_for_scope(worktree_root, scope)
 }
 
+/// Refresh a scoped Board view through the active provider (Issue #4406).
+pub fn refresh_scoped_board_view(
+    worktree_root: &Path,
+    scope: &BoardAudienceScope,
+    previous: Option<gwt_core::coordination::ScopedBoardView>,
+) -> Result<(
+    gwt_core::coordination::ScopedBoardView,
+    gwt_core::coordination::ScopedBoardRefresh,
+)> {
+    provider_for(worktree_root).refresh_scoped_board_view(worktree_root, scope, previous)
+}
+
 /// Load entries updated strictly after `since`.
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
     provider_for(worktree_root).load_entries_since(worktree_root, since)

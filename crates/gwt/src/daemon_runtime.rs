@@ -105,6 +105,7 @@ pub(crate) struct AgentBridgeFailure {
     error_code: Option<crate::AgentWorkspaceUpdateErrorCode>,
     bridge_code: Option<String>,
     bridge_reason: Option<String>,
+    recovery_operations: RecoveryOperationSet,
     diagnostic_reason: Option<String>,
     mismatched_fields: Vec<String>,
     exact_workspace_ensure_required: bool,
@@ -119,6 +120,7 @@ impl AgentBridgeFailure {
             error_code: None,
             bridge_code: None,
             bridge_reason: None,
+            recovery_operations: RecoveryOperationSet::default(),
             diagnostic_reason: None,
             mismatched_fields: Vec::new(),
             exact_workspace_ensure_required: false,
@@ -143,6 +145,9 @@ impl AgentBridgeFailure {
                 .and_then(parse_workspace_update_error_code),
             bridge_code,
             bridge_reason,
+            recovery_operations: RecoveryOperationSet::from_response(
+                response.and_then(|response| response.recovery_operations.as_ref()),
+            ),
             diagnostic_reason: response
                 .and_then(|response| safe_bridge_token(&response.diagnostic_reason)),
             mismatched_fields: response
@@ -180,6 +185,19 @@ impl AgentBridgeFailure {
 impl std::fmt::Display for AgentBridgeFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "[{}] {}", self.reason.as_str(), self.message)?;
+        // Issue #4443 AC-2: a stuck agent needs the route out, not only the
+        // machine tokens, so the recovery operations lead the diagnostic.
+        if !self.recovery_operations.is_empty() {
+            write!(
+                formatter,
+                " — run JSON operation {}",
+                self.recovery_operations
+                    .names()
+                    .map(|operation| format!("`{operation}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )?;
+        }
         if self.http_status.is_some()
             || self.bridge_code.is_some()
             || self.bridge_reason.is_some()
@@ -246,6 +264,44 @@ fn read_bounded_agent_bridge_error_body(
     Ok(body)
 }
 
+/// Issue #4443 AC-2 (and #4396): the recovery operations a Host refusal names,
+/// held as one bit per entry of
+/// [`crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS`].
+///
+/// A set of indices rather than strings so an operation that does not exist —
+/// `workspace.prune`, which stalled an agent for over an hour — is not merely
+/// filtered out but unrepresentable, and so the agent-visible diagnostic keeps
+/// the canonical spelling rather than whatever the response wrote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RecoveryOperationSet(u16);
+
+impl RecoveryOperationSet {
+    fn from_response(values: Option<&Vec<String>>) -> Self {
+        let mut bits = 0u16;
+        for value in values.into_iter().flatten() {
+            if let Some(index) = crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS
+                .iter()
+                .position(|operation| operation == value)
+            {
+                bits |= 1 << index;
+            }
+        }
+        Self(bits)
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn names(self) -> impl Iterator<Item = &'static str> {
+        crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS
+            .into_iter()
+            .enumerate()
+            .filter(move |(index, _)| self.0 & (1 << index) != 0)
+            .map(|(_, operation)| operation)
+    }
+}
+
 fn safe_bridge_token(value: &Option<String>) -> Option<String> {
     value.as_deref().and_then(|value| {
         (!value.is_empty()
@@ -299,6 +355,12 @@ struct WorkspaceBridgeDiagnosticResponse {
     code: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    /// Issue #4443 AC-2: the recovery operations the caller may actually run.
+    /// The Host's free-form `message` stays withheld — it can carry host-side
+    /// paths and identifiers — so the route out crosses as canonical operation
+    /// names alone, resolved through [`RecoveryOperationSet`].
+    #[serde(default)]
+    recovery_operations: Option<Vec<String>>,
     #[serde(default)]
     diagnostic_reason: Option<String>,
     #[serde(default)]
@@ -316,6 +378,12 @@ struct WorkspaceBridgeErrorResponse {
     _diagnostic_reason: Option<String>,
     #[serde(default, rename = "mismatched_fields")]
     _mismatched_fields: Option<Vec<String>>,
+    /// Issue #4443 AC-2: read only so `deny_unknown_fields` keeps accepting the
+    /// exact `workspace_ensure_required` refusal. That refusal names
+    /// `workspace.ensure`, so it now carries this field, and rejecting it here
+    /// would silently drop the ensure-required handling this struct exists for.
+    #[serde(default, rename = "recovery_operations")]
+    _recovery_operations: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2009,7 +2077,10 @@ mod tests {
                 "reason": "authority_mismatch",
                 "diagnostic_reason": "host_binding_stale",
                 "mismatched_fields": ["ledger_head_hash", "capability_generation", "private-value-sentinel"],
-                "message": "private-message-sentinel"
+                "message": "private-message-sentinel",
+                // Issue #4443 AC-2 / #4396: the real operation crosses, the
+                // one that does not exist is discarded.
+                "recovery_operations": ["execution.continue", "workspace.prune"]
             }),
         );
         let request = crate::AgentExecutionContinuationRequest {
@@ -2028,10 +2099,15 @@ mod tests {
             "bridge_reason=authority_mismatch",
             "diagnostic_reason=host_binding_stale",
             "mismatched_fields=ledger_head_hash,capability_generation",
+            "run JSON operation `execution.continue`",
         ] {
             assert!(error.contains(expected), "missing {expected}: {error}");
         }
         assert!(!error.contains("sentinel"), "{error}");
+        assert!(
+            !error.contains("workspace.prune"),
+            "a recovery operation that does not exist reached the agent: {error}"
+        );
         server.receive();
 
         let unsafe_server = BindingProbeServer::start(
@@ -2131,7 +2207,12 @@ mod tests {
                 "reason": "workspace_ensure_required",
                 "diagnostic_reason": "workspace_ensure_required",
                 "mismatched_fields": [],
-                "message": "old Host uses the legacy WorkItems scope"
+                "message": "old Host uses the legacy WorkItems scope",
+                // Issue #4443 AC-2: the real refusal names `workspace.ensure`,
+                // so it carries this field. The strict `deny_unknown_fields`
+                // parser behind `is_exact_workspace_ensure_required` must keep
+                // accepting it.
+                "recovery_operations": ["workspace.ensure"]
             }),
         );
         let ensure_target = HookForwardTarget {
