@@ -902,6 +902,17 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
     },
 }
 
+/// Issue #4378 AC-2: one Issue Monitor launch delivery held until the startup
+/// generation reaper reports back.
+#[derive(Debug, Clone)]
+pub(crate) struct DeferredIssueMonitorLaunch {
+    pub(crate) project_root: PathBuf,
+    pub(crate) issue_number: u64,
+    pub(crate) linked_issue_kind: gwt::LinkedIssueKind,
+    pub(crate) delivery_id: Option<String>,
+    pub(crate) launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueMonitorFailureCommit {
     Committed(Option<u64>),
@@ -1260,6 +1271,10 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
+    /// Issue #4378 AC-2: Issue Monitor launch deliveries held while the
+    /// startup generation reaper runs on the blocking worker. `Some` until the
+    /// reaper reports back; the held deliveries then replay in arrival order.
+    pub(crate) deferred_issue_monitor_launches: Option<Vec<DeferredIssueMonitorLaunch>>,
     /// Issue #4398 AC-3: each project's worktree listing from bootstrap, held
     /// until the startup index status probe takes the active project's one.
     pub(crate) startup_worktree_inventories:
@@ -2892,6 +2907,7 @@ impl AppRuntime {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            deferred_issue_monitor_launches: None,
             startup_worktree_inventories: HashMap::new(),
             pending_pm_worktree_preparations: HashSet::new(),
             update_resume_tab_ids: HashSet::new(),
@@ -3033,8 +3049,25 @@ impl AppRuntime {
     /// [`UserEvent::WorkEventsIngested`] so the worktree reconcile runs in
     /// intake → reconcile order (plan decision 9).
     pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
+        self.spawn_work_events_ingest_with_inventory(project_root, force, None);
+    }
+
+    /// Issue #4378 AC-1: `worktree_inventory` is a listing the caller already
+    /// holds. The ingest reads its worktree sources from it and hands it back
+    /// through [`UserEvent::WorkEventsIngested`] for the reconcile.
+    pub(crate) fn spawn_work_events_ingest_with_inventory(
+        &self,
+        project_root: PathBuf,
+        force: bool,
+        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
+    ) {
         let project_key = gwt_core::paths::resolve_project_scope(&project_root).hash;
-        self.spawn_work_events_ingest_for_project_key(project_root, project_key, force);
+        self.spawn_work_events_ingest_for_project_key(
+            project_root,
+            project_key,
+            force,
+            worktree_inventory,
+        );
     }
 
     pub(crate) fn spawn_work_events_ingest_for_project_key(
@@ -3042,6 +3075,7 @@ impl AppRuntime {
         project_root: PathBuf,
         project_key: gwt_core::repo_hash::ProjectKey,
         force: bool,
+        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
     ) {
         if !self.note_work_events_ingest_attempt(&project_root, force) {
             return;
@@ -3061,11 +3095,13 @@ impl AppRuntime {
         let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
         let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
         thread::spawn(move || {
-            let summary = crate::work_events_ingest::ingest_project_work_events_paths(
-                &project_root,
-                &work_items_path,
-                &state_path,
-            );
+            let summary =
+                crate::work_events_ingest::ingest_project_work_events_paths_with_inventory(
+                    &project_root,
+                    &work_items_path,
+                    &state_path,
+                    worktree_inventory.as_deref().map(Vec::as_slice),
+                );
             // #3065: detection-based repair for the resume owner bleed. Runs
             // after every ingest so re-ingested contaminated logs (from other
             // machines / refs) self-heal; converges to a no-op on clean data.
@@ -3082,6 +3118,7 @@ impl AppRuntime {
             proxy.send(UserEvent::WorkEventsIngested {
                 project_root,
                 changed: summary.changed() || repaired,
+                worktree_inventory,
             });
         });
     }
@@ -3093,8 +3130,12 @@ impl AppRuntime {
         &mut self,
         project_root: PathBuf,
         changed: bool,
+        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
     ) -> Vec<OutboundEvent> {
-        self.reconcile_workspace_worktrees(&project_root);
+        match worktree_inventory {
+            Some(entries) => self.reconcile_workspace_worktrees_from(&project_root, &entries),
+            None => self.reconcile_workspace_worktrees(&project_root),
+        }
         self.spawn_work_merge_status_scan(project_root.clone());
         self.spawn_work_tip_subjects_scan(project_root.clone());
         self.spawn_work_pr_titles_scan(project_root.clone());
@@ -3104,6 +3145,27 @@ impl AppRuntime {
         } else {
             Vec::new()
         }
+    }
+
+    /// Issue #4378 AC-2: the startup generation reaper finished on the
+    /// blocking worker. Replay the Issue Monitor launch deliveries that arrived
+    /// while it ran, in arrival order.
+    pub(crate) fn handle_startup_generation_reaper_completed(&mut self) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        for launch in self
+            .deferred_issue_monitor_launches
+            .take()
+            .unwrap_or_default()
+        {
+            events.extend(self.auto_launch_issue_monitor_delivery_events_for_project(
+                &launch.project_root,
+                launch.issue_number,
+                launch.linked_issue_kind,
+                launch.delivery_id,
+                launch.launch_session_strategy,
+            ));
+        }
+        events
     }
 
     pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
@@ -3394,6 +3456,15 @@ impl AppRuntime {
                 return;
             }
         };
+        self.reconcile_workspace_worktrees_from(project_root, &entries);
+    }
+
+    /// Issue #4378 AC-1: the reconcile against a listing the caller holds.
+    pub(crate) fn reconcile_workspace_worktrees_from(
+        &self,
+        project_root: &Path,
+        entries: &[gwt::worktree_inventory::WorktreeEntry],
+    ) {
         // SPEC-2359 W16-3 (FR-390): refresh the local-worktree branch set the
         // remote_only view marking reads (cache lookup only — no git spawn at
         // view time).
@@ -3406,7 +3477,7 @@ impl AppRuntime {
         self.local_worktree_branches
             .borrow_mut()
             .insert(project_root.to_path_buf(), local_branches);
-        let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
+        let sources = gwt::worktree_inventory::worktree_reconcile_sources(entries);
         if sources.is_empty() {
             return;
         }
