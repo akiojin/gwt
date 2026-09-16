@@ -81,26 +81,25 @@ arrange a rerun → regression: arrange a fresh launch → neither possible: esc
 /// they concluded (SPEC-1935 FR-133).
 pub const USER_VERIFICATION_RESULT_LABEL: &str = "User Verification Result:";
 
-/// The value an autonomous execution records when its change has a UI surface
-/// that nobody was there to look at (Issue #4217 FR-003).
-///
-/// Deliberately distinct from both `confirmed` and `n/a`: the verification was
-/// not performed and was not unnecessary — it was postponed. A PR carrying it
-/// stays Draft until the owner sweeps it (FR-004).
+/// Legacy autonomous result accepted during the #4326 migration. New
+/// autonomous runs record `n/a (autonomous)` and deliver through CI auto-merge.
 pub const DEFERRED_USER_VERIFICATION_RESULT: &str = "deferred (autonomous execution)";
 
-/// Whether a PR body records a *postponed* user verification.
-///
-/// Matches the recorded value rather than the whole line, so the reason text an
-/// agent appends cannot smuggle the PR past the Draft gate, and a body that
-/// merely discusses deferral in prose does not trip it.
+/// Read the first recorded result, including Markdown forms used in PR bodies.
+#[must_use]
+pub fn user_verification_result(body: &str) -> Option<String> {
+    user_verification_results(body)
+        .next()
+        .map(|value| value.trim_matches(['*', '`', ' ']).to_ascii_lowercase())
+}
+
+/// Autonomous verification is no longer waiting on a human (#4326).
+/// Other deferred results retain their existing inventory meaning.
 #[must_use]
 pub fn body_defers_user_verification(body: &str) -> bool {
     user_verification_results(body).any(|value| {
-        value
-            .trim_start_matches(['*', '`', ' '])
-            .to_ascii_lowercase()
-            .starts_with("deferred")
+        let value = value.trim_matches(['*', '`', ' ']).to_ascii_lowercase();
+        value.starts_with("deferred") && !value.starts_with(DEFERRED_USER_VERIFICATION_RESULT)
     })
 }
 
@@ -4674,18 +4673,15 @@ mod tests {
     /// appended after `confirmed` can move a PR into or out of the sweep list.
     #[test]
     fn deferred_user_verification_is_read_from_the_recorded_value() {
-        for deferring in [
+        let deferring = "User Verification Result: Deferred — owner sweeps this later";
+        assert!(
+            body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
+            "must recognize the deferred value: {deferring}"
+        );
+        for settled in [
             "User Verification Result: deferred (autonomous execution)",
             "- User Verification Result: deferred (autonomous execution)",
             "**User Verification Result:** deferred (autonomous execution)",
-            "User Verification Result: Deferred — owner sweeps this later",
-        ] {
-            assert!(
-                body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
-                "must recognize the deferred value: {deferring}"
-            );
-        }
-        for settled in [
             "User Verification Result: confirmed",
             "User Verification Result: n/a (autonomous)",
             "User Verification Result: n/a (no UI surface)",
@@ -4725,7 +4721,7 @@ mod tests {
             ..PrInventoryOptions::default()
         };
         let hydrated = inventory_item_from_fields(fields.clone(), now_3868(), &options);
-        assert_eq!(hydrated.deferred_user_verification, Some(true));
+        assert_eq!(hydrated.deferred_user_verification, Some(false));
 
         fields.body = "Closes #10\nUser Verification Result: confirmed\n".to_string();
         let confirmed = inventory_item_from_fields(fields, now_3868(), &options);
