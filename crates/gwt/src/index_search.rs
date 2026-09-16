@@ -64,6 +64,16 @@ pub(crate) struct IndexSearchUnavailable {
     pub(crate) retry_after_ms: u64,
 }
 
+/// Non-retryable stop state that only an explicit `index.repair` clears
+/// (Issue #3866 AC-3). Crate-private for the same source-compatibility reason
+/// as [`IndexSearchUnavailable`]; public callers see `SearchFailed`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexSearchRepairRequired {
+    pub(crate) reason: String,
+    pub(crate) affected_scopes: Vec<String>,
+    pub(crate) recovery: String,
+}
+
 /// Search error surface (Phase 70 FR-388). `NotReady` is retryable and maps
 /// to exit code 75 / `error_code=INDEX_NOT_READY` on the CLI surface.
 #[derive(Debug, Clone, PartialEq)]
@@ -131,13 +141,14 @@ impl From<String> for IndexSearchError {
 pub(crate) enum IndexSearchAttemptError {
     Public(IndexSearchError),
     Unavailable(IndexSearchUnavailable),
+    RepairRequired(IndexSearchRepairRequired),
 }
 
 impl IndexSearchAttemptError {
     pub(crate) fn exit_code(&self) -> i32 {
         match self {
             Self::Public(error) => error.exit_code(),
-            Self::Unavailable(_) => 1,
+            Self::Unavailable(_) | Self::RepairRequired(_) => 1,
         }
     }
 
@@ -145,6 +156,7 @@ impl IndexSearchAttemptError {
         match self {
             Self::Public(error) => error.error_code(),
             Self::Unavailable(_) => Some("SEARCH_UNAVAILABLE"),
+            Self::RepairRequired(_) => Some("INDEX_REPAIR_REQUIRED"),
         }
     }
 
@@ -152,6 +164,7 @@ impl IndexSearchAttemptError {
         match self {
             Self::Public(error) => error.retryable(),
             Self::Unavailable(_) => true,
+            Self::RepairRequired(_) => false,
         }
     }
 
@@ -159,6 +172,7 @@ impl IndexSearchAttemptError {
         match self {
             Self::Public(error) => error.retry_after_ms(),
             Self::Unavailable(unavailable) => Some(unavailable.retry_after_ms),
+            Self::RepairRequired(_) => None,
         }
     }
 
@@ -168,6 +182,10 @@ impl IndexSearchAttemptError {
             Self::Unavailable(_) => IndexSearchError::Other(
                 "project index search is temporarily unavailable".to_string(),
             ),
+            Self::RepairRequired(required) => IndexSearchError::SearchFailed(IndexSearchFailed {
+                reason: format!("{}; {}", required.reason, required.recovery),
+                affected_scopes: required.affected_scopes,
+            }),
         }
     }
 }
@@ -180,6 +198,11 @@ impl std::fmt::Display for IndexSearchAttemptError {
                 f,
                 "search unavailable: {} (retry in {} ms)",
                 unavailable.reason, unavailable.retry_after_ms,
+            ),
+            Self::RepairRequired(required) => write!(
+                f,
+                "index repair required: {}; {}",
+                required.reason, required.recovery,
             ),
         }
     }
@@ -293,6 +316,9 @@ pub(crate) fn search_project_index_attempt(
     let mut payload = None;
     let mut broken = match run_batch() {
         Ok(initial) => {
+            if let Some(required) = operator_repair_required(&initial) {
+                return Err(IndexSearchAttemptError::RepairRequired(required));
+            }
             let broken = broken_scopes(&initial);
             payload = Some(initial);
             broken
@@ -354,6 +380,9 @@ pub(crate) fn search_project_index_attempt(
             }
             match run_batch() {
                 Ok(next) => {
+                    if let Some(required) = operator_repair_required(&next) {
+                        return Err(IndexSearchAttemptError::RepairRequired(required));
+                    }
                     broken = broken_scopes(&next);
                     payload = Some(next);
                     if broken.is_empty() {
@@ -476,6 +505,42 @@ fn broken_scopes(payload: &Value) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Scope stop states the runner holds until an explicit `index.repair`
+/// (Issue #4205). It refuses every queued repair while they hold, so waiting
+/// for one only burns the attempt deadline (Issue #3866).
+const OPERATOR_REPAIR_REASONS: &[&str] = &["cancelled", "repair_stopped"];
+
+const OPERATOR_REPAIR_RECOVERY: &str = "run the `index.repair` JSON operation to clear the \
+     stop state and rebuild; `index.status` shows each scope's reason";
+
+/// Extract the scopes in an operator stop state from the batch payload.
+fn operator_repair_required(payload: &Value) -> Option<IndexSearchRepairRequired> {
+    let stopped: Vec<(&String, &str)> = payload
+        .get("scopes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(scope, status)| {
+            let reason = status.get("reason").and_then(Value::as_str)?;
+            OPERATOR_REPAIR_REASONS
+                .contains(&reason)
+                .then_some((scope, reason))
+        })
+        .collect();
+    if stopped.is_empty() {
+        return None;
+    }
+    Some(IndexSearchRepairRequired {
+        reason: stopped
+            .iter()
+            .map(|(scope, reason)| format!("{scope} index is {reason}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+        affected_scopes: stopped.iter().map(|(scope, _)| (*scope).clone()).collect(),
+        recovery: OPERATOR_REPAIR_RECOVERY.to_string(),
+    })
 }
 
 /// Light repair-progress probe (PR #3301 review): checks the broken scopes
@@ -2648,6 +2713,44 @@ mod tests {
         assert!(!message.contains('\u{1b}'));
         assert!(!message.contains("ghp_"));
         assert!(message.len() < RUNNER_DIAGNOSTIC_MAX_BYTES);
+    }
+
+    /// Issue #3866 AC-3: `cancelled` and `repair_stopped` hold until an
+    /// explicit `index.repair` (Issue #4205), so a search must not treat them
+    /// as a retryable wait.
+    #[test]
+    fn operator_stop_states_require_explicit_repair_instead_of_a_retry_wait() {
+        for reason in ["cancelled", "repair_stopped"] {
+            let payload = serde_json::json!({
+                "ok": true,
+                "scopes": {
+                    "issues": {"state": "corrupt", "reason": reason},
+                    "specs": {"state": "missing", "reason": "empty_collection"},
+                },
+            });
+            let required = operator_repair_required(&payload)
+                .expect("an operator stop state must not enter the repair wait");
+            assert_eq!(required.affected_scopes, vec!["issues".to_string()]);
+            assert!(required.reason.contains(reason), "{required:?}");
+            assert!(required.recovery.contains("index.repair"), "{required:?}");
+
+            let attempt = IndexSearchAttemptError::RepairRequired(required);
+            assert!(!attempt.retryable());
+            assert_eq!(attempt.retry_after_ms(), None);
+            assert_eq!(attempt.error_code(), Some("INDEX_REPAIR_REQUIRED"));
+            let public = attempt.into_public();
+            assert!(!public.retryable());
+            let IndexSearchError::SearchFailed(failed) = public else {
+                panic!("public callers must see the non-retryable failure");
+            };
+            assert!(failed.reason.contains("index.repair"), "{failed:?}");
+        }
+
+        let repairable = serde_json::json!({
+            "ok": true,
+            "scopes": {"issues": {"state": "corrupt", "reason": "count_mismatch"}},
+        });
+        assert!(operator_repair_required(&repairable).is_none());
     }
 
     #[test]

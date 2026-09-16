@@ -149,6 +149,13 @@ past it the ordinary rule applies again. Clear it the moment you resume:
 Do not fake activity instead (periodic `workspace.update` or Board posts
 to look alive) - a declared wait is the honest signal.
 
+The PM can void your declaration with `issue.monitor.wait.invalidate`
+when its ruling removes the condition (Issue #4286). Your row then reads
+`waiting.in_force:false` with `waiting.invalidated` naming who and why,
+and ordinary stuck detection applies from your last activity, so read
+the Board when you come back: act on the ruling, and declare again only
+if you are genuinely waiting on something else.
+
 ### Proposing new Issues to the PM
 
 Do not call `issue.create`. When you find something that deserves its own
@@ -258,6 +265,29 @@ gwtd binary:
     JSON
 
 There is no standalone `gwt-search` executable.
+
+## Autonomous delivery
+
+Read the launch route from `execution.status`. With `launch_route: autonomous`,
+record `User Verification Result: n/a (autonomous)` and continue verified work
+through a Ready PR and the existing CI auto-merge path until merged. Do not
+request human visual confirmation, send a verification URL, or stop at a Draft
+PR merely because nobody performed a human check. Manual launches retain their
+user-verification contract and require an explicit request to drive to merge.
+
+Automated test / headed E2E / CI failures, known blockers, and all other Ready
+Gate conditions still require repair. For UI work, use the project's isolated
+headed E2E setup and record `Agent Visual Check: pass` separately from the user
+result (`n/a (no UI surface)` otherwise). Select Playwright commands already in
+`verify.run`'s `params.commands` with `params.headed_e2e_commands`; the same fresh
+record must contain actual passing headed Chromium results for dark and light
+themes. The E2E suite must check console/page errors and the changed behavior.
+The agent's own check is never human `confirmed`.
+
+Existing autonomous PRs may retain the legacy `deferred (autonomous execution)`
+body value. Fresh passing evidence permits Ready without rewriting that body or
+obtaining human confirmation. Do not call terminal `execution.blocked` merely
+because human visual confirmation is absent.
 
 ## GitHub reads and mutations
 
@@ -471,6 +501,12 @@ stuck 判定が自分の Issue をスキップし、PM は `issue.monitor.status
 
 生存を装うために定期的な `workspace.update` や Board 投稿で活動を偽装しない
 でください。待機の申告が正直なシグナルです。
+
+PM の裁定で待機条件が消えた場合、PM は `issue.monitor.wait.invalidate` で
+申告を無効化できます（Issue #4286）。自分の行は `waiting.in_force:false` と
+なり `waiting.invalidated` に誰が・なぜが残り、最後の活動時刻から通常の
+stuck 判定に戻ります。戻ってきたら Board を読んで裁定に従い、別のものを
+本当に待つ場合にだけ再申告してください。
 
 ### Issue 化は PM へ提案する
 

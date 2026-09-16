@@ -656,6 +656,7 @@ pub fn aggregate_project_index_status_for_path(project_root: &Path) -> ProjectIn
     match aggregate_project_index_status_for_path_inner(
         project_root,
         StatusProbeScope::AllWorktrees,
+        None,
     ) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
@@ -674,6 +675,27 @@ pub fn aggregate_current_worktree_index_status_for_path(
     match aggregate_project_index_status_for_path_inner(
         project_root,
         StatusProbeScope::CurrentWorktree,
+        None,
+    ) {
+        Ok(status) => status,
+        Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
+    }
+}
+
+/// Issue #4398 AC-3: [`aggregate_current_worktree_index_status_for_path`] over
+/// a worktree inventory the caller already listed, so the probe runs no
+/// `git worktree list` of its own.
+pub fn aggregate_current_worktree_index_status_with_inventory(
+    project_root: &Path,
+    inventory: &[crate::worktree_inventory::WorktreeEntry],
+) -> ProjectIndexStatusView {
+    if let Some(fixture) = load_test_fixture_status() {
+        return fixture;
+    }
+    match aggregate_project_index_status_for_path_inner(
+        project_root,
+        StatusProbeScope::CurrentWorktree,
+        Some(inventory),
     ) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
@@ -748,6 +770,7 @@ fn select_probe_inputs_for_scope(
 fn aggregate_project_index_status_for_path_inner(
     project_root: &Path,
     probe_scope: StatusProbeScope,
+    inventory: Option<&[crate::worktree_inventory::WorktreeEntry]>,
 ) -> Result<ProjectIndexStatusView, String> {
     let Some(context) = project_index_git_context(project_root) else {
         return Ok(ProjectIndexStatusView::new(
@@ -762,8 +785,12 @@ fn aggregate_project_index_status_for_path_inner(
             "No origin remote configured",
         ));
     };
+    let inputs = match inventory {
+        Some(entries) => probe_inputs_from_inventory(entries)?,
+        None => list_worktree_probe_inputs(&repo_root)?,
+    };
     let selection = select_probe_inputs_for_scope(
-        list_worktree_probe_inputs(&repo_root)?,
+        inputs,
         probe_scope,
         context.current_worktree_root.as_deref(),
         all_worktree_status_batch_limit(),
@@ -859,15 +886,32 @@ pub fn list_worktree_probe_inputs(repo_root: &Path) -> Result<Vec<WorktreeProbeI
     if gwt_core::operation_deadline::current().is_some() {
         return list_worktree_probe_inputs_result(repo_root).map_err(|error| error.to_string());
     }
-    let output = gwt_core::process::hidden_command("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|error| error.to_string())?;
+    // Issue #4398 AC-4: the logged wrapper records this listing in the gwt.log
+    // process summary; a raw hidden spawn left it out of every measurement.
+    let output =
+        gwt_core::process::run_git_logged(&["worktree", "list", "--porcelain"], Some(repo_root))
+            .map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     parse_worktree_probe_inputs(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Probe inputs from an already-listed inventory, filtered like
+/// [`parse_worktree_probe_inputs`]: the inventory has already dropped
+/// prunable entries, and a checkout always has a `.git` entry while a bare
+/// repository has none.
+fn probe_inputs_from_inventory(
+    entries: &[crate::worktree_inventory::WorktreeEntry],
+) -> Result<Vec<WorktreeProbeInput>, String> {
+    let mut inputs = Vec::new();
+    for entry in entries {
+        if !entry.path.join(".git").exists() {
+            continue;
+        }
+        push_worktree_probe_input(&mut inputs, entry.path.clone(), entry.branch.clone())?;
+    }
+    Ok(inputs)
 }
 
 fn list_worktree_probe_inputs_result(repo_root: &Path) -> io::Result<Vec<WorktreeProbeInput>> {
@@ -2766,6 +2810,70 @@ detached
         );
         std::fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
         (bare, develop)
+    }
+
+    #[test]
+    fn current_worktree_status_reuses_startup_inventory_without_changing_coverage() {
+        // Issue #4398 AC-3: the startup probe reuses the inventory the startup
+        // path already listed; `coverage.total_worktrees` keeps its value
+        // (the bare main entry stays excluded).
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env_guard = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fixture = gwt_core::test_support::ScopedEnvVar::unset("GWT_INDEX_TEST_FIXTURE");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bare, develop) = make_bare_workspace_with_origin(&temp.path().join("ws"));
+        let feature = temp.path().join("ws").join("feature");
+        run_git_at(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/x",
+                feature.to_str().unwrap(),
+                "develop",
+            ],
+        );
+        let inventory =
+            crate::worktree_inventory::enumerate_worktrees(&develop, None).expect("inventory");
+
+        let listed = aggregate_current_worktree_index_status_for_path(&develop);
+        let reused = aggregate_current_worktree_index_status_with_inventory(&develop, &inventory);
+
+        let listed_coverage = listed.coverage.expect("listed coverage");
+        assert_eq!(listed_coverage.total_worktrees, 2);
+        assert_eq!(reused.coverage, Some(listed_coverage));
+        assert_eq!(
+            reused.worktrees.keys().collect::<Vec<_>>(),
+            listed.worktrees.keys().collect::<Vec<_>>()
+        );
+
+        // The inventory is the only source: the probe does not list again.
+        let without_feature: Vec<_> = inventory
+            .iter()
+            .filter(|entry| entry.branch.as_deref() != Some("feature/x"))
+            .cloned()
+            .collect();
+        let trimmed =
+            aggregate_current_worktree_index_status_with_inventory(&develop, &without_feature);
+        assert_eq!(trimmed.coverage.expect("coverage").total_worktrees, 1);
+    }
+
+    #[test]
+    fn worktree_listing_for_status_is_a_logged_git_spawn() {
+        // Issue #4398 AC-4: the listing reaches the gwt.log process summary
+        // through the logged wrapper instead of an invisible hidden spawn.
+        let temp = tempfile::tempdir().expect("tempdir");
+        init_git_repo_with_origin(temp.path());
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        list_worktree_probe_inputs(temp.path()).expect("list worktrees");
+
+        assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 1);
     }
 
     struct CurrentDirGuard {
