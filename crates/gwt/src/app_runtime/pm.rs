@@ -36,10 +36,12 @@ use gwt::pm_registry::{
 use gwt::PmAgentOption;
 
 use crate::embedded_server::AgentPmSendResponder;
+use crate::UserEvent;
 
+use super::startup::RestoreOrigin;
 use super::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AppRuntime, BackendEvent, ClientId, OutboundEvent,
-    WindowPreset,
+    WindowPreset, WorkspaceResumeContext,
 };
 
 const PM_DELIVERY_MAX_BODY_BYTES: usize = 16 * 1024;
@@ -306,6 +308,76 @@ pub(crate) enum PmEnsureTrigger {
     Restart,
 }
 
+/// Issue #4375: the spawn a PM worktree preparation is holding up.
+///
+/// Preparing the worktree is Git work — `git worktree add` for a first spawn,
+/// `git fetch` plus a detached checkout for every refresh — and its cost scales
+/// with the repository's worktree count. Running it inline held the tao event
+/// loop for seconds during the canvas-ready restore drain, so the preparation
+/// moves to a blocking worker and the spawn it gates is replayed from this
+/// payload when the worker reports back.
+#[derive(Debug, Clone)]
+pub(crate) enum PmWorktreeContinuation {
+    /// A fresh silent spawn into the canonical PM worktree. The dedicated
+    /// detached worktree (research R-10) is created here; its lifecycle is
+    /// bound to the PM registration.
+    FreshSpawn {
+        tab_id: String,
+        project_root: PathBuf,
+    },
+    /// A persisted PM session resuming in the worktree it already owns.
+    ResumeSession {
+        tab_id: String,
+        /// The tab's repository, which keys the in-flight gate. The Git work
+        /// itself targets the session's own worktree.
+        project_root: PathBuf,
+        session: Box<gwt_agent::Session>,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+        origin: RestoreOrigin,
+        /// SPEC-3431 FR-001: whether the resumed pane must be recorded in
+        /// `pending_pm_launches`, so launch completion rewrites `pm.json` to
+        /// name the successor session. Only the ensure path asks for this; the
+        /// startup restore drain deliberately leaves the registration alone.
+        register_pm_launch: bool,
+    },
+}
+
+impl PmWorktreeContinuation {
+    pub(crate) fn tab_id(&self) -> &str {
+        match self {
+            Self::FreshSpawn { tab_id, .. } | Self::ResumeSession { tab_id, .. } => tab_id,
+        }
+    }
+
+    /// The repository this preparation holds, i.e. the in-flight gate's key.
+    pub(crate) fn project_root(&self) -> &Path {
+        match self {
+            Self::FreshSpawn { project_root, .. } | Self::ResumeSession { project_root, .. } => {
+                project_root
+            }
+        }
+    }
+
+    /// Run the Git-backed preparation and report the prepared PM worktree.
+    ///
+    /// Called on a blocking worker, never on the GUI event loop.
+    pub(crate) fn prepare(&self) -> Result<PathBuf, String> {
+        match self {
+            Self::FreshSpawn { project_root, .. } => {
+                pm_registry::refresh_pm_worktree_for_repo_path(project_root)
+                    .map(|outcome| outcome.worktree)
+                    .map_err(|error| error.to_string())
+            }
+            Self::ResumeSession { session, .. } => {
+                pm_registry::refresh_pm_worktree_at_safe_boundary(&session.worktree_path)
+                    .map(|_| session.worktree_path.clone())
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+}
+
 impl AppRuntime {
     /// SPEC-3431 FR-001/FR-002: ensure the resident PM pane for `tab_id`.
     ///
@@ -435,16 +507,7 @@ impl AppRuntime {
             .join(format!("{}.toml", registration.session_id));
         if let Ok(session) = gwt_agent::Session::load_and_migrate(&session_path) {
             if session.worktree_path.exists() {
-                let before = self.pm_window_ids(tab_id);
-                let events = self.spawn_restored_agent_session(
-                    tab_id,
-                    session,
-                    None,
-                    PM_WINDOW_GEOMETRY,
-                    crate::app_runtime::startup::RestoreOrigin::Automatic,
-                );
-                self.mark_new_pm_windows(tab_id, &before, &project_root);
-                return events;
+                return self.resume_registered_pm_session(tab_id, &project_root, session);
             }
         }
         self.spawn_pm_agent(tab_id, &project_root)
@@ -1810,7 +1873,18 @@ impl AppRuntime {
                     "PM launch completed while another live PM is registered; keeping existing"
                 );
             }
-            Ok((prefs, _)) => {
+            Ok((prefs, outcome)) => {
+                // Issue #4394 AC-2: succession ends the replaced Session as a
+                // PM even when it died without `pm.stop`, so restore cannot
+                // bring it back as a second, unregistered PM.
+                if let pm_registry::PmRegisterOutcome::ReplacedStale { previous } = outcome {
+                    if previous.session_id != session_id {
+                        super::startup::mark_auto_resume_source_completed(
+                            &self.sessions_dir,
+                            &previous.session_id,
+                        );
+                    }
+                }
                 self.sync_pm_session_cache(project_root, prefs.registration.as_ref());
             }
             Err(error) => {
@@ -1975,27 +2049,153 @@ impl AppRuntime {
         }
     }
 
+    /// Resume the registered PM's own conversation (FR-003), recording the
+    /// successor pane so launch completion rewrites `pm.json`.
+    ///
+    /// Issue #4375: when the Session lives in the canonical PM worktree the
+    /// spawn now waits on an off-loop preparation, so the marking travels with
+    /// the continuation. Marking here would find no pane and the registration
+    /// would keep naming the dead session.
+    fn resume_registered_pm_session(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        session: gwt_agent::Session,
+    ) -> Vec<OutboundEvent> {
+        if pm_registry::is_pm_worktree(&session.worktree_path) {
+            return self.spawn_pm_worktree_preparation(PmWorktreeContinuation::ResumeSession {
+                tab_id: tab_id.to_string(),
+                project_root: project_root.to_path_buf(),
+                session: Box::new(session),
+                workspace_resume_context: None,
+                fallback_geometry: PM_WINDOW_GEOMETRY,
+                origin: RestoreOrigin::Automatic,
+                register_pm_launch: true,
+            });
+        }
+        let before = self.pm_window_ids(tab_id);
+        let events = self.spawn_restored_agent_session(
+            tab_id,
+            session,
+            None,
+            PM_WINDOW_GEOMETRY,
+            RestoreOrigin::Automatic,
+        );
+        self.mark_new_pm_windows(tab_id, &before, project_root);
+        events
+    }
+
     fn spawn_pm_agent(&mut self, tab_id: &str, project_root: &Path) -> Vec<OutboundEvent> {
+        self.spawn_pm_worktree_preparation(PmWorktreeContinuation::FreshSpawn {
+            tab_id: tab_id.to_string(),
+            project_root: project_root.to_path_buf(),
+        })
+    }
+
+    /// Issue #4375 AC-1: run one PM worktree preparation off the GUI event
+    /// loop, then resume the spawn it gates from the completion event.
+    ///
+    /// The in-flight gate preserves the singleton property the synchronous path
+    /// got for free: while a preparation is running, a second ensure for the
+    /// same repository must not start another one and land a second PM pane.
+    pub(super) fn spawn_pm_worktree_preparation(
+        &mut self,
+        continuation: PmWorktreeContinuation,
+    ) -> Vec<OutboundEvent> {
+        let project_root = continuation.project_root().to_path_buf();
+        if !self
+            .pending_pm_worktree_preparations
+            .insert(project_root.clone())
+        {
+            tracing::info!(
+                project_root = %project_root.display(),
+                "PM worktree preparation already in flight; not starting a second one"
+            );
+            return Vec::new();
+        }
+        let proxy = self.proxy.clone();
+        let spawned = self.blocking_tasks.try_spawn(move || {
+            let result = continuation.prepare();
+            proxy.send(UserEvent::PmWorktreePrepared {
+                continuation: Box::new(continuation),
+                result,
+            });
+        });
+        if let Err(error) = spawned {
+            // Nothing will report back, so release the gate here instead of
+            // leaving the repository permanently unpreparable.
+            self.pending_pm_worktree_preparations.remove(&project_root);
+            return self.pm_worktree_preparation_failed_events(&project_root, &error);
+        }
+        Vec::new()
+    }
+
+    /// Issue #4375: resume the spawn that the PM worktree preparation gated.
+    pub(crate) fn handle_pm_worktree_prepared(
+        &mut self,
+        continuation: PmWorktreeContinuation,
+        result: Result<PathBuf, String>,
+    ) -> Vec<OutboundEvent> {
+        self.pending_pm_worktree_preparations
+            .remove(continuation.project_root());
+        let tab_id = continuation.tab_id().to_string();
+        let mut events = match result {
+            Err(error) => {
+                self.pm_worktree_preparation_failed_events(continuation.project_root(), &error)
+            }
+            Ok(worktree) => match continuation {
+                PmWorktreeContinuation::FreshSpawn {
+                    tab_id,
+                    project_root,
+                } => self.spawn_prepared_pm_agent(&tab_id, &project_root, &worktree),
+                PmWorktreeContinuation::ResumeSession {
+                    tab_id,
+                    project_root,
+                    session,
+                    workspace_resume_context,
+                    fallback_geometry,
+                    origin,
+                    register_pm_launch,
+                } => {
+                    let before = register_pm_launch.then(|| self.pm_window_ids(&tab_id));
+                    let spawned = self.spawn_prepared_restored_agent_session(
+                        &tab_id,
+                        *session,
+                        workspace_resume_context,
+                        fallback_geometry,
+                        origin,
+                    );
+                    if let Some(before) = before {
+                        self.mark_new_pm_windows(&tab_id, &before, &project_root);
+                    }
+                    spawned
+                }
+            },
+        };
+        // FR-026: the preparation is where the PM's live state actually
+        // changes now, so it is also where the settings panel learns about it.
+        if self.active_tab_id.as_deref() == Some(tab_id.as_str()) {
+            events.extend(self.pm_status_broadcast_events());
+        }
+        events
+    }
+
+    /// The fresh silent spawn, once its worktree exists.
+    fn spawn_prepared_pm_agent(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        worktree: &Path,
+    ) -> Vec<OutboundEvent> {
         let profile = pm_registry::pm_prefs_path_for_repo_path(project_root);
         let profile = pm_registry::load_pm_prefs(&profile)
             .map(|prefs| prefs.settings.launch_profile_or_default())
             .unwrap_or_else(|_| pm_registry::PmLaunchProfile::default_profile());
-        let worktree = match Self::ensure_pm_worktree(project_root) {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(
-                    project_root = %project_root.display(),
-                    error,
-                    "failed to prepare the PM worktree; PM not started"
-                );
-                return Vec::new();
-            }
-        };
         // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
         // skill that managed-asset materialization writes into this worktree.
         // Writing it here instead would be futile — the launch's own asset
         // refresh prunes unbundled `gwt-*` skills right after.
-        let config = Self::pm_launch_config(&worktree, &profile);
+        let config = Self::pm_launch_config(worktree, &profile);
         let before = self.pm_window_ids(tab_id);
         match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None) {
             Ok(events) => {
@@ -2007,6 +2207,31 @@ impl AppRuntime {
                 Vec::new()
             }
         }
+    }
+
+    /// Issue #4375 AC-3: a PM worktree preparation that failed stays visible.
+    ///
+    /// The synchronous path only logged, so a PM pane that never appeared — a
+    /// Git error, a full disk — was indistinguishable from one the project had
+    /// deliberately opted out of.
+    fn pm_worktree_preparation_failed_events(
+        &self,
+        project_root: &Path,
+        error: &str,
+    ) -> Vec<OutboundEvent> {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            error,
+            "failed to prepare the PM worktree; PM not started"
+        );
+        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "error".to_string(),
+            message: format!(
+                "PM worktree preparation failed for {}: {error}",
+                project_root.display()
+            ),
+            issue_number: None,
+        })]
     }
 
     /// SPEC-3431 FR-026: the launch config for a fresh PM spawn.
@@ -2050,14 +2275,6 @@ impl AppRuntime {
             );
         }
         config
-    }
-
-    /// Dedicated detached worktree for the PM session (research R-10). Its
-    /// lifecycle is bound to the PM registration; T-016 adds GC.
-    fn ensure_pm_worktree(project_root: &Path) -> Result<PathBuf, String> {
-        pm_registry::refresh_pm_worktree_for_repo_path(project_root)
-            .map(|outcome| outcome.worktree)
-            .map_err(|error| error.to_string())
     }
 }
 
