@@ -3158,8 +3158,14 @@ fn run_issue_edit<E: CliEnv>(
         ));
     }
     let issue = IssueNumber(number);
-    let current = load_or_refresh_issue(env, issue, true)?.snapshot;
+    let current = load_or_refresh_issue(env, issue, true)?;
+    // Issue #4392: a body whose SPEC structure cannot be parsed is not
+    // section-managed, and issue.spec.edit refuses it; replacing the body
+    // here is its repair path.
+    let section_managed = current.spec_parse_error.is_none();
+    let current = current.snapshot;
     if body.is_some()
+        && section_managed
         && current
             .labels
             .iter()
@@ -3472,7 +3478,8 @@ where
     }
     if !cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))? {
         return Err(SpecOpsError::from(ApiError::Network(format!(
-            "issue #{} cache changed before validation receipt publication",
+            "issue #{} cache changed before validation receipt publication: another cache \
+             writer replaced the snapshot during this read; retry the operation",
             number.0
         ))));
     }
@@ -4443,6 +4450,25 @@ mod tests {
         assert_eq!(fetched(&env, 7).title, "Renamed spec");
     }
 
+    /// Issue #4392: a gwt-spec body whose sections index cannot be parsed is
+    /// refused by issue.spec.edit, so issue.edit must accept the body repair.
+    #[test]
+    fn issue_edit_repairs_gwt_spec_body_with_unparseable_index() {
+        let (_tmp, mut env) = seeded_edit_env(&["gwt-spec"]);
+        env.client
+            .patch_body(
+                IssueNumber(7),
+                "<!-- gwt-spec id=7 version=1 -->\n<!-- sections: {} -->\n",
+            )
+            .expect("seed malformed body");
+
+        let mut out = String::new();
+        let code = run(&mut env, edit_body(7, "Repaired body"), &mut out).expect("body repair");
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(fetched(&env, 7).body, "Repaired body");
+    }
+
     /// Issue #3865 AC-5: a missing Issue, a permission failure, and a network
     /// failure each surface their own cause, and none of them writes anything.
     #[test]
@@ -5150,6 +5176,7 @@ mod tests {
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: Some("2026-08-26T00:00:00Z".to_string()),
             scan_stall: None,
+            agent_blackout: None,
             github_budget: None,
             generation_reclaim: None,
             disk_space: None,
@@ -5215,6 +5242,7 @@ mod tests {
             last_error: Some("issue #2338: live failure".to_string()),
             last_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
             scan_stall: None,
+            agent_blackout: None,
             github_budget: None,
             generation_reclaim: None,
             disk_space: None,
@@ -5331,6 +5359,7 @@ mod tests {
                 last_error: None,
                 last_scan_at: None,
                 scan_stall: None,
+                agent_blackout: None,
                 github_budget: None,
                 generation_reclaim: None,
                 disk_space: None,
@@ -5394,6 +5423,7 @@ mod tests {
             last_error: Some("issue #2338: stale failure".to_string()),
             last_scan_at: None,
             scan_stall: None,
+            agent_blackout: None,
             github_budget: None,
             generation_reclaim: None,
             disk_space: None,
@@ -7460,6 +7490,7 @@ mod tests {
             last_error: None,
             last_scan_at: Some("2026-09-07T02:08:00Z".to_string()),
             scan_stall: None,
+            agent_blackout: None,
             github_budget: None,
             idle_windows: Vec::new(),
             idle_window_counts: std::collections::BTreeMap::new(),
@@ -8409,6 +8440,32 @@ mod tests {
         assert_eq!(persisted.updated_at, remote.updated_at);
         assert_eq!(persisted.comments[0].body, remote.comments[0].body);
         assert!(!cache.validation_receipt_path(remote.number).exists());
+    }
+
+    /// Issue #4392: a body that quotes a gwt-spec header with an unparseable
+    /// sections index (the #4390 shape) used to fail every refresh with
+    /// `cache changed before validation receipt publication`, because the
+    /// receipt renewal could not reload the entry it had just written.
+    #[test]
+    fn malformed_spec_header_in_body_still_publishes_receipt() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut remote = sample_issue_snapshot();
+        remote.labels = vec!["bug".to_string()];
+        remote.body = "Quoted header:\n\n```\n  <!-- gwt-spec id=4388 version=1 -->\n  \
+                       <!-- sections: {} -->\n```\n"
+            .to_string();
+        env.client.seed(remote.clone());
+
+        let entry =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, |_| Ok(()))
+                .expect("a malformed quoted header must not refuse the read");
+
+        assert_eq!(entry.snapshot.body, remote.body);
+        assert!(entry.spec_parse_error.is_some());
+        assert!(Cache::new(env.cache_root())
+            .validation_receipt_path(remote.number)
+            .exists());
     }
 
     // Issue #3873 AC-1: `issue.create` with the auto-merge label refuses a

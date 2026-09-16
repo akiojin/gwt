@@ -79,15 +79,28 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let report = distribute_to_worktree(dir.path()).expect("distribute bundle");
 
     assert!(report.files_written > 0, "bundle must write files");
-    for skill_md in [
-        dir.path().join(".claude/skills/gwt-verify/SKILL.md"),
-        dir.path().join(".codex/skills/gwt-verify/SKILL.md"),
+    for skill in [
+        "gwt-execute",
+        "gwt-verify",
+        "gwt-manage-pr",
+        "gwt-build-spec",
+        "gwt-fix-issue",
     ] {
-        assert!(
-            skill_md.is_file(),
-            "expected bundled skill at {}",
-            skill_md.display()
+        let relative = format!("skills/{skill}/SKILL.md");
+        let claude = fs::read_to_string(dir.path().join(".claude").join(&relative))
+            .expect("read materialized Claude skill");
+        let codex = fs::read_to_string(dir.path().join(".codex").join(&relative))
+            .expect("read materialized Codex skill");
+        assert_eq!(
+            claude, codex,
+            "{skill} must have identical delivered contracts"
         );
+        for required in ["n/a (autonomous)", "CI auto-merge", "Agent Visual Check"] {
+            assert!(
+                claude.contains(required),
+                "materialized {skill} must contain {required}"
+            );
+        }
     }
 
     let has_gwt_command = fs::read_dir(dir.path().join(".claude/commands"))
@@ -596,10 +609,8 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
             }
         }
 
-        // Issue #4001 AC-A1: the autonomous values are distinct from the agent
-        // judging a skip. Issue #4217 AC-3: a postponed check needs a value of
-        // its own — `deferred (autonomous execution)` is neither `confirmed`
-        // (nobody looked) nor `n/a` (something was there to look at).
+        // Issue #4326: the autonomous waiver and legacy deferred value remain
+        // distinct from a human confirmation or an agent-judged skip.
         assert_eq!(
             line_starting_with(&skill, "User Verification Result:"),
             "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous) | deferred (autonomous execution)",
@@ -865,6 +876,20 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
         let content = fs::read_to_string(&skill_md)
             .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
         assert!(content.contains("gwt-coordination"));
+        for required in [
+            "launch_route: autonomous",
+            "Ready PR",
+            "CI auto-merge",
+            "User Verification Result: n/a (autonomous)",
+            "Agent Visual Check",
+            "headed_e2e_commands",
+            "manual",
+        ] {
+            assert!(
+                content.contains(required),
+                "generated guidance must contain {required}"
+            );
+        }
         assert!(
             content.contains("Read-only `gh` commands are allowed")
                 && content.contains("Mutations must use gwtd JSON-envelope operations"),
