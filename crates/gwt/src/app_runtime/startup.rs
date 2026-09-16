@@ -1799,7 +1799,12 @@ impl AppRuntime {
                 }
             }
         }
-        self.defer_restore_summary("open project restore", &previous_windows, restored, admission);
+        self.defer_restore_summary(
+            "open project restore",
+            &previous_windows,
+            restored,
+            admission,
+        );
         events
     }
 
