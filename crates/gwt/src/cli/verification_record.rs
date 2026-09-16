@@ -2455,16 +2455,30 @@ fn execute_command_with_isolation(
         gwt_core::process::scrub_git_env(&mut process);
         process.env_remove("CARGO_TARGET_DIR");
     }
-    let output = match process.output() {
-        Ok(output) => output,
-        Err(err) => {
-            let diagnostic = format!("failed to spawn '{command}': {err}");
-            let clipped = bounded_output_tail(diagnostic.as_bytes());
-            return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
-        }
-    };
+    process
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // Issue #4405: this process runs inside the agent tree, whose launch
+    // policy lowers priority; the workload must not inherit that.
+    let output =
+        match gwt_core::process_tree::spawn_at_normal_priority(&mut process).and_then(|spawned| {
+            let priority = spawned.priority.clone();
+            spawned.wait_with_output().map(|output| (output, priority))
+        }) {
+            Ok(output) => output,
+            Err(err) => {
+                let diagnostic = format!("failed to spawn '{command}': {err}");
+                let clipped = bounded_output_tail(diagnostic.as_bytes());
+                return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
+            }
+        };
+    let (output, priority) = output;
     let exit_code = output.status.code().unwrap_or(-1);
     let mut tail = String::new();
+    if !priority.restored {
+        tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+    }
     for (label, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
         if bytes.is_empty() {
             continue;

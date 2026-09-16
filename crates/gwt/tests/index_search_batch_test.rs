@@ -890,6 +890,62 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
     );
 }
 
+/// Issue #3866 AC-3/AC-5: `cancelled` and `repair_stopped` are stop states the
+/// runner holds until an explicit `index.repair` (Issue #4205). A queued
+/// repair is refused, so waiting cannot help: the blocking search must fail
+/// fast and non-retryably instead of burning the 30 s repair wait.
+#[test]
+fn operator_stop_state_fails_fast_without_queueing_repair() {
+    for reason in ["cancelled", "repair_stopped"] {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = setup_search_fixture(&format!(
+            r#"{{"ok": true, "scopes": {{"issues": {{"state": "corrupt", "reason": "{reason}"}}}}}}"#
+        ));
+
+        let started = Instant::now();
+        let error = gwt::search_project_index(
+            &fixture.repo,
+            "stopped issues scope",
+            &[IndexSearchScope::Issues],
+            None,
+            IndexSearchMatchMode::Semantic,
+            true,
+        )
+        .expect_err("a stopped scope must fail typed, never silently succeed");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{reason}: an operator stop state must not wait out the repair \
+             window: {:?}",
+            started.elapsed()
+        );
+        assert!(!error.retryable(), "{reason}: {error:?}");
+        match &error {
+            IndexSearchError::SearchFailed(failed) => {
+                assert!(
+                    failed.affected_scopes.iter().any(|scope| scope == "issues"),
+                    "{reason}: {failed:?}"
+                );
+                assert!(failed.reason.contains(reason), "{reason}: {failed:?}");
+                assert!(
+                    failed.reason.contains("index.repair"),
+                    "{reason}: the error must carry the recovery step: {failed:?}"
+                );
+            }
+            other => panic!("{reason}: expected a non-retryable failure, got {other:?}"),
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            rebuild_invocations(&fixture.runner_log, "--action index-").is_empty(),
+            "{reason}: the runner refuses queued repairs in a stop state, so \
+             none may be queued"
+        );
+    }
+}
+
 #[test]
 fn non_blocking_stale_scope_keeps_verified_results_and_refresh_contract() {
     let _env_lock = env_lock()
