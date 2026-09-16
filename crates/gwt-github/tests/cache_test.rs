@@ -239,7 +239,10 @@ fn failed_snapshot_write_leaves_validation_receipt_absent() {
     let cache = Cache::new(tmp.path().to_path_buf());
     let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v1", "t1"));
     cache.write_snapshot(&first).unwrap();
-    assert!(cache.renew_validation_receipt_if_current(&first).unwrap().renewed());
+    assert!(cache
+        .renew_validation_receipt_if_current(&first)
+        .unwrap()
+        .renewed());
     let receipt = cache.validation_receipt_path(first.number);
 
     fs::remove_file(tmp.path().join("42/body.md")).unwrap();
@@ -408,9 +411,7 @@ fn validation_renewal_distinguishes_a_concurrent_writer_from_a_stable_cache() {
 
     // No entry at all, and no generation to bind a receipt to.
     let missing = mk_snapshot(43, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
-    let unbound = cache
-        .renew_validation_receipt_if_current(&missing)
-        .unwrap();
+    let unbound = cache.renew_validation_receipt_if_current(&missing).unwrap();
     assert_eq!(unbound, ValidationReceiptRenewal::EntryUnreadable);
     assert!(!unbound.cache_changed());
 }

@@ -573,8 +573,7 @@ fn spec_cache_entry_has_no_sections(entry: &CacheEntry) -> bool {
     if !entry.spec_body.sections.is_empty() {
         return false;
     }
-    entry.spec_parse_error.is_none()
-        || body_declares_an_empty_section_index(&entry.snapshot.body)
+    entry.spec_parse_error.is_none() || body_declares_an_empty_section_index(&entry.snapshot.body)
 }
 
 fn issue_monitor_candidates_with_readiness<F>(
@@ -656,9 +655,7 @@ where
                         // stays unusable.
                         Some(entry)
                             if entry.spec_parse_error.is_some()
-                                && !body_declares_an_empty_section_index(
-                                    &entry.snapshot.body,
-                                ) =>
+                                && !body_declares_an_empty_section_index(&entry.snapshot.body) =>
                         {
                             fail(format!(
                                 "targeted refresh parse failed: {}",
@@ -2644,7 +2641,12 @@ mod tests {
                 live_issue(52, &["gwt-spec"], Some("2026-09-16T02:35:00Z")),
             ],
             dir.path(),
-            |number| Err(format!("parse issue cache #{} after targeted refresh", number.0)),
+            |number| {
+                Err(format!(
+                    "parse issue cache #{} after targeted refresh",
+                    number.0
+                ))
+            },
         );
 
         assert_eq!(
