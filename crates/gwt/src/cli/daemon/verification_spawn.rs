@@ -14,6 +14,9 @@
 //! own, so the daemon is never inside its own blast radius (AC-7).
 
 use gwt_core::daemon::{VerificationSpawnAccepted, VerificationSpawnRequest};
+// Every reader of this lives on a Unix-only path — `spawn` and the reason it
+// records — so on Windows the import itself is what `-D warnings` catches.
+#[cfg(unix)]
 use gwt_core::verification_priority::BASELINE_NICE;
 
 /// A running verification child plus the reclamation obligation it carries.
