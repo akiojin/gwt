@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,11 +52,11 @@ fn run_helper_role(role: &str) {
         let complete_signal = PathBuf::from(required_env("GWT_COORD_SIGNAL2"));
         let broker =
             RefreshBroker::open(&root, Duration::ZERO).expect("helper: open refresh broker");
-        fs::write(&ready, b"ready").expect("helper: write refresh broker ready marker");
+        publish_marker(&ready, b"ready").expect("helper: write refresh broker ready marker");
         poll_until(Duration::from_secs(20), || start_signal.exists());
         let claim = broker.claim_next().expect("helper: claim refresh target");
         write_result(if claim.is_some() { "claimed" } else { "idle" });
-        fs::write(&attempted, b"attempted").expect("helper: write claim attempted marker");
+        publish_marker(&attempted, b"attempted").expect("helper: write claim attempted marker");
         poll_until(Duration::from_secs(20), || complete_signal.exists());
         if let Some(claim) = claim {
             claim.complete().expect("helper: complete refresh target");
@@ -125,7 +125,7 @@ fn run_helper_role(role: &str) {
             let _lease = guard
                 .acquire_heavy_with_ttl(Duration::from_secs(20), ttl)
                 .expect("helper: acquire verification lease");
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             std::thread::sleep(Duration::from_secs(60));
         }
         "own-until-waiters" => {
@@ -137,7 +137,7 @@ fn run_helper_role(role: &str) {
                 .request_job(&key, JobPriority::Background, Duration::from_secs(20))
                 .expect("helper: request job");
             let guard = expect_owner(admission);
-            fs::write(&started, b"started").expect("helper: write started marker");
+            publish_marker(&started, b"started").expect("helper: write started marker");
             poll_until(Duration::from_secs(20), || {
                 guard.waiter_count().expect("helper: waiter count") >= waiters
             });
@@ -156,11 +156,11 @@ fn run_helper_role(role: &str) {
                 .request_job(&key, JobPriority::Background, Duration::from_secs(20))
                 .expect("helper: request job");
             let guard = expect_owner(admission);
-            fs::write(&started, b"started").expect("helper: write started marker");
+            publish_marker(&started, b"started").expect("helper: write started marker");
             poll_until(Duration::from_secs(20), || {
                 guard.waiter_count().expect("helper: waiter count") >= 2
             });
-            fs::write(&saw_two, b"two-waiters").expect("helper: write waiters marker");
+            publish_marker(&saw_two, b"two-waiters").expect("helper: write waiters marker");
             poll_until(Duration::from_secs(20), || {
                 guard.waiter_count().expect("helper: waiter count") <= 1
             });
@@ -203,7 +203,7 @@ fn run_helper_role(role: &str) {
                 JobAdmission::Joined(waiter) => waiter,
                 JobAdmission::Owner(_) => panic!("helper: expected to join, became owner"),
             };
-            fs::write(&joined, b"joined").expect("helper: write joined marker");
+            publish_marker(&joined, b"joined").expect("helper: write joined marker");
             poll_until(Duration::from_secs(20), || signal.exists());
             drop(waiter);
             write_result("departed");
@@ -225,17 +225,18 @@ fn run_helper_role(role: &str) {
             let heavy = guard
                 .acquire_heavy_with_ttl(Duration::from_secs(20), ttl)
                 .expect("helper: acquire issues index heavy lease");
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             let yielded = heavy.hold_while(Duration::from_millis(25), || !stop.exists());
             // Best-effort: a parent that already failed takes its arena with
             // it, and a helper that panics on the missing file would bury the
             // parent's diagnosis under its own.
-            let _ = fs::write(
-                PathBuf::from(required_env("GWT_COORD_RESULT")),
+            let _ = publish_marker(
+                &PathBuf::from(required_env("GWT_COORD_RESULT")),
                 match yielded {
                     Some(reason) => reason.as_str(),
                     None => "job-finished",
-                },
+                }
+                .as_bytes(),
             );
             let deadline = Instant::now() + Duration::from_secs(20);
             while !stop.exists() && Instant::now() < deadline {
@@ -263,9 +264,9 @@ fn run_helper_role(role: &str) {
                     probe,
                     Err(gwt_core::index_coordinator::CoordinatorError::Timeout { .. })
                 );
-                fs::write(
-                    PathBuf::from(required_env("GWT_COORD_MARKER")),
-                    if deferred { "deferred" } else { "overtook" },
+                publish_marker(
+                    &PathBuf::from(required_env("GWT_COORD_MARKER")),
+                    if deferred { "deferred" } else { "overtook" }.as_bytes(),
                 )
                 .expect("helper: report retry outcome");
                 if !deferred {
@@ -293,7 +294,7 @@ fn run_helper_role(role: &str) {
             let _heavy = guard
                 .acquire_heavy(Duration::from_secs(20))
                 .expect("helper: acquire heavy");
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             // Park until the parent kills this process (T-IDX-383 lock owner
             // kill: the kernel must auto-release both locks).
             std::thread::sleep(Duration::from_secs(60));
@@ -329,7 +330,7 @@ fn run_helper_role(role: &str) {
             let lease = guard
                 .acquire_heavy(Duration::from_secs(30))
                 .expect("helper: acquire background heavy lease");
-            fs::write(&granted, b"granted").expect("helper: write granted marker");
+            publish_marker(&granted, b"granted").expect("helper: write granted marker");
             std::thread::sleep(hold);
             lease.release().expect("helper: release background lease");
             guard
@@ -346,7 +347,7 @@ fn run_helper_role(role: &str) {
             let ledger = PathBuf::from(required_env("GWT_COORD_LEDGER"));
             let stop = PathBuf::from(required_env("GWT_COORD_SIGNAL"));
             let ready = PathBuf::from(required_env("GWT_COORD_MARKER"));
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             while !stop.exists() {
                 let admission = coordinator
                     .request_job(&key, JobPriority::Background, Duration::from_secs(20))
@@ -420,7 +421,7 @@ fn required_env_u64(name: &str) -> u64 {
 
 fn write_result(content: &str) {
     let path = PathBuf::from(required_env("GWT_COORD_RESULT"));
-    fs::write(path, content).expect("helper: write result");
+    publish_marker(&path, content.as_bytes()).expect("helper: write result");
 }
 
 // ---------------------------------------------------------------------------
@@ -470,8 +471,25 @@ fn locked_append_line(path: &Path, line: &str) {
     fs2::FileExt::unlock(&file).expect("unlock order log");
 }
 
+/// Reads a file its writer maintains under an fs2 lock, taking the same lock.
+///
+/// Issue #4360: the ledgers above are rewritten (truncate then refill) or
+/// appended to while the writer holds the exclusive lock, so an unlocked
+/// reader can catch the file empty or half-written. `None` means the writer
+/// has not created it yet, which is a real "nothing recorded" answer — unlike
+/// a torn read, which the shared lock now makes unobservable.
+fn read_locked(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    fs2::FileExt::lock_shared(&file).expect("lock ledger for reading");
+    let mut raw = String::new();
+    let mut handle = &file;
+    handle.read_to_string(&mut raw).expect("read ledger");
+    fs2::FileExt::unlock(&file).expect("unlock ledger");
+    Some(raw)
+}
+
 fn read_lines(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
+    read_locked(path)
         .unwrap_or_default()
         .lines()
         .map(str::to_string)
@@ -479,8 +497,7 @@ fn read_lines(path: &Path) -> Vec<String> {
 }
 
 fn read_counter(path: &Path) -> (i64, i64) {
-    let raw = fs::read_to_string(path).unwrap_or_default();
-    parse_counter(&raw)
+    parse_counter(&read_locked(path).unwrap_or_default())
 }
 
 fn parse_counter(raw: &str) -> (i64, i64) {
@@ -505,15 +522,117 @@ fn poll_until(deadline: Duration, mut done: impl FnMut() -> bool) {
     panic!("poll_until timed out after {deadline:?}");
 }
 
-fn wait_for_file(path: &Path, deadline: Duration) {
+/// Publishes a cross-process marker or result so that its appearance and its
+/// content become the same instant (Issue #4360).
+///
+/// This is the shared [`gwt_core::atomic_file::write_atomic`] primitive under
+/// a name that says what a marker is for; the daemon endpoint descriptor and
+/// the verification lease release channel publish through the same function.
+fn publish_marker(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    gwt_core::atomic_file::write_atomic(path, content)
+}
+
+/// Waits until `path` holds readable, complete content and returns it.
+///
+/// Every marker and result this suite publishes is non-empty, so an empty read
+/// is an unfinished write rather than a value (Issue #4360). Returning it as
+/// `""` is what turned the race into `left: "" / right: "cap-reached"`, so the
+/// reader keeps waiting instead and fails loudly when the content never lands.
+fn read_when_published(path: &Path, deadline: Duration) -> String {
     let start = Instant::now();
-    while start.elapsed() < deadline {
-        if path.exists() {
-            return;
+    loop {
+        if let Ok(content) = fs::read_to_string(path) {
+            if !content.is_empty() {
+                return content;
+            }
         }
+        assert!(
+            start.elapsed() < deadline,
+            "file {} was not published within {deadline:?}",
+            path.display()
+        );
         std::thread::sleep(POLL);
     }
-    panic!("file {} did not appear within {deadline:?}", path.display());
+}
+
+/// Waits for a marker whose content carries no information beyond "it
+/// happened". It still waits for the published content rather than for mere
+/// existence, so callers cannot observe a half-written marker.
+fn wait_for_file(path: &Path, deadline: Duration) {
+    read_when_published(path, deadline);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4360: cross-process marker publication must be all-or-nothing
+// ---------------------------------------------------------------------------
+
+/// AC-1 (writer side): a reader that observes the destination must never find
+/// it existing yet empty. `fs::write` truncates first and fills afterwards, so
+/// the gap between those two steps is exactly the window a loaded host widens.
+#[test]
+fn publish_marker_never_exposes_an_empty_destination() {
+    let arena = TestArena::new();
+    let path = arena.path("published-marker");
+    let observed = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+
+    let observer = {
+        let path = path.clone();
+        let observed = Arc::clone(&observed);
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let mut empty_reads = 0_u64;
+            while !done.load(Ordering::Relaxed) {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    observed.store(true, Ordering::Relaxed);
+                    if content.is_empty() {
+                        empty_reads += 1;
+                    }
+                }
+            }
+            empty_reads
+        })
+    };
+
+    for turn in 0..2_000 {
+        publish_marker(&path, format!("turn-{turn}").as_bytes()).expect("publish marker");
+    }
+    done.store(true, Ordering::Relaxed);
+    let empty_reads = observer.join().expect("observer thread");
+
+    assert!(
+        observed.load(Ordering::Relaxed),
+        "the observer never managed to read the marker, so the run proves nothing"
+    );
+    assert_eq!(
+        empty_reads, 0,
+        "a published marker must never be observable as an existing empty file"
+    );
+}
+
+/// AC-2 (reader side): an existing-but-empty file is an unfinished write, not
+/// a value. The reader keeps waiting for the content instead of handing an
+/// empty string to the assertion.
+#[test]
+fn read_when_published_waits_out_an_existing_but_empty_file() {
+    let arena = TestArena::new();
+    let path = arena.path("late-content");
+    fs::write(&path, b"").expect("create the half-written destination");
+
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            publish_marker(&path, b"cap-reached").expect("publish late content");
+        })
+    };
+
+    assert_eq!(
+        read_when_published(&path, Duration::from_secs(10)),
+        "cap-reached",
+        "an existing but empty file must not be read as a finished value"
+    );
+    writer.join().expect("writer thread");
 }
 
 struct HelperSpawn {
@@ -735,12 +854,16 @@ fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
     // third must defer even though neither earlier claimant is polling yet.
     let third = spawn_queued("third", "wt-a");
     let third_retry = arena.path("retry-third");
-    wait_for_file(&third_retry, Duration::from_secs(20));
-    assert_eq!(fs::read_to_string(third_retry).unwrap(), "deferred");
+    assert_eq!(
+        read_when_published(&third_retry, Duration::from_secs(20)),
+        "deferred"
+    );
     let second = spawn_queued("second", "wt-b");
     let second_retry = arena.path("retry-second");
-    wait_for_file(&second_retry, Duration::from_secs(20));
-    assert_eq!(fs::read_to_string(second_retry).unwrap(), "deferred");
+    assert_eq!(
+        read_when_published(&second_retry, Duration::from_secs(20)),
+        "deferred"
+    );
     assert!(read_lines(&order).is_empty());
 
     let first = spawn_queued("first", "wt-c");
@@ -1244,12 +1367,8 @@ fn issues_index_job_yields_the_heavy_lease_to_a_waiting_verification_run() {
     // The lease is released before the reason is written, so the winner can
     // be here first; the reason is what the assertion is about, not the
     // ordering of two independent writes.
-    poll_until(Duration::from_secs(10), || {
-        fs::read_to_string(&result)
-            .is_ok_and(|content| content == HeavyYieldReason::Preempted.as_str())
-    });
     assert_eq!(
-        fs::read_to_string(&result).unwrap_or_default(),
+        read_when_published(&result, Duration::from_secs(10)),
         HeavyYieldReason::Preempted.as_str(),
         "the index job must record that it was preempted after waiting {waited:?}"
     );
@@ -1297,12 +1416,8 @@ fn issues_index_job_releases_the_heavy_lease_when_its_hold_cap_lapses() {
         !stop.exists(),
         "the cap must fire while the index job is still running"
     );
-    poll_until(Duration::from_secs(10), || {
-        fs::read_to_string(&result)
-            .is_ok_and(|content| content == HeavyYieldReason::CapReached.as_str())
-    });
     assert_eq!(
-        fs::read_to_string(&result).unwrap_or_default(),
+        read_when_published(&result, Duration::from_secs(10)),
         HeavyYieldReason::CapReached.as_str(),
     );
 
@@ -1425,12 +1540,8 @@ fn background_index_job_yields_the_heavy_lease_to_an_interactive_search() {
     let waited = started.elapsed();
 
     assert!(!stop.exists(), "the background build must still be running");
-    poll_until(Duration::from_secs(10), || {
-        fs::read_to_string(&result)
-            .is_ok_and(|content| content == HeavyYieldReason::Preempted.as_str())
-    });
     assert_eq!(
-        fs::read_to_string(&result).unwrap_or_default(),
+        read_when_published(&result, Duration::from_secs(10)),
         HeavyYieldReason::Preempted.as_str(),
         "the background build must record that an interactive search preempted \
          it after waiting {waited:?}"
@@ -2170,7 +2281,7 @@ fn refresh_broker_two_processes_cannot_claim_the_same_target_concurrently() {
 
     let claimed = results
         .iter()
-        .filter(|(_, _, result)| fs::read_to_string(result).is_ok_and(|value| value == "claimed"))
+        .filter(|(_, _, result)| read_when_published(result, Duration::from_secs(20)) == "claimed")
         .count();
     assert_eq!(
         claimed, 1,

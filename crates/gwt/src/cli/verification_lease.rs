@@ -94,8 +94,15 @@ fn release<E: CliEnv>(
         }
         return Err(missing_lease(lease_id));
     };
-    fs::write(control.join(RELEASE_FILE), reason.unwrap_or("").as_bytes())
-        .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
+    // Issue #4360: the holder waits for this file to exist and then reads the
+    // reason out of it, so a plain write lets it read the empty moment between
+    // create and fill. Publishing by rename makes "exists" mean "complete" —
+    // which also keeps an intentionally empty reason readable as itself.
+    gwt_core::atomic_file::write_atomic(
+        &control.join(RELEASE_FILE),
+        reason.unwrap_or("").as_bytes(),
+    )
+    .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
     await_settled(lease_id)?;
     // A holder that exited normally already removed this; a holder that was
     // killed cannot, so clean up on the caller's side too.
