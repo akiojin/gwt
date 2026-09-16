@@ -104,6 +104,18 @@ struct GitOutput {
     stderr: Vec<u8>,
 }
 
+/// Issue #4378 AC-4: told about every `git worktree list` run so the host can
+/// count them (gwt's startup telemetry). gwt-git keeps no telemetry itself.
+static WORKTREE_LIST_OBSERVER: std::sync::OnceLock<fn(std::time::Instant)> =
+    std::sync::OnceLock::new();
+
+/// Install the process-wide observer for `git worktree list` runs. It is
+/// called after each run with the instant the run started. Only the first
+/// installation takes effect.
+pub fn set_worktree_list_observer(observer: fn(std::time::Instant)) {
+    let _ = WORKTREE_LIST_OBSERVER.set(observer);
+}
+
 fn run_git_observing_operation_deadline(
     args: &[&str],
     current_dir: &Path,
@@ -230,11 +242,15 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
+        let started = std::time::Instant::now();
         let output = run_git_observing_operation_deadline(
             &["worktree", "list", "--porcelain"],
             &self.repo_path,
-        )
-        .map_err(|e| GwtError::Git(format!("worktree list: {e}")))?;
+        );
+        if let Some(observer) = WORKTREE_LIST_OBSERVER.get() {
+            observer(started);
+        }
+        let output = output.map_err(|e| GwtError::Git(format!("worktree list: {e}")))?;
 
         if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
