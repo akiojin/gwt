@@ -75,7 +75,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "output": output,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{}", payload);
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
                 (0, None) => {}
@@ -99,7 +101,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "error": message,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{payload}");
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
             // Issue #3655 AC-2: a governance refusal reaches the PM without
             // depending on the agent noticing it is stuck. Answering the caller
@@ -110,6 +114,32 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+/// Exit code for an operation whose response never reached the caller.
+///
+/// Issue #4435 AC-1: swallowing the write turns a delivery failure into a
+/// zero-byte, exit-0 answer that reads exactly like silent success. Distinct
+/// from the ordinary failure code so a caller can tell the two apart.
+const RESPONSE_NOT_DELIVERED_EXIT: i32 = 3;
+
+/// Write the response envelope. The envelope is the operation's only answer,
+/// so a failed write is reported, never dropped.
+fn write_response(stdout: &mut dyn std::io::Write, payload: &Value) -> Result<(), String> {
+    writeln!(stdout, "{payload}").map_err(|err| err.to_string())
+}
+
+fn report_undelivered_response<E: CliEnv>(
+    env: &mut E,
+    prog: &str,
+    operation: &str,
+    error: &str,
+) -> i32 {
+    let _ = writeln!(
+        env.stderr(),
+        "{prog} {operation}: response envelope was not delivered: {error}"
+    );
+    RESPONSE_NOT_DELIVERED_EXIT
 }
 
 /// Issue #3606: name the project store the operation acted on.
@@ -633,10 +663,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "index recovery supports only the issues scope".to_string(),
                 ));
             }
+            let wait = optional_bool(params, "wait")?.unwrap_or(false);
+            if envelope.operation == "index.cancel" && wait {
+                return Err(CliParseError::InvalidJson(
+                    "index.cancel does not take wait".to_string(),
+                ));
+            }
             CliCommand::Index(if envelope.operation == "index.cancel" {
                 IndexCommand::Cancel
             } else {
-                IndexCommand::Repair
+                // Issue #4435: `index.repair` submits and answers; `wait`
+                // blocks until the coordinated job settles.
+                IndexCommand::Repair { wait }
             })
         }
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
@@ -1795,9 +1833,10 @@ fn verification_quarantine_requests(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
-        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand,
-        SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
+        parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
+        CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
+        IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
+        WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
@@ -3818,6 +3857,75 @@ mod tests {
                 CliParseError::InvalidJson(_)
             ));
         }
+    }
+
+    /// Issue #4435: `index.repair` submits by default; `wait` is the blocking
+    /// form the detached worker runs. `index.cancel` never blocks.
+    #[test]
+    fn index_repair_wait_selects_the_blocking_form() {
+        assert!(matches!(
+            ok("index.repair", json!({})),
+            CliCommand::Index(IndexCommand::Repair { wait: false })
+        ));
+        assert!(matches!(
+            ok("index.repair", json!({"scope": "issues", "wait": true})),
+            CliCommand::Index(IndexCommand::Repair { wait: true })
+        ));
+        match err("index.cancel", json!({"wait": true})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(
+                    message.contains("index.cancel does not take wait"),
+                    "{message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("index.repair", json!({"wait": "yes"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("wait must be a bool"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Issue #4435 AC-1: the envelope is the operation's only answer, so a
+    /// failed write must surface instead of leaving the caller with zero
+    /// bytes on both streams and an exit code that reads as success.
+    #[test]
+    fn an_undelivered_response_is_reported_rather_than_dropped() {
+        struct ClosedPipe;
+        impl std::io::Write for ClosedPipe {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the pipe has been ended",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let payload = json!({"ok": true, "operation": "index.repair"});
+
+        let mut delivered = Vec::new();
+        write_response(&mut delivered, &payload).expect("a writable stdout accepts the envelope");
+        assert!(!delivered.is_empty());
+        assert!(delivered.ends_with(b"\n"));
+
+        let error = write_response(&mut ClosedPipe, &payload)
+            .expect_err("a broken stdout must not be reported as delivered");
+        assert!(error.contains("pipe"), "{error}");
+
+        let mut env = crate::cli::env::TestEnv::new(std::path::PathBuf::from("cache"));
+        let code = report_undelivered_response(&mut env, "gwtd", "index.repair", &error);
+        assert_eq!(code, RESPONSE_NOT_DELIVERED_EXIT);
+        assert_ne!(code, 0, "an undelivered answer must not exit as success");
+        let reported = String::from_utf8(env.stderr.clone()).expect("stderr is utf-8");
+        assert!(
+            reported.contains("index.repair: response envelope was not delivered"),
+            "{reported}"
+        );
     }
 
     #[test]
