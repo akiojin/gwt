@@ -1253,6 +1253,10 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
+    /// Issue #4398 AC-3: each project's worktree listing from bootstrap, held
+    /// until the startup index status probe takes the active project's one.
+    pub(crate) startup_worktree_inventories:
+        HashMap<PathBuf, std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
     /// Issue #4375: repositories whose PM worktree preparation is running on a
     /// blocking worker. Preparing the worktree is Git work that used to run on
     /// the GUI event loop, where it was atomic; this gate keeps a second ensure
@@ -2882,6 +2886,7 @@ impl AppRuntime {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            startup_worktree_inventories: HashMap::new(),
             pending_pm_worktree_preparations: HashSet::new(),
             update_resume_tab_ids: HashSet::new(),
             update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
@@ -8829,6 +8834,16 @@ impl AppRuntime {
         let active_tab_id = self.active_tab_id.as_ref()?;
         self.tab(active_tab_id)
             .map(|tab| tab.project_root.as_path())
+    }
+
+    /// Issue #4398 AC-3: hand the active project's bootstrap worktree listing
+    /// to the startup index status probe, once. The other listings are
+    /// dropped so no later caller reuses one that has gone stale.
+    pub(crate) fn take_startup_worktree_inventory(
+        &mut self,
+    ) -> Option<std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>> {
+        let mut inventories = std::mem::take(&mut self.startup_worktree_inventories);
+        inventories.remove(self.active_project_root()?)
     }
 
     pub(crate) fn tab_mut(&mut self, tab_id: &str) -> Option<&mut ProjectTabRuntime> {

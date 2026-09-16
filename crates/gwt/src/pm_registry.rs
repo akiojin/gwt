@@ -4637,6 +4637,11 @@ pub struct PmRepositoryRegistrationView {
     /// Whether this row is the store the report was asked about. A `false` row
     /// is a PM this store cannot see through its own `pm.json`.
     pub is_current_store: bool,
+    /// Issue #4394 AC-4: `false` for a Session that is live, or still
+    /// restorable, in one of this repository's PM worktrees without holding a
+    /// registration. It has no PM authority, yet it can still post to the
+    /// Board, so the PM has to be able to see it and `pm.stop` it.
+    pub registered: bool,
 }
 
 /// Build the repository-scoped rows for `repo_path`'s report.
@@ -4645,7 +4650,13 @@ pub fn pm_repository_registration_views(repo_path: &Path) -> Vec<PmRepositoryReg
         return Vec::new();
     };
     let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
-    pm_registrations_for_repository(&repository_key)
+    let registrations = pm_registrations_for_repository(&repository_key);
+    let unregistered = unregistered_pm_worktree_sessions(
+        &repository_key,
+        &registrations,
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let mut views: Vec<PmRepositoryRegistrationView> = registrations
         .into_iter()
         .map(|record| PmRepositoryRegistrationView {
             is_current_store: record.project_dir == own_project_dir,
@@ -4653,8 +4664,63 @@ pub fn pm_repository_registration_views(repo_path: &Path) -> Vec<PmRepositoryReg
             session_id: record.registration.session_id,
             agent_id: record.registration.agent_id,
             worktree_path: record.registration.worktree_path,
+            registered: true,
         })
-        .collect()
+        .collect();
+    views.extend(unregistered.into_iter().filter_map(|session| {
+        let project_dir = pm_worktree_store_dir(&session.worktree_path)?;
+        Some(PmRepositoryRegistrationView {
+            is_current_store: paths_are_same_store(&project_dir, &own_project_dir),
+            project_dir: project_dir.display().to_string(),
+            session_id: session.id,
+            agent_id: session.agent_id.command().to_string(),
+            worktree_path: session.worktree_path.display().to_string(),
+            registered: false,
+        })
+    }));
+    views
+}
+
+/// Issue #4394 AC-4: Sessions in one of `repository_key`'s PM worktrees that
+/// hold none of `registrations` and are still live or restorable.
+///
+/// Restore used to bring such Sessions back as extra PM windows that neither
+/// `pm.status` nor `pm.stop` could address. Only records naming a PM worktree
+/// path are parsed, so the scan stays cheap on a store with thousands of
+/// stopped Sessions.
+pub fn unregistered_pm_worktree_sessions(
+    repository_key: &Path,
+    registrations: &[PmStoreRegistration],
+    sessions_dir: &Path,
+) -> Vec<gwt_agent::Session> {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<gwt_agent::Session> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter(|path| {
+            fs::read_to_string(path).is_ok_and(|content| {
+                content.contains("pm/worktree") || content.contains("pm\\worktree")
+            })
+        })
+        .filter_map(|path| gwt_agent::Session::load(&path).ok())
+        .filter(|session| {
+            !registrations
+                .iter()
+                .any(|record| record.registration.session_id == session.id)
+                && (session.restore_window_on_startup
+                    || !matches!(
+                        session.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    ))
+                && pm_worktree_store_dir(&session.worktree_path).is_some()
+                && pm_repository_key(&session.worktree_path).as_deref() == Some(repository_key)
+        })
+        .collect();
+    sessions.sort_by(|left, right| left.id.cmp(&right.id));
+    sessions
 }
 
 /// Build the `pm.status` report from loaded prefs. The durable-session probe
