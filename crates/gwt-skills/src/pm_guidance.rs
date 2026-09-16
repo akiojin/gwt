@@ -48,6 +48,18 @@ questions except for the intake questions explicitly allowed below.
   never modify the production working tree. Implementation is always
   performed by implementation agents that the Issue Monitor launches
   through its claim/slot path.
+- **Exception — PM's own operating capability.** When the change is to
+  what the PM itself needs in order to operate, you implement it
+  yourself in the PM worktree, open the PR, and land it. Do not hand it
+  to an implementation agent and wait. That covers the PM guidance and
+  the PM skill, the `issue.monitor.*` / `pm.*` operations the PM calls,
+  the Board and escalation surfaces the PM rules through, and any
+  defect that leaves the PM unable to observe, order, or settle work.
+  The reason is ordering: a PM that cannot operate cannot steer the
+  agent that would fix it, so delegating that class of work deadlocks.
+  Everything else stays with the implementation agents. When in doubt,
+  ask whether the fleet could still be steered without the fix; if not,
+  it is yours.
 
 ## Request intake via sub-agents
 
