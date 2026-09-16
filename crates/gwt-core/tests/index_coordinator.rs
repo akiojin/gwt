@@ -1100,6 +1100,7 @@ fn killed_verification_owner_releases_lease_before_ttl_expiry() {
     let _ = parked.child.wait();
 
     let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let orphan = coordinator.lease_events().unwrap().pop().unwrap();
     let guard = match coordinator
         .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(10))
         .expect("request verification job after kill")
@@ -1110,10 +1111,74 @@ fn killed_verification_owner_releases_lease_before_ttl_expiry() {
     let lease = guard
         .acquire_heavy_with_ttl(Duration::from_secs(10), Duration::from_secs(60))
         .expect("verification lease after owner kill");
+    assert_eq!(
+        coordinator
+            .heavy_lease_status()
+            .unwrap()
+            .lease_id
+            .as_deref(),
+        Some(lease.id()),
+        "status must preserve the new holder's ticket"
+    );
     lease.release().expect("release recovered lease");
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    let events = coordinator.lease_events().unwrap();
+    let recovered: Vec<_> = events
+        .iter()
+        .filter(|event| event.lease_id == orphan.lease_id && event.kind == LeaseEventKind::Released)
+        .collect();
+    assert_eq!(recovered.len(), 1, "orphan recovery must be recorded once");
+    assert_eq!(
+        recovered[0].reason.as_deref(),
+        Some("holder lock released without settlement")
+    );
+    assert_eq!(events.len(), 4, "normal release must not be recorded twice");
     guard
         .complete(JobOutcome::Completed)
         .expect("complete recovered job");
+}
+
+#[test]
+fn status_recovers_killed_verification_ticket_once() {
+    let arena = TestArena::new();
+    let ready = arena.path("verify-ready");
+    let mut parked = spawn_helper(
+        "verify-holder",
+        &[
+            ("GWT_COORD_ROLE", "hold-verification-and-park".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_VERIFY_TARGET", "repo-a|wt-1".to_string()),
+            ("GWT_COORD_TTL_MS", "3600000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+    let coordinator = IndexCoordinator::open(&arena.coord_root).unwrap();
+    let live = coordinator.heavy_lease_status().unwrap();
+    let ticket = fs::read(coordinator.heavy_ticket_path()).unwrap();
+    assert!(live.held);
+    assert_eq!(coordinator.lease_events().unwrap().len(), 1);
+
+    parked.child.kill().expect("kill verification holder");
+    let _ = parked.child.wait();
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    assert!(!coordinator.heavy_ticket_path().exists());
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    let events = coordinator.lease_events().unwrap();
+    assert_eq!(events.len(), 2, "status must settle the orphan only once");
+    assert_eq!(events[1].lease_id, live.lease_id.unwrap());
+    assert_eq!(events[1].kind, LeaseEventKind::Released);
+    assert_eq!(
+        events[1].reason.as_deref(),
+        Some("holder lock released without settlement")
+    );
+
+    // A holder can also die between appending its terminal event and
+    // removing the ticket. Recover that residue without a second event.
+    fs::write(coordinator.heavy_ticket_path(), ticket).unwrap();
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    assert!(!coordinator.heavy_ticket_path().exists());
+    assert_eq!(coordinator.lease_events().unwrap().len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,7 +1244,10 @@ fn issues_index_job_yields_the_heavy_lease_to_a_waiting_verification_run() {
     // The lease is released before the reason is written, so the winner can
     // be here first; the reason is what the assertion is about, not the
     // ordering of two independent writes.
-    wait_for_file(&result, Duration::from_secs(10));
+    poll_until(Duration::from_secs(10), || {
+        fs::read_to_string(&result)
+            .is_ok_and(|content| content == HeavyYieldReason::Preempted.as_str())
+    });
     assert_eq!(
         fs::read_to_string(&result).unwrap_or_default(),
         HeavyYieldReason::Preempted.as_str(),
@@ -1229,7 +1297,10 @@ fn issues_index_job_releases_the_heavy_lease_when_its_hold_cap_lapses() {
         !stop.exists(),
         "the cap must fire while the index job is still running"
     );
-    wait_for_file(&result, Duration::from_secs(10));
+    poll_until(Duration::from_secs(10), || {
+        fs::read_to_string(&result)
+            .is_ok_and(|content| content == HeavyYieldReason::CapReached.as_str())
+    });
     assert_eq!(
         fs::read_to_string(&result).unwrap_or_default(),
         HeavyYieldReason::CapReached.as_str(),
@@ -1354,7 +1425,10 @@ fn background_index_job_yields_the_heavy_lease_to_an_interactive_search() {
     let waited = started.elapsed();
 
     assert!(!stop.exists(), "the background build must still be running");
-    wait_for_file(&result, Duration::from_secs(10));
+    poll_until(Duration::from_secs(10), || {
+        fs::read_to_string(&result)
+            .is_ok_and(|content| content == HeavyYieldReason::Preempted.as_str())
+    });
     assert_eq!(
         fs::read_to_string(&result).unwrap_or_default(),
         HeavyYieldReason::Preempted.as_str(),

@@ -126,7 +126,7 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
     env.stdin = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {
-            "command": "gh issue view 123"
+            "command": "gh issue edit 123 --title updated"
         }
     })
     .to_string();
@@ -153,11 +153,11 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
         "stdout must deny the tool, got: {stdout}"
     );
     assert!(
-        stdout.contains("Direct GitHub workflow CLI commands are not allowed"),
+        stdout.contains("Direct GitHub workflow mutations are not allowed"),
         "short summary must remain in the visible reason: {stdout}"
     );
     assert!(
-        stdout.contains("pr.view"),
+        stdout.contains("issue.edit"),
         "canonical gwt JSON operation alternative must be present in the visible reason: {stdout}"
     );
     assert!(
@@ -181,7 +181,7 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
     env.stdin = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {
-            "command": "gh issue view 123"
+            "command": "gh issue edit 123 --title updated"
         }
     })
     .to_string();

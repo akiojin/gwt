@@ -50,6 +50,9 @@ mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+// Unix has no tree-wide CPU cap to lift (Issue #4405).
+#[cfg(windows)]
+mod verification_cap_relief;
 mod work_events_ingest;
 mod workspace_session_registry;
 
@@ -234,13 +237,17 @@ fn spawn_project_index_status_check(
     _runtime: &Runtime,
     proxy: EventLoopProxy<UserEvent>,
     project_root: Option<PathBuf>,
+    startup_inventory: Option<std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
 ) {
     dispatch_project_index_status_check_with(
         AppEventProxy::new(proxy),
         project_root,
         |proxy, root| {
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
-                .spawn(proxy, root)
+            let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::global();
+            match startup_inventory {
+                Some(inventory) => service.spawn_with_startup_inventory(proxy, root, inventory),
+                None => service.spawn(proxy, root),
+            }
         },
     );
 }
@@ -359,6 +366,41 @@ fn debug_variant_label<T: std::fmt::Debug + ?Sized>(value: &T) -> DispatchLabel 
 
 fn frontend_event_kind_label(event: &FrontendEvent) -> DispatchLabel {
     debug_variant_label(event)
+}
+
+fn log_frontend_timing(
+    event: DispatchLabel,
+    received_at: std::time::Instant,
+    handler_started: std::time::Instant,
+    completed_at: std::time::Instant,
+    window_count: usize,
+) {
+    let queue_wait_ms = handler_started.duration_since(received_at).as_millis() as u64;
+    let handler_ms = completed_at.duration_since(handler_started).as_millis() as u64;
+    let receive_to_complete_ms = completed_at.duration_since(received_at).as_millis() as u64;
+    if receive_to_complete_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt.frontend.timing",
+            event = %event,
+            elapsed_ms = handler_ms,
+            queue_wait_ms,
+            handler_ms,
+            receive_to_complete_ms,
+            window_count,
+            "frontend event receive-to-completion latency exceeded budget"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            event = %event,
+            elapsed_ms = handler_ms,
+            queue_wait_ms,
+            handler_ms,
+            receive_to_complete_ms,
+            window_count,
+            "frontend event handled"
+        );
+    }
 }
 
 /// Issue #3611 AC-4: name the event-loop dispatch that is about to be timed.
@@ -1137,11 +1179,10 @@ fn issue_monitor_daemon_user_event(
     match event_name {
         "status" => {
             let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
-            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::IssueMonitorStatus {
-                    status: Box::new(status),
-                },
-            )]))
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: project_root.to_path_buf(),
+                status: Box::new(status),
+            })
         }
         "inbox" => {
             let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
@@ -1259,6 +1300,7 @@ enum UserEvent {
     Frontend {
         client_id: ClientId,
         event: FrontendEvent,
+        received_at: std::time::Instant,
     },
     /// Internal request from the capability-authenticated pane bridge. The
     /// server-side principal is the only project/Session routing authority.
@@ -1431,6 +1473,10 @@ enum UserEvent {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     },
+    IssueMonitorDaemonStatus {
+        project_root: PathBuf,
+        status: Box<gwt::IssueMonitorStatusView>,
+    },
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
     IssueMonitorDaemonInbox {
@@ -1526,6 +1572,15 @@ enum UserEvent {
     LaunchComplete {
         window_id: String,
         result: Box<AgentLaunchResult>,
+    },
+    /// Issue #4375: one PM worktree preparation finished on a blocking worker.
+    /// The Git work it covers (`git worktree add`, `git fetch`) used to run
+    /// inside the canvas-ready restore drain and held the GUI event loop for
+    /// seconds on a repository with many worktrees; the spawn it gates resumes
+    /// from this event instead.
+    PmWorktreePrepared {
+        continuation: Box<crate::app_runtime::pm::PmWorktreeContinuation>,
+        result: Result<PathBuf, String>,
     },
     ShellLaunchComplete {
         window_id: String,
@@ -1661,7 +1716,7 @@ mod tests {
     /// poll interval.
     #[test]
     fn the_gui_drives_daemon_supervision_on_its_own_timer() {
-        let source = include_str!("main.rs");
+        let source = include_str!("main.rs").replace("\r\n", "\n");
         let supervision = source
             .split_once("runtime-daemon-ensure-tick")
             .expect("the GUI must own a daemon supervision thread")
@@ -1785,6 +1840,63 @@ mod tests {
         assert_eq!(
             frontend_event_kind_label(&gwt::FrontendEvent::FrontendReady).as_str(),
             "FrontendReady"
+        );
+    }
+
+    pub(crate) fn capture_timing_warnings(run: impl FnOnce()) -> String {
+        let output = tempfile::NamedTempFile::new().expect("timing log");
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(output.reopen().expect("timing log writer"))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        std::fs::read_to_string(output.path()).expect("read timing log")
+    }
+
+    #[test]
+    fn frontend_timing_warns_for_receive_latency_without_logging_input() {
+        use std::time::{Duration, Instant};
+        let received = Instant::now();
+        let started = received + Duration::from_millis(50);
+        let completed = started + Duration::from_millis(5);
+        let label = frontend_event_kind_label(&gwt::FrontendEvent::TerminalInput {
+            id: "secret-window".to_string(),
+            data: "secret-input".to_string(),
+        });
+        let output = capture_timing_warnings(|| {
+            super::log_frontend_timing(label, received, started, completed, 9);
+            super::log_frontend_timing(
+                label,
+                received + Duration::from_millis(26),
+                started,
+                completed,
+                9,
+            );
+            super::log_frontend_timing(
+                label,
+                received + Duration::from_millis(25),
+                started,
+                completed,
+                9,
+            );
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("timing JSON"))
+            .collect();
+        assert_eq!(logs.len(), 2, "29ms must not warn; 30ms must warn");
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["event"], "TerminalInput");
+        assert_eq!(fields["queue_wait_ms"], 50);
+        assert_eq!(fields["handler_ms"], 5);
+        assert_eq!(fields["elapsed_ms"], 5);
+        assert_eq!(fields["receive_to_complete_ms"], 55);
+        assert_eq!(fields["window_count"], 9);
+        assert_eq!(logs[1]["fields"]["receive_to_complete_ms"], 30);
+        assert!(
+            !output.contains("secret"),
+            "timing must exclude input payload"
         );
     }
 
@@ -2050,19 +2162,19 @@ mod tests {
             serde_json::to_value(status.clone()).expect("status serializes"),
             42,
         );
-        match super::daemon_broadcast_user_event(
+        let status_event = super::daemon_broadcast_user_event(
             gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
             status_payload,
             project_root,
             99,
-        ) {
-            Some(UserEvent::Dispatch(events)) => {
-                assert!(events.iter().any(|event| {
-                    matches!(
-                        &event.event,
-                        BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
-                    )
-                }));
+        );
+        match status_event {
+            Some(UserEvent::IssueMonitorDaemonStatus {
+                project_root: actual_project_root,
+                status: actual,
+            }) => {
+                assert_eq!(actual_project_root, project_root);
+                assert_eq!(*actual, status);
             }
             other => panic!("unexpected issue monitor status event: {other:?}"),
         }
@@ -3302,6 +3414,8 @@ mod tests {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            startup_worktree_inventories: HashMap::new(),
+            pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -3339,6 +3453,7 @@ mod tests {
             recoverable_agent_error_windows: std::collections::HashSet::new(),
             provider_quota_holds: std::collections::HashMap::new(),
             provider_quota_candidates: std::collections::HashMap::new(),
+            released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
             agent_capability_issuer: None,
@@ -7129,8 +7244,22 @@ mod tests {
 
     #[test]
     fn orphan_intake_prune_plan_never_reaps_worktree_created_after_startup_snapshot() {
+        // Executing the plan revokes Codex project trust, which resolves its
+        // config from the process-global `CODEX_HOME` (falling back to the real
+        // user home). Pin it to this test's tempdir under the env lock, the same
+        // way the sibling prune tests do: without it this test reads whichever
+        // `CODEX_HOME` a concurrently running test happens to have installed —
+        // including the deliberately malformed config written by
+        // `orphan_intake_prune_keeps_worktree_when_codex_trust_revocation_fails`
+        // — and then keeps the snapshotted orphan because trust cleanup failed,
+        // so `removed` is 0 instead of 1 (Issue #4299).
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_git_clone_with_origin(&repo);
         let manager = gwt_git::WorktreeManager::new(&repo);
@@ -8553,6 +8682,7 @@ fn main() -> std::io::Result<()> {
     // can be measured. Fail-open — a disabled kill switch or an unwritable log
     // directory leaves every later `record_*` call a no-op.
     gwt::perf::install_from_settings();
+    gwt::perf::startup::begin(*PROCESS_STARTED_AT.get().expect("process start instant"));
 
     // Issue #4142: a launchd-started GUI inherits soft `RLIMIT_NOFILE` = 256,
     // and every live PTY pane costs three descriptors, so the process runs out
@@ -8643,7 +8773,11 @@ fn main() -> std::io::Result<()> {
         ),
     };
 
-    let runtime = Runtime::new().expect("tokio runtime");
+    let runtime = {
+        let _phase =
+            gwt::perf::startup::PhaseTimer::start(gwt::perf::startup::StartupPhase::RuntimeInit);
+        Runtime::new().expect("tokio runtime")
+    };
 
     // SPEC-3287 FR-028..FR-030: commit the embedded-server port before any
     // server task or browser URL can be published. Explicit `--port` values
@@ -8873,6 +9007,8 @@ fn main() -> std::io::Result<()> {
             let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
         }),
     );
+    #[cfg(windows)]
+    verification_cap_relief::spawn(pty_writers.clone());
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
@@ -8886,10 +9022,15 @@ fn main() -> std::io::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
+    let mut startup_index_project = app
+        .active_project_root()
+        .map(|root| root.display().to_string());
+    let startup_worktree_inventory = app.take_startup_worktree_inventory();
     spawn_project_index_status_check(
         &runtime,
         proxy.clone(),
         app.active_project_root().map(Path::to_path_buf),
+        startup_worktree_inventory,
     );
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
@@ -9065,7 +9206,11 @@ fn main() -> std::io::Result<()> {
                 );
                 *control_flow = ControlFlow::Exit;
             }
-            Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
+            Event::UserEvent(UserEvent::Frontend {
+                client_id,
+                event,
+                received_at,
+            }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
                 // Issue #4145 AC-1: the canvas reporting its bounds is the
@@ -9079,25 +9224,17 @@ fn main() -> std::io::Result<()> {
                 let dispatch_kind = frontend_event_kind_label(&event);
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                let completed_at = std::time::Instant::now();
                 if canvas_ready {
                     record_startup_perf_route_once();
                 }
-                let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
-                if dispatch_elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
-                    tracing::warn!(
-                        target: "gwt.frontend.timing",
-                        event = %dispatch_kind,
-                        elapsed_ms = dispatch_elapsed_ms,
-                        "frontend event handler blocked the GUI event loop"
-                    );
-                } else {
-                    tracing::debug!(
-                        target: "gwt.frontend.timing",
-                        event = %dispatch_kind,
-                        elapsed_ms = dispatch_elapsed_ms,
-                        "frontend event handled"
-                    );
-                }
+                log_frontend_timing(
+                    dispatch_kind,
+                    received_at,
+                    dispatch_started,
+                    completed_at,
+                    app.window_lookup.len(),
+                );
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
@@ -9109,6 +9246,7 @@ fn main() -> std::io::Result<()> {
                         &runtime,
                         proxy.clone(),
                         app.active_project_root().map(Path::to_path_buf),
+                        None,
                     );
                 }
             }
@@ -9360,18 +9498,17 @@ fn main() -> std::io::Result<()> {
                 ));
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
+                project_root,
+                status,
+            }) => {
+                clients.dispatch(app.issue_monitor_daemon_status_events(&project_root, status));
+            }
             Event::UserEvent(UserEvent::IssueMonitorDaemonInbox {
                 project_root,
                 items,
             }) => {
-                // SPEC-3431 T-093: the wake decision runs before the frontend
-                // broadcast so a parked PM is revived by daemon-side activity.
-                app.replace_knowledge_monitor_snapshot(&project_root, &items);
-                let mut events = app.pm_wake_events(&project_root, &items);
-                events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorInbox {
-                    items,
-                }));
-                clients.dispatch(events);
+                clients.dispatch(app.issue_monitor_daemon_inbox_events(&project_root, items));
             }
             Event::UserEvent(UserEvent::IssueMonitorIdlePaneClose {
                 window_id,
@@ -9453,6 +9590,15 @@ fn main() -> std::io::Result<()> {
                 project_root,
                 status,
             }) => {
+                if startup_index_project.as_deref() == Some(project_root.as_str()) {
+                    if status.state == gwt::ProjectIndexStatusState::Ready {
+                        gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::IndexRuntimeReady);
+                        startup_index_project = None;
+                    } else if matches!(status.state, gwt::ProjectIndexStatusState::Error | gwt::ProjectIndexStatusState::Skipped) {
+                        // A later manual repair/open is not startup readiness.
+                        startup_index_project = None;
+                    }
+                }
                 clients.dispatch(vec![OutboundEvent::broadcast(
                     BackendEvent::ProjectIndexStatus {
                         project_root,
@@ -9462,6 +9608,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, *result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::PmWorktreePrepared {
+                continuation,
+                result,
+            }) => {
+                let events = app.handle_pm_worktree_prepared(*continuation, result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueMonitorAnswerDeliveryComplete(delivery)) => {

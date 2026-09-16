@@ -11,6 +11,10 @@
 
 ## エージェント運用原則
 
+- **Classify before acting:** ユーザーの指摘・指示・修正を受けたら、着手前に「gwt 機能」か「このリポジトリ固有の運用」かを判定し、結果と根拠を報告に明記する。
+  「他プロジェクトを gwt で開いたときにも必要か」「`gwt-pm` / `gwt-coordination` や skill / hooks / runtime / `gwtd` operation の契約に影響するか」を判定基準とする。
+  gwt 機能の Issue 化・恒久実装は、既存の「gwt 専用機能は『機能』として実装する」と「Report gwt Friction to the PM」に従う。判断に迷う場合も gwt 機能として PM に提示する。
+  gwt リポジトリの CI・レビュー・リリース慣習に限定される運用は AGENTS.md、仕様は該当 SPEC、利用者向け説明は「ドキュメント管理」に従い README.md / README.ja.md に記載する（運用ルールは README に入れない）。
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
 - **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd` JSON operation `memory.add` でマシンローカルの work-notes memory（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`、SPEC-3214）に記録し、同種の作業を始める前に確認する。repo-local `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は読み取り fallback / legacy alias として扱う。
 - **Report gwt Friction to the PM:** gwt 自体の摩擦・機能ギャップは Board で PM に報告し、PM が `gwt-register-issue` で起票する。agent は自分で upstream に Issue を作らない（詳細な投稿手順は generated `gwt-coordination` SKILL.md が配信する）。
@@ -135,10 +139,11 @@
 - Draft PR は CI / 共有 / 早期レビュー用とし、PR 本文に未完了項目、既知 blocker、Remaining acceptance を明記する。Draft PR で完了や配信可能性を主張しない。
 - Ready 化前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了、既知 blocker なしを確認する。
 - **起動経路は実行記録から判定する（Issue #4217 FR-002）。** `execution.status` の `launch_route` が `autonomous` なら自動実行、`manual` または不明なら手動起動として扱う。`GWT_AUTONOMOUS_EXECUTION` は legacy シグナルであり、**設定されていることは autonomous の証拠になるが、設定されていないことは manual の証拠にならない**。この env は「プロジェクトが unattended mode を opt-in したか」でのみ書かれるため、Issue Monitor 起動でも未設定になり、実際に 2 窓が「手動起動」と誤判定して視覚検証待ちで停止した（#3777 / #3697）。
-- **自動実行（`launch_route: autonomous`）では、ユーザーによる視覚確認を PR 作成の前提条件にしない。** 実装と自動検証が完了した時点で **Draft PR** を作成し、実行を settle してスロットを解放する。UI surface がある場合は `User Verification Result: deferred (autonomous execution)` を、無い場合は `n/a` を記録する（`n/a (autonomous)` は両者の旧表記で、既存 PR では引き続き有効）。**`confirmed` と偽ってはならない。**
-- **`deferred (autonomous execution)` の PR は Ready にしない。** Draft のまま残り、`draft == false` を条件とする `auto-merge.yml` の対象にならない。gwt 自身が `pr.ready` と非 draft の `pr.create` を拒否する。**自動化するのは PR 作成までで、マージ判断はオーナーに残す。** オーナーは `pr.list`（`include: ["body"]`、`deferred_user_verification` フィールド）で後からまとめて視覚確認する。
-- **自動実行では、視覚検証待ちを理由に `execution.blocked` を打ってはならない。** `execution.blocked` は一時停止ではなく terminal であり、open obligation を全て defer し `pr.edit` を失効させるため、脱出経路が閉路になる（#4214）。gwt は autonomous route でのこの settle を拒否する。Draft PR を渡して通常どおり settle する。
-- GUI / フロントエンド変更の品質は、agent 自身が verify 内で実行する自動 headed E2E（実 Chromium、dark / light 両テーマ、console / page error ゼロ）で担保し、その結果は `Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)` として **`User Verification Result` とは別の行に**記録する。agent の自己 browser-check をユーザーの確認結果として扱ってはならない。
+- **自動実行（`launch_route: autonomous`）では、実装・自動検証・Ready PR Gate を満たしたら Ready PR を作成し、既存の CI 自動マージまで完結させる（Issue #4326）。** ユーザーへ視覚確認を依頼せず、UI surface の有無にかかわらず `User Verification Result: n/a (autonomous)` を記録する。agent 自身の確認を人間の `confirmed` と偽ってはならない。
+- **旧 `deferred (autonomous execution)` は移行互換として扱う。** 既存の自動実行 PR は本文を書き換えず、fresh な検証証跡と他の Ready Gate 条件を満たせば `pr.ready` / 非 draft の `pr.create` を実行できる。`pr.list` の `deferred_user_verification` は新旧の自動実行値では `false`、manual / 一般の deferred では `true` とする。本文を hydrate していない場合はフィールドを省略する。
+- **自動実行では、人間の視覚確認の不在を理由に `execution.blocked` を打ってはならない。** 自動テスト・実 headed E2E・CI の失敗、既知 blocker、他の Ready Gate 未達は解消してから進む。`execution.blocked` は一時停止ではなく terminal であるため、一時的な検証待ちにも使用しない。
+- GUI / フロントエンド変更では、`browser-check` による checkout + fresh HOME の隔離起動を使い、実 Chromium の headed E2E で dark / light 両テーマ、console / page error ゼロ、変更した機能の挙動を検証する。`verify.run` の `params.headed_e2e_commands` に `params.commands` 内の Playwright コマンドを完全一致で指定する。gwtd が `--headed` と組込 reporter を付加し、両テーマの実測 PASS 件数を記録する。script 経由の場合は追加の Playwright 引数を転送できること。
+- 自動実行の UI Ready Gate は、同じ fresh 検証記録にある実測 headed PASS 証跡も必須とする。`Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)` は **`User Verification Result` とは別の行に**記録し、自己申告の pass のみを証跡としない。console / page error と機能 assertion は E2E 自体で確認する。
 - Gate を満たさない場合は Draft のまま維持するか、Ready 化せず No Action として報告する。
 
 ## 開発ワークフロー
@@ -239,8 +244,8 @@
 
 > 🚨 **手動起動（ユーザーが自分で始めた作業）では、エージェントは、ユーザーの視覚検証結果が `confirmed` になる前に PR を `create` / `update` してはならない。自動実行（autonomous launch）では、以下の「自動実行時の扱い」に従い視覚検証を要求しない。**
 
-- `gwt-verify --mode pre-pr` の **`User Verification Result`** が `confirmed` または `n/a`（UI 影響が無い変更で視覚検証不要な場合に限る）のいずれかになるまで PR 作成・更新を行わない。`pending` / 未確認のまま JSON operations `pr.create` / `pr.edit` を呼ばない。
-- **自動実行時の扱い（ユーザー裁定 2026-09-06 Issue #4001、Issue #4217 で起動経路判定と deferred 値を追加）:** `execution.status` の `launch_route` が `autonomous` の自動実行では、ユーザーへ視覚確認を依頼しない（URL も出さない）。UI surface があれば `User Verification Result: deferred (autonomous execution)`、無ければ `n/a` を記録して **Draft PR 作成まで**進める（`n/a (autonomous)` は旧表記）。`deferred` の PR は Ready 化しない。自動実行のセッションで質問ツールを呼ぶと owner Issue が needs_human で park され実行が終了するため、視覚確認の依頼は「待ち」ではなく「停止」になる。GUI 変更の品質は agent 自身の自動 headed E2E（`Agent Visual Check`）で担保する。これらの値は launch mode によって決まる事実であり、判断に迷って倒す `skipped(<reason>)` の言い換えとして使ってはならない。
+- 手動起動では `gwt-verify --mode pre-pr` の **`User Verification Result`** が `confirmed` または `n/a`（UI 影響が無い変更で視覚検証不要な場合に限る）のいずれかになるまで PR 作成・更新を行わない。`pending` / 未確認のまま JSON operations `pr.create` / `pr.edit` を呼ばない。
+- **自動実行時の扱い（ユーザー裁定 2026-09-14、Issue #4326）:** `execution.status` の `launch_route` が `autonomous` なら、ユーザーへ視覚確認を依頼せず、URL も出さない。`User Verification Result: n/a (autonomous)` と独立した `Agent Visual Check` を記録し、上記 Ready PR Gate の fresh 自動検証と UI 時の実測 headed 証跡が PASS したら、Ready PR 作成から CI 自動マージまで進める。旧 deferred 本文も同じ証跡で Ready にできる。自動実行で質問ツールを呼ぶと owner Issue が needs_human で park されるため、視覚確認待ちで実行を止めない。この扱いは起動経路による事実であり、`skipped(<reason>)` や `confirmed` へ書き換えない。
 - （手動起動時）ユーザーが視覚検証できない状態（例: Open Project picker のクリックがブロックされている、splash から進めない、サーバーが起動しない 等）に遭遇した場合、エージェントの独断で `skipped(<reason>)` に倒さない。**まずブロッカーの根本原因を特定して解消し、ユーザーが実際に視覚確認できる状態を再現してから verification を依頼する**。
 - `skipped(<reason>)` を許容するのは、ユーザーが `AskUserQuestion` 等で明示的に "Skip — proceed to PR" を選択した場合のみ。エージェントが「自動テスト全 PASS だから skip 妥当」と判断して skip するのは禁止。
 - 「進めて」「OK」等の承認指示は、**既に verification 結果を持つ作業**を完了まで進める指示であり、verification 自体の skip 承認ではない。verification 動線がブロックされている時に「進めて」と言われた場合は、ブロッカー解消の作業を進める指示として解釈する。
@@ -262,7 +267,9 @@
 ### ローカル検証/実行ルール（Rust）
 
 - このリポジトリのローカル検証・実行は Cargo を使用する
-- 現在の checkout で `gwtd` の JSON operation を実行する場合は、タスクまたはセッションの初回実行前に checkout root で `cargo build -p gwt --bin gwtd` を実行し、以後は `<checkout-root>/target/debug/gwtd` を明示的に使用する。`GWT_BIN_PATH` や `PATH` 上のバイナリは、version が一致する場合や checkout より新しい場合も checkout source と同じ実装であることを保証しないため使用しない
+- checkout のコードを実行する `gwtd` JSON operation（`execution.*` / `workspace.*` / `build.*` / `verify.*` / checkout で追加した operation）は、タスクまたはセッションの初回実行前に checkout root で `cargo build -p gwt --bin gwtd` を実行し、以後は `<checkout-root>/target/debug/gwtd` を明示的に使用する。`GWT_BIN_PATH` や `PATH` 上のバイナリは、version が一致する場合や checkout より新しい場合も checkout source と同じ実装であることを保証しないため、これらの operation には使用しない
+- 読み取りの `issue.*` / `pr.*` / `board.*` / `search` は installed gwtd（`GWT_BIN_PATH` / PATH）で実行してよい。Issue / PR / Board の状態を知るためだけに build や lease を待たない
+- 初回の `cargo build -p gwt --bin gwtd` は lease 不要の bootstrap step であり heavy な検証コマンドではない。順序は build → `verify.plan` → `verify.run` とし、lease を保持・待機したまま build しない（正本は `coordination_guidance.rs` の「gwtd bootstrap order」、生成 gwt-coordination / gwt-verify / gwt-search SKILL.md と同一文面）
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`
 - テスト: `cargo test -p gwt-core -p gwt --all-features`

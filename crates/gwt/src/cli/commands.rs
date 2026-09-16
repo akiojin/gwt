@@ -249,6 +249,14 @@ pub enum IssueCommand {
         resume_condition: Option<String>,
         clear: bool,
     },
+    /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration whose
+    /// condition no longer holds. `by` defaults to the calling session.
+    MonitorWaitInvalidate {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        reason: String,
+        by: Option<String>,
+    },
     /// Issue #3478 (AC-9): list the questions autonomous executions are parked
     /// on, so a human can see what is blocking the queue.
     MonitorQuestions {
@@ -316,6 +324,12 @@ pub enum PrCommand {
         number: u64,
     },
     Draft {
+        number: u64,
+    },
+    /// SPEC #3835 AC-15: merge the base branch into the PR head so a `BEHIND`
+    /// PR can reach `MERGEABLE`. The PM's only way out of `BEHIND`; a conflict
+    /// refuses instead of resolving anything.
+    UpdateBranch {
         number: u64,
     },
     Comment {

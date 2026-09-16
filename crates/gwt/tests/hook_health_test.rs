@@ -84,6 +84,46 @@ fn normalized_embedded_path_text(value: &str) -> String {
 }
 
 #[test]
+fn managed_hook_health_without_expected_binary_does_not_probe_git_tracking() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(worktree.path());
+    for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+        let path = worktree.path().join(artifact);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "{}").unwrap();
+    }
+    let trace_path = worktree.path().join("git-trace.jsonl");
+    let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+    let git = gwt_core::process::hidden_command("git")
+        .arg("--version")
+        .output()
+        .expect("Git is required for the tracking regression test");
+    assert!(git.status.success());
+    assert!(!fs::read_to_string(&trace_path)
+        .expect("Git Trace2 works")
+        .is_empty());
+    fs::write(&trace_path, "").unwrap();
+    let mut input = ManagedHookHealthInput::new(worktree.path());
+    input.expected_hook_bin = None;
+    input.runtime_state_path = None;
+
+    let health = read_managed_hook_health(&input);
+
+    assert!(health
+        .issues
+        .iter()
+        .any(|issue| issue.contains("SessionStart")));
+    let trace = fs::read_to_string(trace_path).expect("read Git trace");
+    assert!(
+        !trace.contains("\"ls-files\""),
+        "without a binary to compare, config tracking cannot affect health: {trace}"
+    );
+}
+
+#[test]
 fn managed_hook_health_is_ready_when_assets_and_runtime_state_are_current() {
     let _env_lock = env_test_lock()
         .lock()
@@ -272,6 +312,56 @@ fn managed_hook_health_detects_missing_managed_configs_and_repair_recreates_them
 
     assert!(outcome.repaired);
     assert!(worktree.path().join(".codex/hooks.json").exists());
+}
+
+/// Issue #4339 AC-2 / AC-4: a `core.hooksPath` whose directory holds no hook
+/// makes Git skip commitlint and the commit/push gates in silence. Health has
+/// to say so, and repair has to materialize them.
+#[test]
+fn managed_hook_health_detects_empty_git_hooks_path_and_repair_materializes_it() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let root = worktree.path();
+    init_git_repo(root);
+    run_git(root, &["config", "core.hooksPath", ".husky/_"]);
+    fs::create_dir_all(root.join(".husky")).expect("husky dir");
+    fs::write(
+        root.join(".husky/commit-msg"),
+        "#!/usr/bin/env sh\nexit 0\n",
+    )
+    .expect("write commit-msg source");
+    // A gwt surface makes this a managed worktree; the Git hooks themselves
+    // belong to the repository, not to any agent provider.
+    fs::create_dir_all(root.join(".claude")).expect("claude dir");
+
+    let health = read_managed_hook_health(&ManagedHookHealthInput::new(root));
+
+    assert_eq!(health.status, ManagedHookHealthStatus::NeedsAttention);
+    assert!(
+        health
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed git hook missing")
+                && issue.contains("commit-msg")),
+        "an empty core.hooksPath directory must be reported: {:?}",
+        health.issues
+    );
+
+    let outcome = repair_managed_hook_configs(root).expect("repair");
+
+    assert!(outcome.repaired);
+    assert!(root.join(".husky/_/commit-msg").is_file());
+    let repaired = read_managed_hook_health(&ManagedHookHealthInput::new(root));
+    assert!(
+        !repaired
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed git hook missing")),
+        "repair must clear the missing-hook issue: {:?}",
+        repaired.issues
+    );
 }
 
 #[test]
@@ -1386,6 +1476,58 @@ fn tracked_canonical_hook_config_is_not_reported_as_binary_skew() {
     );
 }
 
+#[test]
+fn managed_hook_health_snapshot_is_reused_and_refreshes_on_next_projection() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+    use gwt_core::error_ledger::{record, ErrorKind, ErrorRecord, ErrorTarget};
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = home.path().join("repo");
+    fs::create_dir(&worktree).unwrap();
+    let mut input = ManagedHookHealthInput::new(&worktree);
+    input.runtime_state_path = None;
+    input.expected_hook_bin = None;
+    let snapshot = ManagedHookFailureSnapshot::read();
+    let before = snapshot.read_health(&input);
+    let failure = record(ErrorRecord::new(
+        ErrorKind::HookFailure,
+        "test failure",
+        ErrorTarget {
+            project_root: Some(worktree.display().to_string()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        snapshot.read_health(&input),
+        before,
+        "one projection must not reread the ledger"
+    );
+    let refreshed = ManagedHookFailureSnapshot::read();
+    let health = refreshed.read_health(&input);
+    assert_eq!(health, read_managed_hook_health(&input));
+    assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+    assert!(health
+        .issues
+        .iter()
+        .any(|issue| issue.contains(&failure.id)));
+    input.worktree_root = home.path().join("other");
+    fs::create_dir(&input.worktree_root).unwrap();
+    assert!(
+        !refreshed
+            .read_health(&input)
+            .issues
+            .iter()
+            .any(|issue| issue.contains(&failure.id)),
+        "shared snapshot must preserve worktree filtering"
+    );
+}
+
 /// Issue #3541 AC-2 / AC-5: a handler failure must surface in `hook.health`,
 /// and a later successful event must turn it into "recovered" evidence
 /// instead of erasing it back to an empty `issues` list.
@@ -1492,5 +1634,65 @@ fn managed_hook_health_retains_failure_evidence_after_a_later_success() {
     assert!(
         !issues.contains("unresolved"),
         "a later success must be reported as recovery, not as an open failure: {issues}"
+    );
+}
+
+/// Issue #4257: a bare fallback such as `gwtd` is resolved by walking the whole
+/// PATH (~11ms per lookup on a 59-entry Windows PATH), and the answer depends
+/// only on process-wide state. One projection shares one snapshot across every
+/// Work row, so it must resolve each distinct binary once per projection, not
+/// once per command per event per row.
+#[test]
+fn shared_snapshot_resolves_each_bare_hook_binary_once() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _no_hook_bin = ScopedEnvVar::remove("GWT_HOOK_BIN");
+    let command = |event: &str| {
+        format!(
+            "gwt_bin=\"${{GWT_BIN_PATH:-}}\"; if [ -z \"$gwt_bin\" ]; then gwt_bin='gwtd'; fi; \
+             if command -v \"$gwt_bin\" >/dev/null 2>&1; then \"$gwt_bin\" hook event {event}; \
+             else true; fi"
+        )
+    };
+    let mut hooks = serde_json::Map::new();
+    for event in [
+        "PreToolUse",
+        "PostToolUse",
+        "SessionStart",
+        "Stop",
+        "UserPromptSubmit",
+    ] {
+        hooks.insert(
+            event.to_string(),
+            json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": command(event) }] }]),
+        );
+    }
+    let bare_fallback_hooks = serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap();
+    let worktrees = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    for worktree in &worktrees {
+        fs::create_dir_all(worktree.path().join(".codex")).unwrap();
+        fs::write(
+            worktree.path().join(".codex/hooks.json"),
+            &bare_fallback_hooks,
+        )
+        .unwrap();
+    }
+
+    let snapshot = ManagedHookFailureSnapshot::default();
+    for worktree in &worktrees {
+        let mut input = ManagedHookHealthInput::new(worktree.path());
+        input.runtime_state_path = None;
+        let shared = snapshot.read_health(&input);
+        let fresh = ManagedHookFailureSnapshot::default().read_health(&input);
+        assert_eq!(shared, fresh);
+    }
+
+    assert_eq!(
+        snapshot.resolved_hook_binaries(),
+        1,
+        "10 bare `gwtd` commands across two worktrees must resolve once"
     );
 }

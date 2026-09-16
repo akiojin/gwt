@@ -31,6 +31,8 @@ impl std::fmt::Display for PrState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrStatus {
     pub number: u64,
+    #[serde(default)]
+    pub head_ref_name: String,
     pub title: String,
     pub state: PrState,
     pub url: String,
@@ -79,32 +81,35 @@ arrange a rerun → regression: arrange a fresh launch → neither possible: esc
 /// they concluded (SPEC-1935 FR-133).
 pub const USER_VERIFICATION_RESULT_LABEL: &str = "User Verification Result:";
 
-/// The value an autonomous execution records when its change has a UI surface
-/// that nobody was there to look at (Issue #4217 FR-003).
-///
-/// Deliberately distinct from both `confirmed` and `n/a`: the verification was
-/// not performed and was not unnecessary — it was postponed. A PR carrying it
-/// stays Draft until the owner sweeps it (FR-004).
+/// Legacy autonomous result accepted during the #4326 migration. New
+/// autonomous runs record `n/a (autonomous)` and deliver through CI auto-merge.
 pub const DEFERRED_USER_VERIFICATION_RESULT: &str = "deferred (autonomous execution)";
 
-/// Whether a PR body records a *postponed* user verification.
-///
-/// Matches the recorded value rather than the whole line, so the reason text an
-/// agent appends cannot smuggle the PR past the Draft gate, and a body that
-/// merely discusses deferral in prose does not trip it.
+/// Read the first recorded result, including Markdown forms used in PR bodies.
+#[must_use]
+pub fn user_verification_result(body: &str) -> Option<String> {
+    user_verification_results(body)
+        .next()
+        .map(|value| value.trim_matches(['*', '`', ' ']).to_ascii_lowercase())
+}
+
+/// Autonomous verification is no longer waiting on a human (#4326).
+/// Other deferred results retain their existing inventory meaning.
 #[must_use]
 pub fn body_defers_user_verification(body: &str) -> bool {
-    body.lines().any(|line| {
+    user_verification_results(body).any(|value| {
+        let value = value.trim_matches(['*', '`', ' ']).to_ascii_lowercase();
+        value.starts_with("deferred") && !value.starts_with(DEFERRED_USER_VERIFICATION_RESULT)
+    })
+}
+
+/// Recorded verification values, excluding prose that merely mentions the label.
+pub fn user_verification_results(body: &str) -> impl Iterator<Item = &str> {
+    body.lines().filter_map(|line| {
         line.trim_start()
             .trim_start_matches(['-', '*', '#', '>', ' '])
             .strip_prefix(USER_VERIFICATION_RESULT_LABEL)
-            .map(|value| {
-                value
-                    .trim()
-                    .trim_start_matches(['*', '`', ' '])
-                    .to_ascii_lowercase()
-            })
-            .is_some_and(|value| value.starts_with("deferred"))
+            .map(str::trim)
     })
 }
 
@@ -126,6 +131,10 @@ pub struct PrInventoryOptions {
     /// One-step override of the reserve / burst throttle, with the reason the
     /// decision cannot wait. Never bypasses an open refusal window.
     pub force_reason: Option<String>,
+    /// Snapshot reuse interval, independent of checks polling.
+    pub cache_ttl_secs: u64,
+    /// Poll running checks at most once per interval on unchanged PRs.
+    pub checks_refresh_secs: u64,
 }
 
 impl Default for PrInventoryOptions {
@@ -136,6 +145,8 @@ impl Default for PrInventoryOptions {
             refresh: false,
             include: PrInventoryInclude::default(),
             force_reason: None,
+            cache_ttl_secs: PR_INVENTORY_CACHE_TTL_SECS as u64,
+            checks_refresh_secs: 600,
         }
     }
 }
@@ -272,6 +283,15 @@ pub struct PrLifecycleDecision {
     pub dwell_hours: Option<i64>,
     /// Whether the PM can execute `default_action` through JSON operations.
     pub default_action_executable: bool,
+    /// SPEC #3835 AC-17: the JSON operation that performs `default_action`,
+    /// when the action needs one. `None` means the action is advisory (a
+    /// digest line, a hold, "leave in progress") or runs through the owner
+    /// relaunch path, whose executability `blocker` already governs.
+    ///
+    /// An action that needs an operation and has none must never be reported
+    /// executable — that is exactly how `update-branch` spent 21 of 25 open
+    /// PRs recommending a step no surface could take.
+    pub default_action_operation: Option<&'static str>,
     /// Why the owner cannot be relaunched, when known (Issue #3868 AC-1).
     pub blocker: Option<String>,
     /// The fallback order to apply when `default_action` is not executable.
@@ -304,6 +324,9 @@ pub struct PrInventoryItem {
     pub owner_issue_closed: bool,
     #[serde(default)]
     pub owner_issue: Option<u64>,
+    /// Whether the owner is explicit (`closing_issues`) or inferred (`head_branch`).
+    #[serde(default)]
+    pub owner_issue_source: Option<String>,
     pub default_action: String,
     #[serde(default)]
     pub dwell_hours: Option<i64>,
@@ -311,6 +334,9 @@ pub struct PrInventoryItem {
     pub stale_after_hours: i64,
     #[serde(default = "default_true")]
     pub default_action_executable: bool,
+    /// SPEC #3835 AC-17: the JSON operation that performs `default_action`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_action_operation: Option<String>,
     #[serde(default)]
     pub blocker: Option<String>,
     #[serde(default)]
@@ -456,6 +482,7 @@ impl PrInventoryItem {
         self.lifecycle_source = "held".to_string();
         self.default_action = decision.default_action;
         self.default_action_executable = decision.default_action_executable;
+        self.default_action_operation = decision.default_action_operation.map(str::to_string);
         self.blocker = decision.blocker;
         self.fallback = decision.fallback;
     }
@@ -585,6 +612,7 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     } else {
         None
     };
+    let default_action_operation = default_action_operation(class, fields.is_draft);
     let default_action_executable = !(class.relaunches_owner() && blocker.is_some());
     let fallback =
         (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string());
@@ -596,8 +624,29 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
         default_action,
         dwell_hours: None,
         default_action_executable,
+        default_action_operation,
         blocker: blocker.map(str::to_string),
         fallback,
+    }
+}
+
+/// The JSON operation that performs the class's default action, when the
+/// action is one a surface executes rather than advice the PM acts on
+/// (SPEC #3835 AC-17).
+///
+/// Every name returned here must be an operation the envelope parser accepts;
+/// `crates/gwt` fixes that with a test, because this crate cannot see the
+/// operation table.
+fn default_action_operation(class: PrLifecycleClass, is_draft: bool) -> Option<&'static str> {
+    match (class, is_draft) {
+        // "mark ready"
+        (PrLifecycleClass::MergeCandidate, true) => Some("pr.ready"),
+        // "update-branch"
+        (PrLifecycleClass::Behind, _) => Some("pr.update_branch"),
+        // "propose merge" is a proposal, and merging is `auto-merge.yml`'s job.
+        // Conflict and CI-red relaunch the owner; superseded, in-progress and
+        // undetermined are digest lines and holds.
+        _ => None,
     }
 }
 
@@ -616,6 +665,13 @@ fn inventory_item_from_fields(
         .include
         .body
         .then(|| body_defers_user_verification(&fields.body));
+    let owner_issue_source = if !fields.closing_issues.is_empty() {
+        Some("closing_issues")
+    } else if decision.owner_issue.is_some() {
+        Some("head_branch")
+    } else {
+        None
+    };
     PrInventoryItem {
         number: fields.number,
         title: fields.title,
@@ -634,10 +690,12 @@ fn inventory_item_from_fields(
         stale: decision.stale,
         owner_issue_closed: decision.owner_issue_closed,
         owner_issue: decision.owner_issue,
+        owner_issue_source: owner_issue_source.map(str::to_string),
         default_action: decision.default_action,
         dwell_hours: decision.dwell_hours,
         stale_after_hours: options.stale_after_hours,
         default_action_executable: decision.default_action_executable,
+        default_action_operation: decision.default_action_operation.map(str::to_string),
         blocker: decision.blocker,
         fallback: decision.fallback,
         unchanged_cycles: 0,
@@ -731,9 +789,9 @@ pub fn parse_pr_inventory_json_with(
 
 /// The bulk list query (Issue #3891 AC-2): no `body`, no `statusCheckRollup`.
 /// Both are hydrated per PR, and only when that PR needs it.
-const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences";
+const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,headRefOid,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences";
 const INVENTORY_LIGHT_JSON_FIELDS_WITHOUT_CLOSING: &str =
-    "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
+    "number,title,url,isDraft,headRefName,headRefOid,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
 
 /// File under the machine-local project dir that remembers the previous
 /// `pr.list` observation per PR (Issue #3868 AC-6).
@@ -744,7 +802,7 @@ pub const PR_INVENTORY_HISTORY_FILE: &str = "pr-inventory-history.json";
 /// repository on this machine, so N readers cost one fetch per TTL.
 pub const PR_INVENTORY_CACHE_FILE: &str = "pr-inventory-cache.json";
 
-/// How long a snapshot answers `pr.list` without touching GitHub. One PM
+/// Default time a snapshot answers `pr.list` without touching GitHub. One PM
 /// cycle: repeated reads inside a cycle are free, and a cycle never sees data
 /// older than the previous cycle.
 pub const PR_INVENTORY_CACHE_TTL_SECS: i64 = 300;
@@ -752,11 +810,14 @@ pub const PR_INVENTORY_CACHE_TTL_SECS: i64 = 300;
 /// Per-PR hydration calls allowed in one read. Bounds the spawn burst on a
 /// cold cache; the rest hydrate on the next read.
 const PR_INVENTORY_HYDRATION_CAP: usize = 30;
+const PR_INVENTORY_HYDRATION_CONCURRENCY: usize = 5;
 
 /// Heavy fields of one PR, keyed by the `updated_at` they were fetched for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrInventoryHeavy {
     pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub head_ref_oid: Option<String>,
     pub status_check_rollup: Option<serde_json::Value>,
     pub body: Option<String>,
     pub hydrated_at: DateTime<Utc>,
@@ -846,6 +907,10 @@ pub struct PrInventoryRead {
     pub throttled: Option<String>,
     /// Budget-spending `gh` calls this read made (the free probe excluded).
     pub github_calls: u32,
+    /// PRs whose heavy fields were successfully fetched during this read.
+    pub hydrated: usize,
+    /// PRs skipped as unchanged after a live bulk comparison; zero on cache reads.
+    pub skipped_unchanged: usize,
     /// Issue #4074 FR-005: `work/issue-*` branches with commits and no open PR
     /// to land them. Read from local refs, so it stays truthful even when the
     /// PR rows came from cache.
@@ -1027,8 +1092,8 @@ pub fn fetch_pr_inventory_tracked(
 ///    served and the skip is reported; with no snapshot the inventory is
 ///    unobservable, not empty.
 /// 3. A live read is the light list query plus per-PR hydration of the
-///    requested heavy fields, only for PRs whose real data changed or whose
-///    CI is not final yet.
+///    requested heavy fields, only for changed PRs, missing fields, or
+///    running checks whose independent refresh interval has elapsed.
 fn fetch_pr_inventory_cached_with<F>(
     repo_path: &Path,
     cache_path: &Path,
@@ -1038,13 +1103,14 @@ fn fetch_pr_inventory_cached_with<F>(
     mut run_gh: F,
 ) -> Result<PrInventoryRead>
 where
-    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput> + Sync,
 {
     let mut cache = PrInventoryCache::load(cache_path);
     let cache_age = cache.age_secs(now);
     if !options.refresh {
         if let Some(age) = cache_age {
-            if (0..PR_INVENTORY_CACHE_TTL_SECS).contains(&age)
+            if age >= 0
+                && (age as u64) < options.cache_ttl_secs
                 && cache.include.covers(options.include)
             {
                 return Ok(PrInventoryRead {
@@ -1054,6 +1120,8 @@ where
                     cache_age_secs: Some(age),
                     throttled: None,
                     github_calls: 0,
+                    hydrated: 0,
+                    skipped_unchanged: 0,
                     unlanded_branches: Vec::new(),
                 });
             }
@@ -1074,6 +1142,8 @@ where
                 cache_age_secs: cache_age,
                 throttled: Some(reason),
                 github_calls: 0,
+                hydrated: 0,
+                skipped_unchanged: 0,
                 unlanded_branches: Vec::new(),
             });
         }
@@ -1087,35 +1157,62 @@ where
     let (rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
     let mut heavy = BTreeMap::new();
     let mut hydrated = 0usize;
+    let mut skipped_unchanged = 0usize;
+    let mut pending = Vec::new();
     for row in &rows {
         let Some(number) = row.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
         };
         let updated_at =
             parse_github_timestamp(row.get("updatedAt").and_then(serde_json::Value::as_str));
+        let head_ref_oid = row.get("headRefOid").and_then(serde_json::Value::as_str);
         let previous = cache.heavy.remove(&number);
-        let mut entry = previous.clone();
-        if let Some(fields) = hydration_needed(previous.as_ref(), updated_at, options.include, now)
+        if let Some(fields) =
+            hydration_needed(previous.as_ref(), updated_at, head_ref_oid, options, now)
         {
-            if hydrated < PR_INVENTORY_HYDRATION_CAP {
-                hydrated += 1;
-                github_calls += 1;
-                if let Ok((rollup, body)) = hydrate_pr(repo_path, number, fields, &mut run_gh) {
-                    entry = Some(PrInventoryHeavy {
-                        updated_at,
-                        status_check_rollup: rollup.or_else(|| {
-                            previous
-                                .as_ref()
-                                .and_then(|p| p.status_check_rollup.clone())
-                        }),
-                        body: body.or_else(|| previous.as_ref().and_then(|p| p.body.clone())),
-                        hydrated_at: now,
-                    });
-                }
+            if pending.len() < PR_INVENTORY_HYDRATION_CAP {
+                pending.push((number, updated_at, head_ref_oid, fields));
             }
+        } else if previous.is_some() && !options.include.is_empty() {
+            skipped_unchanged += 1;
         }
-        if let Some(entry) = entry {
+        if let Some(entry) = previous {
             heavy.insert(number, entry);
+        }
+    }
+    github_calls += pending.len() as u32;
+    for batch in pending.chunks(PR_INVENTORY_HYDRATION_CONCURRENCY) {
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|(number, _, _, fields)| {
+                    let run_gh = &run_gh;
+                    scope.spawn(move || hydrate_pr(repo_path, *number, *fields, run_gh))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("PR hydration worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        for ((number, updated_at, head_ref_oid, _), result) in batch.iter().zip(results) {
+            if let Ok((rollup, body)) = result {
+                // Only retain omitted fields from the same revision. A changed
+                // head must not bless checks fetched for an earlier commit.
+                let previous = heavy.get(number).filter(|p| {
+                    p.updated_at == *updated_at && p.head_ref_oid.as_deref() == *head_ref_oid
+                });
+                let entry = PrInventoryHeavy {
+                    updated_at: *updated_at,
+                    head_ref_oid: head_ref_oid.map(str::to_string),
+                    status_check_rollup: rollup
+                        .or_else(|| previous.and_then(|p| p.status_check_rollup.clone())),
+                    body: body.or_else(|| previous.and_then(|p| p.body.clone())),
+                    hydrated_at: now,
+                };
+                heavy.insert(*number, entry);
+                hydrated += 1;
+            }
         }
     }
     cache = PrInventoryCache {
@@ -1137,6 +1234,8 @@ where
         cache_age_secs: Some(0),
         throttled: None,
         github_calls,
+        hydrated,
+        skipped_unchanged,
         unlanded_branches: Vec::new(),
     })
 }
@@ -1170,28 +1269,31 @@ where
 }
 
 /// Which heavy fields PR `number` must (re-)fetch, or `None` when the cached
-/// entry still answers: unchanged real data, final CI, body already held.
+/// entry still answers: unchanged data, no running checks due, body already held.
 fn hydration_needed(
     previous: Option<&PrInventoryHeavy>,
     updated_at: Option<DateTime<Utc>>,
-    wanted: PrInventoryInclude,
+    head_ref_oid: Option<&str>,
+    options: &PrInventoryOptions,
     now: DateTime<Utc>,
 ) -> Option<PrInventoryInclude> {
+    let wanted = options.include;
     if wanted.is_empty() {
         return None;
     }
     let Some(previous) = previous else {
         return Some(wanted);
     };
-    if previous.updated_at != updated_at {
+    if previous.updated_at != updated_at || previous.head_ref_oid.as_deref() != head_ref_oid {
         return Some(wanted);
     }
     let checks = wanted.checks
         && match &previous.status_check_rollup {
             None => true,
             Some(rollup) => {
-                !ci_is_final(&ci_status_from_rollup(Some(rollup)))
-                    && (now - previous.hydrated_at).num_seconds() >= PR_INVENTORY_CACHE_TTL_SECS
+                ci_status_from_rollup(Some(rollup)) == "PENDING"
+                    && (now - previous.hydrated_at).num_seconds().max(0) as u64
+                        >= options.checks_refresh_secs
             }
         };
     let body = wanted.body && previous.body.is_none();
@@ -1199,19 +1301,15 @@ fn hydration_needed(
     (!needed.is_empty()).then_some(needed)
 }
 
-fn ci_is_final(ci_status: &str) -> bool {
-    ci_status.eq_ignore_ascii_case("SUCCESS") || ci_status.eq_ignore_ascii_case("FAILURE")
-}
-
 /// One `gh pr view <n> --json <fields>` for the heavy fields.
 fn hydrate_pr<F>(
     repo_path: &Path,
     number: u64,
     fields: PrInventoryInclude,
-    run_gh: &mut F,
+    run_gh: &F,
 ) -> Result<(Option<serde_json::Value>, Option<String>)>
 where
-    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
     let json_fields = fields.view_json_fields();
@@ -1225,7 +1323,15 @@ where
     let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|error| GwtError::Other(format!("gh pr view {number} JSON: {error}")))?;
     Ok((
-        value.get("statusCheckRollup").cloned(),
+        // Preserve "fetched, no checks" across Option<Value> serialization:
+        // Some(Null) would otherwise reload as None and trigger another fetch.
+        value.get("statusCheckRollup").map(|rollup| {
+            if rollup.is_null() {
+                serde_json::json!([])
+            } else {
+                rollup.clone()
+            }
+        }),
         value
             .get("body")
             .and_then(serde_json::Value::as_str)
@@ -1321,7 +1427,7 @@ pub fn fetch_pr_status(repo_slug: &str, number: u64) -> Result<PrStatus> {
         "--repo",
         repo_slug,
         "--json",
-        "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+        "number,title,state,url,headRefName,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
     ];
     let label = format!("gh pr view {}", number);
     let output = gwt_core::process_console::spawn_logged_blocking(
@@ -1370,6 +1476,7 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
 
     Ok(PrStatus {
         number,
+        head_ref_name: v["headRefName"].as_str().unwrap_or_default().to_string(),
         title,
         state,
         url,
@@ -1770,7 +1877,7 @@ where
             "pr",
             "list",
             "--json",
-            "number,title,state,url,createdAt,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
+            "number,title,state,url,headRefName,createdAt,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
             "--state",
             "all",
             "--limit",
@@ -1854,6 +1961,7 @@ fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
                 }
             };
             PrStatus {
+                head_ref_name: v["head"]["ref"].as_str().unwrap_or_default().to_string(),
                 number: v
                     .get("number")
                     .and_then(serde_json::Value::as_u64)
@@ -2936,6 +3044,7 @@ mod tests {
         let json = r#"{
             "number": 123,
             "title": "Add feature",
+            "headRefName": "work/issue-3835",
             "state": "OPEN",
             "url": "https://github.com/owner/repo/pull/123",
             "mergeable": "MERGEABLE",
@@ -2949,12 +3058,46 @@ mod tests {
         let pr = parse_pr_status_json(json).unwrap();
         assert_eq!(pr.number, 123);
         assert_eq!(pr.title, "Add feature");
+        assert_eq!(
+            serde_json::to_value(&pr).unwrap()["head_ref_name"],
+            "work/issue-3835"
+        );
         assert_eq!(pr.state, PrState::Open);
         assert_eq!(pr.ci_status, "SUCCESS");
         assert_eq!(pr.mergeable, "MERGEABLE");
         assert_eq!(pr.merge_state_status, "CLEAN");
         assert_eq!(pr.effective_merge_status(), "MERGEABLE");
         assert_eq!(pr.review_status, "APPROVED");
+    }
+
+    #[test]
+    fn inventory_owner_source_distinguishes_closing_issue_branch_and_unknown() {
+        let mut fields = sample_inventory_fields();
+        fields.head_ref_name = "work/issue-3835".to_string();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("OPEN".to_string()),
+        }];
+        for (owner, source) in [
+            (Some(10), Some("closing_issues")),
+            (Some(3835), Some("head_branch")),
+            (None, None),
+        ] {
+            let row = inventory_item_from_fields(
+                fields.clone(),
+                now_3868(),
+                &PrInventoryOptions::default(),
+            );
+            assert_eq!(row.owner_issue, owner);
+            assert_eq!(
+                serde_json::to_value(row).unwrap()["owner_issue_source"],
+                serde_json::json!(source)
+            );
+            if fields.closing_issues.is_empty() {
+                fields.head_ref_name = "feature/no-owner".to_string();
+            }
+            fields.closing_issues.clear();
+        }
     }
 
     #[test]
@@ -3176,6 +3319,7 @@ mod tests {
     #[test]
     fn latest_pr_by_created_at_prefers_newest_pr() {
         let older = PrStatus {
+            head_ref_name: String::new(),
             number: 2537,
             title: "Older PR".to_string(),
             state: PrState::Closed,
@@ -3187,6 +3331,7 @@ mod tests {
             review_status: "APPROVED".to_string(),
         };
         let newer = PrStatus {
+            head_ref_name: String::new(),
             number: 2538,
             title: "Newer PR".to_string(),
             state: PrState::Open,
@@ -3215,6 +3360,7 @@ mod tests {
             {
                 "number": 11,
                 "title": "REST fallback PR",
+                "head": { "ref": "work/issue-3835" },
                 "state": "open",
                 "html_url": "https://github.com/o/r/pull/11"
             }
@@ -3224,6 +3370,10 @@ mod tests {
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].number, 11);
         assert_eq!(prs[0].title, "REST fallback PR");
+        assert_eq!(
+            serde_json::to_value(&prs[0]).unwrap()["head_ref_name"],
+            "work/issue-3835"
+        );
         assert_eq!(prs[0].state, PrState::Open);
         assert_eq!(prs[0].url, "https://github.com/o/r/pull/11");
         assert_eq!(prs[0].ci_status, "UNKNOWN");
@@ -3239,6 +3389,8 @@ mod tests {
 
         let prs = fetch_pr_list_with(repo_path, |path, args| {
             assert_eq!(path, repo_path);
+            assert!(args.windows(2).any(|pair| pair[0] == "--json"
+                && pair[1].split(',').any(|field| field == "headRefName")));
             calls.push(args[..2].join(" "));
             match args {
                 ["pr", "list", ..] => Ok(GhCliOutput {
@@ -4085,6 +4237,53 @@ mod tests {
         assert_eq!(decision.default_action, "escalate: no update for 24h");
     }
 
+    /// SPEC #3835 AC-17: `update-branch` names the operation that performs it,
+    /// so "the PM may do this" and "a surface can do this" stop disagreeing.
+    #[test]
+    fn a_behind_pr_names_the_operation_that_resolves_it() {
+        let mut fields = sample_inventory_fields();
+        fields.merge_state_status = "BEHIND".to_string();
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::Behind);
+        assert_eq!(decision.default_action, "update-branch");
+        assert_eq!(decision.default_action_operation, Some("pr.update_branch"));
+        assert!(decision.default_action_executable);
+    }
+
+    /// SPEC #3835 AC-17: advisory actions name no operation. "leave in
+    /// progress" and "propose close in digest" are things the PM decides, not
+    /// calls it makes, so claiming an operation for them would be the same
+    /// dishonesty in the other direction.
+    #[test]
+    fn advisory_default_actions_name_no_operation() {
+        let mut fields = sample_inventory_fields();
+        fields.ci_status = "PENDING".to_string();
+        let in_progress = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(in_progress.class, PrLifecycleClass::InProgress);
+        assert_eq!(in_progress.default_action_operation, None);
+
+        let mut fields = sample_inventory_fields();
+        fields.closing_issues = vec![PrClosingIssue {
+            number: 10,
+            state: Some("CLOSED".to_string()),
+        }];
+        let superseded = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(superseded.class, PrLifecycleClass::Superseded);
+        assert_eq!(superseded.default_action_operation, None);
+    }
+
+    /// SPEC #3835 AC-17: a Draft merge candidate is promoted through the
+    /// canonical `pr.ready`, never through a bare `gh` mutation.
+    #[test]
+    fn a_draft_merge_candidate_names_pr_ready() {
+        let mut fields = sample_inventory_fields();
+        fields.is_draft = true;
+        let decision = classify_pr_lifecycle(&fields, now_3868());
+        assert_eq!(decision.class, PrLifecycleClass::MergeCandidate);
+        assert_eq!(decision.default_action, "mark ready");
+        assert_eq!(decision.default_action_operation, Some("pr.ready"));
+    }
+
     /// Issue #4074 AC-2: the launch guard now inherits a launch ref carrying
     /// unique commits instead of refusing it, so a relaunch of the owner on
     /// its own branch is an action the Monitor can actually take.
@@ -4277,18 +4476,15 @@ mod tests {
     /// appended after `confirmed` can move a PR into or out of the sweep list.
     #[test]
     fn deferred_user_verification_is_read_from_the_recorded_value() {
-        for deferring in [
+        let deferring = "User Verification Result: Deferred — owner sweeps this later";
+        assert!(
+            body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
+            "must recognize the deferred value: {deferring}"
+        );
+        for settled in [
             "User Verification Result: deferred (autonomous execution)",
             "- User Verification Result: deferred (autonomous execution)",
             "**User Verification Result:** deferred (autonomous execution)",
-            "User Verification Result: Deferred — owner sweeps this later",
-        ] {
-            assert!(
-                body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
-                "must recognize the deferred value: {deferring}"
-            );
-        }
-        for settled in [
             "User Verification Result: confirmed",
             "User Verification Result: n/a (autonomous)",
             "User Verification Result: n/a (no UI surface)",
@@ -4328,7 +4524,7 @@ mod tests {
             ..PrInventoryOptions::default()
         };
         let hydrated = inventory_item_from_fields(fields.clone(), now_3868(), &options);
-        assert_eq!(hydrated.deferred_user_verification, Some(true));
+        assert_eq!(hydrated.deferred_user_verification, Some(false));
 
         fields.body = "Closes #10\nUser Verification Result: confirmed\n".to_string();
         let confirmed = inventory_item_from_fields(fields, now_3868(), &options);
@@ -4596,6 +4792,7 @@ mod tests {
                 )),
                 ["pr", "list", ..] => {
                     let json_fields = args[args.len() - 1];
+                    assert!(json_fields.contains("headRefOid"));
                     assert!(
                         !json_fields.contains("statusCheckRollup") && !json_fields.contains("body"),
                         "the list query must stay light (AC-2): {json_fields}"
@@ -4622,13 +4819,14 @@ mod tests {
         now: DateTime<Utc>,
         options: &PrInventoryOptions,
     ) -> Result<PrInventoryRead> {
+        let gh = std::sync::Mutex::new(gh);
         fetch_pr_inventory_cached_with(
             Path::new("/tmp/repo"),
             &tmp.join(PR_INVENTORY_CACHE_FILE),
             ledger,
             now,
             options,
-            |_, args| gh.run(args),
+            |_, args| gh.lock().unwrap().run(args),
         )
     }
 
@@ -4655,6 +4853,8 @@ mod tests {
         )
         .expect("read");
 
+        // Hydration order is intentionally independent of inventory order.
+        gh.calls[2..].sort();
         assert_eq!(
             gh.calls,
             vec![
@@ -4666,6 +4866,8 @@ mod tests {
         );
         assert_eq!(read.source, "github");
         assert_eq!(read.github_calls, 3, "the free probe is not a budget call");
+        assert_eq!(read.hydrated, 2);
+        assert_eq!(read.skipped_unchanged, 0);
         assert_eq!(read.throttled, None);
         assert_eq!(read.items[0].lifecycle, "MERGE-CANDIDATE");
         assert_eq!(read.items[1].lifecycle, "CI-RED");
@@ -4742,9 +4944,64 @@ mod tests {
         );
         assert_eq!(second.source, "cache");
         assert_eq!(second.github_calls, 0);
+        assert_eq!(
+            second.skipped_unchanged, 0,
+            "cache hits do not compare live revisions"
+        );
         assert_eq!(second.cache_age_secs, Some(60));
         assert_eq!(second.items[0].lifecycle, first.items[0].lifecycle);
         assert_eq!(second.items[0].ci_status, "SUCCESS");
+    }
+
+    /// Issue #4308 AC-1/AC-3: an unchanged PM cycle costs one bulk read,
+    /// even when every draft has no checks and the snapshot TTL has elapsed.
+    #[test]
+    fn inventory_unchanged_drafts_after_ttl_need_only_the_bulk_list() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let rows = (1..=30)
+            .map(|number| {
+                let mut row = light_row(number, "2026-09-01T00:00:00Z", "CLEAN");
+                row["isDraft"] = serde_json::json!(true);
+                row["headRefOid"] = serde_json::json!(format!("head-{number}"));
+                row
+            })
+            .collect();
+        let mut gh = FakeGh::new(rows);
+        gh.views = (1..=30)
+            .map(|number| (number, r#"{"statusCheckRollup":[]}"#.to_string()))
+            .collect();
+        gh.views
+            .insert(30, r#"{"statusCheckRollup":null}"#.to_string());
+        let options = PrInventoryOptions::default();
+        cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("warm");
+        gh.calls.clear();
+        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &options).expect("periodic");
+        assert_eq!(gh.calls, vec![light_list_call()]);
+        assert_eq!(read.github_calls, 1);
+        assert_eq!(read.items.len(), 30);
+        assert_eq!(read.hydrated, 0);
+        assert_eq!(read.skipped_unchanged, 30);
+
+        // A head change invalidates an empty rollup even without updatedAt changing.
+        gh.calls.clear();
+        gh.rows[0]["headRefOid"] = serde_json::json!("new-head");
+        cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+            &options,
+        )
+        .expect("changed head");
+        assert_eq!(
+            gh.calls,
+            vec![
+                light_list_call(),
+                "pr view 1 --json statusCheckRollup".to_string()
+            ]
+        );
     }
 
     /// AC-2: heavy fields are re-fetched only for PRs whose real data changed
@@ -4765,22 +5022,30 @@ mod tests {
         cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("first");
         gh.calls.clear();
 
-        // TTL elapsed, nothing changed: only the pending PR is re-checked.
+        // The snapshot TTL elapsed, but the independent checks interval has not.
         let second_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
         cached_read(tmp.path(), &ledger, &mut gh, second_at, &options).expect("second");
         assert_eq!(
             gh.calls,
+            vec![light_list_call()],
+            "pending checks must not be refreshed at every snapshot expiry"
+        );
+        gh.calls.clear();
+
+        let checks_at = now_3891() + chrono::Duration::seconds(602);
+        cached_read(tmp.path(), &ledger, &mut gh, checks_at, &options).expect("checks due");
+        assert_eq!(
+            gh.calls,
             vec![
                 light_list_call(),
-                "pr view 4 --json statusCheckRollup".to_string(),
-            ],
-            "the probe is still fresh and PR 3 is final, so neither is re-read"
+                "pr view 4 --json statusCheckRollup".to_string()
+            ]
         );
         gh.calls.clear();
 
         // PR 3 got a new commit: its updatedAt moved, so it is hydrated again.
         gh.rows[0] = light_row(3, "2026-09-02T00:30:00Z", "CLEAN");
-        let third_at = second_at + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let third_at = checks_at + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
         let third = cached_read(tmp.path(), &ledger, &mut gh, third_at, &options).expect("third");
         assert!(
             gh.calls
@@ -4789,6 +5054,75 @@ mod tests {
             gh.calls
         );
         assert_eq!(third.items[0].lifecycle, "MERGE-CANDIDATE");
+    }
+
+    #[test]
+    fn inventory_hydrates_five_changed_prs_concurrently() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let gh = FakeGh::new(
+            (1..=35)
+                .map(|number| light_row(number, "2026-09-01T00:00:00Z", "CLEAN"))
+                .collect(),
+        );
+        let options = PrInventoryOptions::default();
+        let gh = Mutex::new(gh);
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let read_at = |now| {
+            fetch_pr_inventory_cached_with(
+                Path::new("/tmp/repo"),
+                &tmp.path().join(PR_INVENTORY_CACHE_FILE),
+                &ledger,
+                now,
+                &options,
+                |_, args| {
+                    let output = gh.lock().unwrap().run(args);
+                    if args.starts_with(&["pr", "view"]) {
+                        let active = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(active, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        running.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    output
+                },
+            )
+        };
+        let cold = read_at(now_3891()).expect("warm first 30");
+        assert_eq!(cold.github_calls, 31, "the per-read cap remains 30");
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            5,
+            "cold reads must be bounded too"
+        );
+        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        read_at(later).expect("warm remaining 5");
+        {
+            let mut gh = gh.lock().unwrap();
+            for row in &mut gh.rows[..5] {
+                row["updatedAt"] = serde_json::json!("2026-09-01T00:10:00Z");
+            }
+            gh.calls.clear();
+        }
+        peak.store(0, Ordering::SeqCst);
+        let read = read_at(later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1))
+            .expect("changed cycle");
+        assert_eq!(read.github_calls, 6);
+        assert_eq!(read.hydrated, 5);
+        assert_eq!(read.skipped_unchanged, 30);
+        let peak = peak.load(Ordering::SeqCst);
+        assert_eq!(peak, 5, "the five changed PRs should hydrate together");
+        assert_eq!(
+            read.items
+                .iter()
+                .map(|item| item.number)
+                .collect::<Vec<_>>(),
+            (1..=35).collect::<Vec<_>>()
+        );
     }
 
     /// AC-4 / AC-7: with the budget below the reserve, a periodic read is

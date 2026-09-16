@@ -19,9 +19,10 @@ name: Cache Warm
 #
 # Cache budget (AC-3): three shared keys — linux-workspace, windows-workspace,
 # macos-workspace — at ~540 MB each, held for the develop and main scopes, is
-# ~3.2 GB of the repository's 10 GB ceiling. coverage.yml and release.yml keep
-# their own job-id keys and fit in the remainder. A fourth shared key has to be
-# argued against that budget; consolidating by OS is the reason there are three.
+# ~3.2 GB of the repository's 10 GB ceiling. coverage.yml, nightly.yml and
+# release.yml keep their own job-id keys and fit in the remainder. A fourth
+# shared key has to be argued against that budget; consolidating by OS is the
+# reason there are three.
 #
 # When the cache legitimately misses (AC-4): the key changes whenever Cargo.lock
 # or a manifest changes, or when the stable toolchain moves — `rustc -vV` is
@@ -68,7 +69,9 @@ jobs:
   warm-linux:
     name: Warm cargo cache (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Covers the two step budgets below (18+35) plus checkout, toolchain and
+    # cache setup.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -77,11 +80,26 @@ jobs:
           # the run still writes into the default-branch scope puts the key PRs
           # need where every run in the repository can restore it.
           ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
-      - name: Install tray + GTK dependencies (Linux)
-        run: |
-          sudo bash scripts/ci-apt.sh update
-          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+      # Issue #4191 / #4268: the same archive cache the other Linux jobs use,
+      # keyed on the script that owns the package list with a prefix fallback so
+      # an edit to it costs a delta rather than all 59.2 MB. Pinned by
+      # crates/gwt/tests/ci_linux_dependency_install_contract_test.rs.
+      - name: Cache Linux GTK dependency packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/gwt-apt-archives
+          key: gwt-apt-gtk-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
+          restore-keys: |
+            gwt-apt-gtk-${{ runner.os }}-
         timeout-minutes: 5
+      # `gtk-deps` and not `gtk-deps xvfb dbus`: this job only compiles, and
+      # sharing the plain namespace keeps it warm for `Build` and `Clippy` too.
+      # scripts/ci-apt.sh owns the 900s deadline and retries inside it; this cap
+      # is only the outer net and must stay above it so the script, not GitHub,
+      # reports a dependency-install failure.
+      - name: Install tray + GTK dependencies (Linux)
+        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -107,8 +125,8 @@ jobs:
         with:
           shared-key: windows-workspace
       # The package set the Windows PR jobs compile between them
-      # (test-windows-rust, test-windows-default-parallel,
-      # test-windows-agent-launch-e2e, check-windows, lint-windows). Deliberately
+      # (test-windows-rust, test-windows-agent-launch-e2e, check-windows,
+      # lint-windows). Deliberately
       # not `--workspace`: no CI path builds the remaining crates' test targets
       # on Windows, and rust-cache skips its save when the job fails, so an
       # untested target here would quietly leave the scope cold.

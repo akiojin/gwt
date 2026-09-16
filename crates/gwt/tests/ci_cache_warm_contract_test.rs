@@ -32,8 +32,8 @@ const TOOLCHAIN_ACTION: &str = "dtolnay/rust-toolchain@stable";
 /// AC-3: the repository cache ceiling is 10 GB and one warmed scope measured
 /// ~540 MB. Each shared key is stored once per warmed branch scope (develop and
 /// main), so the shared keys alone cost `count * 2 * 540 MB`. Three keys leave
-/// ~3.2 GB for `coverage.yml` and the release build scopes, which keep their
-/// own job-id keys. A fourth key would have to be justified against that
+/// ~3.2 GB for `coverage.yml`, `nightly.yml` and the release build scopes,
+/// which keep their own job-id keys. A fourth key would have to be justified against that
 /// budget rather than added by habit.
 const MAX_SHARED_KEYS: usize = 3;
 

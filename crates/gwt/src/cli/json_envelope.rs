@@ -171,6 +171,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     }
     let params = params_object(&envelope.params)?;
     let command = match envelope.operation.as_str() {
+        "concern.create" | "concern.update" | "concern.list" | "concern.measure"
+        | "concern.resolve" => CliCommand::Concern(Box::new(super::concern::parse(
+            &envelope.operation,
+            params,
+        )?)),
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
@@ -427,6 +432,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 clear,
             })
         }
+        "issue.monitor.wait.invalidate" | "issue.monitor.wait-invalidate" => {
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                // An unexplained invalidation is exactly the record AC-2 needs.
+                reason: required_string(params, "reason")?,
+                by: optional_string(params, "by")?,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -579,6 +593,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
         }),
+        // SPEC #3835 AC-15 / AC-17: the operation behind the `update-branch`
+        // default action, which `pr.list` recommended for a year without one.
+        "pr.update_branch" | "pr.update-branch" => CliCommand::Pr(PrCommand::UpdateBranch {
+            number: required_u64(params, "number")?,
+        }),
         "pr.comment" => CliCommand::Pr(PrCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -659,12 +678,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
+            let headed_e2e_commands = optional_string_vec(params, "headed_e2e_commands")?;
+            if headed_e2e_commands
+                .iter()
+                .any(|command| !commands.contains(command))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "headed_e2e_commands must name exact entries in commands".to_string(),
+                ));
+            }
             // Issue #3913: bound on the host admission wait.
             let max_wait_secs = optional_u64(params, "max_wait_secs")?;
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands,
                 max_wait_secs,
                 user_verification_result: optional_string(params, "user_verification_result")?,
+                headed_e2e_commands,
             })
         }
         "verify.adjudicate" => {
@@ -818,6 +847,54 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.release_prepared" => {
+            // Issue #4161: owner-addressed like `execution.status`, because the
+            // Session that left the Prepared fence behind is gone and the
+            // operator clearing it is somewhere else in the same repository.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            let reason = required_string(params, "reason")?;
+            let operation_id = optional_string(params, "operation_id")?;
+            reject_unknown_params(
+                params,
+                &["issue", "spec", "reason", "operation_id"],
+                "execution.release_prepared",
+            )?;
+            let owner = match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (None, None) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared requires params.issue or params.spec"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared owner number must be greater than zero"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                },
+                (None, Some(number)) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number,
+                },
+            };
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id,
+                    reason,
+                },
+            )
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -875,6 +952,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
         "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.startup" => {
+            reject_unknown_params(params, &[], "perf.startup")?;
+            CliCommand::Perf(PerfCommand::Startup)
+        }
         "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
@@ -1750,6 +1831,344 @@ mod tests {
         }
     }
 
+    fn concern_call(env: &mut TestEnv, operation: &str, params: Value) -> Value {
+        env.stdout.clear();
+        env.stderr.clear();
+        env.stdin = envelope(operation, params);
+        let code = super::dispatch(env, "gwtd");
+        assert_eq!(
+            code,
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&env.stdout),
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+        serde_json::from_str(response["output"].as_str().unwrap()).unwrap()
+    }
+
+    fn concern_create_params() -> Value {
+        json!({
+            "summary": "Unnecessary windows are restored",
+            "symptom_measurement": {"kind": "shell_command", "command": "printf '{\"count\":3}'"},
+            "baseline": {"count": 3},
+            "verification_predicate": {"pointer": "/count", "op": "eq", "expected": 0},
+            "owner_issues": [4059]
+        })
+    }
+
+    #[test]
+    fn concern_list_is_read_only_but_measurements_and_resolutions_are_mutations() {
+        use crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation;
+        assert!(is_read_only_json_envelope_operation("concern.list"));
+        for operation in [
+            "concern.create",
+            "concern.update",
+            "concern.measure",
+            "concern.resolve",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+    }
+
+    fn concern_owner_progress(state: &str) -> Value {
+        json!([{"number":4059,"state":state,"queue_position":3,"status":"queued","pull_requests":[]}])
+    }
+
+    #[test]
+    fn concern_roundtrip_requires_measurement_evidence_despite_closed_owners() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        assert_eq!(created["concern"]["state"], "open");
+        assert!(created["concern"]["raised_at"].is_string());
+        assert!(gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
+            .join("project-state/concerns.json")
+            .is_file());
+
+        // A new environment reads the record from disk, not process-local state.
+        let mut env = TestEnv::new(repo);
+        let listed = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(listed["concerns"][0]["id"], id);
+        assert_eq!(listed["summary"]["open_count"], 1);
+        assert_eq!(
+            listed["summary"]["oldest_raised_at"],
+            created["concern"]["raised_at"]
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({"id":id,"summary":"Restoration regression"}),
+        );
+        assert_eq!(updated["concern"]["summary"], "Restoration regression");
+
+        let measured = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":2},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(measured["concern"]["state"], "fix_landed");
+        assert_eq!(
+            measured["concern"]["previous_measurement"],
+            json!({"count":3})
+        );
+        assert_eq!(measured["concern"]["last_measurement"], json!({"count":2}));
+        assert_eq!(measured["concern"]["measurement_changed"], true);
+        let unresolved = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(unresolved["summary"]["unresolved_count"], 1);
+
+        let failed = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(failed["predicate_passed"], false);
+        assert_eq!(failed["concern"]["state"], "open");
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-2","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        let verified = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(verified["predicate_passed"], true);
+        assert_eq!(verified["concern"]["state"], "verified");
+        let recurrence = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-3","measurement":{"count":1},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(recurrence["concern"]["state"], "open");
+        let withdrawn = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"withdrawn"}),
+        );
+        assert_eq!(withdrawn["concern"]["state"], "withdrawn");
+    }
+
+    #[test]
+    fn concern_duplicate_report_returns_remeasurement_and_preserves_baseline() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let mut report = concern_create_params();
+        report["baseline"] = json!({"count":1});
+        let repeated = concern_call(&mut env, "concern.create", report.clone());
+        assert_eq!(repeated["reused"], true);
+        assert_eq!(repeated["concern"]["id"], created["concern"]["id"]);
+        assert_eq!(repeated["concern"]["baseline"], json!({"count":3}));
+        assert_eq!(repeated["concern"]["last_measurement"], json!({"count":1}));
+        let listed = concern_call(
+            &mut env,
+            "concern.list",
+            json!({"symptom_measurement":report["symptom_measurement"]}),
+        );
+        assert_eq!(listed["concerns"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concern_escalates_after_ten_cycles_without_owner_progress() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        for cycle in 1..=10 {
+            let result = concern_call(
+                &mut env,
+                "concern.measure",
+                json!({
+                    "id":id,"cycle_id":format!("cycle-{cycle}"),"measurement":{"count":cycle},
+                    "owner_progress":concern_owner_progress("open")
+                }),
+            );
+            assert_eq!(result["concern"]["stagnant_cycles"], cycle);
+            assert_eq!(result["concern"]["escalation_due"], cycle == 10);
+        }
+        let repeated = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-10","measurement":{"count":10},
+                "owner_progress":concern_owner_progress("open")
+            }),
+        );
+        assert_eq!(repeated["concern"]["stagnant_cycles"], 10);
+        assert_eq!(
+            repeated["concern"]["previous_measurement"],
+            json!({"count":9})
+        );
+        assert_eq!(repeated["concern"]["measurement_changed"], true);
+        let mut progress = concern_owner_progress("open");
+        progress[0]["status"] = json!("active");
+        let advanced = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(advanced["concern"]["stagnant_cycles"], 0);
+        assert_eq!(advanced["concern"]["escalation_due"], false);
+        assert_eq!(advanced["concern"]["owner_progress_changed"], true);
+        let retried = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(retried, advanced);
+    }
+
+    #[test]
+    fn concern_definition_update_cannot_reuse_previous_verification() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({
+                "id":id,"symptom_measurement":{"kind":"gwtd_operation","operation":"workspace.projection_list","params":{}}
+            }),
+        );
+        assert_eq!(updated["concern"]["state"], "open");
+        env.stdout.clear();
+        env.stdin = envelope("concern.resolve", json!({"id":id,"state":"verified"}));
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(String::from_utf8_lossy(&env.stdout).contains("measurement"));
+        assert!(matches!(
+            err("concern.update", json!({"id":id,"state":"verified"})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    /// SPEC #3835 AC-15: the operation behind the `update-branch` default
+    /// action, so a `BEHIND` PR has a surface that can move it.
+    #[test]
+    fn pr_update_branch_parses_under_both_spellings() {
+        use crate::cli::PrCommand;
+        for operation in ["pr.update_branch", "pr.update-branch"] {
+            assert_eq!(
+                ok(operation, json!({"number": 4139})),
+                CliCommand::Pr(PrCommand::UpdateBranch { number: 4139 })
+            );
+        }
+        assert!(matches!(
+            err("pr.update_branch", json!({})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// SPEC #3835 AC-17: every default action that names an operation names a
+    /// real one. `pr.list` reported `default_action: "update-branch"` with
+    /// `default_action_executable: true` on 21 of 25 open PRs while no such
+    /// operation existed, so its only recommended action was unrunnable.
+    ///
+    /// This test is the structural guard: `gwt-git` cannot see the operation
+    /// table, so the invariant has to be fixed from this side.
+    #[test]
+    fn every_named_pr_default_action_operation_is_callable() {
+        use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
+
+        let now = chrono::Utc::now();
+        let mut seen_update_branch = false;
+        for (mergeable, merge_state_status, ci_status, is_draft) in [
+            ("MERGEABLE", "BEHIND", "SUCCESS", true),
+            ("MERGEABLE", "BEHIND", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "SUCCESS", true),
+            ("MERGEABLE", "CLEAN", "SUCCESS", false),
+            ("CONFLICTING", "DIRTY", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "FAILURE", false),
+            ("MERGEABLE", "CLEAN", "PENDING", false),
+            ("UNKNOWN", "UNKNOWN", "UNKNOWN", false),
+        ] {
+            let fields = PrInventoryFields {
+                number: 4139,
+                title: "a PR".to_string(),
+                url: "https://example.com/pr/4139".to_string(),
+                is_draft,
+                head_ref_name: "work/issue-4131".to_string(),
+                updated_at: Some(now),
+                mergeable: mergeable.to_string(),
+                merge_state_status: merge_state_status.to_string(),
+                ci_status: ci_status.to_string(),
+                review_status: "APPROVED".to_string(),
+                body: String::new(),
+                closing_issues: Vec::new(),
+            };
+            let decision = classify_pr_lifecycle(&fields, now);
+            let Some(operation) = decision.default_action_operation else {
+                continue;
+            };
+            seen_update_branch |= operation == "pr.update_branch";
+            if let Err(error) = parse(&envelope(operation, json!({"number": 4139}))) {
+                panic!(
+                    "`{}` recommends `{operation}`, which no operation implements: {error}",
+                    decision.default_action
+                );
+            }
+        }
+        assert!(
+            seen_update_branch,
+            "a BEHIND PR must name the operation that resolves it"
+        );
+    }
+
     /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
     #[test]
     fn verify_run_parses_max_wait_secs() {
@@ -1762,6 +2181,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: Some(2),
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -1770,6 +2190,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -1779,6 +2200,20 @@ mod tests {
                 json!({"commands": ["git --version"], "max_wait_secs": "soon"})
             ),
             CliParseError::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn verify_run_rejects_unlisted_headed_command() {
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({
+                    "commands": ["cargo test"],
+                    "headed_e2e_commands": ["npx playwright test"]
+                })
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 
@@ -1815,6 +2250,84 @@ mod tests {
         serialized["user_verification_result"] = json!("confirmed");
         let tampered = serde_json::from_value(serialized).unwrap();
         assert!(!verification_record::integrity_ok(&tampered));
+    }
+
+    #[test]
+    fn verify_run_rejects_autonomous_confirmation_and_allows_correction() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
+        let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut session = gwt_agent::Session::new(&repo, "test", gwt_agent::AgentId::Codex);
+        session.id = "session-4237".to_string();
+        session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git --version"], "user_verification_result": "n/a"}),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let original = verification_record::load(&repo).unwrap().unwrap();
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git init must-not-run"],
+                "user_verification_result": "**Confirmed** (launch instructions)"
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        let output = String::from_utf8_lossy(&env.stdout);
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("autonomous"), "{output}");
+        assert!(output.contains("n/a (autonomous)"), "{output}");
+        assert!(output.contains("verify.run"), "{output}");
+        assert!(!repo.join("must-not-run").exists());
+        assert_eq!(
+            verification_record::load(&repo).unwrap().unwrap().record_id,
+            original.record_id,
+            "a rejected result must preserve the preceding record"
+        );
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": "n/a (autonomous)"
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert_eq!(
+            verification_record::load(&repo)
+                .unwrap()
+                .unwrap()
+                .user_verification_result
+                .as_deref(),
+            Some("n/a (autonomous)")
+        );
+
+        let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _unknown = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "legacy-4237");
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git init legacy-must-not-run"], "user_verification_result": "confirmed"}),
+        );
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!repo.join("legacy-must-not-run").exists());
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report
@@ -2864,6 +3377,50 @@ mod tests {
         ));
     }
 
+    /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
+    /// target and the reason are mandatory because an unexplained
+    /// invalidation is exactly the record AC-2 says must exist.
+    #[test]
+    fn issue_monitor_wait_invalidate_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({ "number": 42, "reason": "bootstrap build needs no lease" })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: None,
+                number: 42,
+                reason: "bootstrap build needs no lease".to_string(),
+                by: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 42,
+                    "reason": "ruled out",
+                    "by": "session:pm",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 42,
+                reason: "ruled out".to_string(),
+                by: Some("session:pm".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+    }
+
     /// Issue #3883 AC-6: the PM's recovery for launches that are still running
     /// but no longer tracked. It takes no target and no reason because it
     /// revokes nothing — it only re-adopts what the canvas already shows.
@@ -3428,6 +3985,61 @@ mod tests {
             ),
             CliParseError::InvalidJson(message)
                 if message.contains("only accepts params.operation_id")
+        ));
+        // Issue #4161: the release is owner-addressed, so the owner is
+        // required rather than inferred from the caller's own record.
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "the launch that prepared it is gone"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id: None,
+                    ..
+                }
+            ) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 4161,
+                }
+        ));
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"spec": 4161, "reason": "stale fence", "operation_id": "fresh-launch-7"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    operation_id: Some(operation_id),
+                    ..
+                }
+            ) if operation_id == "fresh-launch-7"
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"reason": "stale fence"})),
+            CliParseError::InvalidJson(message)
+                if message.contains("requires params.issue or params.spec")
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"issue": 4161})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "spec": 4161, "reason": "stale fence"})
+            ),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "stale fence", "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("does not accept the parameter unexpected")
         ));
     }
 

@@ -152,6 +152,12 @@ pub fn run<E: CliEnv>(
             render_search_unavailable(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
+        Err(error @ crate::index_search::IndexSearchAttemptError::RepairRequired(_)) => {
+            // Issue #3866 AC-3: a stop state only `index.repair` clears is
+            // non-retryable and carries its recovery step.
+            render_repair_required(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
         Err(crate::index_search::IndexSearchAttemptError::Public(error)) => {
             return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
         }
@@ -198,6 +204,30 @@ fn render_search_unavailable(
             "retryable": true,
             "reason": unavailable.reason,
             "retry_after_ms": unavailable.retry_after_ms,
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("{error}\n"));
+    }
+}
+
+fn render_repair_required(
+    out: &mut String,
+    json: bool,
+    error: &crate::index_search::IndexSearchAttemptError,
+) {
+    let crate::index_search::IndexSearchAttemptError::RepairRequired(required) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "INDEX_REPAIR_REQUIRED",
+            "retryable": false,
+            "reason": required.reason,
+            "affected_scopes": required.affected_scopes,
+            "recovery": required.recovery,
         });
         out.push_str(&payload.to_string());
         out.push('\n');
@@ -559,6 +589,33 @@ mod tests {
         assert!(error.retryable());
         assert_eq!(error.retry_after_ms(), Some(5_000));
         assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn render_repair_required_json_reports_non_retryable_recovery_contract() {
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchRepairRequired};
+        let error = IndexSearchAttemptError::RepairRequired(IndexSearchRepairRequired {
+            reason: "issues index is cancelled".to_string(),
+            affected_scopes: vec!["issues".to_string()],
+            recovery: "run the index.repair JSON operation".to_string(),
+        });
+
+        let mut out = String::new();
+        render_repair_required(&mut out, true, &error);
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "INDEX_REPAIR_REQUIRED");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(false));
+        assert_eq!(payload["affected_scopes"][0], "issues");
+        assert_eq!(payload["reason"], "issues index is cancelled");
+        assert_eq!(payload["recovery"], "run the index.repair JSON operation");
+        assert!(payload.get("retry_after_ms").is_none(), "{payload}");
+        assert_eq!(error.exit_code(), 1);
+
+        let mut text = String::new();
+        render_repair_required(&mut text, false, &error);
+        assert!(text.contains("index repair required"), "{text}");
+        assert!(text.contains("index.repair"), "{text}");
     }
 
     #[test]

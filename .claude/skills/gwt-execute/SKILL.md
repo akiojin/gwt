@@ -103,6 +103,17 @@ fresh Active record, so the same execution lifetime can continue. Diagnose
 first with `execution.status` — its `available_recoveries` names the exact
 operation to run.
 
+When a launch is refused with `... refuses while a Prepared successor or
+takeover targets the current generation`, an operation that prepared a
+successor died before settling it and its intent still fences the owner. Read
+the owner with `execution.status` and `params.issue` / `params.spec`: the
+fence is listed under `blocking_prepared_transactions` and
+`recommended_recovery` names `execution.release_prepared`. Release it with
+that operation, the same owner parameter, a non-empty `params.reason`, and
+`params.operation_id` for the exact transaction the diagnosis reported; then
+launch. It is owner-addressed rather than session-bound, so a PM agent that
+cannot reach the GUI can clear the fence.
+
 ## Mode detection
 
 1. If the invocation includes `#N` or an Issue URL, read the Issue with JSON
@@ -168,53 +179,53 @@ absence proves nothing — it is written only when the project opted into
 unattended mode, so monitor launches used to misread themselves as human-driven
 and stall (#3777, #3697, #4217).
 
-In an `autonomous` launch the handoff is waived: nobody is watching, and calling
-the question tool parks the owner Issue instead of pausing for an answer. Record
-`User Verification Result: deferred (autonomous execution)` when a UI surface is
-in scope (`n/a` when none is) and cover UI-affecting work with your own
-automated headed run — real browser, dark and light themes, zero console / page
-errors — reported on the separate `Agent Visual Check:` line. Your own
-browser-check is never a `User Verification Result`, and neither autonomous
-value is ever written as `skipped(<reason>)` or `confirmed`.
+In an `autonomous` launch, skip the user handoff and record
+`User Verification Result: n/a (autonomous)`. Do not ask for visual confirmation
+or send a verification URL. Cover any UI surface with the agent's own automated
+headed E2E, recorded separately as `Agent Visual Check: pass` (`n/a (no UI
+surface)` otherwise). Never turn the agent's check into human `confirmed`.
 
-**Never settle an autonomous execution as blocked over a missing visual
-check.** `execution.blocked` is terminal: it defers every open obligation and
-revokes `pr.edit`, so the stall becomes a closed loop (#4214). gwt refuses that
-settlement on an autonomous route. Hand off a Draft PR and settle the execution
-normally — that is what releases the slot.
+Run the full matrix through `verify.run`. For UI work, select its Playwright
+commands with `params.headed_e2e_commands`; each entry must exactly match an
+entry in `params.commands`. gwtd adds `--headed` and its embedded reporter and
+records actual Chromium results for both dark and light themes. Use
+`browser-check` for an isolated checkout instance; the E2E tests must assert the
+changed behavior and zero console/page errors. An autonomous UI Ready handoff
+requires those measured passing results in the same fresh verification record.
 
-PR work goes through `gwt-manage-pr`. Do not create or update a Ready PR until
-pre-PR verification passes and the `User Verification Result` is `confirmed`,
-`n/a`, or `n/a (autonomous)`. A `deferred (autonomous execution)` result
-authorizes a **Draft** PR only, and gwt enforces that: `pr.ready` and non-draft
-`pr.create` refuse a body carrying it. The owner sweeps the deferred PRs later
-(`pr.list` with `include: ["body"]`, field `deferred_user_verification`).
+PR work goes through `gwt-manage-pr`. After automated verification and all
+other Ready PR Gate conditions pass, create a Ready PR (or call `pr.ready` for
+an existing Draft), then follow the existing CI auto-merge path until the PR is
+merged. Do not stop at Draft creation. Automated test / headed E2E / CI failures,
+known blockers, and other Ready Gate failures still require repair.
 
-## Heavy command serialization
+The legacy `deferred (autonomous execution)` value remains compatible on
+existing autonomous PRs: fresh passing evidence permits Ready without rewriting
+the PR body or obtaining human confirmation. Manual launch verification stays
+unchanged.
 
-Every `cargo test`, `cargo clippy`, `cargo build`, coverage, or headed
-browser run in the RED / GREEN / refactor / verify loop compiles on a host
-shared with every other agent worktree (Issue #3913). Serialize them
-through the host-wide lease before starting, even for a single focused
-test:
+**Never call `execution.blocked` merely because an autonomous launch has no
+human visual confirmation.** It is a terminal outcome, not a pause. Continue
+through verification, Ready PR, and CI auto-merge; settle the execution after
+the scoped delivery is complete.
 
-1. Run JSON operation `verify.lease.acquire` with `params.reason` naming
-   the Issue and a `ttl_minutes` sized for the run (default 45). Run the
-   command, then `verify.lease.release` with the lease id. Never start a
-   raw `cargo` command without the lease.
-2. On refusal, follow the wait procedure in gwt-verify's "Heavy
-   verification serialization" section: declare the wait with
-   `issue.monitor.wait` so it costs no autonomous attempt (Issue #3844),
-   retry every 3 minutes, keep the holder visible, escalate after 15
-   attempts, and clear the declaration once granted. A refusal is not
-   permission to run anyway.
-3. `verify.run` admits itself: it honors a lease this worktree already
-   holds, otherwise claims the lease in-process and waits up to
-   `params.max_wait_secs` (default 300, hard cap 1500) for other
-   worktrees' `cargo` / `rustc` / test binaries to drain. A `deferred`
-   answer means the budget ran out without writing a record — rerun
-   `verify.run`; each rerun is a fresh tool call and counts as one attempt
-   of the same wait procedure.
+## Canonical verification admission
+
+Only canonical `verify.run` acquires the host-wide lease, in-process for
+its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+`cargo clippy`, `cargo build`, coverage, direct headed browser checks, and
+pre-push checks do not require a verification lease. Run the RED / GREEN /
+refactor commands directly.
+
+For canonical evidence use `verify.plan` then `verify.run`. Manual
+`verify.lease.acquire`, `verify.lease.hold`, and `verify.lease.extend` are
+retired and return an error without acquiring or reserving a lease.
+`verify.run` manages admission and waits up to `params.max_wait_secs`
+(default 300, hard cap 1500). A `deferred` response means no verification
+record was written: inspect the holder with `verify.lease.status` and
+retry when the contention is resolved. There is no manual acquire loop or
+fixed retry schedule. `verify.lease.release` remains available to drain a
+legacy holder.
 
 ## Legacy aliases
 
