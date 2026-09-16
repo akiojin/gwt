@@ -3726,6 +3726,7 @@ fn sample_runtime_with_events(
         pm_wake_seen: HashMap::new(),
         pending_pm_wakes: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
+        startup_worktree_inventories: HashMap::new(),
         pending_pm_worktree_preparations: HashSet::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
@@ -50774,6 +50775,104 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
     );
 }
 
+/// Issue #3628 AC-3/AC-6: the GUI recovery for a row whose launch is gone.
+///
+/// Launch Now only opens the wizard, so an operator who wanted the row back in
+/// the queue *without* starting an agent had no control at all and fell back to
+/// editing `issue-monitor.json` by hand. Seeded in the 2026-08-17 shape: a
+/// persisted failure hold with no launch left, beside a live launch that the
+/// recovery must not disturb.
+#[test]
+fn app_runtime_issue_monitor_requeue_releases_a_dead_hold_without_launching() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 3629,
+                window_id: "tab-1::agent-live".to_string(),
+            }],
+            failed_issues: vec![gwt::IssueMonitorFailedIssue {
+                issue_number: 3628,
+                message: "an execution generation already exists for issue #3628".to_string(),
+                window_id: Some("tab-1::agent-dead".to_string()),
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("save issue monitor prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorRequeue { issue_number: 3628 },
+    );
+
+    assert!(
+        !events.is_empty(),
+        "missing daemon forces the atomic GUI fallback writer"
+    );
+    assert!(
+        runtime.launch_wizard.is_none(),
+        "the recovery returns the row to the queue and must not start an agent"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert!(
+        persisted.failed_issues.is_empty(),
+        "the persisted hold must be gone: {:?}",
+        persisted.failed_issues
+    );
+    assert_eq!(
+        persisted
+            .released_failures
+            .iter()
+            .map(|release| release.issue_number)
+            .collect::<Vec<_>>(),
+        vec![3628],
+        "the release must be published so other processes converge on it"
+    );
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "the unrelated live launch must survive the recovery"
+    );
+
+    // Aiming the recovery at the live row is refused, and the refusal changes
+    // nothing — killing a running agent is the one mistake no later
+    // compensation can undo.
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorRequeue { issue_number: 3629 },
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "a refused recovery must leave the live launch bound"
+    );
+    assert!(
+        persisted
+            .released_failures
+            .iter()
+            .all(|release| release.issue_number != 3629),
+        "a refused recovery must not publish a release"
+    );
+}
+
 #[test]
 fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
     let _env_lock = env_test_lock()
@@ -60714,6 +60813,12 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     session.restore_window_on_startup = true;
     session.update_status(gwt_agent::AgentStatus::Stopped);
     session.save(&runtime.sessions_dir).expect("save session");
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        pm_registration_fixture("session-own-pm", &own_pm_worktree),
+        |_| false,
+    )
+    .expect("register the store's own PM");
 
     runtime.restore_open_project_windows("tab-current");
 
@@ -60727,6 +60832,152 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         .pending_auto_resume_sources
         .values()
         .any(|source| source == "session-own-pm"));
+}
+
+/// Issue #4394 AC-1 / AC-5: a GUI restart brings back exactly one PM window.
+///
+/// The incident canvas held three windows in this store's own `pm/worktree`
+/// while `pm.json` named only one of them. The #3607 gate compares stores, so
+/// all three came back and two unregistered PMs kept posting rulings.
+#[test]
+fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let own_pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    let registered = "session-registered-pm";
+    let orphans = ["session-orphan-pm-a", "session-orphan-pm-b"];
+
+    let mut persisted = empty_workspace_state();
+    for (index, session_id) in std::iter::once(registered).chain(orphans).enumerate() {
+        let mut window = sample_window(
+            &format!("agent-{}", index + 1),
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        );
+        window.agent_id = Some("claude".to_string());
+        window.session_id = Some(session_id.to_string());
+        persisted.windows.push(window);
+    }
+    persisted.next_z_index = 4;
+    let tab = ProjectTabRuntime {
+        id: "tab-current".to_string(),
+        title: "Current".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
+
+    for session_id in std::iter::once(registered).chain(orphans) {
+        let mut session =
+            gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+        session.id = session_id.to_string();
+        session.agent_session_id = Some(format!("native-{session_id}"));
+        session.restore_window_on_startup = true;
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        session.save(&runtime.sessions_dir).expect("save session");
+    }
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        pm_registration_fixture(registered, &own_pm_worktree),
+        |_| false,
+    )
+    .expect("register one PM");
+
+    runtime.restore_open_project_windows("tab-current");
+
+    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert!(!events.is_empty(), "the registered PM must still restore");
+    assert_eq!(
+        runtime
+            .pending_auto_resume_sources
+            .values()
+            .collect::<Vec<_>>(),
+        vec![registered],
+        "only the registered PM may be resumed"
+    );
+    for orphan in orphans {
+        let session = gwt_agent::Session::load_and_migrate(
+            &runtime.sessions_dir.join(format!("{orphan}.toml")),
+        )
+        .expect("load orphan session");
+        assert!(
+            !session.restore_window_on_startup,
+            "{orphan} must not come back on the next startup either"
+        );
+        assert!(
+            runtime
+                .tab("tab-current")
+                .expect("tab")
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .all(|window| window.session_id.as_deref() != Some(orphan)),
+            "{orphan} must not keep a PM placeholder on the canvas"
+        );
+    }
+}
+
+/// Issue #4394 AC-2: succession retires the replaced PM Session for restore,
+/// even when it ended without `pm.stop` (crash, GUI restart).
+#[test]
+fn pm_registration_succession_marks_the_replaced_session_unrestorable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    fs::create_dir_all(&pm_worktree).expect("create PM worktree");
+
+    let mut previous =
+        gwt_agent::Session::new(&pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    previous.id = "session-previous-pm".to_string();
+    previous.restore_window_on_startup = true;
+    previous.save(&runtime.sessions_dir).expect("save session");
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    gwt::pm_registry::try_register_pm(
+        &prefs_path,
+        pm_registration_fixture("session-previous-pm", &pm_worktree),
+        |_| false,
+    )
+    .expect("register the previous PM");
+
+    runtime.register_pm_after_launch(&repo, "session-successor-pm", "claude", &pm_worktree);
+
+    assert_eq!(
+        gwt::pm_registry::load_pm_prefs(&prefs_path)
+            .expect("load prefs")
+            .registration
+            .map(|registration| registration.session_id),
+        Some("session-successor-pm".to_string())
+    );
+    let previous = gwt_agent::Session::load_and_migrate(
+        &runtime.sessions_dir.join("session-previous-pm.toml"),
+    )
+    .expect("load previous session");
+    assert!(
+        !previous.restore_window_on_startup,
+        "the replaced PM must not be restorable"
+    );
+    assert_eq!(previous.status, gwt_agent::AgentStatus::Stopped);
 }
 
 #[test]
@@ -62589,6 +62840,14 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::Codex);
     session.agent_session_id = Some("pm-conversation-resume".to_string());
+    // Issue #4394 AC-1: only the registered PM's Session may resume from the
+    // PM worktree.
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        pm_registration_fixture(&session.id, &pm_worktree),
+        |_| false,
+    )
+    .expect("register the resuming PM");
 
     runtime.spawn_restored_agent_session(
         "tab-1",

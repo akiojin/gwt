@@ -1253,6 +1253,10 @@ pub struct AppRuntime {
     /// startup auto-resume — agent panes never spawn before the canvas is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
+    /// Issue #4398 AC-3: each project's worktree listing from bootstrap, held
+    /// until the startup index status probe takes the active project's one.
+    pub(crate) startup_worktree_inventories:
+        HashMap<PathBuf, std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
     /// Issue #4375: repositories whose PM worktree preparation is running on a
     /// blocking worker. Preparing the worktree is Git work that used to run on
     /// the GUI event loop, where it was atomic; this gate keeps a second ensure
@@ -2882,6 +2886,7 @@ impl AppRuntime {
             pm_wake_seen: HashMap::new(),
             pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
+            startup_worktree_inventories: HashMap::new(),
             pending_pm_worktree_preparations: HashSet::new(),
             update_resume_tab_ids: HashSet::new(),
             update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
@@ -7698,6 +7703,28 @@ impl AppRuntime {
                 issue_number,
                 linked_issue_kind.unwrap_or(gwt::LinkedIssueKind::Issue),
             ),
+            // Issue #3628 (AC-3): the recovery Launch Now never was. The wizard
+            // path only ever offered "start an agent", so an operator who
+            // wanted the row back in the queue had to edit the state file.
+            FrontendEvent::IssueMonitorRequeue { issue_number } => {
+                let reason = "operator requeue from the Issue Monitor surface";
+                let publication = self.publish_active_issue_monitor_control(serde_json::json!({
+                    "requeue": { "issue_number": issue_number, "reason": reason }
+                }));
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "requeue",
+                    |monitor| {
+                        let now =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        // The driver owns the safety decision: a row a launch
+                        // still owns is refused here exactly as it is in the
+                        // daemon and the CLI.
+                        monitor.requeue_failed_issue(issue_number, reason, &now);
+                    },
+                )
+            }
             FrontendEvent::IssueMonitorConfigureIssue {
                 issue_number,
                 linked_issue_kind,
@@ -8829,6 +8856,16 @@ impl AppRuntime {
         let active_tab_id = self.active_tab_id.as_ref()?;
         self.tab(active_tab_id)
             .map(|tab| tab.project_root.as_path())
+    }
+
+    /// Issue #4398 AC-3: hand the active project's bootstrap worktree listing
+    /// to the startup index status probe, once. The other listings are
+    /// dropped so no later caller reuses one that has gone stale.
+    pub(crate) fn take_startup_worktree_inventory(
+        &mut self,
+    ) -> Option<std::sync::Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>> {
+        let mut inventories = std::mem::take(&mut self.startup_worktree_inventories);
+        inventories.remove(self.active_project_root()?)
     }
 
     pub(crate) fn tab_mut(&mut self, tab_id: &str) -> Option<&mut ProjectTabRuntime> {
