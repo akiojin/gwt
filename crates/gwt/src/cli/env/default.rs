@@ -205,7 +205,9 @@ impl DefaultCliEnv {
     /// The inner `HttpIssueClient` is constructed with an empty token
     /// and empty owner/repo strings.
     pub fn new_for_hooks() -> Self {
-        Self::new_for_hooks_at(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project = crate::pm_registry::pm_worktree_for_runtime_dir(&cwd).unwrap_or(cwd);
+        Self::new_for_hooks_at(project)
     }
 
     /// Build a hook environment for an explicitly resolved worktree.
