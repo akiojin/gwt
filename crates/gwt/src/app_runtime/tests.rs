@@ -61853,6 +61853,16 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // #4484: a tracked project plugin link must survive PM regeneration.
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(repo.join(".claude/agents")).unwrap();
+        std::os::unix::fs::symlink("../../README.md", repo.join(".claude/agents/project.md"))
+            .unwrap();
+        run_git(&repo, &["add", ".claude/agents/project.md"]);
+        run_git(&repo, &["commit", "-qm", "track project agent symlink"]);
+        run_git(&repo, &["push", "origin", "develop"]);
+    }
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -61903,6 +61913,27 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         scratch.is_dir(),
         "PM spawn preparation must create the project-state scratch directory at {}",
         scratch.display()
+    );
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).unwrap();
+    assert!(prefs.settings.auto_start);
+    assert_eq!(
+        prefs.worktree_freshness.as_ref().map(|state| state.state),
+        Some(gwt::pm_registry::PmWorktreeFreshnessState::Fresh)
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::read_link(pm_worktree.join(".claude/agents/project.md")).unwrap(),
+        PathBuf::from("../../README.md")
+    );
+    // Exercise the launch-completion registration after the automatic preparation.
+    runtime.register_pm_after_launch(&repo, "pm-project-symlink", "claude", &pm_worktree);
+    assert_eq!(
+        gwt::pm_registry::load_pm_prefs(&prefs_path)
+            .unwrap()
+            .registration
+            .map(|registration| registration.session_id),
+        Some("pm-project-symlink".to_string())
     );
 }
 
