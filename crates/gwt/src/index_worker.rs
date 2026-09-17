@@ -1402,38 +1402,15 @@ fn format_rebuild_runner_failure(output: &gwt_core::process_console::SpawnOutput
 /// `gwt index rebuild`, gated by the host-wide index coordinator so
 /// concurrent CLI/GUI/agent rebuilds coalesce and the heavy runner stays
 /// exclusive host-wide.
-pub fn rebuild_index_target(
-    project_root: &Path,
+/// The production runner action for every rebuildable scope. Keeping this a
+/// total function over [`IndexRebuildScope`] is what guarantees no scope is
+/// left without a rebuild path (Issue #4455 AC-4).
+pub(crate) fn rebuild_action_for_scope(
     scope: IndexRebuildScope,
-    worktree_hash: Option<&str>,
-    priority: JobPriority,
-) -> Result<(), String> {
-    use crate::cli::index::runtime::{resolve_index_context, RebuildAction};
+) -> crate::cli::index::runtime::RebuildAction {
+    use crate::cli::index::runtime::RebuildAction;
 
-    let mut ctx = resolve_index_context(project_root).map_err(|err| err.to_string())?;
-    #[cfg(test)]
-    if [
-        "GWT_INDEX_TEST_REBUILD_HANG",
-        "GWT_INDEX_TEST_REBUILD_FAILURE",
-    ]
-    .iter()
-    .any(|key| std::env::var_os(key).as_deref() == Some(OsStr::new("1")))
-    {
-        // Keep the deadline fixture away from the user's shared project-index
-        // runtime. The local runner seam launches this test binary only.
-        ctx.python = std::env::current_exe().map_err(|err| err.to_string())?;
-        ctx.runner = PathBuf::from("--ignored");
-    }
-    if let Some(target_hash) = worktree_hash {
-        let inputs = list_worktree_probe_inputs(&ctx.project_root)?;
-        let target = inputs
-            .into_iter()
-            .find(|input| input.worktree_hash == target_hash)
-            .ok_or_else(|| format!("worktree with hash {target_hash} not found"))?;
-        ctx.project_root = target.path;
-        ctx.worktree_hash = target_hash.to_string();
-    }
-    let action = match scope {
+    match scope {
         IndexRebuildScope::Issues => RebuildAction {
             label: "issues",
             action: "index-issues",
@@ -1482,7 +1459,41 @@ pub fn rebuild_index_target(
             scope: Some("files-docs"),
             needs_worktree_hash: true,
         },
-    };
+    }
+}
+
+pub fn rebuild_index_target(
+    project_root: &Path,
+    scope: IndexRebuildScope,
+    worktree_hash: Option<&str>,
+    priority: JobPriority,
+) -> Result<(), String> {
+    use crate::cli::index::runtime::resolve_index_context;
+
+    let mut ctx = resolve_index_context(project_root).map_err(|err| err.to_string())?;
+    #[cfg(test)]
+    if [
+        "GWT_INDEX_TEST_REBUILD_HANG",
+        "GWT_INDEX_TEST_REBUILD_FAILURE",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).as_deref() == Some(OsStr::new("1")))
+    {
+        // Keep the deadline fixture away from the user's shared project-index
+        // runtime. The local runner seam launches this test binary only.
+        ctx.python = std::env::current_exe().map_err(|err| err.to_string())?;
+        ctx.runner = PathBuf::from("--ignored");
+    }
+    if let Some(target_hash) = worktree_hash {
+        let inputs = list_worktree_probe_inputs(&ctx.project_root)?;
+        let target = inputs
+            .into_iter()
+            .find(|input| input.worktree_hash == target_hash)
+            .ok_or_else(|| format!("worktree with hash {target_hash} not found"))?;
+        ctx.project_root = target.path;
+        ctx.worktree_hash = target_hash.to_string();
+    }
+    let action = rebuild_action_for_scope(scope);
     let coordinator_worktree = action
         .needs_worktree_hash
         .then(|| ctx.worktree_hash.clone());
