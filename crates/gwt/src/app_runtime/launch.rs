@@ -2988,6 +2988,18 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
     })
 }
 
+// Session and LaunchConfig keep the project checkout as their identity. Only
+// the provider process discovers instructions from the isolated PM runtime.
+fn pm_provider_runtime_dir(config: &gwt_agent::LaunchConfig) -> Option<PathBuf> {
+    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host {
+        return None;
+    }
+    config
+        .working_dir
+        .as_deref()
+        .and_then(gwt::pm_registry::pm_runtime_dir_for_pm_worktree)
+}
+
 /// `generated_hook_bin` is the fallback binary the materialization that just
 /// ran pinned into the hook commands it wrote (#3967). Trust has to compare
 /// against that exact value: the pin is released when materialization returns,
@@ -3030,7 +3042,12 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
 
     match config.runtime_target {
         gwt_agent::LaunchRuntimeTarget::Host => {
-            let child_cwd = config.working_dir.as_deref().unwrap_or(worktree_path);
+            let pm_runtime = pm_provider_runtime_dir(config);
+            let child_cwd = pm_runtime
+                .as_deref()
+                .or(config.working_dir.as_deref())
+                .unwrap_or(worktree_path);
+            let hooks_root = pm_runtime.as_deref().unwrap_or(worktree_path);
             let codex_config_path = match effective_host_codex_config_path(
                 child_cwd,
                 &config.env_vars,
@@ -3058,7 +3075,7 @@ pub(super) fn maybe_register_codex_managed_hook_trust_for_launch(
             // keyed by absolute hooks path, so entries for a file Codex does
             // not read are inert.
             let report = gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
-                worktree_path,
+                hooks_root,
                 &codex_config_path,
                 gwt::managed_assets::MANAGED_CODEX_HOOK_DISCOVERY_MODE,
                 generated_hook_bin,
@@ -5782,7 +5799,7 @@ impl AppRuntime {
                 args: config.args.clone(),
                 env: config.env_vars.clone(),
                 remove_env: config.remove_env.clone(),
-                cwd: config.working_dir.clone(),
+                cwd: pm_provider_runtime_dir(&config).or_else(|| config.working_dir.clone()),
                 pending_tool_runtime_migration,
                 resource_policy,
             };

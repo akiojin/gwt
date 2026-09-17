@@ -741,6 +741,22 @@ delegated; app-only channel posting is not supported). You must be a
 **member** of the target team and channel — otherwise Graph returns `403` and
 gwt shows an actionable hint.
 
+## PM project configuration
+
+The resident PM starts in a gwt-owned runtime directory. Repository skills,
+hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are
+not loaded as PM configuration. Implementation agents keep their normal
+project configuration. Existing PM conversations are not migrated automatically;
+the isolated directory is used on the next PM session launch.
+
+To explicitly supply project policy, add `settings.project_policy_files` to
+`~/.gwt/projects/<project-hash>/project-state/pm.json`, preserving its other
+fields. For example, `"project_policy_files": ["docs/pm-policy.md"]` selects a
+file relative to the PM project checkout. The default is an empty list.
+Selected text is copied into the existing generated `gwt-pm` skill during
+managed asset refresh; no project symlink is added to the runtime. Removing
+an entry removes its copied policy on the next refresh.
+
 ## Canvas Operations
 
 - Zoom the canvas with the on-screen zoom buttons
@@ -1013,7 +1029,10 @@ Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
 and bumps the version, regenerates the `CHANGELOG`, and opens a
 `develop → main` Release PR — so you can release from any branch without
 switching to `develop` locally. The `bump` input is `auto` (default),
-`patch`, `minor`, or `major`. Review and merge the generated Release PR;
+`patch`, `minor`, or `major`. `auto` never produces a major release:
+breaking markers in commits are only listed in the Release PR body, and a
+major bump requires choosing `major` explicitly. Review and merge the
+generated Release PR;
 merging to `main` then runs the release pipeline (tag, GitHub Release,
 cross‑platform binaries). The manual fallback procedure lives in
 `.claude/commands/release.md`.

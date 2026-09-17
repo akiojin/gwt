@@ -702,6 +702,21 @@ Teams でチャンネル → **チャンネルへのリンクを取得**し、�
 対象 team/channel に**参加している**必要があります（未参加だと Graph が `403` を返し、
 gwt が対処メッセージを表示）。
 
+## PM のプロジェクト設定
+
+常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
+hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には
+読み込まれません。実装 agent は従来どおり project 設定を使います。既存の PM 会話は
+自動移行せず、次回の PM セッション起動時から分離されたディレクトリを使います。
+
+project 固有の規約を明示的に渡すには、
+`~/.gwt/projects/<project-hash>/project-state/pm.json` の他のフィールドを保持したまま、
+`settings.project_policy_files` を設定してください。
+例: `"project_policy_files": ["docs/pm-policy.md"]`。パスは PM の project checkout からの
+相対パスで、既定は空リストです。選択した内容は managed asset の再生成時に既存の
+`gwt-pm` skill へコピーされ、runtime に project への symlink は作りません。
+指定を外した内容は次回の再生成で除去されます。
+
 ## キャンバス操作
 
 - 画面上の zoom ボタンでキャンバスを拡大・縮小
@@ -966,6 +981,8 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
 を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
 リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
+`auto` がメジャーになることはありません。コミットの breaking marker は
+Release PR 本文に列挙されるだけで、メジャー昇格は `major` を明示した場合のみです。
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
 ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
