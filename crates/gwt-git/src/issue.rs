@@ -124,7 +124,7 @@ pub fn fetch_issue_listing(owner: &str, repo: &str) -> Result<IssueListing> {
             &hub,
             gwt_core::process_console::ProcessKind::Gh,
             "gh",
-            &["api", path],
+            &["api", path, "--include"],
             gwt_core::process_console::SpawnOptions::new("gh api issues"),
         )
         .map_err(|e| e.to_string())?;
@@ -136,7 +136,7 @@ pub fn fetch_issue_listing(owner: &str, repo: &str) -> Result<IssueListing> {
     })
 }
 
-/// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path>`.
+/// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path> --include`.
 pub fn fetch_issues_with<F>(owner: &str, repo: &str, fetch: F) -> Result<Vec<Issue>>
 where
     F: FnMut(&str) -> std::result::Result<String, String>,
@@ -144,7 +144,7 @@ where
     fetch_issue_listing_with(owner, repo, fetch).map(|listing| listing.issues)
 }
 
-/// Injectable core of [`fetch_issue_listing`]: `fetch` runs one `gh api <path>`.
+/// Injectable core of [`fetch_issue_listing`]: `fetch` runs one `gh api <path> --include`.
 pub fn fetch_issue_listing_with<F>(owner: &str, repo: &str, fetch: F) -> Result<IssueListing>
 where
     F: FnMut(&str) -> std::result::Result<String, String>,
@@ -411,11 +411,11 @@ mod tests {
         let mut calls = Vec::new();
         let issues = fetch_issues_with("acme", "widgets", |path| {
             calls.push(path.to_string());
-            Ok(if calls.len() == 1 {
+            Ok(format!("HTTP/2.0 200 OK\n\r\n{}", if calls.len() == 1 {
                 r#"[{"number":42,"title":"Fix bug","state":"open","labels":[{"name":"bug"}],"assignees":[{"login":"alice"}],"body":"b","html_url":"https://github.com/acme/widgets/issues/42","updated_at":"2026-09-01T00:00:00Z"},{"number":43,"title":"PR row","state":"open","pull_request":{"url":"x"}}]"#.to_string()
             } else {
                 "[]".to_string()
-            })
+            }))
         })
         .unwrap();
         assert_eq!(
@@ -454,7 +454,7 @@ mod tests {
                     row
                 })
                 .collect::<Vec<_>>();
-            Ok(serde_json::to_string(&rows).unwrap())
+            Ok(format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/acme/widgets/issues?page={}>; rel=\"next\"\r\n\r\n{}", requests + 1, serde_json::to_string(&rows).unwrap()))
         })
         .unwrap();
 
