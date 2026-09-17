@@ -1506,6 +1506,7 @@ mod tests {
                 execution_binding: binding,
                 worktree_fingerprint: plan.worktree_fingerprint.clone(),
                 commands: vec![crate::cli::verification_record::VerificationCommandResult {
+                    headed_e2e: None,
                     command: command.clone(),
                     exit_code: 101,
                     output_tail: format!(

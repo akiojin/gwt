@@ -50,7 +50,7 @@ use super::{
     resolve_docker_agent_program_with_binding, resolve_launch_spec_with_fallback,
     resolve_launch_worktree, same_worktree_path, save_resumed_workspace_projection,
     save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DockerLaunchBinding,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, DockerLaunchBinding,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
     PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
     WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
@@ -294,7 +294,7 @@ fn pending_fresh_execution_launch_from_session(
             gwt::cli::execution_state::ExecutionControlStatus::Completed
         }
         gwt::cli::execution_state::SuccessorPredecessorStatus::Active => {
-            return Err("fresh linked-owner launch cannot bypass an Active predecessor".to_string())
+            gwt::cli::execution_state::ExecutionControlStatus::Active
         }
     };
     if ledger.current_effective_status() != Some(expected_status) {
@@ -2055,7 +2055,7 @@ pub(super) fn launch_config_from_persisted_session(
     }
     if let Some(scratch) = pm_scratch {
         config.env_vars.insert(
-            "GWT_PM_SCRATCH_DIR".to_string(),
+            gwt::pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
             scratch.to_string_lossy().into_owned(),
         );
         config.suppress_execution_control = true;
@@ -3810,11 +3810,28 @@ impl AppRuntime {
                         tab_id: tab_id.clone(),
                     },
                 );
-                let _ = gwt_agent::persist_session_restore_window_on_startup(
+                let origin = if auto_resume_source_session_id.is_some() {
+                    if self.restore_launch_windows.contains_key(&window_id) {
+                        gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                    } else {
+                        gwt_agent::SessionLaunchOrigin::UserRestart
+                    }
+                } else {
+                    gwt_agent::SessionLaunchOrigin::Launch
+                };
+                if let Err(error) = gwt_agent::update_session(
                     &self.sessions_dir,
                     &session_id_for_restore,
-                    true,
-                );
+                    |session| {
+                        session.restore_window_on_startup = true;
+                        session.updated_at = chrono::Utc::now();
+                        session.launch_origin = origin;
+                        session.restore_source_session_id = auto_resume_source_session_id.clone();
+                        Ok(())
+                    },
+                ) {
+                    tracing::warn!(session_id = %session_id_for_restore, %error, "failed to persist launched Session window metadata");
+                }
                 if let Some(tab) = self.tab_mut(&tab_id) {
                     let _ = tab
                         .workspace
@@ -4086,16 +4103,20 @@ impl AppRuntime {
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
                         {
-                            if let Some(tab) = self.tab(&tab_id) {
-                                if let Some(projection) =
-                                    self.active_work_projection_for_tab(&tab_id, tab)
-                                {
-                                    events.push(OutboundEvent::broadcast(
-                                        BackendEvent::ActiveWorkProjection {
-                                            projection: Box::new(projection),
-                                        },
-                                    ));
-                                }
+                            // Issue #4406 AC-5: acknowledge the launch from the
+                            // cached rail and rebuild off the event loop.
+                            // Rebuilding here made `LaunchComplete` the second
+                            // heaviest dispatch of the 20 minute window
+                            // (436,894ms over 71 launches).
+                            if let Some(event) =
+                                self.cached_active_work_projection_broadcast_for_active_tab()
+                            {
+                                events.push(event);
+                            }
+                            if let Some(project_root) =
+                                self.tab(&tab_id).map(|tab| tab.project_root.clone())
+                            {
+                                self.request_active_work_projection_refresh(&project_root);
                             }
                         }
                         let composed_status = self
@@ -4449,6 +4470,50 @@ impl AppRuntime {
             );
             emit_agent_launch_stage(id, "spawn_pty", &launch_argv_summary(&launch.args));
         }
+        // Legacy direct presets bypass the Launch Wizard, but their PTYs
+        // still belong in the same Session observation and stop lifecycle.
+        if matches!(preset, WindowPreset::Claude | WindowPreset::Codex) {
+            let agent_id = if preset == WindowPreset::Claude {
+                gwt_agent::AgentId::ClaudeCode
+            } else {
+                gwt_agent::AgentId::Codex
+            };
+            let branch = gwt_git::repository::Repository::discover(&project_root)
+                .ok()
+                .and_then(|repo| repo.current_branch().ok().flatten())
+                .unwrap_or_default();
+            let mut session = gwt_agent::Session::new(&project_root, &branch, agent_id.clone());
+            session.project_state_root = Some(project_root.clone());
+            session.launch_command = launch.command.clone();
+            session.launch_args = launch.args.clone();
+            session.update_status(gwt_agent::AgentStatus::Running);
+            if let Err(error) = session.save(&self.sessions_dir) {
+                let detail = format!("Failed to save agent Session: {error}");
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                self.window_details
+                    .insert(window_id.clone(), detail.clone());
+                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
+            }
+            if let Some(tab) = self.tab_mut(tab_id) {
+                let _ = tab
+                    .workspace
+                    .set_session_id(raw_id, Some(session.id.clone()));
+            }
+            self.active_agent_sessions.insert(
+                window_id.clone(),
+                ActiveAgentSession {
+                    window_id: window_id.clone(),
+                    session_id: session.id,
+                    agent_id: agent_id.command().to_string(),
+                    branch_name: branch,
+                    display_name: session.display_name,
+                    worktree_path: project_root.clone(),
+                    agent_project_root: project_root.display().to_string(),
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                    tab_id: tab_id.to_string(),
+                },
+            );
+        }
         match self.spawn_process_window_with_console_kind(
             &window_id,
             geometry,
@@ -4475,6 +4540,9 @@ impl AppRuntime {
             Err(error) => {
                 if let Some(id) = stage_id {
                     emit_agent_launch_stage(id, "error", &error);
+                }
+                if matches!(preset, WindowPreset::Claude | WindowPreset::Codex) {
+                    self.mark_agent_session_stopped(&window_id);
                 }
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
@@ -4521,6 +4589,53 @@ impl AppRuntime {
                 .map_err(|error| error.to_string())?
         };
         let incarnation = next_window_runtime_incarnation();
+        if let Some(active) = self.active_agent_sessions.get(id) {
+            // Unbound launches and automatic restores need the same physical
+            // process observation as producing launches. This does not grant
+            // execution authority or reserve an Issue Monitor slot.
+            let observation = (|| -> std::io::Result<()> {
+                let child_pid = pane
+                    .pty()
+                    .process_id()
+                    .ok_or_else(|| std::io::Error::other("agent PTY process id is unavailable"))?;
+                let child_started_at = gwt::process::host_process_start_time(child_pid)
+                    .ok_or_else(|| std::io::Error::other("agent PTY start time is unavailable"))?;
+                let host_started_at = gwt::process::host_process_start_time(std::process::id())
+                    .ok_or_else(|| std::io::Error::other("agent Host start time is unavailable"))?;
+                gwt_agent::with_session_path_lease(
+                    &self.sessions_dir,
+                    &active.session_id,
+                    |state| {
+                        match state {
+                            gwt_agent::SessionPathState::Present(_) => {}
+                            gwt_agent::SessionPathState::Missing => {
+                                return Err(std::io::Error::other("agent Session is missing"))
+                            }
+                            gwt_agent::SessionPathState::Error(error) => return Err(error),
+                        }
+                        let path =
+                            gwt_agent::runtime_state_path(&self.sessions_dir, &active.session_id);
+                        let mut runtime = match gwt_agent::SessionRuntimeState::load(&path) {
+                            Ok(runtime) => runtime,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        runtime.execution_identity = None;
+                        runtime.runtime_incarnation = Some(incarnation);
+                        runtime.host_started_at = Some(host_started_at);
+                        runtime.child_pid = Some(child_pid);
+                        runtime.child_started_at = Some(child_started_at);
+                        runtime.save(&path)
+                    },
+                )
+            })();
+            if let Err(error) = observation {
+                tracing::warn!(window_id = %id, session_id = %active.session_id, %error,
+                    "agent process observation could not be persisted");
+            }
+        }
         self.install_process_window(id, incarnation, pane, console_kind);
         Ok(())
     }
@@ -4646,6 +4761,7 @@ impl AppRuntime {
         // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
         // the pre-PTY failure guard.
         self.restore_launch_windows.remove(id);
+        self.record_restore_window_outcome(id, Ok(()));
     }
 
     /// Issue #3475: start the authenticated SessionStart readiness deadline for
@@ -6874,7 +6990,7 @@ mod agent_endpoint_env_tests {
     /// another launch. The second launch starts its own generation beside the
     /// holder's; the holder keeps its Active generation and its binding.
     #[test]
-    fn fresh_launch_starts_a_concurrent_generation_beside_a_live_holder() {
+    fn prepared_successor_concurrent_launch_recovers_and_rolls_back_its_exact_candidate() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6972,6 +7088,88 @@ mod agent_endpoint_env_tests {
             holder_identity,
             "the existing window must be untouched by the concurrent launch"
         );
+
+        // A second Prepared launch for the owner must not make recovery of
+        // this Session ambiguous (Issue #4395 AC-3).
+        let mut other = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        other.project_state_root = Some(launch.project.clone());
+        other.linked_issue_number = Some(launch.owner.number);
+        other.update_status(gwt_agent::AgentStatus::Running);
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut other,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut HashMap::new())
+        .expect("prepare another concurrent candidate");
+        let other_path = launch.sessions_dir.join(format!("{}.toml", other.id));
+        let other_before = std::fs::read(&other_path).unwrap();
+        assert!(
+            gwt::cli::execution_state::prepared_owner_launch_successor_for_predecessor(
+                &launch.project,
+                launch.owner,
+                &holder_identity.execution_binding.identity,
+            )
+            .expect("concurrent launches are not terminal manual-launch replays")
+            .is_none()
+        );
+        let nonce = &env[gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV];
+        let recover = |issue| {
+            pending_fresh_execution_launch_from_session(
+                &launch.sessions_dir,
+                &relaunch.id,
+                &launch.project,
+                launch.project.to_str().unwrap(),
+                issue,
+                None,
+                None,
+                None,
+                nonce,
+                &gwt_agent::AgentId::Codex,
+            )
+        };
+        let pending = recover(Some(launch.owner.number))
+            .expect("recover the exact concurrent candidate among two Prepared launches");
+        assert_eq!(pending.binding, binding);
+        assert!(recover(Some(launch.owner.number + 1)).is_err());
+
+        rollback_materialized_fresh_execution_launch(
+            &launch.sessions_dir,
+            &relaunch.id,
+            &launch.project,
+            "readiness reconstruction failed",
+            &gwt_agent::AgentId::Codex,
+        )
+        .expect("a failed concurrent launch must roll back its candidate");
+        assert!(!launch
+            .sessions_dir
+            .join(format!("{}.toml", relaunch.id))
+            .exists());
+        let remaining =
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .unwrap()
+                .unwrap();
+        let prepared = gwt::cli::execution_state::blocking_prepared_transactions(
+            &launch.sessions_dir,
+            &remaining,
+        );
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].candidate_session_id, other.id);
+        assert_eq!(std::fs::read(other_path).unwrap(), other_before);
+        assert_eq!(remaining.generations, ledger.generations);
+        assert_eq!(remaining.lifecycle_events, ledger.lifecycle_events);
     }
 
     /// SPEC #3590 FR-009: each concurrent session settles its own generation.

@@ -793,7 +793,8 @@ test("issue #3906: update_drain in issue_monitor_status renders the draining CTA
   assert.equal(cta.dataset.status, "draining");
   assert.equal(cta.className, "update-cta is-draining");
   assert.equal(cta.textContent, "Update v9.91.0 pending — draining 2 agents (12 min)");
-  assert.equal(cta.title, "Update v9.91.0 pending — draining 2 agents (12 min)");
+  // Issue #4376 AC-5: the title carries the blockers and the exits.
+  assert.match(cta.title, /^Update v9\.91\.0 pending — draining 2 agents \(12 min\)\. Waiting for: /);
   assert.equal(cta.disabled, false, "draining is informational; the user may still act");
   assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
 
@@ -912,6 +913,56 @@ test("issue #3906: clicking the draining CTA offers Apply now anyway through app
   assert.match(modal.textContent, /draining/);
   anyway.click();
   assert.deepEqual(fixture.sent, [{ kind: "apply_update_restart_now" }]);
+});
+
+// Issue #4376 AC-5 / AC-6: a manual Update click that is waiting for agents
+// must read, from the CTA alone, that it is waiting, what it is waiting for
+// (the blocking agents and their Issues) and how to stop waiting. The
+// draining modal lists the blockers and offers Stop waiting, which releases
+// the drain through the existing cancel_update_auto_apply control.
+test("issue #4376: the draining CTA names its blockers and the modal offers Stop waiting", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-15T00:12:00Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.99.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.99.0", asset_path: "/x" });
+  controller.handleIssueMonitorStatus({
+    update_drain: {
+      version: "9.99.0",
+      since: "2026-09-15T00:00:00Z",
+      reason: "auto",
+      blocking: [
+        { kind: "active_pane", window_id: "w1", label: "work/issue-4376", state: "running" },
+        { kind: "pending_acquire_claim", issue_number: 42 },
+      ],
+    },
+  });
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "draining");
+  assert.equal(cta.textContent, "Update v9.99.0 pending — draining 2 agents (12 min)");
+  assert.equal(
+    cta.title,
+    "Update v9.99.0 pending — draining 2 agents (12 min). Waiting for: work/issue-4376 (running), claim for #42. New launches are held; agents are never stopped. Click to apply now anyway or stop waiting.",
+  );
+
+  cta.click();
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "ready");
+  assert.equal(modal.dataset.variant, "anyway");
+  assert.match(modal.textContent, /Waiting for: work\/issue-4376 \(running\), claim for #42/);
+  assert.equal(modal.querySelector("[data-update-modal-later]"), null, "Later is not offered while draining");
+  const stopWaiting = modal.querySelector("[data-update-modal-stop-waiting]");
+  assert.equal(stopWaiting.textContent, "Stop waiting");
+  assert.equal(modal.querySelector("[data-update-modal-restart-now]").textContent, "Apply now anyway");
+
+  stopWaiting.click();
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }, { kind: "cancel_update_auto_apply" }]);
+  assert.equal(fixture.document.getElementById("update-modal"), null, "the modal closes");
+  assert.equal(fixture.document.getElementById("update-cta").textContent, "Stopping the wait…");
+
+  controller.handleUpdateAutoApply({ version: "9.99.0", phase: "cancelled" });
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "ready");
+  assert.equal(fixture.document.getElementById("update-cta").textContent, "Update v9.99.0 ready — Restart now");
 });
 
 // Issue #3906 AC-7 / #4076 AC-5: the backend announces the cancel grace; the

@@ -178,11 +178,25 @@ fn format_workspace_help() -> String {
         "  workspace.update                       Set Work status fields and Agent purpose/focus",
         "  workspace.create | workspace.ensure    Create or ensure a Work assignment",
         "  workspace.join | workspace.candidates  Join/list Work candidates",
+        "  workspace.work_prune                   Repair stale Works: close closed-owner Works,",
+        "                                         discard orphaned placeholders, detach container",
+        "                                         refs owned by another canonical Work",
+        "  workspace.projection_list              List Workspace projections (--stale/--all)",
+        "  workspace.projection_prune             Archive/delete stale Workspace projections",
+        "  workspace.store_consolidate            Move durable Workspace state to the split root",
         "",
         "Key params:",
         "  purpose                                Short Agent/window title purpose",
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
+        "  ids                                    Scope work_prune/projection_prune to these ids",
+        "  dry_run                                Both prune operations default to dry-run;",
+        "                                         pass false to apply",
+        "",
+        "Resolving an ambiguous execution container:",
+        "  1. workspace.candidates                List the Works on this container",
+        "  2. workspace.work_prune {\"ids\":[<stale Work id>]}   Detach the stale ref (dry-run first)",
+        "  3. workspace.join {\"workspace_id\":<canonical Work id>}  Attach explicitly if needed",
         "",
     ]
     .join("\n")
@@ -268,7 +282,7 @@ fn format_issue_help() -> String {
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
-        "  issue.monitor.wait",
+        "  issue.monitor.wait | issue.monitor.wait.invalidate",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
         "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
@@ -289,6 +303,9 @@ fn format_issue_help() -> String {
         "  reason, resume_condition, clear       issue.monitor.wait declares that the",
         "                                        current launch is waiting (stuck detection",
         "                                        pauses, max 3h); clear=true when resumed",
+        "  number, reason, by?                   issue.monitor.wait.invalidate: the PM",
+        "                                        voids a wait whose condition no longer",
+        "                                        holds; stuck detection resumes next scan",
         "  provider, reason                      issue.monitor.quota_hold.clear releases a",
         "                                        provider-wide quota hold (e.g. codex / claude;",
         "                                        any agent id the hold is keyed by)",
@@ -414,10 +431,21 @@ fn format_index_help() -> String {
         "Operations:",
         "  index.status                            Show index runtime and asset status",
         "  index.rebuild                           Rebuild a specific scope",
+        "  index.repair                            Recover the issues index",
+        "  index.cancel                            Request cancellation of an issues rebuild",
         "",
         "Key params:",
         "  scope                                   all|issues|specs|memory|discussions|board|files|files-docs",
         "                                          JSON also accepts files_docs",
+        "                                          index.repair and index.cancel take issues only",
+        "  wait                                    index.repair only. Default false: submit the",
+        "                                          job to a detached worker and answer at once",
+        "                                          with the collection, the job id and the",
+        "                                          index's own repair state. true blocks until",
+        "                                          the job settles and reports the result.",
+        "",
+        "Notes:",
+        "  - index.repair always answers; follow a submitted job with index.status.",
         "",
     ]
     .join("\n")
@@ -601,7 +629,8 @@ fn format_verify_help() -> String {
         "  minutes (params.ttl_minutes); the holder self-releases when it",
         "  lapses, and a killed holder releases at once.",
         "  A refusal reports holder_kind (verification | index | other) and",
-        "  estimated_remaining_ms (remaining_batches for an index job), and",
+        "  estimated_remaining_ms (remaining_batches: batches left in an index",
+        "  job, commands left in a verify.run), and",
         "  reserves the caller's turn: background index jobs defer to it until",
         "  a retry is granted or the reservation lapses (Issue #4086).",
         "  verify.lease.release with an index job's lease_id answers `yield",
@@ -947,6 +976,32 @@ mod tests {
         }
     }
 
+    /// Issue #4465 AC-6'': every workspace operation that exists must be
+    /// discoverable from `gwtd --help workspace`. `workspace.work_prune` and
+    /// the projection operations were absent, so a refusal telling an agent to
+    /// prune had no discoverable route at all — the help, the refusal text and
+    /// four guessed names all missed on 2026-09-16.
+    #[test]
+    fn workspace_family_help_lists_every_workspace_operation() {
+        let help = family_help("workspace").expect("workspace family help");
+        for expected in [
+            "workspace.update",
+            "workspace.create",
+            "workspace.ensure",
+            "workspace.join",
+            "workspace.candidates",
+            "workspace.work_prune",
+            "workspace.projection_list",
+            "workspace.projection_prune",
+            "workspace.store_consolidate",
+        ] {
+            assert!(
+                help.contains(expected),
+                "workspace help must mention {expected}, got:\n{help}"
+            );
+        }
+    }
+
     #[test]
     fn did_you_mean_rejects_unrelated_input() {
         assert_eq!(did_you_mean("frobnicate"), None);
@@ -1148,6 +1203,9 @@ mod tests {
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",
+            // Issue #4286: the only way the PM can void a wait whose condition
+            // its ruling removed, short of waiting out the 3h cap.
+            "issue.monitor.wait.invalidate",
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",

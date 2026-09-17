@@ -9,7 +9,7 @@ use std::{
 
 use gwt_github::{
     body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
-    cache::{Cache, CacheEntry, ValidatedCacheEntry},
+    cache::{Cache, CacheEntry, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
 };
@@ -195,7 +195,8 @@ fn matching_validation_receipt_marks_snapshot_fresh() {
 
     assert!(cache
         .renew_validation_receipt_if_current(&snapshot)
-        .unwrap());
+        .unwrap()
+        .renewed());
 
     match cache
         .load_validated_entry(snapshot.number, Duration::from_secs(60))
@@ -214,7 +215,8 @@ fn validation_receipt_is_bound_to_the_snapshot_contents() {
     cache.write_snapshot(&snapshot).unwrap();
     assert!(cache
         .renew_validation_receipt_if_current(&snapshot)
-        .unwrap());
+        .unwrap()
+        .renewed());
 
     let mut replacement = snapshot.clone();
     replacement.body = "concurrent replacement".to_string();
@@ -237,7 +239,10 @@ fn failed_snapshot_write_leaves_validation_receipt_absent() {
     let cache = Cache::new(tmp.path().to_path_buf());
     let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v1", "t1"));
     cache.write_snapshot(&first).unwrap();
-    assert!(cache.renew_validation_receipt_if_current(&first).unwrap());
+    assert!(cache
+        .renew_validation_receipt_if_current(&first)
+        .unwrap()
+        .renewed());
     let receipt = cache.validation_receipt_path(first.number);
 
     fs::remove_file(tmp.path().join("42/body.md")).unwrap();
@@ -260,7 +265,8 @@ fn identical_snapshot_commits_rotate_generation_and_invalidate_receipt() {
     let first = cache.current_generation(snapshot.number).unwrap().unwrap();
     assert!(cache
         .renew_validation_receipt_if_generation(&snapshot, Some(&first))
-        .unwrap());
+        .unwrap()
+        .renewed());
 
     cache.write_snapshot(&snapshot).unwrap();
     let second = cache.current_generation(snapshot.number).unwrap().unwrap();
@@ -334,7 +340,8 @@ fn validation_publication_rejects_a_changed_generation() {
 
     assert!(!cache
         .renew_validation_receipt_if_generation(&first, Some(&stale_generation))
-        .unwrap());
+        .unwrap()
+        .renewed());
     assert!(!cache.validation_receipt_path(first.number).exists());
 }
 
@@ -353,8 +360,60 @@ fn validation_publication_rejects_mixed_files_with_the_old_generation() {
 
     assert!(!cache
         .renew_validation_receipt_if_generation(&expected, Some(&generation))
-        .unwrap());
+        .unwrap()
+        .renewed());
     assert!(!cache.validation_receipt_path(expected.number).exists());
+}
+
+/// Issue #4436 AC-4: a renewal names which of the four refusals happened, and
+/// only a concurrent writer answers `cache_changed`.
+///
+/// Every refusal used to be reported to operators as "the cache changed; retry
+/// the operation". Three of them describe the persisted entry, so retrying
+/// re-ran the same refusal against a `meta.json` that never moved.
+#[test]
+fn validation_renewal_distinguishes_a_concurrent_writer_from_a_stable_cache() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    let generation = cache.current_generation(snapshot.number).unwrap().unwrap();
+
+    assert_eq!(
+        cache
+            .renew_validation_receipt_if_generation(&snapshot, Some(&generation))
+            .unwrap(),
+        ValidationReceiptRenewal::Renewed
+    );
+
+    // The caller's generation is no longer the persisted one: a real race, and
+    // the only outcome a retry can resolve.
+    cache.write_snapshot(&snapshot).unwrap();
+    let changed = cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&generation))
+        .unwrap();
+    assert_eq!(changed, ValidationReceiptRenewal::GenerationChanged);
+    assert!(changed.cache_changed());
+
+    // The generation is still the caller's, but the persisted bytes are not the
+    // validated snapshot. Nothing changed under the caller; the entry is simply
+    // not what was validated.
+    let current = cache.current_generation(snapshot.number).unwrap().unwrap();
+    fs::write(tmp.path().join("42/body.md"), "partial writer body").unwrap();
+    let mismatch = cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&current))
+        .unwrap();
+    assert_eq!(mismatch, ValidationReceiptRenewal::SnapshotMismatch);
+    assert!(
+        !mismatch.cache_changed(),
+        "a stable generation must never be reported as a concurrent writer"
+    );
+
+    // No entry at all, and no generation to bind a receipt to.
+    let missing = mk_snapshot(43, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    let unbound = cache.renew_validation_receipt_if_current(&missing).unwrap();
+    assert_eq!(unbound, ValidationReceiptRenewal::EntryUnreadable);
+    assert!(!unbound.cache_changed());
 }
 
 #[test]
@@ -724,16 +783,39 @@ Rest of the body is human prose, not a real SPEC.\n"
         leftover.iter().map(|e| e.file_name()).collect::<Vec<_>>()
     );
 
-    // load_entry must NOT surface this entry: the SPEC header is present
-    // but parse failed, so exposing an empty SpecBody would let
-    // `SpecOps::write_section` recompute the routing from scratch and
-    // overwrite the body's sections index, orphaning any content in
-    // comments referenced by the malformed index.
+    // Issue #4392: load_entry surfaces the entry with an empty SpecBody and
+    // the parse error, instead of hiding it. Hiding it made every validated
+    // read (issue.view / edit / comment) fail forever, because the receipt
+    // renewal could never reload what it had just written.
+    // `SpecOps::write_section` refuses entries carrying the marker, so the
+    // orphaned-comment hazard stays closed.
+    let entry = cache
+        .load_entry(IssueNumber(123))
+        .expect("load_entry must surface header-present-but-malformed entries");
+    assert_eq!(entry.snapshot.body, body);
+    assert!(entry.spec_body.sections.is_empty());
     assert!(
-        cache.load_entry(IssueNumber(123)).is_none(),
-        "load_entry must hide header-present-but-malformed entries to \
-         prevent SpecOps::write_section from corrupting them"
+        entry
+            .spec_parse_error
+            .as_deref()
+            .is_some_and(|error| error.contains("broken index map")),
+        "{:?}",
+        entry.spec_parse_error
     );
+
+    assert!(
+        cache
+            .renew_validation_receipt_if_current(&snapshot)
+            .unwrap()
+            .renewed(),
+        "a malformed SPEC body must still receive a validation receipt"
+    );
+    assert!(matches!(
+        cache
+            .load_validated_entry(IssueNumber(123), Duration::from_secs(60))
+            .unwrap(),
+        ValidatedCacheEntry::Fresh(_)
+    ));
 }
 
 // Companion to the previous test: a plain Issue (no `<!-- gwt-spec id=...`

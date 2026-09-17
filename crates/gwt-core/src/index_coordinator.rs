@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 pub const COORDINATOR_SCHEMA_VERSION: u32 = 1;
 
 /// Scope reserved for heavy verification runs (SPEC #3576 FR-2b). Verification
-/// claims the same host-wide heavy lease as index jobs: the contended resource
-/// is host CPU, so a second exclusion mechanism would only add a lock ordering
-/// problem.
+/// claims a host-wide heavy lease of its own lane
+/// ([`verification_coordinator_root`], Issue #4285): the contended resource
+/// is host CPU, not the model-loaded runner tree that searches and index
+/// builds exclude on, so the two lanes never wait for each other.
 pub const VERIFICATION_SCOPE: &str = "verification";
 /// Issue #4086: how long a refused verification claimant stays pending as a
 /// reservation with no live process behind it. The gwt-verify retry cadence
@@ -69,6 +70,7 @@ const INTERACTIVE_BURST_FILE: &str = "heavy.burst.json";
 const RESERVATION_PREFIX: &str = "reservation-";
 
 const COORDINATOR_DIR_NAME: &str = "index-coordinator";
+const VERIFICATION_COORDINATOR_DIR_NAME: &str = "verification-coordinator";
 const LEASE_EVENT_LOG_NAME: &str = "lease-events.jsonl";
 /// Issue #4210: the arrival counter every heavy claimant draws from. It is
 /// deliberately not a `.json` file, so the registration sweep never mistakes
@@ -88,6 +90,30 @@ pub fn coordinator_root_from(gwt_home: &Path) -> PathBuf {
 /// Coordinator root for the current process (`~/.gwt/runtime/index-coordinator`).
 pub fn coordinator_root() -> PathBuf {
     crate::paths::gwt_runtime_dir().join(COORDINATOR_DIR_NAME)
+}
+
+/// Verification lane root under an explicit gwt home
+/// (`<gwt_home>/runtime/verification-coordinator`), see
+/// [`verification_coordinator_root`].
+pub fn verification_coordinator_root_from(gwt_home: &Path) -> PathBuf {
+    gwt_home
+        .join("runtime")
+        .join(VERIFICATION_COORDINATOR_DIR_NAME)
+}
+
+/// Verification lane root for the current process
+/// (`~/.gwt/runtime/verification-coordinator`), Issue #4285.
+///
+/// Canonical verification excludes on host CPU; searches and index builds
+/// exclude on the model-loaded runner tree (FR-417 / AS-30). Sharing one
+/// root made each lane wait for the other's resource: a 40-minute
+/// verification stopped every semantic search, and a search reservation
+/// queued in front of verification. A separate root gives the verification
+/// lane its own kernel lock, FIFO, reservations, ticket, and ledger while
+/// the model lane — and the Python runner that reads `heavy.pending` /
+/// `heavy.progress.json` from it — stays exactly where it was.
+pub fn verification_coordinator_root() -> PathBuf {
+    crate::paths::gwt_runtime_dir().join(VERIFICATION_COORDINATOR_DIR_NAME)
 }
 
 /// Job target key (FR-382). Repo-shared scopes use `(repo_hash, scope)`;
@@ -338,10 +364,11 @@ pub struct HeavyLeaseStatus {
     pub queue: Vec<HeavyQueueEntry>,
     /// Issue #4086 AC-4: what kind of job holds the lease.
     pub holder_kind: Option<HeavyHolderKind>,
-    /// Index holders only: batches left according to the runner's progress.
+    /// Units left according to the holder's published progress: batches for
+    /// an index job, commands for a `verify.run` (Issue #4280 AC-2).
     pub remaining_batches: Option<u64>,
-    /// Best-effort wait estimate: the TTL remainder for a verification
-    /// holder, `remaining_batches × batch_ms` for an index holder.
+    /// Best-effort wait estimate: `remaining_batches × batch_ms`, or the TTL
+    /// remainder for a verification holder that has not finished a command.
     pub estimated_remaining_ms: Option<u64>,
 }
 
@@ -610,6 +637,13 @@ impl IndexCoordinator {
         Self::open(coordinator_root())
     }
 
+    /// Open the default verification lane root (Issue #4285). Same
+    /// coordinator, different root: canonical verifications serialize among
+    /// themselves here and never contend with the model lane.
+    pub fn open_default_verification() -> Result<Self, CoordinatorError> {
+        Self::open(verification_coordinator_root())
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -789,14 +823,24 @@ impl IndexCoordinator {
         let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
         let holder_kind = HeavyHolderKind::of_target(&ticket.target);
         let progress = match holder_kind {
-            HeavyHolderKind::Index => self.read_heavy_progress().filter(|progress| {
+            HeavyHolderKind::Other => None,
+            _ => self.read_heavy_progress().filter(|progress| {
                 progress.target == ticket.target && progress.updated_at_ms >= ticket.acquired_at_ms
             }),
-            _ => None,
         };
         let remaining_batches = progress.as_ref().map(HeavyProgress::remaining_batches);
         let estimated_remaining_ms = match holder_kind {
-            HeavyHolderKind::Verification => remaining_ms,
+            // Issue #4280 AC-2: once a command has finished its pace prices
+            // the rest; before that only the TTL bounds the wait.
+            HeavyHolderKind::Verification => progress
+                .as_ref()
+                .filter(|progress| progress.done > 0)
+                .map(|progress| {
+                    progress
+                        .remaining_batches()
+                        .saturating_mul(progress.batch_ms)
+                })
+                .or(remaining_ms),
             HeavyHolderKind::Index => progress.as_ref().map(|progress| {
                 progress
                     .remaining_batches()
@@ -1271,6 +1315,30 @@ impl HeavyLease {
 
     pub fn is_expired(&self) -> bool {
         self.ticket.expires_at_ms.is_some_and(|at| now_ms() >= at)
+    }
+
+    /// Publish this holder's progress, `done` of `total` units finished at
+    /// `unit_ms` each (Issue #4280 AC-2). A `verify.run` holder reports its
+    /// command matrix this way, so a refused claimant sees how many commands
+    /// are left and a paced estimate instead of only the TTL remainder.
+    pub fn publish_progress(
+        &self,
+        done: u64,
+        total: u64,
+        unit_ms: u64,
+    ) -> Result<(), CoordinatorError> {
+        write_json_atomic(
+            &self.root.join(HEAVY_PROGRESS_FILE),
+            &HeavyProgress {
+                target: self.ticket.target.clone(),
+                done,
+                total,
+                batch_size: 1,
+                batch_ms: unit_ms,
+                updated_at_ms: now_ms(),
+            },
+        )?;
+        Ok(())
     }
 
     /// Push the TTL deadline out by `ttl` from now (FR-2). The republished
@@ -1919,6 +1987,28 @@ mod tests {
     fn open_default_creates_the_coordinator_root() {
         let coordinator = IndexCoordinator::open_default().expect("open default");
         assert!(coordinator.root().is_dir());
+    }
+
+    /// Issue #4285: verification excludes on host CPU, search and index
+    /// builds on the model-loaded runner tree. Two resources, two roots — so
+    /// the lock, FIFO, reservations, ticket, and ledger are all disjoint.
+    #[test]
+    fn verification_coordinator_root_is_disjoint_from_the_index_root() {
+        let home = Path::new("/home/gwt/.gwt");
+        let index = coordinator_root_from(home);
+        let verification = verification_coordinator_root_from(home);
+        assert_ne!(index, verification);
+        assert!(verification.starts_with(home.join("runtime")));
+        assert!(!verification.starts_with(&index));
+        assert!(!index.starts_with(&verification));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
+        let verification = IndexCoordinator::open_default_verification().unwrap();
+        let index = IndexCoordinator::open_default().unwrap();
+        assert_eq!(verification.root(), verification_coordinator_root());
+        assert_ne!(verification.heavy_lock_path(), index.heavy_lock_path());
+        assert_ne!(verification.heavy_pending_dir(), index.heavy_pending_dir());
     }
 
     #[test]
@@ -2860,5 +2950,88 @@ mod tests {
         assert_eq!(HeavyHolderKind::Index.as_str(), "index");
         assert_eq!(HeavyHolderKind::Verification.as_str(), "verification");
         assert_eq!(HeavyHolderKind::Other.as_str(), "other");
+    }
+
+    /// Issue #4280 AC-2: a verification holder publishes how many commands its
+    /// run has left and how long each takes, so a waiter reads a real ETA and
+    /// whether another command follows, instead of only the TTL remainder.
+    #[test]
+    fn heavy_lease_status_reports_a_verification_runs_remaining_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let guard = own(
+            &coordinator,
+            &verification_key(),
+            JobPriority::ManualRebuild,
+        );
+        let heavy = guard
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(2_700))
+            .unwrap();
+
+        // Nothing has finished yet: the commands still to run are known, their
+        // pace is not, so the TTL remainder stays the estimate.
+        heavy.publish_progress(0, 3, 0).unwrap();
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(status.remaining_batches, Some(3));
+        assert_eq!(status.estimated_remaining_ms, status.remaining_ms);
+
+        // One command took 40 s and two are left.
+        heavy.publish_progress(1, 3, 40_000).unwrap();
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(status.remaining_batches, Some(2));
+        assert_eq!(status.estimated_remaining_ms, Some(80_000));
+
+        drop(heavy);
+        guard.complete(JobOutcome::Completed).unwrap();
+    }
+
+    /// Issue #4280 AC-1: a holder that finishes one run and immediately starts
+    /// the next rejoins the queue behind the claimant that waited through the
+    /// first one. Granting consumed its earlier place, so the second run is a
+    /// newcomer and never chains batches past a waiter.
+    #[test]
+    fn a_holder_that_comes_straight_back_queues_behind_the_waiter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let holder_key = TargetKey::verification("repo", "holder");
+        let waiter_key = TargetKey::verification("repo", "waiter");
+        let holder = own(&coordinator, &holder_key, JobPriority::ManualRebuild);
+        let first_batch = holder
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+            .unwrap();
+
+        // The waiter is refused while the first batch runs and leaves its
+        // reserved turn behind, exactly as a deferred `verify.run` does.
+        let waiter = own(&coordinator, &waiter_key, JobPriority::ManualRebuild);
+        assert!(matches!(
+            waiter.acquire_heavy_with_ttl(Duration::from_millis(100), Duration::from_secs(60)),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+
+        // Batch boundary: the holder releases and asks again at once.
+        drop(first_batch);
+        let second_batch =
+            holder.acquire_heavy_with_ttl(Duration::from_millis(300), Duration::from_secs(60));
+        assert!(
+            matches!(second_batch, Err(CoordinatorError::Timeout { .. })),
+            "the returning holder must queue behind the reserved waiter"
+        );
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(
+            status
+                .queue
+                .iter()
+                .map(|entry| entry.target.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec![waiter_key.file_stem(), holder_key.file_stem()],
+            "service order after the boundary: waiter first, returning holder last"
+        );
+
+        let turn = waiter
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+            .expect("the waiter takes the lease the holder handed back");
+        drop(turn);
+        waiter.complete(JobOutcome::Completed).unwrap();
+        holder.complete(JobOutcome::Completed).unwrap();
     }
 }

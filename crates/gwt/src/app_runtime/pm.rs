@@ -1873,7 +1873,18 @@ impl AppRuntime {
                     "PM launch completed while another live PM is registered; keeping existing"
                 );
             }
-            Ok((prefs, _)) => {
+            Ok((prefs, outcome)) => {
+                // Issue #4394 AC-2: succession ends the replaced Session as a
+                // PM even when it died without `pm.stop`, so restore cannot
+                // bring it back as a second, unregistered PM.
+                if let pm_registry::PmRegisterOutcome::ReplacedStale { previous } = outcome {
+                    if previous.session_id != session_id {
+                        super::startup::mark_auto_resume_source_completed(
+                            &self.sessions_dir,
+                            &previous.session_id,
+                        );
+                    }
+                }
                 self.sync_pm_session_cache(project_root, prefs.registration.as_ref());
             }
             Err(error) => {
@@ -2259,7 +2270,7 @@ impl AppRuntime {
         config.suppress_execution_control = true;
         if let Some(scratch) = pm_registry::pm_scratch_dir_for_pm_worktree(worktree) {
             config.env_vars.insert(
-                "GWT_PM_SCRATCH_DIR".to_string(),
+                pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
                 scratch.to_string_lossy().into_owned(),
             );
         }

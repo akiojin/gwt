@@ -287,12 +287,17 @@ def render_release_pr_body(
     version: str,
     bump: str,
     notes: str | None = None,
+    breaking_commits: Sequence[str] | None = None,
 ) -> str:
     """Render the reference-only Release PR body (Issue #3545 AC-1 / AC-2).
 
     Delivered Issues are listed as bare `#N` references. Every line, including
     free-text `notes`, passes through `neutralize_closing_keywords`, and the
     result is asserted to contain no closing reference before it is returned.
+
+    `breaking_commits` (Issue #4373 AC-2) lists commits that carry a breaking
+    marker. They are informational only: the marker no longer raises the
+    version, so the section says so and names the explicit `bump=major` route.
     """
     sections = [
         "## Summary",
@@ -304,6 +309,19 @@ def render_release_pr_body(
         f"- {version} (bump: {bump})",
         "",
     ]
+    if breaking_commits:
+        sections.extend(
+            [
+                "## Breaking Changes",
+                "",
+                "Breaking markers (`type!:` / `BREAKING CHANGE:`) were found in this range but are "
+                "not applied to the version (Issue #4373): a major release requires an explicit "
+                "`bump=major` from the person triggering Prepare Release.",
+                "",
+                *(f"- {line.strip()}" for line in breaking_commits if line.strip()),
+                "",
+            ]
+        )
     if notes and notes.strip():
         sections.extend(["## Changes", "", notes.strip(), ""])
     sections.extend(
@@ -394,6 +412,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional Markdown file appended as `## Changes`; closing keywords are neutralized.",
     )
+    parser.add_argument(
+        "--breaking-file",
+        dest="breaking_file",
+        default=None,
+        help="Optional file with one `<sha> <subject>` breaking commit per line, listed under `## Breaking Changes`.",
+    )
     return parser
 
 
@@ -420,7 +444,16 @@ def main() -> int:
         if args.notes_file:
             with open(args.notes_file, encoding="utf-8") as handle:
                 notes = handle.read()
-        print(render_release_pr_body(report, args.version, args.bump, notes=notes), end="")
+        breaking: list[str] = []
+        if args.breaking_file:
+            with open(args.breaking_file, encoding="utf-8") as handle:
+                breaking = [line for line in handle.read().splitlines() if line.strip()]
+        print(
+            render_release_pr_body(
+                report, args.version, args.bump, notes=notes, breaking_commits=breaking
+            ),
+            end="",
+        )
     else:
         print(render_text(report))
 

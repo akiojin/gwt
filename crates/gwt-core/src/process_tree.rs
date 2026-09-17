@@ -17,6 +17,144 @@ pub enum ProcessPriorityClass {
     Idle,
 }
 
+/// What priority a child spawned by [`spawn_at_normal_priority`] actually got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildPriorityReport {
+    /// Whether the child runs at normal priority, free of the priority its
+    /// launcher inherited.
+    pub restored: bool,
+    /// Human-readable account of the effective priority and, when it could
+    /// not be restored, where the inherited priority came from.
+    pub detail: String,
+}
+
+/// A child spawned by [`spawn_at_normal_priority`].
+pub struct NormalPriorityChild {
+    pub child: std::process::Child,
+    pub priority: ChildPriorityReport,
+}
+
+impl NormalPriorityChild {
+    /// Wait for the child and collect its piped output.
+    pub fn wait_with_output(self) -> std::io::Result<std::process::Output> {
+        self.child.wait_with_output()
+    }
+}
+
+/// `NORMAL_PRIORITY_CLASS`, passed at creation so a child does not inherit
+/// its launcher's BELOW_NORMAL / IDLE class.
+pub const WINDOWS_NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
+
+/// Issue #4405: spawn a heavy workload at normal priority even when the
+/// caller runs inside an agent tree lowered by the launch policy (SPEC #1921
+/// Phase 86). `verify.run` runs inside that tree, so without this its test
+/// binaries inherited BELOW_NORMAL / nice 10 and starved under agent load.
+///
+/// Windows restores the class at creation, which needs no privilege and keeps
+/// the child inside the agent Job, so pane-close containment is unchanged.
+/// Unix tries nice 0, but an unprivileged process can never lower its nice
+/// value; the report then names the inherited value instead of hiding it.
+pub fn spawn_at_normal_priority(
+    command: &mut std::process::Command,
+) -> std::io::Result<NormalPriorityChild> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(WINDOWS_CREATE_NO_WINDOW | WINDOWS_NORMAL_PRIORITY_CLASS);
+        let child = command.spawn()?;
+        let priority = match process_priority_class(child.id()) {
+            Ok(ProcessPriorityClass::Normal) => ChildPriorityReport {
+                restored: true,
+                detail: "normal priority class".to_string(),
+            },
+            Ok(class) => ChildPriorityReport {
+                restored: false,
+                detail: format!("{class:?} priority class despite a normal-class spawn"),
+            },
+            Err(error) => ChildPriorityReport {
+                restored: false,
+                detail: format!("priority class unreadable: {error}"),
+            },
+        };
+        Ok(NormalPriorityChild { child, priority })
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // SAFETY: setpriority is async-signal-safe and touches no memory. A
+        // refusal (EACCES / EPERM for an unprivileged caller) is reported
+        // from the child's effective nice below.
+        unsafe {
+            command.pre_exec(|| {
+                let _ = libc::setpriority(libc::PRIO_PROCESS as _, 0, 0);
+                Ok(())
+            });
+        }
+        // SAFETY: plain syscalls reading nice values.
+        let launcher = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+        let child = command.spawn()?;
+        let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, child.id() as libc::id_t) };
+        Ok(NormalPriorityChild {
+            child,
+            priority: unix_priority_report(launcher, nice),
+        })
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let child = command.spawn()?;
+        Ok(NormalPriorityChild {
+            child,
+            priority: ChildPriorityReport {
+                restored: false,
+                detail: "priority is not managed on this platform".to_string(),
+            },
+        })
+    }
+}
+
+#[cfg(unix)]
+fn unix_priority_report(launcher_nice: i32, child_nice: i32) -> ChildPriorityReport {
+    // getpriority answers -1 for a process that already exited; an
+    // unprivileged launcher above nice 0 could never have produced it.
+    if child_nice == -1 && launcher_nice > 0 {
+        return ChildPriorityReport {
+            restored: false,
+            detail: format!(
+                "nice unknown: the child exited before it could be read (launcher nice \
+                 {launcher_nice})"
+            ),
+        };
+    }
+    if child_nice <= 0 {
+        return ChildPriorityReport {
+            restored: true,
+            detail: format!("nice {child_nice}"),
+        };
+    }
+    // Naming the launcher's own nice separates the two sources that stack
+    // here: the launch policy nices the whole pane group (SPEC #1921 Phase
+    // 86, nice 10), and anything between that and this spawn can add more —
+    // a zsh `&` backgrounds at +5, so a matrix launched that way runs at 15,
+    // not 10. Blaming the policy for the total would send the reader to the
+    // wrong knob.
+    let source = if launcher_nice > child_nice {
+        format!("the launcher's nice {launcher_nice} (lowered to {child_nice} by the host)")
+    } else {
+        format!("the launcher, which itself runs at nice {launcher_nice}")
+    };
+    ChildPriorityReport {
+        restored: false,
+        detail: format!(
+            "nice {child_nice} inherited from {source}: an unprivileged process cannot lower \
+             its nice value, so this workload runs below normal priority and slows down under \
+             agent load. The agent launch policy (SPEC #1921 Phase 86) accounts for nice 10; \
+             anything above that was added between the pane and this spawn"
+        ),
+    }
+}
+
 #[cfg(windows)]
 mod windows_job {
     use std::process::Command;
@@ -27,9 +165,10 @@ mod windows_job {
             Foundation::{CloseHandle, HANDLE},
             System::{
                 JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
-                    JobObjectExtendedLimitInformation, QueryInformationJobObject,
-                    SetInformationJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+                    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+                    JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
+                    QueryInformationJobObject, SetInformationJobObject,
+                    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
                     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                     JOB_OBJECT_CPU_RATE_CONTROL, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
                     JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -273,6 +412,23 @@ mod windows_job {
             // SAFETY: with HARD_CAP set the union carries `CpuRate`.
             let rate = unsafe { info.Anonymous.CpuRate };
             Ok(Some((rate / CPU_RATE_PER_PERCENT).min(100) as u8))
+        }
+
+        /// Whether `process_id` currently runs inside this Job. Descendants
+        /// join their parent's Job, so this covers a whole agent tree.
+        pub fn contains_process(&self, process_id: u32) -> Result<bool, WindowsJobError> {
+            let job = self.handle.expect("live Windows Job handle");
+            // SAFETY: OpenProcess returns a new owned handle for the exact PID.
+            let process =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
+                    .map(ScopedHandle)
+                    .map_err(|source| operation_error("OpenProcess", source))?;
+            let mut contained = windows::core::BOOL::default();
+            // SAFETY: both handles are live for this call and `contained` is
+            // writable for its duration.
+            unsafe { IsProcessInJob(process.0, Some(job), &mut contained) }
+                .map_err(|source| operation_error("IsProcessInJob", source))?;
+            Ok(contained.as_bool())
         }
 
         /// Whether `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is currently armed.
