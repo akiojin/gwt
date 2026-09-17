@@ -92,7 +92,8 @@ pub use agent_project_state::{
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
-    cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,
+    cleanup_selected_branches_with_progress, BranchCleanupOperationSnapshot,
+    BranchCleanupOperationStore, BranchCleanupOptions, BranchCleanupProgressEntry,
     BranchCleanupProgressPhase, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
 pub use branch_list::{

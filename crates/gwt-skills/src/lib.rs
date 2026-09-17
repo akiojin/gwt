@@ -1499,8 +1499,10 @@ mod tests {
     }
 
     #[test]
-    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+    fn gwt_execute_documents_issue_bound_build_lifecycle() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().expect("materialization target");
+        distribute_to_worktree(materialized.path()).expect("materialize managed skills");
         let claude =
             std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
                 .expect("read Claude gwt-execute skill");
@@ -1516,6 +1518,27 @@ mod tests {
             (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
             (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
         ] {
+            assert_eq!(
+                std::fs::read_to_string(materialized.path().join(relative)).unwrap(),
+                guidance,
+                "{relative} must distribute the current lifecycle contract"
+            );
+            for required in [
+                "`build.start` with `params.spec:<n>` for every Issue owner",
+                "`build.phase` with the same `params.spec:<n>`",
+                "`build.complete` with the same `params.spec:<n>`",
+                "`build.abort` with the same `params.spec:<n>`",
+                "Without an owner Issue, do not call `build.*`",
+            ] {
+                assert!(
+                    guidance.contains(required),
+                    "{relative} must document the accepted lifecycle params: {required}"
+                );
+            }
+            assert!(
+                !guidance.contains("params.task"),
+                "{relative} must not recommend the unsupported task parameter"
+            );
             assert!(
                 guidance.contains(
                     "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
@@ -2776,11 +2799,16 @@ mod tests {
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        // `Ready PR 禁止` used to be required here. That phrase encoded the
+        // retired rule "incomplete work may only be a Draft PR"; keeping it
+        // would pin AGENTS.md to a policy this repository no longer has.
+        // The gate still exists — it moved from "Ready vs Draft" to
+        // "PR vs no PR" — so assert the phrase that carries it now.
         for required in [
             "Ready PR Gate",
             "Draft PR",
             "単独で配信可能",
-            "Ready PR 禁止",
+            "Draft PR を作成しない",
         ] {
             assert!(
                 agents.contains(required),

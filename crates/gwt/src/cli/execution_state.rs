@@ -51,7 +51,7 @@ pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-c
 /// silently rewrite this independently hashed record.
 pub const EXECUTION_GENERATION_POINTER_STATE_RELATIVE: &str =
     ".gwt/skill-state/execution-generation-pointer.json";
-const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
+pub(crate) const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
 const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
@@ -2335,6 +2335,9 @@ pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool 
             ) | (
                 SuccessorPredecessorStatus::Completed,
                 MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+            ) | (
+                SuccessorPredecessorStatus::Active,
+                CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
             )
         )
 }
@@ -2945,7 +2948,7 @@ pub struct OwnerExecutionDiagnosis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_worktree: Option<String>,
     /// Exact runtime evidence for the holder: `live`, `terminal`, `defunct`,
-    /// `host_dead`, `absent`, `unknown`, or `not_evaluated`.
+    /// `host_dead`, `child_exited`, `absent`, `unknown`, or `not_evaluated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_runtime: Option<String>,
     /// Whether the generation reaper is allowed to release this generation as
@@ -7328,6 +7331,9 @@ pub fn prepared_owner_launch_successor_for_predecessor(
         .filter(|attempt| {
             attempt.status == ContinuationAttemptStatus::Prepared
                 && is_owner_launch_successor_attempt(attempt)
+                // Concurrent launches are independent requests, not a replay
+                // of the terminal predecessor's manual launch.
+                && attempt.predecessor_status != SuccessorPredecessorStatus::Active
                 && attempt.predecessor.generation_id == current.identity.generation_id
         });
     let candidate = candidates.next().cloned();
@@ -9929,8 +9935,18 @@ fn update_exact_recovery_session_with_publisher<T>(
         },
     ) {
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated((value, binding))) => {
-            if let Some(publisher) = publisher.as_mut() {
-                publisher.publish(binding.expect("Host adoption retains its Session binding"));
+            // Issue #4443 AC-10: an unbound Session here is a refusal, not an
+            // invariant violation. Panicking crossed the `spawn_blocking`
+            // boundary and the adoption handler answered `500 code=internal`.
+            match (publisher.as_mut(), binding) {
+                (Some(publisher), Some(binding)) => publisher.publish(binding),
+                (Some(_), None) => {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "Host adoption cannot publish authority: the durable Session carries no execution binding; run JSON operation `execution.continue` to bind canonical authority first",
+                    ))
+                }
+                (None, _) => {}
             }
             Ok(value)
         }
@@ -10762,6 +10778,49 @@ pub fn settle(
     crate::cli::trusted_store::with_write_lease(worktree, || {
         settle_locked(worktree, session_id, settlement)
     })
+}
+
+/// Identity of the Session holding a worktree's execution control record when
+/// the caller is not that Session (Issue #4454).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignExecutionRecordHolder {
+    pub holder_session_id: String,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+}
+
+/// Prove that `session_id` holds no execution authority over this worktree's
+/// Work, and name the Session that does (Issue #4454).
+///
+/// Stop gates use this to tell an orphan window from an authority holder
+/// before demanding a settlement. Every refusal path stays conservative: a
+/// missing record (never launched, so the settlement operations accept the
+/// caller), a failed integrity check (the execution control gate owns that
+/// case and blocks first), and a concurrent generation owned by `session_id`
+/// all return `None`. A Session that might hold authority is therefore never
+/// mistaken for an orphan.
+pub(crate) fn foreign_record_holder(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<ForeignExecutionRecordHolder>> {
+    let Some(flat) = load(worktree)? else {
+        return Ok(None);
+    };
+    if !integrity_ok(&flat) || flat.primary_session_id == session_id {
+        return Ok(None);
+    }
+    let owner = ExecutionOwnerKey {
+        kind: flat.owner_kind,
+        number: flat.owner_number,
+    };
+    if concurrent_generation_record_for_session(worktree, owner, session_id)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(ForeignExecutionRecordHolder {
+        holder_session_id: flat.primary_session_id,
+        owner_kind: flat.owner_kind,
+        owner_number: flat.owner_number,
+    }))
 }
 
 /// SPEC #3590 FR-009: the execution projection a Session owns when the flat
@@ -11726,6 +11785,55 @@ const EXECUTION_RECORD_RECOVERY_OPERATIONS: [&str; 6] = [
 /// recovery is available to this Session; only a fresh linked-owner launch
 /// can proceed (Issue #4029 AC-2).
 pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
+
+/// Issue #4443 AC-2: the gwtd operations a Host refusal may name to an agent.
+///
+/// A refusal that reaches an agent over the capability bridge carries operation
+/// names from this list and nothing else. Membership is the truthfulness check:
+/// #4396 stalled an agent for over an hour by naming `workspace.prune`, which
+/// does not exist, and free-form refusal prose cannot cross the bridge because
+/// it may carry host-side paths and identifiers.
+///
+/// Ordered so that a name containing another is matched first;
+/// [`recovery_operations_named_in`] then reports the specific operation rather
+/// than the one embedded in it.
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 14] = [
+    "execution.release_prepared",
+    "execution.continue",
+    "execution.status",
+    "execution.repair",
+    "execution.reopen",
+    "execution.adopt",
+    "workspace.ensure",
+    "workspace.update",
+    // Issue #4465: the container-ambiguity refusal names these three. They
+    // were absent, so the one refusal that actually needed a prune route could
+    // not carry it across the bridge and the agent was left guessing.
+    "workspace.work_prune",
+    "workspace.candidates",
+    "workspace.join",
+    "build.abort",
+    "verify.plan",
+    "verify.run",
+];
+
+/// The recovery operations `message` names, deduplicated and ordered as in
+/// [`AGENT_RECOVERY_OPERATIONS`]. Refusals already state their route in prose;
+/// this lifts it into a structured field the agent bridge is allowed to carry.
+#[must_use]
+pub fn recovery_operations_named_in(message: &str) -> Vec<String> {
+    let mut remaining = message.to_string();
+    let mut named = Vec::new();
+    for operation in AGENT_RECOVERY_OPERATIONS {
+        if remaining.contains(operation) {
+            // Blank the match so `execution.continue` is not also reported as
+            // `execution.repair`'s shorter neighbours in a later pass.
+            remaining = remaining.replace(operation, " ");
+            named.push(operation.to_string());
+        }
+    }
+    named
+}
 
 /// Recoveries that need no session identity or execution authority, so naming
 /// one is always truthful (Issue #4074 AC-3).
@@ -15137,10 +15245,13 @@ pub(crate) fn adopt_for_authenticated_host(
         &mut out,
         Some(publisher),
     )
-    .map_err(|_| {
+    // Issue #4443 AC-10: the underlying refusal already names the repair route
+    // (`execution.repair`, `verify.plan` ...). Replacing it with a fixed
+    // sentence left the agent with a bare `code=internal` and no way forward.
+    .map_err(|error| {
         AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::Internal,
-            "Host adoption did not complete; inspect execution.status before retrying",
+            format!("Host adoption did not complete: {error}"),
         )
     })?;
     if code != 0 {
@@ -18698,6 +18809,9 @@ mod tests {
         .unwrap();
 
         let held = diagnose_owner(worktree.path(), owner);
+        // Issue #3712 AC-3: the literal the PM reads for this shape, so a
+        // living GUI Host can never be mistaken for a living agent again.
+        assert_eq!(held.holder_runtime.as_deref(), Some("child_exited"));
         assert!(
             held.reclaimable,
             "a living GUI host does not keep its dead child alive"
