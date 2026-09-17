@@ -224,8 +224,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "workspace.work_prune" | "workspace.work-prune" => {
+            // Issue #4465 AC-4'': this operation closes, discards and detaches
+            // durable Work state across every Work in the project, so a scope
+            // parameter it does not implement is a refusal. `params.work` was
+            // silently dropped and the call then applied machine-wide.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "ids"],
+                "workspace.work_prune",
+            )?;
             CliCommand::Workspace(WorkspaceCommand::WorkPrune {
-                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+                // Issue #4465 AC-8: an unqualified call reports candidates
+                // only; applying requires an explicit opt-out.
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
                 ids: optional_string_vec(params, "ids")?,
                 project_root: optional_string(params, "project_root")?,
             })
@@ -353,6 +364,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .filter(|value| !value.is_null())
                 .map(|_| optional_string_vec(params, "labels"))
                 .transpose()?,
+        }),
+        "issue.close" => CliCommand::Issue(IssueCommand::Close {
+            number: required_u64(params, "number")?,
+            reason: issue_close_reason(params)?,
+            comment: optional_string(params, "comment")?,
+        }),
+        "issue.reopen" => CliCommand::Issue(IssueCommand::Reopen {
+            number: required_u64(params, "number")?,
+            comment: optional_string(params, "comment")?,
         }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
@@ -963,6 +983,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.close" | "pane.stop" => CliCommand::Pane(PaneCommand::Close {
             id: required_string(params, "id")?,
         }),
+        "pane.recover" => {
+            reject_unknown_params(
+                params,
+                &["started_after", "started_before", "apply"],
+                "pane.recover",
+            )?;
+            let started_after = required_string(params, "started_after")?;
+            let started_before = required_string(params, "started_before")?;
+            super::pane::parse_recovery_bounds(&started_after, &started_before)
+                .map_err(CliParseError::InvalidJson)?;
+            CliCommand::Pane(PaneCommand::Recover {
+                started_after,
+                started_before,
+                apply: optional_bool(params, "apply")?.unwrap_or(false),
+            })
+        }
         "pane.send" => CliCommand::Pane(PaneCommand::Send {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
@@ -1111,25 +1147,42 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
         "title_summary",
         "board.post must not update agent title_summary",
     )?;
-    Ok(CliCommand::Board(BoardCommand::Post(Box::new(
-        BoardPostCommand {
-            kind: required_string(params, "kind")?,
-            body: Some(required_string(params, "body")?),
-            file: None,
-            title: optional_string(params, "title")?,
-            title_summary: None,
-            parent: optional_string(params, "parent")?,
-            topics: optional_string_vec(params, "topics")?,
-            owners: optional_string_vec(params, "owners")?,
-            targets: optional_string_vec(params, "targets")?,
-            mentions: optional_string_vec(params, "mentions")?,
-            // Issue #3655: accepts a single id or a list, because the common
-            // case is closing exactly one escalation and quoting it as an
-            // array is the kind of ceremony agents get wrong.
-            resolves: optional_string_or_string_vec(params, "resolves")?,
-            broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
-        },
-    ))))
+    for key in [
+        "session_id",
+        "project_id",
+        "provider",
+        "worktree_form",
+        "recovery_id",
+        "entry_id",
+        "payload_digest",
+        "provider_receipt",
+        "operation_id",
+    ] {
+        reject_key(
+            params,
+            key,
+            "untrusted recovery identity field is not accepted by public board.post",
+        )?;
+    }
+    let intent_id = optional_string(params, "intent_id")?;
+    let command = Box::new(BoardPostCommand {
+        kind: required_string(params, "kind")?,
+        body: Some(required_string(params, "body")?),
+        file: None,
+        title: optional_string(params, "title")?,
+        title_summary: None,
+        parent: optional_string(params, "parent")?,
+        topics: optional_string_vec(params, "topics")?,
+        owners: optional_string_vec(params, "owners")?,
+        targets: optional_string_vec(params, "targets")?,
+        mentions: optional_string_vec(params, "mentions")?,
+        resolves: optional_string_or_string_vec(params, "resolves")?,
+        broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
+    });
+    Ok(CliCommand::Board(match intent_id {
+        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        None => BoardCommand::Post(command),
+    }))
 }
 
 fn issue_spec_edit(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -1433,6 +1486,7 @@ fn index_scope(value: &str) -> Result<IndexScope, CliParseError> {
         "memory" => Ok(IndexScope::Memory),
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
+        "works" => Ok(IndexScope::Works),
         "files" => Ok(IndexScope::Files),
         "files_docs" | "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::InvalidJson(format!(
@@ -1686,6 +1740,25 @@ fn issue_monitor_priority_position(
     }
 }
 
+/// SPEC #4249 FR-001: `reason` is the optional GitHub `state_reason` of a
+/// close. An unrecognised spelling is refused rather than silently dropped,
+/// because a dropped reason closes the Issue with the wrong rationale.
+fn issue_close_reason(
+    params: &Map<String, Value>,
+) -> Result<Option<gwt_github::client::IssueCloseReason>, CliParseError> {
+    let Some(raw) = optional_string(params, "reason")? else {
+        return Ok(None);
+    };
+    gwt_github::client::IssueCloseReason::parse(&raw)
+        .map(Some)
+        .ok_or_else(|| {
+            CliParseError::InvalidJson(format!(
+                "reason must be one of {:?}",
+                gwt_github::client::IssueCloseReason::ACCEPTED
+            ))
+        })
+}
+
 /// Issue #4037 AC-5 / #3906 AC-3: `update_drain` is the operator bool or the
 /// auto-drain object `{reason, version}`.
 fn optional_update_drain_control(
@@ -1839,8 +1912,8 @@ mod tests {
         WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
-    use crate::cli::IssueMonitorPriorityPosition;
     use crate::cli::TestEnv;
+    use crate::cli::{BoardCommand, IssueMonitorPriorityPosition};
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
 
@@ -2189,6 +2262,7 @@ mod tests {
                 review_status: "APPROVED".to_string(),
                 body: String::new(),
                 closing_issues: Vec::new(),
+                fallback_owner_closed: false,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
@@ -2998,6 +3072,40 @@ mod tests {
         ));
     }
 
+    /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
+    /// an unqualified call only reports candidates. The first call used to be
+    /// an immediate `APPLIED` across every Work on the machine (1100 rows,
+    /// other projects included).
+    #[test]
+    fn workspace_work_prune_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok("workspace.work-prune", json!({"dry_run": false})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    /// Issue #4465 AC-4'': a scope parameter this operation does not implement
+    /// must be refused, never dropped. `params.work` was silently ignored and
+    /// the call then applied to the whole machine — the first specimen of the
+    /// #4444 dropped-params family that changes state.
+    #[test]
+    fn workspace_work_prune_rejects_an_unknown_scope_param() {
+        match err(
+            "workspace.work_prune",
+            json!({"work": "work-work-issue-4029-124040a6"}),
+        ) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("work"), "{message}");
+                assert!(message.contains("ids"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[test]
     fn workspace_join_requires_workspace_id() {
         match err("workspace.join", json!({"agent_session": "s"})) {
@@ -3749,6 +3857,72 @@ mod tests {
         ));
     }
 
+    /// SPEC #4249 FR-001: `issue.close` / `issue.reopen` need only `number`;
+    /// `reason` accepts the GitHub spellings and is refused — never silently
+    /// dropped — when it is not one of them, because a dropped reason closes the
+    /// Issue with the wrong rationale.
+    #[test]
+    fn issue_close_and_reopen_parse_their_optional_params() {
+        assert!(matches!(
+            ok("issue.close", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.close",
+                json!({"number": 7, "reason": "not-planned", "comment": "why"})
+            ),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                ..
+            })
+        ));
+        for reason in ["completed", "not_planned"] {
+            assert!(
+                matches!(
+                    ok("issue.close", json!({"number": 7, "reason": reason})),
+                    CliCommand::Issue(IssueCommand::Close {
+                        reason: Some(_),
+                        ..
+                    })
+                ),
+                "{reason}"
+            );
+        }
+        // Duplicate closure needs a canonical issue ID; tracked in #4489.
+        assert!(matches!(
+            err("issue.close", json!({"number": 7, "reason": "duplicate"})),
+            CliParseError::InvalidJson(_)
+        ));
+        match err("issue.close", json!({"number": 7, "reason": "wontfix"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("not_planned"), "{message}")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("issue.close", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert!(matches!(
+            ok("issue.reopen", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            })
+        ));
+        match err("issue.reopen", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,
     /// while an explicit empty array clears them.
     #[test]
@@ -3769,6 +3943,58 @@ mod tests {
             cleared,
             CliCommand::Issue(IssueCommand::Edit { labels: Some(ref labels), .. }) if labels.is_empty()
         ));
+    }
+
+    #[test]
+    fn board_post_intent_id_selects_recovery_and_normal_shape_stays_normal() {
+        let normal = ok("board.post", json!({"kind": "status", "body": "normal"}));
+        assert!(matches!(normal, CliCommand::Board(BoardCommand::Post(_))));
+
+        let recovery = ok(
+            "board.post",
+            json!({
+                "kind": "status",
+                "body": "recover",
+                "intent_id": "stable-intent-1"
+            }),
+        );
+        assert!(matches!(
+            recovery,
+            CliCommand::Board(BoardCommand::RecoveryPost {
+                ref intent_id,
+                ..
+            }) if intent_id == "stable-intent-1"
+        ));
+    }
+
+    #[test]
+    fn board_post_rejects_untrusted_recovery_identity_fields() {
+        for intent_id in [None, Some("stable-intent-1")] {
+            for key in [
+                "session_id",
+                "project_id",
+                "provider",
+                "worktree_form",
+                "recovery_id",
+                "entry_id",
+                "payload_digest",
+                "provider_receipt",
+                "operation_id",
+            ] {
+                let mut params = serde_json::Map::from_iter([
+                    ("kind".to_string(), json!("status")),
+                    ("body".to_string(), json!("recover")),
+                ]);
+                if let Some(intent_id) = intent_id {
+                    params.insert("intent_id".to_string(), json!(intent_id));
+                }
+                params.insert(key.to_string(), json!("untrusted"));
+                assert!(matches!(
+                    err("board.post", Value::Object(params)),
+                    CliParseError::InvalidValue { .. }
+                ));
+            }
+        }
     }
 
     #[test]
@@ -4660,6 +4886,7 @@ mod tests {
             "memory",
             "discussions",
             "board",
+            "works",
             "files",
             "files-docs",
         ] {
@@ -4858,6 +5085,20 @@ mod tests {
         assert!(matches!(
             ok("build.start", json!({"spec": 1})),
             CliCommand::Build(SkillStateAction::Start { spec: 1 })
+        ));
+    }
+
+    #[test]
+    fn pane_recover_accepts_a_bounded_restore_burst() {
+        assert!(matches!(
+            ok(
+                "pane.recover",
+                json!({
+                    "started_after": "2026-09-14T05:00:00Z",
+                    "started_before": "2026-09-14T05:05:00Z"
+                })
+            ),
+            CliCommand::Pane(_)
         ));
     }
 

@@ -2672,6 +2672,7 @@ pub fn run_verification(
 struct RunOptions<'a> {
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
+    on_progress: Option<&'a mut dyn FnMut(usize, usize, std::time::Duration)>,
 }
 
 fn run_verification_for_caller(
@@ -2699,7 +2700,7 @@ fn run_verification_inner<F>(
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    options: RunOptions<'_>,
+    mut options: RunOptions<'_>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
@@ -2758,6 +2759,10 @@ where
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
         );
     }
+    let commands_started = std::time::Instant::now();
+    if let Some(on_progress) = options.on_progress.as_mut() {
+        on_progress(0, commands.len(), std::time::Duration::ZERO);
+    }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
         let capture = options
@@ -2788,6 +2793,9 @@ where
             output_tail: persisted_failure_output(exit_code, &tail),
             headed_e2e,
         });
+        if let Some(on_progress) = options.on_progress.as_mut() {
+            on_progress(results.len(), commands.len(), commands_started.elapsed());
+        }
     }
     after_commands();
     let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
@@ -4115,15 +4123,31 @@ pub(super) fn run<E: CliEnv>(
                 out.push_str(&refusal);
                 return Ok(2);
             }
-            // SPEC #3576: the canonical runner owns its in-process lease.
-            // Ordinary development processes do not delay admission. A budget overrun
-            // answers `deferred` without writing a record.
+            // SPEC #3576 / Issue #4196: only heavy canonical matrices claim
+            // an in-process lease. Classify the commands before admission;
+            // a budget overrun answers `deferred` without writing a record.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
-            let admission =
-                crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
-            out.push_str(&admission.summary());
-            out.push('\n');
+            let admission = match crate::cli::verification_lease::first_heavy_command(&commands) {
+                Some(heavy) => {
+                    out.push_str(&format!(
+                        "verify: scope — heavy; `{heavy}` needs the host to itself\n"
+                    ));
+                    let granted =
+                        crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
+                    out.push_str(&granted.summary());
+                    out.push('\n');
+                    Some(granted)
+                }
+                None => {
+                    out.push_str(&format!(
+                        "verify: scope — light; {count} command(s) narrowly scoped, so this run \
+                         shares the host instead of claiming the lease\n",
+                        count = commands.len()
+                    ));
+                    None
+                }
+            };
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to load verification plan for quarantine preparation: {error}"
@@ -4147,6 +4171,11 @@ pub(super) fn run<E: CliEnv>(
                         user_verification_result.as_deref()
                     },
                     headed_e2e_commands: &headed_e2e_commands,
+                    on_progress: Some(&mut |done, total, elapsed| {
+                        if let Some(admission) = admission.as_ref() {
+                            admission.publish_progress(done, total, elapsed);
+                        }
+                    }),
                 },
             );
             // Release the in-process lease before the (lease-free) evidence
@@ -4653,6 +4682,7 @@ pub(crate) mod tests {
             RunOptions {
                 user_verification_result: None,
                 headed_e2e_commands: &commands,
+                ..RunOptions::default()
             },
             || {},
         )
@@ -6087,6 +6117,66 @@ mod tests {
         )
         .expect_err("missing GWT_SESSION_ID must fail");
         assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
+    }
+
+    /// Issue #4196 AC-2 / AC-4: `verify.run` decides on host admission by
+    /// reading the commands it was given. A matrix narrowed to one named test
+    /// target starts while another target holds the host lease — before this,
+    /// admission ran unconditionally and the same matrix answered `deferred`
+    /// after waiting out its whole budget.
+    #[test]
+    fn verify_run_skips_host_admission_for_a_light_matrix() {
+        use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+        let coordinator = IndexCoordinator::open_default_verification().unwrap();
+        let other = TargetKey::verification("other-repo", "other-worktree");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(
+                &other,
+                JobPriority::ManualRebuild,
+                std::time::Duration::from_millis(250),
+            )
+            .unwrap()
+        else {
+            panic!("a private lease root must admit the owner");
+        };
+        let _lease = guard
+            .acquire_heavy_with_ttl(
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+
+        // Narrowed to one named integration test of one package, and pointed
+        // at a directory with no manifest so cargo answers immediately: the
+        // command's outcome is irrelevant here, its classification is not.
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (_code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["cargo test -p gwt --test issue-4196-absent".to_string()],
+                headed_e2e_commands: vec![],
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap_or_else(|err| panic!("a light matrix must not queue behind the host lease: {err}"));
+        assert!(
+            out.contains("scope — light"),
+            "the run must report the classification it acted on: {out}"
+        );
+        assert!(
+            !out.contains("host admission"),
+            "a light matrix must not claim the host lease: {out}"
+        );
     }
 
     #[test]

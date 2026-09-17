@@ -1788,17 +1788,26 @@ fn sustained_interactive_traffic_and_background_index_work_both_progress() {
     wait_for_file(&ready, Duration::from_secs(30));
     let (baseline, _) = read_counter(&ledger);
 
-    // Three full bursts of searches, issued back to back.
+    // Three full bursts with a live background waiter at each release.
+    // The helper drops its pending registration between jobs; its ready
+    // marker alone does not prove sustained contention. Hold each search
+    // lease until that background worker has queued its next attempt.
     let rounds = 3 * MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
     for round in 1..=rounds {
-        coordinator
+        let lease = coordinator
             .acquire_interactive_search_heavy(&search_key, Duration::from_secs(20))
             .unwrap_or_else(|err| {
                 let _ = fs::write(&stop, b"stop");
                 panic!("interactive search {round}/{rounds} must still be served: {err}")
-            })
-            .release()
-            .expect("release search lease");
+            });
+        poll_until(Duration::from_secs(20), || {
+            coordinator
+                .heavy_lease_status()
+                .expect("read queued background waiter")
+                .pending
+                >= 1
+        });
+        lease.release().expect("release search lease");
     }
 
     let (after, _) = read_counter(&ledger);

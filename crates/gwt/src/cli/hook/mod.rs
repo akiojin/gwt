@@ -19,6 +19,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+mod context;
 pub mod coordination_event;
 pub mod diagnostics;
 pub mod effect_classifier;
@@ -66,7 +67,22 @@ pub(crate) use identity::{
 /// must be deterministic per worktree so an ambient value from another session
 /// can never redirect policy.
 pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
-    crate::pm_registry::is_pm_worktree(&gwt_core::paths::resolve_current_worktree_root(worktree))
+    // Hooks may supply a nested cwd. Find the PM root without repeatedly
+    // spawning git on the warm prompt path, and retain the full canonical
+    // registry check so an ordinary branch named pm/worktree cannot match.
+    worktree.ancestors().any(|ancestor| {
+        if ancestor.file_name() != Some(std::ffi::OsStr::new("worktree"))
+            || ancestor.parent().and_then(std::path::Path::file_name)
+                != Some(std::ffi::OsStr::new("pm"))
+        {
+            return false;
+        }
+        if crate::pm_registry::is_pm_worktree(ancestor) {
+            return true;
+        }
+        let canonical = dunce::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+        crate::pm_registry::is_canonical_pm_worktree(&canonical)
+    })
 }
 
 /// Every hook name exposed via `gwtd hook <name>`.
@@ -710,6 +726,24 @@ mod tests {
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
 
     use super::*;
+
+    #[test]
+    fn resident_pm_policy_recognizes_nested_cwd_only_under_canonical_pm_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let pm = gwt_core::paths::gwt_projects_dir().join("repo-hash/pm/worktree");
+        let nested = pm.join("crates/gwt/src");
+        fs::create_dir_all(&nested).expect("nested PM cwd");
+
+        assert!(is_resident_pm_worktree(&pm));
+        assert!(is_resident_pm_worktree(&nested));
+        assert!(is_resident_pm_worktree(
+            &dunce::canonicalize(&nested).expect("canonical cwd")
+        ));
+        assert!(!is_resident_pm_worktree(
+            &temp.path().join("production/pm/worktree/crates/gwt/src")
+        ));
+    }
 
     #[test]
     fn invalid_hook_event_is_written_to_the_error_ledger() {
