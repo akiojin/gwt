@@ -70757,6 +70757,7 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
                 state: gwt::issue_monitor::IssueClosureState::Closed,
                 evidence: gwt::issue_monitor::IssueClosureEvidence::DirectRelease,
                 issue_updated_at: None,
+                reopened_after_close: false,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
