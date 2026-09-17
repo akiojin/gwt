@@ -4378,13 +4378,15 @@ fn scan_issue_monitor_once_blocking(
                         loaded.issues[index] = refreshed;
                         confirmed.insert(issue_number);
                     }
-                    Err(failure)
-                        if crate::issue_monitor_worker::is_rate_limit_failure(&failure.detail) =>
-                    {
+                    // Issue #4436 AC-1: a per-candidate readback failure used to
+                    // abort the whole scan (`launch_suppressed`), so one Issue
+                    // whose cache entry could not be parsed stopped every other
+                    // Issue from launching. The candidate is left unconfirmed —
+                    // exactly as for a rate-limit refusal — and the pass goes on.
+                    Err(failure) => {
                         deferred_candidates.insert(issue_number);
                         deferral.get_or_insert(failure);
                     }
-                    Err(failure) => return Err(failure),
                 }
             }
             if let Some(failure) = deferral {
@@ -10784,6 +10786,13 @@ exit 0
     /// Issue #3933 AC-2 (review follow-up): if the authoritative state cannot be
     /// read either, the fallback has nothing trustworthy to launch from and the
     /// scan fails closed rather than guessing the candidate is still open.
+    ///
+    /// Issue #4436 AC-1: the fail-closed contract is the `confirmed_previous_candidates`
+    /// allowlist, not an aborted pass. The candidate whose readback failed is
+    /// left unconfirmed and cannot be claimed, exactly as a rate-limited one
+    /// already was; every other candidate and stage keeps running. Aborting
+    /// instead suppressed the launch stage for every unrelated Issue in the
+    /// same scan.
     #[test]
     fn the_fallback_fails_closed_when_the_candidate_state_cannot_be_confirmed() {
         let _env_lock = crate::env_test_lock()
@@ -10839,13 +10848,32 @@ exit 0
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
-        let failure = super::scan_issue_monitor_once_blocking(scope, preserved, true)
-            .expect_err("an unconfirmable candidate state must not authorize a launch");
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("one unconfirmable candidate must not abort the pass");
 
-        assert_eq!(
-            failure.stage,
-            crate::issue_monitor_worker::IssueMonitorScanStage::CandidateLoad
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "an unconfirmable candidate state must not authorize a launch: {:?}",
+            scanned.pending_effects()
         );
+        assert!(
+            scanned.status_view().active_count == 0,
+            "nothing may be launched from a state that could not be confirmed"
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a degraded scan still reports why");
+        for expected in [
+            "candidate-load",
+            "continued_with_deferred_candidates",
+            "#44",
+        ] {
+            assert!(last_error.contains(expected), "{expected}: {last_error}");
+        }
     }
 
     /// Issue #3928 AC-1 / AC-2: while a rate-limit window persisted by another
