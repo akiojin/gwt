@@ -13,6 +13,37 @@ use crate::settings_local::{
     write_text_atomically,
 };
 
+const OPENCODE_PLUGIN_PATH: &str = ".gwt/opencode/plugins/gwt-hooks.js";
+const OPENCODE_CONFIG_PATH: &str = ".gwt/opencode/opencode.json";
+const OPENCODE_SKIP_PERMISSIONS_PATH: &str = ".gwt/opencode/skip-permissions.json";
+const OPENCLAW_CONFIG_PATH: &str = ".gwt/openclaw/openclaw.json";
+const OPENCLAW_PACKAGE_PATH: &str = ".gwt/openclaw/plugins/gwt-hook-bridge/package.json";
+const OPENCLAW_MANIFEST_PATH: &str = ".gwt/openclaw/plugins/gwt-hook-bridge/openclaw.plugin.json";
+const OPENCLAW_PLUGIN_PATH: &str = ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts";
+const HERMES_CONFIG_PATH: &str = ".gwt/hermes/config.yaml";
+const HERMES_SCRIPT_PATH: &str = ".gwt/hermes/agent-hooks/gwt-hook.sh";
+
+/// Credential leaves bridged into the worktree-local Hermes home.
+pub const HERMES_CREDENTIAL_FILES: [&str; 2] = [".env", "auth.json"];
+
+/// Generated provider hook files, excluding the Hermes credential links.
+pub fn managed_provider_hook_paths(worktree: &Path) -> Vec<PathBuf> {
+    [
+        OPENCODE_PLUGIN_PATH,
+        OPENCODE_CONFIG_PATH,
+        OPENCODE_SKIP_PERMISSIONS_PATH,
+        OPENCLAW_CONFIG_PATH,
+        OPENCLAW_PACKAGE_PATH,
+        OPENCLAW_MANIFEST_PATH,
+        OPENCLAW_PLUGIN_PATH,
+        HERMES_CONFIG_PATH,
+        HERMES_SCRIPT_PATH,
+    ]
+    .into_iter()
+    .map(|path| worktree.join(path))
+    .collect()
+}
+
 /// Generate OpenCode project-local hook bridge assets under `.gwt/opencode`.
 ///
 /// Writes three artifacts:
@@ -25,10 +56,9 @@ use crate::settings_local::{
 ///   config overlay is the parity mechanism for `--yolo` /
 ///   `--dangerously-skip-permissions`.
 pub fn generate_opencode_hooks(worktree: &Path) -> io::Result<()> {
-    let config_dir = worktree.join(".gwt/opencode");
-    let plugin_path = config_dir.join("plugins/gwt-hooks.js");
-    let config_path = config_dir.join("opencode.json");
-    let skip_permissions_path = config_dir.join("skip-permissions.json");
+    let plugin_path = worktree.join(OPENCODE_PLUGIN_PATH);
+    let config_path = worktree.join(OPENCODE_CONFIG_PATH);
+    let skip_permissions_path = worktree.join(OPENCODE_SKIP_PERMISSIONS_PATH);
     let plugin_content = opencode_plugin_content(&gwt_hook_bin_path());
     let config = json!({
         "plugin": ["./plugins/gwt-hooks.js"],
@@ -96,8 +126,8 @@ pub(crate) fn generate_hermes_hooks_with_source(
     source_home: Option<&Path>,
 ) -> io::Result<()> {
     let home = worktree.join(".gwt/hermes");
-    let config_path = home.join("config.yaml");
-    let script_path = home.join("agent-hooks/gwt-hook.sh");
+    let config_path = worktree.join(HERMES_CONFIG_PATH);
+    let script_path = worktree.join(HERMES_SCRIPT_PATH);
 
     write_text_atomically(
         &script_path,
@@ -400,7 +430,7 @@ fn home_dir() -> Option<PathBuf> {
 /// back to a copy. Existing entries are replaced so refresh stays idempotent.
 fn bridge_hermes_credentials(source_home: &Path, dest_home: &Path) -> io::Result<()> {
     fs::create_dir_all(dest_home)?;
-    for name in [".env", "auth.json"] {
+    for name in HERMES_CREDENTIAL_FILES {
         let src = source_home.join(name);
         let dst = dest_home.join(name);
         if !src.exists() {
@@ -464,19 +494,16 @@ fn merge_hermes_config(source_home: Option<&Path>, script_path: &Path) -> io::Re
 pub fn generate_openclaw_hooks(worktree: &Path) -> io::Result<()> {
     let config_dir = worktree.join(".gwt/openclaw");
     let plugin_dir = config_dir.join("plugins/gwt-hook-bridge");
-    let config_path = config_dir.join("openclaw.json");
+    let config_path = worktree.join(OPENCLAW_CONFIG_PATH);
 
     write_settings_atomically(&config_path, &openclaw_config(&plugin_dir))?;
     write_text_atomically(
-        &plugin_dir.join("package.json"),
+        &worktree.join(OPENCLAW_PACKAGE_PATH),
         &openclaw_package_content(),
     )?;
-    write_settings_atomically(
-        &plugin_dir.join("openclaw.plugin.json"),
-        &openclaw_manifest(),
-    )?;
+    write_settings_atomically(&worktree.join(OPENCLAW_MANIFEST_PATH), &openclaw_manifest())?;
     write_text_atomically(
-        &plugin_dir.join("plugin.ts"),
+        &worktree.join(OPENCLAW_PLUGIN_PATH),
         &openclaw_plugin_content(&gwt_hook_bin_path()),
     )
 }

@@ -761,31 +761,62 @@ fn pm_repoint_sync_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-const PM_MANAGED_ASSET_TRANSACTION_ROOTS: &[&str] = &[
-    ".claude",
-    ".codex",
-    ".gwt/opencode",
-    ".gwt/openclaw",
-    ".gwt/hermes",
-];
+/// Generated leaves are supplied by the same path definitions the writers use.
+fn pm_generated_asset_paths(worktree: &Path) -> Vec<PathBuf> {
+    let mut paths = gwt_skills::provider_hooks::managed_provider_hook_paths(worktree);
+    paths.extend([
+        worktree.join(gwt_skills::settings_local::CLAUDE_SETTINGS_PATH),
+        worktree.join(gwt_skills::settings_local::CODEX_HOOKS_PATH),
+    ]);
+    for root in [".claude/skills", ".codex/skills"] {
+        let root = worktree.join(root);
+        paths.push(gwt_skills::coordination_guidance::skill_path(&root));
+        paths.push(gwt_skills::pm_guidance::skill_path(&root));
+    }
+    paths
+}
 
-/// Reject indirection only where refresh writes or prunes. Snapshot copying
-/// preserves user-owned links verbatim and never traverses their targets.
+fn pm_managed_asset_targets(worktree: &Path) -> io::Result<Vec<PathBuf>> {
+    let plan = gwt_skills::distribute::plan_distribution_to_worktree_for_targets(
+        worktree,
+        &ManagedAssetTarget::ALL,
+        gwt_skills::TrackedAssetWritePolicy::PreserveTracked,
+    )?;
+    let mut targets = pm_generated_asset_paths(worktree);
+    targets.extend(plan.mutation_paths().map(Path::to_path_buf));
+    targets.extend(
+        gwt_skills::provider_hooks::HERMES_CREDENTIAL_FILES
+            .iter()
+            .map(|name| worktree.join(".gwt/hermes").join(name)),
+    );
+    if let Some(plan) = gwt_skills::plan_managed_git_hooks(worktree) {
+        let self_ignore = plan.hooks_dir.join(".gitignore");
+        if !self_ignore.exists() {
+            targets.push(self_ignore);
+        }
+        targets.extend(plan.hooks.into_iter().filter_map(|hook| {
+            (!hook.target.exists() || gwt_skills::git_hooks::is_managed_hook(&hook.target))
+                .then_some(hook.target)
+        }));
+    }
+    targets.push(resolve_git_exclude_path(worktree)?);
+    targets.sort();
+    // A pruned managed subtree already includes its regenerated leaves.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for target in targets {
+        if !roots.iter().any(|root| target.starts_with(root)) {
+            roots.push(target);
+        }
+    }
+    Ok(roots)
+}
+
+/// Guard managed namespaces before the distribution planner can traverse them.
+/// Project links outside these namespaces are never inspected or snapshotted;
+/// the Hermes credential bridge owns its link leaves without following them.
 fn preflight_pm_managed_asset_refresh(worktree: &Path) -> io::Result<()> {
-    for relative in [
-        ".claude/settings.local.json",
-        ".codex/hooks.json",
-        ".gwt/opencode/plugins/gwt-hooks.js",
-        ".gwt/opencode/opencode.json",
-        ".gwt/opencode/skip-permissions.json",
-        ".gwt/openclaw/openclaw.json",
-        ".gwt/openclaw/plugins/gwt-hook-bridge/package.json",
-        ".gwt/openclaw/plugins/gwt-hook-bridge/openclaw.plugin.json",
-        ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
-        ".gwt/hermes/config.yaml",
-        ".gwt/hermes/agent-hooks/gwt-hook.sh",
-    ] {
-        preflight_pm_managed_asset_path(worktree, &worktree.join(relative), "write")?;
+    for path in pm_generated_asset_paths(worktree) {
+        preflight_pm_managed_asset_path(worktree, &path, "write")?;
     }
     // The Hermes credential bridge replaces links without following them.
     // Its parent is checked above; .env/auth.json remain valid link leaves.
@@ -906,8 +937,8 @@ fn preflight_pm_managed_asset_tree(path: &Path) -> io::Result<()> {
 
 struct PmManagedAssetSnapshot {
     entries: Vec<PmManagedAssetSnapshotEntry>,
-    gwt_parent: PathBuf,
-    gwt_parent_existed: bool,
+    worktree: PathBuf,
+    missing_directories: Vec<PathBuf>,
     backup_root: PathBuf,
 }
 
@@ -926,32 +957,21 @@ impl PmManagedAssetSnapshot {
             .ok_or_else(|| io::Error::other("canonical PM worktree has no project-state root"))?
             .join("project-state");
         ensure_real_pm_managed_asset_directory(&project_state)?;
-        let gwt_parent = worktree.join(".gwt");
-        let gwt_parent_existed = pm_managed_asset_node_exists(&gwt_parent)?;
-        if gwt_parent_existed {
-            let metadata = fs::symlink_metadata(&gwt_parent)?;
-            reject_pm_managed_asset_indirection(&gwt_parent, &metadata)?;
-            if !metadata.file_type().is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "PM managed provider-home parent is not a directory: {}",
-                        gwt_parent.display()
-                    ),
-                ));
+        let targets = pm_managed_asset_targets(worktree)?;
+        let exclude = resolve_git_exclude_path(worktree)?;
+        let exclude_backup = unique_pm_managed_asset_sibling(&exclude, "backup")?;
+        let mut missing_directories = BTreeSet::new();
+        for target in &targets {
+            for parent in target
+                .ancestors()
+                .skip(1)
+                .take_while(|parent| parent.starts_with(worktree) && *parent != worktree)
+            {
+                if !pm_managed_asset_node_exists(parent)? {
+                    missing_directories.insert(parent.to_path_buf());
+                }
             }
         }
-        let mut targets = PM_MANAGED_ASSET_TRANSACTION_ROOTS
-            .iter()
-            .map(|relative| worktree.join(relative))
-            .collect::<Vec<_>>();
-        targets.push(resolve_git_exclude_path(worktree)?);
-        let exclude_backup = unique_pm_managed_asset_sibling(
-            targets
-                .last()
-                .expect("Git exclude is always appended to the transaction targets"),
-            "backup",
-        )?;
         let target_presence = targets
             .iter()
             .map(|target| pm_managed_asset_node_exists(target))
@@ -963,10 +983,10 @@ impl PmManagedAssetSnapshot {
         fs::create_dir(&backup_root)?;
         let mut entries: Vec<PmManagedAssetSnapshotEntry> = Vec::with_capacity(targets.len());
         for (index, (target, existed)) in targets.into_iter().zip(target_presence).enumerate() {
-            let backup = if index < PM_MANAGED_ASSET_TRANSACTION_ROOTS.len() {
-                backup_root.join(index.to_string())
-            } else {
+            let backup = if target == exclude {
                 exclude_backup.clone()
+            } else {
+                backup_root.join(index.to_string())
             };
             if existed {
                 if let Err(error) = copy_pm_managed_asset_node(&target, &backup) {
@@ -1003,8 +1023,8 @@ impl PmManagedAssetSnapshot {
         }
         Ok(Self {
             entries,
-            gwt_parent,
-            gwt_parent_existed,
+            worktree: worktree.to_path_buf(),
+            missing_directories: missing_directories.into_iter().collect(),
             backup_root,
         })
     }
@@ -1012,6 +1032,23 @@ impl PmManagedAssetSnapshot {
     fn restore(self) -> io::Result<()> {
         let mut failures = Vec::new();
         for entry in &self.entries {
+            let parent = entry.target.parent().expect("managed target parent");
+            if let Err(error) = preflight_pm_managed_asset_path(&self.worktree, parent, "restore")
+                .and_then(|()| {
+                    if entry.existed {
+                        fs::create_dir_all(parent)
+                    } else {
+                        Ok(())
+                    }
+                })
+            {
+                failures.push(format!(
+                    "restore parent for {}: {error}",
+                    entry.target.display()
+                ));
+                continue;
+            }
+
             let quarantine = match unique_pm_managed_asset_sibling(&entry.target, "failed") {
                 Ok(path) => path,
                 Err(error) => {
@@ -1069,8 +1106,8 @@ impl PmManagedAssetSnapshot {
                 }
             }
         }
-        if !self.gwt_parent_existed {
-            match fs::remove_dir(&self.gwt_parent) {
+        for directory in self.missing_directories.iter().rev() {
+            match fs::remove_dir(directory) {
                 Ok(()) => {}
                 Err(error)
                     if matches!(
@@ -1078,8 +1115,8 @@ impl PmManagedAssetSnapshot {
                         io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
                     ) => {}
                 Err(error) => failures.push(format!(
-                    "remove newly-created empty PM provider-home parent {}: {error}",
-                    self.gwt_parent.display()
+                    "remove newly-created empty PM managed asset directory {}: {error}",
+                    directory.display()
                 )),
             }
         }
@@ -1199,6 +1236,11 @@ fn remove_pm_managed_asset_node(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    // A captured credential link is an owned leaf. Unlink it without ever
+    // traversing its destination, just as remove_dir_all did inside a backup.
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(path);
+    }
     reject_pm_managed_asset_indirection(path, &metadata)?;
     if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)
@@ -1869,6 +1911,57 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn pm_snapshot_does_not_capture_project_owned_nodes() {
+        let (_temp, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
+        let project_path = worktree.join(".claude/agents/project.md");
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(&project_path, "project before").unwrap();
+        let socket_path = project_path.with_extension("sock");
+        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let managed_path = worktree.join(".claude/settings.local.json");
+        std::fs::write(&managed_path, "managed before").unwrap();
+        repoint_git(&worktree, &["config", "core.hooksPath", ".git-hooks/_"]);
+        seed_repoint_collision(&worktree, ".git-hooks/pre-commit", "echo project hook");
+        let hook_path = worktree.join(".git-hooks/_/pre-commit");
+        let hook_before = "# gwt-managed-git-hook\n# previous generated hook\n";
+        seed_repoint_collision(&worktree, ".git-hooks/_/pre-commit", hook_before);
+        seed_repoint_collision(&worktree, ".claude/hooks/scripts/gwt-old.sh", "old script");
+        let snapshot = super::PmManagedAssetSnapshot::capture(&worktree).unwrap();
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| !project_path.starts_with(&entry.target)),
+            "project-owned nodes must not be captured through a shared parent"
+        );
+        assert!(snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.target == hook_path));
+        gwt_skills::distribute_to_worktree(&worktree).unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        std::fs::write(&project_path, "project after").unwrap();
+        std::fs::write(&managed_path, "managed after").unwrap();
+        snapshot.restore().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project_path).unwrap(),
+            "project after"
+        );
+        assert_eq!(
+            std::fs::read_to_string(managed_path).unwrap(),
+            "managed before"
+        );
+        assert_eq!(std::fs::read_to_string(hook_path).unwrap(), hook_before);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(".claude/hooks/scripts/gwt-old.sh")).unwrap(),
+            "old script"
+        );
+        assert!(socket_path.exists());
+        assert!(!worktree.join(".codex").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pm_snapshot_preserves_project_and_hermes_symlinks_verbatim() {
         let (_temp, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
         let sentinel = worktree.join("shared/agent.md");
@@ -1892,8 +1985,8 @@ mod tests {
             std::os::unix::fs::symlink(&sentinel, worktree.join(".husky/_").join(name)).unwrap();
         }
         let snapshot = super::PmManagedAssetSnapshot::capture(&worktree).unwrap();
-        // Rollback must recover both valid and dangling links verbatim.
-        std::fs::remove_file(worktree.join(links[0].0)).unwrap();
+        // Rollback preserves project links and recovers credential links verbatim.
+        std::fs::remove_file(worktree.join(links[2].0)).unwrap();
         snapshot.restore().unwrap();
         gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
         for name in ["pre-commit", ".gitignore"] {
