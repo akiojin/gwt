@@ -82,10 +82,10 @@ pub struct PerfRecord {
     schema_version: u32,
     #[serde(rename = "type")]
     record_type: PerfRecordType,
-    timestamp: DateTime<Utc>,
+    pub(super) timestamp: DateTime<Utc>,
     stream: PerfStream,
-    target: String,
-    value: f64,
+    pub(super) target: String,
+    pub(super) value: f64,
     unit: PerfUnit,
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
@@ -95,6 +95,8 @@ pub struct PerfRecord {
     consecutive_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detector_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     startup: Option<super::startup::StartupSample>,
 }
@@ -119,6 +121,7 @@ impl PerfRecord {
             budget: None,
             consecutive_count: None,
             duration_seconds: None,
+            detector_version: None,
             startup: None,
         }
     }
@@ -143,6 +146,7 @@ impl PerfRecord {
             budget: Some(details.budget),
             consecutive_count: Some(details.consecutive_count),
             duration_seconds: Some(details.duration_seconds),
+            detector_version: None,
             startup: None,
         }
     }
@@ -163,6 +167,21 @@ impl PerfRecord {
     pub fn with_role(mut self, role: impl AsRef<str>) -> Self {
         self.role = Some(sanitize_perf_target(role.as_ref()));
         self
+    }
+
+    pub(super) fn with_shared_detection(mut self) -> Self {
+        self.detector_version = Some(1);
+        self
+    }
+
+    pub(super) fn as_violation(&self, details: PerfViolationDetails) -> Self {
+        Self {
+            record_type: PerfRecordType::Violation,
+            budget: Some(details.budget),
+            consecutive_count: Some(details.consecutive_count),
+            duration_seconds: Some(details.duration_seconds),
+            ..self.clone()
+        }
     }
 }
 
