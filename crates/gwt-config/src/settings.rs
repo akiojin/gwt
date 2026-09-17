@@ -172,6 +172,8 @@ pub struct Settings {
     pub github_budget: crate::GitHubBudgetConfig,
     /// Snapshot and running-check refresh intervals for `pr.list`.
     pub pr_inventory: PrInventoryConfig,
+    /// Automatic build-artifact reclaim on low disk (Issue #4391).
+    pub build_artifact_gc: crate::BuildArtifactGcConfig,
 }
 
 impl Default for Settings {
@@ -196,6 +198,7 @@ impl Default for Settings {
             server: ServerConfig::default(),
             github_budget: crate::GitHubBudgetConfig::default(),
             pr_inventory: PrInventoryConfig::default(),
+            build_artifact_gc: crate::BuildArtifactGcConfig::default(),
         }
     }
 }
