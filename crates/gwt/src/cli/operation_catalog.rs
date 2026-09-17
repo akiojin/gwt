@@ -382,6 +382,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pane.recover",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.send",
         aliases: &[],
     },

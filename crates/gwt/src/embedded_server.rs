@@ -968,6 +968,12 @@ pub(crate) enum AgentFrontendRequest {
         request_id: Option<String>,
         responder: Option<AgentSelfCloseResponder>,
     },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
+    },
     SendInput {
         text: String,
     },
@@ -990,6 +996,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
+            Self::RecoverRestoredWindow { .. } => {
+                formatter.write_str("AgentFrontendRequest::RecoverRestoredWindow(<redacted>)")
+            }
             Self::SendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
             }
@@ -1008,6 +1017,7 @@ impl AgentFrontendRequest {
         matches!(
             self,
             Self::CloseWindow { .. }
+                | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }
                 | Self::PmSendInput { .. }
                 | Self::IssueMonitorScanNow { .. }
@@ -3801,6 +3811,19 @@ impl AgentPaneSessionScope {
             {
                 Some(AgentFrontendRequest::SendInput { text })
             }
+            FrontendEvent::RecoverRestoredWindow {
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } if self.allowed_window_ids.contains(&id) => {
+                Some(AgentFrontendRequest::RecoverRestoredWindow {
+                    id,
+                    session_id,
+                    child_pid,
+                    child_started_at,
+                })
+            }
             FrontendEvent::PmPaneSendInput {
                 operation_id,
                 window_id,
@@ -5695,6 +5718,33 @@ mod tests {
     /// no Active execution binding) must be able to request close of a peer
     /// pane inside its own project scope, and the close reply kind must pass
     /// the outbound filter so the caller hears the outcome.
+    #[test]
+    fn agent_pane_scope_limits_recovery_to_project_windows() {
+        let project = tempfile::tempdir().expect("project");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let principal = AgentSessionPrincipal::new(project.path(), "pm-session")
+            .expect("observation principal");
+        let mut scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        scope.allowed_window_ids.insert("owned-window".to_string());
+        let request = |id: &str| {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": id, "session_id": "restored-session",
+                "child_pid": 123, "child_started_at": 456
+            }))
+            .expect("recovery request")
+        };
+
+        assert!(scope
+            .filter_inbound(request("owned-window"))
+            .is_some_and(
+                |request| request.mutates_host_state() && !request.requires_producing_authority()
+            ));
+        assert!(scope.filter_inbound(request("foreign-window")).is_none());
+    }
+
     #[test]
     fn agent_pane_scope_allows_observation_grant_close_and_passes_close_result() {
         let project = tempfile::tempdir().expect("project tempdir");
