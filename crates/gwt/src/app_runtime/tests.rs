@@ -7934,11 +7934,15 @@ fn run_git_with_paths(args: &[&str], paths: &[&Path]) {
 }
 
 fn init_git_clone_with_origin(repo: &Path) -> PathBuf {
+    init_git_clone_with_default_branch(repo, "develop")
+}
+
+fn init_git_clone_with_default_branch(repo: &Path, default_branch: &str) -> PathBuf {
     let root = repo.parent().expect("repo parent");
     let seed = root.join("seed");
     let origin = root.join("origin.git");
     fs::create_dir_all(&seed).expect("create seed");
-    run_git(&seed, &["init", "-q", "-b", "develop"]);
+    run_git(&seed, &["init", "-q", "-b", default_branch]);
     run_git(&seed, &["config", "user.name", "Codex"]);
     run_git(&seed, &["config", "user.email", "codex@example.com"]);
     fs::write(seed.join("README.md"), "repo\n").expect("seed readme");
@@ -62187,6 +62191,7 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
         freshness.failure_stage,
         Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::Fetch)
     );
+    assert_eq!(freshness.base_ref, "HEAD");
     assert_eq!(freshness.head_sha.as_deref(), Some(local_head.as_str()));
     assert_eq!(freshness.target_sha, None);
 }
@@ -62494,17 +62499,48 @@ fn pm_ensure_respects_auto_start_opt_out() {
 
 #[test]
 fn pm_ensure_spawns_fresh_pm_when_unregistered() {
-    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
-    // FR-001/FR-002: no registration + auto_start default ON => silent spawn
-    // with a pending PM marker so launch completion can register the session.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_pm_ensure_spawns_from_default_branch("develop", true);
+}
+
+#[test]
+fn pm_ensure_spawns_from_main_without_valid_cached_origin_head() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_pm_ensure_spawns_from_default_branch("main", false);
+}
+
+#[test]
+fn pm_ensure_spawns_from_master_with_cached_origin_head() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_pm_ensure_spawns_from_default_branch("master", true);
+}
+
+fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_default: bool) {
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    // FR-001/FR-002: no registration + auto_start default ON => silent spawn
+    // with a pending PM marker so launch completion can register the session.
+    // Each test caller owns the process environment lock for this fixture.
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
-    init_git_clone_with_origin(&repo);
+    init_git_clone_with_default_branch(&repo, default_branch);
+    if !cached_default {
+        run_git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/obsolete",
+            ],
+        );
+    }
     // #4484: a tracked project plugin link must survive PM regeneration.
     #[cfg(unix)]
     {
@@ -62517,7 +62553,7 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
             .unwrap();
         run_git(&repo, &["add", ".claude/commands/release.md"]);
         run_git(&repo, &["commit", "-qm", "track project agent symlink"]);
-        run_git(&repo, &["push", "origin", "develop"]);
+        run_git(&repo, &["push", "origin", default_branch]);
     }
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
@@ -62573,6 +62609,13 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
     let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).unwrap();
     assert!(prefs.settings.auto_start);
+    assert_eq!(
+        prefs
+            .worktree_freshness
+            .as_ref()
+            .map(|state| state.base_ref.as_str()),
+        Some(format!("origin/{default_branch}").as_str())
+    );
     assert_eq!(
         prefs.worktree_freshness.as_ref().map(|state| state.state),
         Some(gwt::pm_registry::PmWorktreeFreshnessState::Fresh)
@@ -63758,6 +63801,7 @@ fn bare_layout_remote_unavailable_materializes_bare_head_for_fresh_spawn() {
         outcome.freshness.head_sha.as_deref(),
         Some(local_head.as_str())
     );
+    assert_eq!(outcome.freshness.base_ref, "HEAD");
     assert_eq!(outcome.freshness.target_sha, None);
 }
 

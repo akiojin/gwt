@@ -427,6 +427,8 @@ mod tests {
         run_git(&repo, &["add", "tracked.txt"]);
         run_git(&repo, &["commit", "-m", "A"]);
         run_git(&repo, &["push", "-u", "origin", "develop"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "--auto"]);
 
         let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
         std::fs::create_dir_all(worktree.parent().expect("PM parent")).expect("PM parent");
