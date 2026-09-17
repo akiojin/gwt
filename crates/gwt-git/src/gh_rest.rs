@@ -23,8 +23,7 @@ pub struct RestPages {
     pub rows: Vec<Value>,
     /// REST requests spent.
     pub requests: usize,
-    /// `true` when the page budget ran out while pages were still full, so
-    /// rows beyond the ceiling were not read.
+    /// `true` when the page budget ran out with a continuation still unread.
     pub capped: bool,
 }
 
@@ -34,8 +33,8 @@ pub fn page_endpoint(endpoint: &str, page: usize) -> String {
     format!("{endpoint}{separator}per_page={REST_PAGE_SIZE}&page={page}")
 }
 
-/// Read `endpoint` page by page until a short page or the page budget.
-/// `fetch` runs one `gh api <path>` and answers its stdout, or the failure
+/// Read `endpoint` until there is no HTTP Link continuation or the page budget.
+/// `fetch` runs one `gh api <path> --include` and answers its stdout, or the failure
 /// text; a failed page fails the whole read so a partial list never looks
 /// complete.
 pub fn read_pages_with<F>(endpoint: &str, mut fetch: F) -> Result<RestPages, String>
@@ -44,25 +43,86 @@ where
 {
     let mut rows = Vec::new();
     let mut requests = 0;
-    let mut capped = true;
-    for page in 1..=REST_MAX_PAGES_PER_READ {
-        let path = page_endpoint(endpoint, page);
+    let mut next = Some(page_endpoint(endpoint, 1));
+    while let Some(path) = next.take() {
         let stdout = fetch(&path)?;
         requests += 1;
+        let (headers, body) = stdout
+            .split_once("\n\r\n")
+            .or_else(|| stdout.split_once("\n\n"))
+            .ok_or_else(|| format!("gh api {path}: missing HTTP headers"))?;
+        let mut lines = headers.lines();
+        let status = lines.next().unwrap_or_default();
+        if !status.starts_with("HTTP/")
+            || status
+                .split_whitespace()
+                .nth(1)
+                .and_then(|code| code.parse::<u16>().ok())
+                .is_none_or(|code| !(200..300).contains(&code))
+        {
+            return Err(format!("gh api {path}: invalid HTTP status {status}"));
+        }
+        for line in lines {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("link") {
+                    next = next_link(value)?.or(next);
+                }
+            }
+        }
         let page_rows: Vec<Value> =
-            serde_json::from_str(&stdout).map_err(|e| format!("gh api {endpoint} JSON: {e}"))?;
-        let count = page_rows.len();
+            serde_json::from_str(body).map_err(|e| format!("gh api {path} JSON: {e}"))?;
         rows.extend(page_rows);
-        if count < REST_PAGE_SIZE {
-            capped = false;
+        if requests == REST_MAX_PAGES_PER_READ {
             break;
         }
     }
     Ok(RestPages {
         rows,
         requests,
-        capped,
+        capped: next.is_some(),
     })
+}
+
+fn next_link(value: &str) -> Result<Option<String>, String> {
+    for link in value.split(',') {
+        let (target, parameters) = link
+            .trim()
+            .split_once(';')
+            .ok_or_else(|| "gh api: invalid HTTP Link header".to_string())?;
+        let target = target
+            .trim()
+            .strip_prefix('<')
+            .and_then(|target| target.strip_suffix('>'))
+            .filter(|target| !target.is_empty())
+            .ok_or_else(|| "gh api: invalid HTTP Link target".to_string())?;
+        let mut has_relation = false;
+        for parameter in parameters.split(';') {
+            let (name, value) = parameter
+                .trim()
+                .split_once('=')
+                .unwrap_or((parameter.trim(), ""));
+            if !name.trim().eq_ignore_ascii_case("rel") {
+                continue;
+            }
+            has_relation = true;
+            let value = value.trim();
+            let relation = if let Some(quoted) = value.strip_prefix('"') {
+                quoted.strip_suffix('"').unwrap_or_default()
+            } else {
+                value
+            };
+            if relation.is_empty() {
+                return Err("gh api: invalid HTTP Link relation".to_string());
+            }
+            if relation.split_ascii_whitespace().any(|rel| rel == "next") {
+                return Ok(Some(target.to_string()));
+            }
+        }
+        if !has_relation {
+            return Err("gh api: missing HTTP Link relation".to_string());
+        }
+    }
+    Ok(None)
 }
 
 /// One Issue as `GET /repos/{owner}/{repo}/issues` returns it, reduced to the
@@ -152,21 +212,24 @@ mod tests {
     }
 
     #[test]
-    fn read_pages_stops_at_the_first_short_page() {
+    fn read_pages_follows_next_through_short_and_empty_pages() {
         let mut calls = Vec::new();
+        let next = "https://api.github.com/repos/o/r/issues?state=open&per_page=30&page=2";
+        let last = "https://api.github.com/repos/o/r/issues?state=open&per_page=30&page=3";
         let pages = read_pages_with("repos/o/r/issues?state=open", |path| {
             calls.push(path.to_string());
             Ok(match calls.len() {
-                1 => rows(REST_PAGE_SIZE, 0),
-                2 => rows(REST_PAGE_SIZE, 100),
-                _ => rows(7, 200),
+                1 => format!("HTTP/2.0 200 OK\nLink: <{next}>; rel=\"next\", <{last}>; rel=\"last\"\r\n\r\n{}", rows(1, 0)),
+                2 => format!("HTTP/2.0 200 OK\nlInK: <{last}>; rel=\"next\"\r\n\r\n[]"),
+                // A full final page without next is still complete.
+                _ => format!("HTTP/2.0 200 OK\n\r\n{}", rows(REST_PAGE_SIZE, 1)),
             })
         })
         .unwrap();
         assert_eq!(pages.requests, 3);
-        assert_eq!(pages.rows.len(), 207);
+        assert_eq!(pages.rows.len(), 101);
         assert!(!pages.capped);
-        assert_eq!(calls[2], "repos/o/r/issues?state=open&per_page=100&page=3");
+        assert_eq!(&calls[1..], &[next, last]);
     }
 
     #[test]
@@ -176,13 +239,13 @@ mod tests {
         let mut calls = 0;
         let pages = read_pages_with("repos/o/r/issues?state=all", |_| {
             calls += 1;
-            Ok(rows(REST_PAGE_SIZE, (calls - 1) * 100))
+            Ok(format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page={}>; rel=\"next\"\r\n\r\n{}", calls + 1, rows(REST_PAGE_SIZE, (calls - 1) * 100)))
         })
         .unwrap();
         assert_eq!(calls, REST_MAX_PAGES_PER_READ);
         assert_eq!(pages.requests, REST_MAX_PAGES_PER_READ);
         assert_eq!(pages.rows.len(), REST_MAX_PAGES_PER_READ * REST_PAGE_SIZE);
-        assert!(pages.capped, "a full last page means more may exist");
+        assert!(pages.capped, "next remains after the request budget");
     }
 
     #[test]
@@ -195,13 +258,25 @@ mod tests {
         let failure = read_pages_with("repos/o/r/issues", |_| {
             calls += 1;
             Ok(if calls == 1 {
-                rows(REST_PAGE_SIZE, 0)
+                format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page=2>; rel=\"next\"\r\n\r\n{}", rows(1, 0))
             } else {
-                "not json".to_string()
+                "HTTP/2.0 200 OK\n\r\nnot json".to_string()
             })
         })
         .unwrap_err();
         assert!(failure.contains("JSON"), "{failure}");
+        assert_eq!(calls, 2, "a bad continuation fails the whole read");
+
+        let failure = read_pages_with("repos/o/r/issues", |_| Ok("[]".to_string())).unwrap_err();
+        assert!(failure.contains("HTTP"), "headers are required: {failure}");
+
+        let failure = read_pages_with("repos/o/r/issues", |_| {
+            Ok("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page=2>; rel\r\n\r\n[]".to_string())
+        }).unwrap_err();
+        assert!(
+            failure.contains("Link"),
+            "invalid continuation must fail: {failure}"
+        );
     }
 
     #[test]

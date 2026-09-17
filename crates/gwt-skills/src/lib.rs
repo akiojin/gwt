@@ -2799,11 +2799,16 @@ mod tests {
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        // `Ready PR 禁止` used to be required here. That phrase encoded the
+        // retired rule "incomplete work may only be a Draft PR"; keeping it
+        // would pin AGENTS.md to a policy this repository no longer has.
+        // The gate still exists — it moved from "Ready vs Draft" to
+        // "PR vs no PR" — so assert the phrase that carries it now.
         for required in [
             "Ready PR Gate",
             "Draft PR",
             "単独で配信可能",
-            "Ready PR 禁止",
+            "Draft PR を作成しない",
         ] {
             assert!(
                 agents.contains(required),

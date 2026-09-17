@@ -3,14 +3,20 @@
 //! A lease lives inside its runner rather than a detached process with no
 //! workload. The retired acquire/hold/extend operations keep actionable
 //! diagnostics; status/release remain available to drain pre-upgrade holders.
+//!
+//! Issue #4285: the lease lives on the verification lane
+//! (`~/.gwt/runtime/verification-coordinator`), not on the model lane that
+//! searches and index builds share. A pre-upgrade binary still runs its
+//! canonical verification on the model lane; that holder stays observable
+//! and drainable here until every binary on the host has moved.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    coordinator_root, HeavyHolderKind, HeavyLeaseStatus, HeavyQueueEntry, IndexCoordinator,
-    JobPriority, TargetKey, VERIFICATION_RESERVATION_TTL,
+    coordinator_root, verification_coordinator_root, HeavyHolderKind, HeavyLeaseStatus,
+    HeavyQueueEntry, IndexCoordinator, TargetKey,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -56,7 +62,7 @@ pub enum VerificationLeaseCommand {
 }
 
 pub(super) fn run<E: CliEnv>(
-    env: &mut E,
+    _env: &mut E,
     command: VerificationLeaseCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -77,21 +83,13 @@ pub(super) fn run<E: CliEnv>(
                 .to_string(),
         )),
         VerificationLeaseCommand::Release { lease_id, reason } => {
-            release(env, &lease_id, reason.as_deref(), out)
+            release(&lease_id, reason.as_deref(), out)
         }
     }
 }
 
-fn release<E: CliEnv>(
-    env: &mut E,
-    lease_id: &str,
-    reason: Option<&str>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
+fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32, SpecOpsError> {
     let Some(control) = control_dir_for(lease_id) else {
-        if held_index_lease(lease_id)? {
-            return request_index_yield(env, lease_id, reason, out);
-        }
         return Err(missing_lease(lease_id));
     };
     fs::write(control.join(RELEASE_FILE), reason.unwrap_or("").as_bytes())
@@ -130,10 +128,13 @@ fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
 /// host-wide, so this scan sees one candidate in practice. Only a *granted*
 /// outcome may answer: a refusal snapshot names the lease it lost to, so
 /// matching on the lease id alone would route release requests to
-/// a directory with nobody listening.
+/// a directory with nobody listening. Pre-upgrade detached holders wrote
+/// their channel under the model lane, so both lanes are scanned.
 fn control_dir_for(lease_id: &str) -> Option<PathBuf> {
-    fs::read_dir(coordinator_root().join(CONTROL_DIR))
-        .ok()?
+    [verification_coordinator_root(), coordinator_root()]
+        .into_iter()
+        .filter_map(|root| fs::read_dir(root.join(CONTROL_DIR)).ok())
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .find(|dir| {
@@ -227,15 +228,26 @@ struct LeaseOutcome {
     error: Option<String>,
 }
 
+/// The verification lane's lease. While the lane is free, a canonical
+/// verification that a pre-upgrade binary still runs on the model lane is
+/// reported in its place (Issue #4285 transition); index jobs and searches
+/// on the model lane are never verification holders.
 fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
-    Ok(open_coordinator()?
+    let status = open_coordinator()?
         .heavy_lease_status()
-        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?
-        .into())
+        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
+    if status.held || status.pending > 0 {
+        return Ok(status.into());
+    }
+    let legacy = IndexCoordinator::open_default()
+        .and_then(|coordinator| coordinator.heavy_lease_status())
+        .ok()
+        .filter(|legacy| legacy.held && legacy.holder_kind == Some(HeavyHolderKind::Verification));
+    Ok(legacy.unwrap_or(status).into())
 }
 
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
-    IndexCoordinator::open_default()
+    IndexCoordinator::open_default_verification()
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
 
@@ -253,50 +265,6 @@ fn render(out: &mut String, held_label: &str, free_label: &str, status: &LeaseSt
     let label = if status.held { held_label } else { free_label };
     out.push_str(&format!("verification lease: {label}\n"));
     push_status_fields(out, status);
-}
-
-/// The live lease named by `lease_id` when it belongs to an index job
-/// (Issue #4086): such a lease has no verification control directory, so
-/// release requests are arbitrated through the coordinator instead.
-fn held_index_lease(lease_id: &str) -> Result<bool, SpecOpsError> {
-    let status = status()?;
-    Ok(status.held
-        && status.lease_id.as_deref() == Some(lease_id)
-        && status.holder_kind.as_deref() == Some(HeavyHolderKind::Index.as_str()))
-}
-
-/// PM arbitration of an index lease (Issue #4086): leave a verification-
-/// priority reservation for the caller's worktree. The runner observes it at
-/// its next batch boundary and yields; the host then defers to the
-/// reservation instead of re-taking the lease.
-fn request_index_yield<E: CliEnv>(
-    env: &mut E,
-    lease_id: &str,
-    reason: Option<&str>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
-    let key = verification_key(env)?;
-    open_coordinator()?
-        .reserve_heavy(
-            &key,
-            JobPriority::ManualRebuild,
-            VERIFICATION_RESERVATION_TTL,
-            Some(reason.unwrap_or("verify.lease.release arbitration")),
-        )
-        .map_err(|err| unexpected(format!("failed to reserve the heavy lease: {err}")))?;
-    out.push_str("verification lease: yield requested\n");
-    out.push_str(&format!("lease_id: {lease_id}\n"));
-    if let Some(reason) = reason {
-        out.push_str(&format!("reason: {reason}\n"));
-    }
-    push_status_fields(out, &status()?);
-    out.push_str(&format!(
-        "note: an index job holds this lease; it releases at its next batch boundary \
-         (at most {}s after this request when progress is published) and background index \
-         jobs defer to the reservation left for this worktree\n",
-        VERIFICATION_RESERVATION_TTL.as_secs()
-    ));
-    Ok(0)
 }
 
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
@@ -383,6 +351,7 @@ fn unexpected(message: String) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::index_coordinator::JobPriority;
 
     #[test]
     fn free_status_renders_without_holder_fields() {
