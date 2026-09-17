@@ -282,6 +282,10 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
         .find("\n## ")
         .map(|index| start + heading.len() + index + 1)
         .unwrap_or(content.len());
+    // Issue #4434: proposals are `### Proposal ...` blocks stored *inside*
+    // the entry being replaced. Carry them over, or the update silently
+    // drops them along with the fields it is refreshing.
+    let entry = preserve_existing_proposal_blocks(entry, &content[start..next]);
     let mut output = String::new();
     output.push_str(content[..start].trim_end());
     output.push_str("\n\n");
@@ -291,6 +295,85 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
     output
 }
 
+/// Re-attaches the proposal blocks of the entry being replaced to the freshly
+/// formatted entry, so they keep following their own discussion fields.
+fn preserve_existing_proposal_blocks(entry: &str, existing_section: &str) -> String {
+    let Some(blocks) = proposal_blocks(existing_section) else {
+        return entry.to_string();
+    };
+    let mut output = entry.trim_end().to_string();
+    output.push_str("\n\n");
+    output.push_str(blocks.trim());
+    output.push('\n');
+    output
+}
+
+/// Returns the tail of `section` starting at its first `### Proposal ` heading.
+fn proposal_blocks(section: &str) -> Option<&str> {
+    let mut offset = 0;
+    for line in section.split_inclusive('\n') {
+        if line.trim_start().starts_with("### Proposal ") {
+            return Some(&section[offset..]);
+        }
+        offset += line.len();
+    }
+    None
+}
+
 fn io_as_spec_error(err: std::io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gwt_core::test_support::ScopedGwtHome;
+
+    fn update_command(summary: &str) -> DiscussionUpdateCommand {
+        DiscussionUpdateCommand {
+            date: Some("2026-09-16".to_string()),
+            title: "Proposal survival across updates".to_string(),
+            status: "active".to_string(),
+            topics: Vec::new(),
+            related_specs: Vec::new(),
+            related_works: Vec::new(),
+            promoted_to: Vec::new(),
+            summary: summary.to_string(),
+            decisions: Vec::new(),
+            open_questions: Vec::new(),
+            next: "Continue".to_string(),
+        }
+    }
+
+    /// Issue #4434 (AC-3): a proposal that survives the entry replacement has
+    /// to stay where `discussion_resume` looks for it, so the resume prompt
+    /// still picks it up after the update.
+    #[test]
+    fn preserved_proposal_stays_visible_to_discussion_resume() {
+        let repo = tempfile::tempdir().expect("repo");
+        let _home = ScopedGwtHome::set(repo.path().join("gwt-home"));
+
+        let path = update_discussion_entry(repo.path(), &update_command("Initial summary"), None)
+            .expect("first update");
+        let mut seeded = fs::read_to_string(&path).expect("read discussions");
+        seeded.push_str(
+            "\n### Proposal A - Preserve proposals on update [active]\n\
+             - Implementation Proof: pending\n\
+             - Next Question: Keep this proposal while refreshing the summary?\n",
+        );
+        fs::write(&path, seeded).expect("append proposal");
+
+        update_discussion_entry(repo.path(), &update_command("Updated summary"), None)
+            .expect("second update");
+
+        let pending = crate::discussion_resume::load_pending_resume(repo.path())
+            .expect("load pending resume")
+            .expect("preserved proposal must still be a resume candidate");
+        assert_eq!(pending.proposal_label, "Proposal A");
+        assert_eq!(pending.proposal_title, "Preserve proposals on update");
+        assert_eq!(
+            pending.next_question.as_deref(),
+            Some("Keep this proposal while refreshing the summary?")
+        );
+    }
 }
