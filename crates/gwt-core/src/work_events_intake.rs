@@ -18,8 +18,8 @@
 //! - only works.json is written — sessions / current.json / journal.jsonl
 //!   are untouched (SC-261).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -928,6 +928,9 @@ fn repair_duplicate_event_container(
 /// sha256, or immutable-file metadata bound to source/container identity.
 /// Deleting the cache only costs re-reading sources; event-id dedup preserves
 /// correctness.
+///
+/// Issue #4397: this is the logical view, and the shape of the legacy
+/// single-file cache. It is persisted as a [`WorkEventsIntakeStore`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkEventsIntakeState {
     #[serde(default)]
@@ -955,22 +958,416 @@ impl WorkEventsIntakeState {
     }
 }
 
-/// Load the intake state; missing or corrupt files yield the default state
-/// (the cache is advisory).
+/// Load the whole intake state; a missing or corrupt store yields the default
+/// state (the cache is advisory).
 pub fn load_work_events_intake_state(path: &Path) -> WorkEventsIntakeState {
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return WorkEventsIntakeState::default();
-    };
-    serde_json::from_str(&body).unwrap_or_default()
+    WorkEventsIntakeStore::open(path)
+        .to_state()
+        .unwrap_or_default()
 }
 
+/// Replace the whole intake state.
 pub fn save_work_events_intake_state(path: &Path, state: &WorkEventsIntakeState) -> Result<()> {
-    let body = serde_json::to_vec_pretty(state)
-        .map_err(|error| GwtError::Other(format!("work events intake state: {error}")))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let mut store = WorkEventsIntakeStore::open(path);
+    store.clear();
+    store.index.projection_version = state.projection_version.clone();
+    store.index_dirty = true;
+    let mut groups = BTreeMap::<&str, BTreeMap<String, String>>::new();
+    for (key, fingerprint) in &state.sources {
+        match work_events_intake_group_of(key) {
+            Some(group) => {
+                groups
+                    .entry(group)
+                    .or_default()
+                    .insert(key.clone(), fingerprint.clone());
+            }
+            None => store.record(key.clone(), fingerprint.clone()),
+        }
     }
-    crate::workspace_projection::write_atomic(path, &body)
+    for (group, sources) in groups {
+        store.set_group(group, None, sources);
+    }
+    store.save().map(|_| ())
+}
+
+const INTAKE_STORE_FORMAT: u32 = 2;
+const WORKTREE_GROUP_PREFIX: &str = "worktree:";
+const REF_GROUP_PREFIX: &str = "ref:";
+const WORKTREE_EVENT_STORE_MARKERS: [&str; 2] = [".gwt/work/events", ".gwt\\work\\events"];
+
+/// The group a source key belongs to (Issue #4397).
+///
+/// - `ref:<refname>:<tree path>` belongs to `ref:<refname>` (git refnames
+///   cannot contain `:`);
+/// - `worktree:<worktree>/.gwt/work/events…` belongs to `worktree:<worktree>`;
+/// - anything else (the local lifecycle log, the source-list fingerprint) is
+///   ungrouped and lives in the index.
+pub fn work_events_intake_group_of(key: &str) -> Option<&str> {
+    if let Some(rest) = key.strip_prefix(REF_GROUP_PREFIX) {
+        let (refname, _) = rest.split_once(':')?;
+        return Some(&key[..REF_GROUP_PREFIX.len() + refname.len()]);
+    }
+    if key.starts_with(WORKTREE_GROUP_PREFIX) {
+        let marker = WORKTREE_EVENT_STORE_MARKERS
+            .iter()
+            .filter_map(|marker| key.rfind(marker))
+            .max()?;
+        let group = key[..marker].trim_end_matches(['/', '\\']);
+        return (group.len() > WORKTREE_GROUP_PREFIX.len()).then_some(group);
+    }
+    None
+}
+
+/// One group's entry in the intake index.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkEventsIntakeGroup {
+    /// Identity of the scan whose sources the group holds. `None` until a
+    /// scan verified them, so the next pass compares the group per source.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    /// Number of source fingerprints the group holds.
+    #[serde(default)]
+    pub sources: usize,
+    /// Size of the group file on disk.
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct IntakeIndex {
+    format: u32,
+    #[serde(default)]
+    projection_version: Option<String>,
+    #[serde(default)]
+    ungrouped: BTreeMap<String, String>,
+    #[serde(default)]
+    groups: BTreeMap<String, WorkEventsIntakeGroup>,
+}
+
+#[derive(Deserialize)]
+struct IntakeGroupFile {
+    group: String,
+    sources: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct IntakeGroupFileRef<'a> {
+    group: &'a str,
+    sources: &'a BTreeMap<String, String>,
+}
+
+/// What one [`WorkEventsIntakeStore::save`] wrote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkEventsIntakeSaveReport {
+    pub groups_written: usize,
+    pub bytes_written: u64,
+}
+
+/// The intake fingerprint cache, partitioned per source group (Issue #4397).
+///
+/// `<state>/index.json` holds each group's snapshot and size plus the
+/// ungrouped keys; `<state>/groups/<sha256(group)>.json` holds one group's
+/// fingerprints. A pass opens only the index, loads the groups whose snapshot
+/// changed, and writes only the groups it changed, so its I/O follows the
+/// changed sources instead of the whole history. The index is written last:
+/// it is the commit point. A legacy flat `work-events-intake.json` is
+/// migrated verbatim on open and retired by the first save.
+pub struct WorkEventsIntakeStore {
+    dir: PathBuf,
+    legacy_path: PathBuf,
+    retire_legacy: bool,
+    prune_orphan_groups: bool,
+    index: IntakeIndex,
+    index_bytes: u64,
+    index_dirty: bool,
+    loaded: HashMap<String, Option<BTreeMap<String, String>>>,
+    dirty_groups: BTreeSet<String>,
+    removed_groups: BTreeSet<String>,
+}
+
+impl WorkEventsIntakeStore {
+    /// Open the store belonging to the legacy state path `state_path`.
+    pub fn open(state_path: &Path) -> Self {
+        let mut store = Self {
+            dir: state_path.with_extension(""),
+            legacy_path: state_path.to_path_buf(),
+            retire_legacy: false,
+            prune_orphan_groups: false,
+            index: IntakeIndex::default(),
+            index_bytes: 0,
+            index_dirty: false,
+            loaded: HashMap::new(),
+            dirty_groups: BTreeSet::new(),
+            removed_groups: BTreeSet::new(),
+        };
+        if let Ok(body) = std::fs::read(store.index_path()) {
+            match serde_json::from_slice::<IntakeIndex>(&body) {
+                Ok(index) if index.format == INTAKE_STORE_FORMAT => {
+                    store.index_bytes = body.len() as u64;
+                    store.index = index;
+                    // A legacy file beside a valid index was written by an
+                    // older gwt after the migration. The index stays
+                    // authoritative (dedup is event-id based), so the next
+                    // save retires the leftover instead of keeping it forever.
+                    store.retire_legacy = state_path.exists();
+                    return store;
+                }
+                _ => store.prune_orphan_groups = true,
+            }
+        }
+        let Ok(body) = std::fs::read(state_path) else {
+            return store;
+        };
+        let Ok(legacy) = serde_json::from_slice::<WorkEventsIntakeState>(&body) else {
+            return store;
+        };
+        let mut groups = BTreeMap::<String, BTreeMap<String, String>>::new();
+        for (key, fingerprint) in legacy.sources {
+            match work_events_intake_group_of(&key).map(str::to_owned) {
+                Some(group) => {
+                    groups.entry(group).or_default().insert(key, fingerprint);
+                }
+                None => {
+                    store.index.ungrouped.insert(key, fingerprint);
+                }
+            }
+        }
+        for (group, sources) in groups {
+            store.set_group(&group, None, sources);
+        }
+        store.index.projection_version = legacy.projection_version;
+        store.index_dirty = true;
+        store.retire_legacy = true;
+        store.prune_orphan_groups = true;
+        store
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.dir.join("index.json")
+    }
+
+    fn group_path(&self, group: &str) -> PathBuf {
+        self.dir
+            .join("groups")
+            .join(format!("{}.json", content_fingerprint(group)))
+    }
+
+    pub fn projection_is_current(&self, required: &str) -> bool {
+        self.index.projection_version.as_deref() == Some(required)
+    }
+
+    pub fn record_projection_version(&mut self, version: impl Into<String>) {
+        let version = Some(version.into());
+        if self.index.projection_version != version {
+            self.index.projection_version = version;
+            self.index_dirty = true;
+        }
+    }
+
+    /// True when the ungrouped `key` already holds `fingerprint`.
+    pub fn is_current(&self, key: &str, fingerprint: &str) -> bool {
+        self.index.ungrouped.get(key).map(String::as_str) == Some(fingerprint)
+    }
+
+    /// True when the ungrouped `key` holds any fingerprint.
+    pub fn contains(&self, key: &str) -> bool {
+        self.index.ungrouped.contains_key(key)
+    }
+
+    /// Record an ungrouped key.
+    pub fn record(&mut self, key: impl Into<String>, fingerprint: impl Into<String>) {
+        let fingerprint = fingerprint.into();
+        let previous = self.index.ungrouped.insert(key.into(), fingerprint.clone());
+        if previous.as_deref() != Some(fingerprint.as_str()) {
+            self.index_dirty = true;
+        }
+    }
+
+    pub fn group(&self, group: &str) -> Option<&WorkEventsIntakeGroup> {
+        self.index.groups.get(group)
+    }
+
+    pub fn group_names(&self) -> impl Iterator<Item = &str> {
+        self.index.groups.keys().map(String::as_str)
+    }
+
+    /// The fingerprints `group` holds, loading its file on first use. A group
+    /// the index does not know is empty; `None` means its file is unreadable,
+    /// so nothing about the group's history can be trusted.
+    pub fn group_sources(&mut self, group: &str) -> Option<&BTreeMap<String, String>> {
+        if !self.loaded.contains_key(group) {
+            let sources = if self.index.groups.contains_key(group) {
+                self.read_group(group)
+            } else {
+                Some(BTreeMap::new())
+            };
+            self.loaded.insert(group.to_string(), sources);
+        }
+        self.loaded.get(group).and_then(Option::as_ref)
+    }
+
+    fn read_group(&self, group: &str) -> Option<BTreeMap<String, String>> {
+        let body = std::fs::read(self.group_path(group)).ok()?;
+        let file = serde_json::from_slice::<IntakeGroupFile>(&body).ok()?;
+        (file.group == group).then_some(file.sources)
+    }
+
+    /// Replace `group`'s fingerprints. Every key must belong to `group`.
+    pub fn set_group(
+        &mut self,
+        group: &str,
+        snapshot: Option<String>,
+        sources: BTreeMap<String, String>,
+    ) {
+        let entry = self.index.groups.entry(group.to_string()).or_default();
+        entry.snapshot = snapshot;
+        entry.sources = sources.len();
+        self.loaded.insert(group.to_string(), Some(sources));
+        self.dirty_groups.insert(group.to_string());
+        self.removed_groups.remove(group);
+        self.index_dirty = true;
+    }
+
+    /// Record which scan `group`'s unchanged fingerprints were verified by.
+    pub fn set_group_snapshot(&mut self, group: &str, snapshot: Option<String>) {
+        if let Some(entry) = self.index.groups.get_mut(group) {
+            if entry.snapshot != snapshot {
+                entry.snapshot = snapshot;
+                self.index_dirty = true;
+            }
+        }
+    }
+
+    pub fn remove_group(&mut self, group: &str) {
+        if self.index.groups.remove(group).is_some() {
+            self.removed_groups.insert(group.to_string());
+            self.index_dirty = true;
+        }
+        self.loaded.remove(group);
+        self.dirty_groups.remove(group);
+    }
+
+    /// Drop every fingerprint (a rebuild establishes a new source snapshot).
+    pub fn clear(&mut self) {
+        let groups = self.index.groups.keys().cloned().collect::<Vec<_>>();
+        for group in groups {
+            self.remove_group(&group);
+        }
+        if !self.index.ungrouped.is_empty() {
+            self.index.ungrouped.clear();
+            self.index_dirty = true;
+        }
+    }
+
+    /// Fingerprints held, grouped and ungrouped.
+    pub fn source_count(&self) -> usize {
+        self.index
+            .groups
+            .values()
+            .map(|group| group.sources)
+            .sum::<usize>()
+            + self.index.ungrouped.len()
+    }
+
+    /// Bytes the store occupies on disk, as of its last open or save.
+    pub fn stored_bytes(&self) -> u64 {
+        self.index_bytes
+            + self
+                .index
+                .groups
+                .values()
+                .map(|group| group.bytes)
+                .sum::<u64>()
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.index_dirty
+            || self.retire_legacy
+            || !self.dirty_groups.is_empty()
+            || !self.removed_groups.is_empty()
+    }
+
+    /// Assemble the logical view; `None` when a group file is unreadable.
+    pub fn to_state(&mut self) -> Option<WorkEventsIntakeState> {
+        let mut sources = self.index.ungrouped.clone();
+        let groups = self.index.groups.keys().cloned().collect::<Vec<_>>();
+        for group in groups {
+            sources.extend(
+                self.group_sources(&group)?
+                    .iter()
+                    .map(|(key, fingerprint)| (key.clone(), fingerprint.clone())),
+            );
+        }
+        Some(WorkEventsIntakeState {
+            sources,
+            projection_version: self.index.projection_version.clone(),
+        })
+    }
+
+    /// Write the changed groups, then the index, then retire what they
+    /// replaced.
+    pub fn save(&mut self) -> Result<WorkEventsIntakeSaveReport> {
+        let mut report = WorkEventsIntakeSaveReport::default();
+        if !self.is_dirty() {
+            return Ok(report);
+        }
+        std::fs::create_dir_all(self.dir.join("groups"))?;
+        for group in std::mem::take(&mut self.dirty_groups) {
+            let Some(Some(sources)) = self.loaded.get(&group) else {
+                continue;
+            };
+            let body = serde_json::to_vec(&IntakeGroupFileRef {
+                group: &group,
+                sources,
+            })
+            .map_err(|error| GwtError::Other(format!("work events intake group: {error}")))?;
+            crate::workspace_projection::write_atomic(&self.group_path(&group), &body)?;
+            if let Some(entry) = self.index.groups.get_mut(&group) {
+                entry.bytes = body.len() as u64;
+            }
+            report.groups_written += 1;
+            report.bytes_written += body.len() as u64;
+        }
+
+        self.index.format = INTAKE_STORE_FORMAT;
+        let body = serde_json::to_vec(&self.index)
+            .map_err(|error| GwtError::Other(format!("work events intake index: {error}")))?;
+        crate::workspace_projection::write_atomic(&self.index_path(), &body)?;
+        self.index_bytes = body.len() as u64;
+        self.index_dirty = false;
+        report.bytes_written += body.len() as u64;
+
+        for group in std::mem::take(&mut self.removed_groups) {
+            remove_file_if_present(&self.group_path(&group));
+        }
+        if std::mem::take(&mut self.prune_orphan_groups) {
+            let kept = self
+                .index
+                .groups
+                .keys()
+                .map(|group| self.group_path(group))
+                .collect::<HashSet<_>>();
+            if let Ok(entries) = std::fs::read_dir(self.dir.join("groups")) {
+                for entry in entries.flatten() {
+                    if !kept.contains(&entry.path()) {
+                        remove_file_if_present(&entry.path());
+                    }
+                }
+            }
+        }
+        if std::mem::take(&mut self.retire_legacy) {
+            remove_file_if_present(&self.legacy_path);
+        }
+        Ok(report)
+    }
+}
+
+fn remove_file_if_present(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, path = %path.display(), "work events intake: stale file removal failed");
+        }
+    }
 }
 
 /// Content sha256 used as the fingerprint for filesystem sources (git blob
@@ -2418,8 +2815,138 @@ mod tests {
         assert!(loaded.is_current("origin/work/x", "blob-oid-1"));
         assert!(!loaded.is_current("origin/work/x", "blob-oid-2"));
 
-        // Corrupt file → default (advisory cache).
-        std::fs::write(&path, b"{ not json").expect("corrupt");
+        // Corrupt index → default (advisory cache).
+        std::fs::write(
+            tmp.path().join("work-events-intake").join("index.json"),
+            b"{ not json",
+        )
+        .expect("corrupt");
+        assert_eq!(
+            load_work_events_intake_state(&path),
+            WorkEventsIntakeState::default()
+        );
+    }
+
+    #[test]
+    fn intake_group_of_partitions_worktree_and_ref_keys() {
+        assert_eq!(
+            work_events_intake_group_of("ref:refs/remotes/origin/a/b:.gwt/work/events/ab/x.jsonl"),
+            Some("ref:refs/remotes/origin/a/b")
+        );
+        assert_eq!(
+            work_events_intake_group_of("worktree:/r/wt/.gwt/work/events.jsonl"),
+            Some("worktree:/r/wt")
+        );
+        assert_eq!(
+            work_events_intake_group_of(r"worktree:E:\r\wt\.gwt/work/events\ab\x.jsonl"),
+            Some(r"worktree:E:\r\wt")
+        );
+        assert_eq!(work_events_intake_group_of("local-lifecycle:/x"), None);
+        assert_eq!(work_events_intake_group_of("source-list:v1"), None);
+    }
+
+    fn grouped_state() -> WorkEventsIntakeState {
+        let mut state = WorkEventsIntakeState::default();
+        for branch in 0..3 {
+            for shard in 0..4 {
+                state.record(
+                    format!("ref:refs/remotes/origin/b{branch}:.gwt/work/events/aa/{shard}.jsonl"),
+                    format!("fp-{branch}-{shard}"),
+                );
+            }
+        }
+        state.record("worktree:/r/wt/.gwt/work/events.jsonl", "fp-legacy");
+        state.record("local-lifecycle:/home/closed.jsonl", "fp-local");
+        state.record("source-list:v1", "fp-list");
+        state.record_projection_version("v-test");
+        state
+    }
+
+    /// Issue #4397 AC-1: a trigger that changed one group rewrites that group
+    /// and the index, not every fingerprint.
+    #[test]
+    fn intake_store_save_writes_only_changed_groups() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        save_work_events_intake_state(&path, &grouped_state()).expect("seed");
+
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert_eq!(store.source_count(), 15);
+        assert!(store.stored_bytes() > 0);
+        let group = "ref:refs/remotes/origin/b1";
+        let mut sources = store.group_sources(group).expect("readable group").clone();
+        assert_eq!(sources.len(), 4);
+        let added = format!("{group}:.gwt/work/events/bb/new.jsonl");
+        sources.insert(added.clone(), "fp-new".to_string());
+        store.set_group(group, Some("snapshot".to_string()), sources);
+        let report = store.save().expect("save");
+
+        assert_eq!(report.groups_written, 1);
+        let reopened = WorkEventsIntakeStore::open(&path);
+        assert_eq!(
+            reopened
+                .group(group)
+                .and_then(|group| group.snapshot.as_deref()),
+            Some("snapshot")
+        );
+        let mut expected = grouped_state();
+        expected.record(added, "fp-new");
+        assert_eq!(load_work_events_intake_state(&path), expected);
+
+        let mut unchanged = WorkEventsIntakeStore::open(&path);
+        assert!(!unchanged.is_dirty());
+        assert_eq!(unchanged.save().expect("noop save").groups_written, 0);
+    }
+
+    /// Issue #4397 AC-5: the legacy flat file migrates verbatim, and the
+    /// legacy file is removed only once the grouped store is written.
+    #[test]
+    fn intake_store_migrates_legacy_flat_state_without_losing_fingerprints() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        let legacy = grouped_state();
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).expect("legacy");
+
+        assert_eq!(load_work_events_intake_state(&path), legacy);
+        assert!(path.exists(), "reading never discards the legacy file");
+
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(store.is_dirty(), "migration must be persisted");
+        assert!(store.group("worktree:/r/wt").is_some());
+        assert_eq!(
+            store
+                .group("ref:refs/remotes/origin/b0")
+                .map(|group| group.snapshot.clone()),
+            Some(None),
+            "migrated groups are unverified until the next scan"
+        );
+        store.save().expect("save migrated");
+
+        assert!(!path.exists(), "legacy file removed after migration");
+        assert_eq!(load_work_events_intake_state(&path), legacy);
+
+        // An older gwt writing the legacy file again does not override the
+        // index; the leftover is retired by the next save.
+        std::fs::write(&path, b"{\"sources\":{}}").expect("downgrade leftover");
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(store.is_dirty());
+        store.save().expect("retire leftover");
+        assert!(!path.exists());
+        assert_eq!(load_work_events_intake_state(&path), legacy);
+    }
+
+    #[test]
+    fn intake_store_reports_unreadable_group_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        save_work_events_intake_state(&path, &grouped_state()).expect("seed");
+        let groups_dir = tmp.path().join("work-events-intake").join("groups");
+        for entry in std::fs::read_dir(&groups_dir).expect("groups") {
+            std::fs::write(entry.expect("entry").path(), b"{ not json").expect("corrupt");
+        }
+
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(store.group_sources("ref:refs/remotes/origin/b0").is_none());
         assert_eq!(
             load_work_events_intake_state(&path),
             WorkEventsIntakeState::default()
