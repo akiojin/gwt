@@ -51,6 +51,7 @@ pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
 pub mod runtime_daemon_events;
+pub mod session_inventory;
 pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
@@ -59,6 +60,7 @@ pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
 pub mod work_notes;
+pub mod worktree;
 pub mod worktree_form;
 pub mod worktree_inventory;
 
@@ -91,7 +93,8 @@ pub use agent_project_state::{
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
-    cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,
+    cleanup_selected_branches_with_progress, BranchCleanupOperationSnapshot,
+    BranchCleanupOperationStore, BranchCleanupOptions, BranchCleanupProgressEntry,
     BranchCleanupProgressPhase, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
 pub use branch_list::{

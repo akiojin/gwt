@@ -253,6 +253,11 @@ async fn run_async(
             read_pane_snapshot(ws_url, project_root, &id, lines).await
         }
         PaneCommand::Close { id } => close_pane(ws_url, project_root, &id).await,
+        PaneCommand::Recover {
+            started_after,
+            started_before,
+            apply,
+        } => recover_panes(ws_url, project_root, &started_after, &started_before, apply).await,
         PaneCommand::Send { id, text } => {
             send_pane_input(ws_url, project_root, id.as_deref(), &text).await
         }
@@ -566,6 +571,159 @@ async fn read_pane_snapshot_with_timeout(
             )
         }
     })?
+}
+
+pub(super) fn parse_recovery_bounds(after: &str, before: &str) -> Result<(i64, i64), String> {
+    let parse = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|time| time.timestamp())
+            .map_err(|_| {
+                "pane.recover requires RFC3339 started_after and started_before".to_string()
+            })
+    };
+    let (after, before) = (parse(after)?, parse(before)?);
+    if after > before {
+        return Err("pane.recover started_after must not exceed started_before".to_string());
+    }
+    Ok((after, before))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PaneRecoveryCandidate {
+    window_id: String,
+    session_id: String,
+    worktree_path: std::path::PathBuf,
+    worktree_exists: bool,
+    started_at: String,
+    child_pid: u32,
+    child_started_at: u64,
+}
+
+fn plan_pane_recovery(
+    windows: &[PersistedWindowState],
+    sessions: &[crate::session_inventory::SessionObservation],
+    after: i64,
+    before: i64,
+    caller_session_id: Option<&str>,
+) -> Vec<PaneRecoveryCandidate> {
+    let mut selected = sessions
+        .iter()
+        .filter_map(|session| {
+            if session.launch_origin != gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                || session.restore_source_session_id.is_none()
+                || caller_session_id == Some(session.session_id.as_str())
+                || sessions
+                    .iter()
+                    .filter(|other| other.session_id == session.session_id)
+                    .count()
+                    != 1
+                || windows
+                    .iter()
+                    .filter(|window| window.session_id.as_deref() == Some(&session.session_id))
+                    .count()
+                    != 1
+                || i64::try_from(session.child_started_at)
+                    .ok()
+                    .is_none_or(|started| started < after || started > before)
+            {
+                return None;
+            }
+            let window = windows.iter().find(|window| {
+                is_agent_pane(window) && window.session_id.as_deref() == Some(&session.session_id)
+            })?;
+            Some(PaneRecoveryCandidate {
+                window_id: window.id.clone(),
+                session_id: session.session_id.clone(),
+                worktree_path: session.worktree_path.clone(),
+                worktree_exists: session.worktree_exists,
+                started_at: session.started_at.clone(),
+                child_pid: session.child_pid,
+                child_started_at: session.child_started_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by(|a, b| {
+        (a.worktree_exists, a.child_started_at, &a.session_id).cmp(&(
+            b.worktree_exists,
+            b.child_started_at,
+            &b.session_id,
+        ))
+    });
+    selected
+}
+
+async fn recover_panes(
+    ws_url: &str,
+    project_root: &str,
+    started_after: &str,
+    started_before: &str,
+    apply: bool,
+) -> Result<String, String> {
+    let (after, before) = parse_recovery_bounds(started_after, started_before)?;
+    let windows = request_window_list(ws_url, project_root).await?;
+    let inventory = crate::session_inventory::observe_sessions(
+        Path::new(project_root),
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let caller = std::env::var(GWT_SESSION_ID_ENV).ok();
+    let candidates = plan_pane_recovery(
+        &windows,
+        &inventory.sessions,
+        after,
+        before,
+        caller.as_deref(),
+    );
+    let mut results = Vec::new();
+    if apply {
+        for candidate in &candidates {
+            let result = close_restored_pane(ws_url, project_root, candidate).await;
+            results.push(match result {
+                Ok(detail) => json!({"window_id": candidate.window_id, "session_id": candidate.session_id, "closed": true, "detail": detail.trim()}),
+                Err(reason) => json!({"window_id": candidate.window_id, "session_id": candidate.session_id, "closed": false, "reason": reason}),
+            });
+        }
+    }
+    Ok(format!(
+        "{}\n",
+        json!({
+            "apply": apply, "started_after": started_after, "started_before": started_before,
+            "selected_count": candidates.len(), "candidates": candidates, "results": results,
+            "observation_complete": inventory.uncertainties.is_empty(),
+            "uncertainties": inventory.uncertainties,
+        })
+    ))
+}
+
+async fn close_restored_pane(
+    ws_url: &str,
+    project_root: &str,
+    candidate: &PaneRecoveryCandidate,
+) -> Result<String, String> {
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(&mut socket, json!({"kind": "frontend_ready"})).await?;
+    let windows = next_workspace_windows(&mut socket, project_root, "pane recover").await?;
+    if !windows.iter().any(|window| {
+        window.id == candidate.window_id
+            && window.session_id.as_deref() == Some(&candidate.session_id)
+    }) {
+        return Err("pane recover: target Session changed or left the project".to_string());
+    }
+    // The backend repeats this identity/provenance check on its event loop,
+    // atomically with teardown, so a reused window ID cannot close a new launch.
+    send_frontend_event(
+        &mut socket,
+        json!({
+            "kind": "recover_restored_window", "id": candidate.window_id,
+            "session_id": candidate.session_id,
+            "child_pid": candidate.child_pid, "child_started_at": candidate.child_started_at,
+        }),
+    )
+    .await?;
+    let reply =
+        wait_for_pane_close_result(&mut socket, &candidate.window_id, BACKEND_RESPONSE_TIMEOUT)
+            .await?
+            .ok_or_else(|| "pane recover: no matching backend close result".to_string())?;
+    pane_close_verdict(&candidate.window_id, reply)
 }
 
 async fn close_pane(
@@ -1453,11 +1611,15 @@ fn parse_wire_windows(
 }
 
 pub(crate) fn render_pane_list(windows: &[PersistedWindowState]) -> String {
+    render_pane_list_with_sessions(windows, &gwt_core::paths::gwt_sessions_dir())
+}
+
+fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir: &Path) -> String {
     let panes = windows.iter().filter(|window| is_agent_pane(window));
     let mut out = String::new();
     for window in panes {
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\trole={}\n",
+            "{}\t{}\t{}\t{}",
             window.id,
             status_label(window.status),
             window
@@ -1468,13 +1630,34 @@ pub(crate) fn render_pane_list(windows: &[PersistedWindowState]) -> String {
                 .dynamic_title
                 .as_deref()
                 .or(window.purpose_title.as_deref())
-                .unwrap_or(&window.title),
-            if window.is_pm {
-                "pm"
-            } else {
-                "implementation_agent"
-            }
+                .unwrap_or(&window.title)
         ));
+        if let Some(session) = window.session_id.as_deref().and_then(|id| {
+            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
+                .ok()
+                .filter(|session| session.id == id)
+        }) {
+            let origin = serde_json::to_value(session.launch_origin)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string());
+            out.push_str(&format!(
+                "\torigin={origin}\tsession_created_at={}\tworktree={}\tsource_session={}",
+                session.created_at.to_rfc3339(),
+                session.worktree_path.display(),
+                session
+                    .restore_source_session_id
+                    .as_deref()
+                    .unwrap_or("none")
+            ));
+        } else {
+            out.push_str("\torigin=unknown");
+        }
+        out.push_str(if window.is_pm {
+            "\trole=pm\n"
+        } else {
+            "\trole=implementation_agent\n"
+        });
     }
     if out.is_empty() {
         out.push_str("no active agent panes\n");
@@ -1641,6 +1824,121 @@ mod tests {
                 id: "agent-1".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn recovery_plan_selects_only_the_restore_burst_and_prioritizes_missing_worktrees() {
+        use crate::session_inventory::SessionObservation;
+        use gwt_agent::SessionLaunchOrigin;
+        let after = chrono::DateTime::parse_from_rfc3339("2026-09-14T05:00:00Z").unwrap();
+        let mut windows = Vec::new();
+        let sessions = [
+            ("restored", SessionLaunchOrigin::AutomaticRestore, true, 10),
+            ("missing", SessionLaunchOrigin::AutomaticRestore, false, 20),
+            ("launch", SessionLaunchOrigin::Launch, true, 10),
+            ("restart", SessionLaunchOrigin::UserRestart, true, 10),
+            ("legacy", SessionLaunchOrigin::Unknown, false, 10),
+            ("outside", SessionLaunchOrigin::AutomaticRestore, true, 61),
+            ("self", SessionLaunchOrigin::AutomaticRestore, true, 10),
+        ]
+        .into_iter()
+        .map(|(id, origin, exists, offset)| {
+            let mut pane = window(id, WindowPreset::Agent, Some("codex"));
+            pane.session_id = Some(id.to_string());
+            windows.push(pane);
+            SessionObservation {
+                session_id: id.to_string(),
+                issue_number: Some(4305),
+                agent_id: "codex".to_string(),
+                worktree_path: "/repo/work/issue-4305".into(),
+                worktree_exists: exists,
+                host_pid: 1,
+                child_pid: 2,
+                child_started_at: (after.timestamp() + offset) as u64,
+                started_at: (after + chrono::Duration::seconds(offset)).to_rfc3339(),
+                launch_origin: origin,
+                restore_source_session_id: Some("source".to_string()),
+            }
+        })
+        .collect::<Vec<_>>();
+        let plan = plan_pane_recovery(
+            &windows,
+            &sessions,
+            after.timestamp(),
+            after.timestamp() + 60,
+            Some("self"),
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["missing", "restored"]
+        );
+        windows[0].session_id = Some("replacement-launch".to_string());
+        assert_eq!(
+            plan_pane_recovery(
+                &windows,
+                &sessions,
+                after.timestamp(),
+                after.timestamp() + 60,
+                Some("self")
+            )
+            .len(),
+            1
+        );
+        assert!(parse_recovery_bounds("invalid", "2026-09-14T05:00:00Z").is_err());
+        assert!(parse_recovery_bounds("2026-09-14T06:00:00Z", "2026-09-14T05:00:00Z").is_err());
+    }
+
+    #[test]
+    fn pane_list_exposes_persisted_restore_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            gwt_agent::Session::new(temp.path(), "work/issue-4305", gwt_agent::AgentId::Codex);
+        session.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        session.restore_source_session_id = Some("source-session".to_string());
+        session.save(temp.path()).unwrap();
+        let mut pane = window("restored", WindowPreset::Agent, Some("codex"));
+        pane.session_id = Some(session.id);
+        let text = render_pane_list_with_sessions(&[pane], temp.path());
+        assert!(text.contains("origin=automatic_restore"), "{text}");
+        assert!(text.contains("source_session=source-session"), "{text}");
+        assert!(text.contains("session_created_at="), "{text}");
+    }
+
+    #[test]
+    fn recovery_close_sends_exact_process_identity_and_reports_backend_refusal() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut pane = window("restored", WindowPreset::Agent, Some("codex"));
+            pane.session_id = Some("restored-session".to_string());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                socket.send(Message::Text(workspace_state_for_test("/repo/test", vec![pane]).to_string().into())).await.unwrap();
+                let request = next_frontend_json(&mut socket).await;
+                assert_eq!(request, json!({"kind":"recover_restored_window", "id":"restored", "session_id":"restored-session", "child_pid":123, "child_started_at":456}));
+                socket.send(Message::Text(json!({"kind":"pane_close_result", "window_id":"restored", "ok":false, "reason":"process identity changed"}).to_string().into())).await.unwrap();
+            });
+            let candidate = PaneRecoveryCandidate {
+                window_id: "restored".to_string(), session_id: "restored-session".to_string(),
+                worktree_path: "/repo/test".into(), worktree_exists: true,
+                started_at: "1970-01-01T00:07:36Z".to_string(), child_pid: 123, child_started_at: 456,
+            };
+            let error = close_restored_pane(&format!("ws://{address}/internal/pane-ws"), "/repo/test", &candidate).await.unwrap_err();
+            assert!(error.contains("process identity changed"), "{error}");
+            server.await.unwrap();
+        });
     }
 
     #[test]

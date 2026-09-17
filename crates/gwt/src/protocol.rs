@@ -432,6 +432,12 @@ pub enum FrontendEvent {
         #[serde(default)]
         request_id: Option<String>,
     },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
+    },
     /// SPEC-2356 安心 Addendum (FR-041): stop the window's agent runtime (kill
     /// the PTY through the existing stop path) but KEEP the window and its
     /// terminal output on the canvas, rendered as `Stopped`. Distinct from
@@ -639,12 +645,35 @@ pub enum FrontendEvent {
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: frontend-generated id for this cleanup run, so a
+        /// client that reconnects mid-cleanup can re-sync the operation it
+        /// started. `None` only for clients predating the field.
+        #[serde(default)]
+        operation_id: Option<String>,
     },
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: see [`FrontendEvent::RunBranchCleanup::operation_id`].
+        #[serde(default)]
+        operation_id: Option<String>,
+    },
+    /// Issue #4433: a reconnected client asks for the current state of the
+    /// cleanup operation it is still showing as running. The backend replies
+    /// with the latest [`BackendEvent::BranchCleanupProgress`] or
+    /// [`BackendEvent::BranchCleanupResult`], or with nothing when the
+    /// operation is unknown.
+    SyncBranchCleanup {
+        id: String,
+        operation_id: String,
+    },
+    /// Issue #4433: the client consumed the operation's result, so the backend
+    /// can drop the snapshot instead of replaying it into the next cleanup.
+    ClearBranchCleanupStatus {
+        id: String,
+        operation_id: String,
     },
     /// SPEC-1939 US-5: trigger a per-cell index rebuild for
     /// `(project_root, scope, worktree_hash?)`. The backend funnels this
@@ -2073,10 +2102,17 @@ pub enum BackendEvent {
     },
     BranchCleanupResult {
         id: String,
+        /// Issue #4433: identifies the cleanup run this result belongs to so a
+        /// reconnected client can drop a result from a superseded run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchCleanupProgress {
         id: String,
+        /// Issue #4433: see [`BackendEvent::BranchCleanupResult::operation_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         branch: String,
         execution_branch: Option<String>,
         index: usize,
@@ -3381,6 +3417,25 @@ mod tests {
         assert_eq!(
             policy.backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn recover_restored_window_request_preserves_expected_session() {
+        let value = serde_json::json!({
+            "kind": "recover_restored_window",
+            "id": "tab-1::agent-1",
+            "session_id": "restored-session",
+            "child_pid": 123,
+            "child_started_at": 456
+        });
+        serde_json::from_value::<FrontendEvent>(value).expect("restored-window recovery request");
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": "tab-1::agent-1"
+            }))
+            .is_err(),
+            "recovery requires an expected Session identity"
         );
     }
 

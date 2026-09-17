@@ -161,7 +161,7 @@ fn shim_for(name: &str) -> String {
     )
 }
 
-fn is_managed_hook(path: &Path) -> bool {
+pub fn is_managed_hook(path: &Path) -> bool {
     fs::read_to_string(path).is_ok_and(|content| content.contains(MANAGED_HOOK_MARKER))
 }
 

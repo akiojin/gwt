@@ -1453,7 +1453,8 @@ impl AppRuntime {
         if let Some(branch) = work_item_branch.as_deref() {
             let agent_sessions = self
                 .session_ledger_cache
-                .borrow_mut()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .load(&self.sessions_dir);
             let project_repo_hash = gwt_core::repo_hash::detect_repo_hash(&project_root);
             let registry = crate::workspace_session_registry::branch_session_registry(
