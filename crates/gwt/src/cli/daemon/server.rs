@@ -5504,6 +5504,9 @@ mod tests {
             &fake_gh,
             r###"#!/bin/sh
 case "$*" in
+  *" --include") printf 'HTTP/2.0 200 OK\n\r\n' ;;
+esac
+case "$*" in
   *"--method POST"*|*"--method PATCH"*|*"-X POST"*|*"-X PATCH"*|*"pr merge"*)
     if [ -n "$GWT_FAKE_GH_MUTATION_MARKER" ]; then
       : > "$GWT_FAKE_GH_MUTATION_MARKER"
@@ -5674,7 +5677,7 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   # The REST list is paged: only the first page carries rows, like GitHub
   # (a fixture larger than per_page would otherwise page forever).
   case "$*" in
-    *"issue list"* | *"/issues?"*"&page=1")
+    *"issue list"* | *"/issues?"*"&page=1 --include")
       cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
       exit 0
       ;;

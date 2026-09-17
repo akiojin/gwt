@@ -2178,7 +2178,8 @@ fn file_rebuild_scopes(scopes: &[RefreshScope]) -> Vec<IndexRebuildScope> {
 /// Issue #4086 AC-3: register an Issue-index refresh intent instead of
 /// rebuilding in-process. The host drains it after the broker quiet period
 /// (`DEFAULT_REFRESH_QUIET_PERIOD`), so a burst of gwtd calls coalesces into
-/// one background build that also defers to any pending verification.
+/// one background build that also defers to any pending search or manual
+/// rebuild on the model lane (verification runs on its own lane, #4285).
 pub fn submit_issue_index_refresh(
     broker: &RefreshBroker,
     repo_hash: &str,
