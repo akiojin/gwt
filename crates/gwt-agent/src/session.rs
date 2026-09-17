@@ -355,6 +355,19 @@ pub fn inspect_session_path(path: &Path) -> SessionPathState {
     }
 }
 
+/// How a Session's window was opened, independently of its execution authority.
+/// Legacy records remain unknown so recovery never treats history as proof of
+/// an automatic restore.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLaunchOrigin {
+    #[default]
+    Unknown,
+    Launch,
+    AutomaticRestore,
+    UserRestart,
+}
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -416,6 +429,11 @@ pub struct Session {
     /// which therefore keep the human-gated `Manual` behavior.
     #[serde(default)]
     pub launch_route: LaunchRoute,
+    #[serde(default)]
+    pub launch_origin: SessionLaunchOrigin,
+    /// Predecessor gwt Session id, distinct from the provider conversation id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_source_session_id: Option<String>,
     #[serde(default)]
     pub workflow_bypass: Option<WorkflowBypass>,
     /// When the bypass was armed. Consumers treat a bypass without a fresh
@@ -565,6 +583,8 @@ impl Session {
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
             launch_route: LaunchRoute::Manual,
+            launch_origin: SessionLaunchOrigin::Launch,
+            restore_source_session_id: None,
             workflow_bypass: None,
             workflow_bypass_armed_at: None,
             launch_command: String::new(),
@@ -2769,6 +2789,29 @@ mod tests {
         assert!(!session.restore_window_on_startup);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn session_launch_origin_preserves_restore_provenance_and_defaults_legacy_to_unknown() {
+        let session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        let mut value = serde_json::to_value(&session).expect("serialize Session");
+        assert_eq!(value["launch_origin"], "launch");
+        value["launch_origin"] = serde_json::json!("automatic_restore");
+        value["restore_source_session_id"] = serde_json::json!("source-session");
+        let restored: Session = serde_json::from_value(value.clone()).expect("restore metadata");
+        let persisted = toml::to_string(&restored).expect("persist restore metadata");
+        let roundtrip: Session = toml::from_str(&persisted).expect("read restore metadata");
+        let roundtrip = serde_json::to_value(roundtrip).expect("inspect restore metadata");
+        assert_eq!(roundtrip["launch_origin"], "automatic_restore");
+        assert_eq!(roundtrip["restore_source_session_id"], "source-session");
+
+        let legacy = value.as_object_mut().expect("Session object");
+        legacy.remove("launch_origin");
+        legacy.remove("restore_source_session_id");
+        let legacy: Session = serde_json::from_value(value).expect("read legacy Session");
+        let legacy = serde_json::to_value(legacy).expect("inspect legacy Session");
+        assert_eq!(legacy["launch_origin"], "unknown");
+        assert!(legacy["restore_source_session_id"].is_null());
     }
 
     #[test]
