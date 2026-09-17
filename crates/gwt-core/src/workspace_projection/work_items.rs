@@ -615,6 +615,60 @@ impl WorkItemsProjection {
         healed
     }
 
+    /// Issue #4465: detach refs to `container` from every Work other than its
+    /// canonical owner.
+    ///
+    /// `canonical_work_id` is a pure function of (project, branch, worktree),
+    /// so the canonical owner of a container is never ambiguous — only the
+    /// *references* accrete, when a branch or worktree is reused by a later
+    /// Work while an earlier one is still incomplete. #3684's classifier only
+    /// sees Works whose containers are *all* foreign, so the common shape (a
+    /// stale Work that keeps its own container and picks up one more) escapes
+    /// it and pins `workspace.ensure` fail-closed forever.
+    ///
+    /// Fail-closed boundaries: the canonical Work must exist, be incomplete,
+    /// and itself hold the container. Detaching a ref never terminalizes a
+    /// Work and never touches its other containers. Returns the healed ids.
+    ///
+    /// `matches_container` decides container identity, so callers reuse the
+    /// same predicate their refusal path uses — a heal that disagreed with the
+    /// refusal would leave the session blocked anyway. `restrict_to`, when
+    /// non-empty, limits the repair to those Work ids; an explicitly scoped
+    /// caller must not reach past the scope it named.
+    pub fn detach_foreign_container_refs<F>(
+        &mut self,
+        canonical_id: &str,
+        restrict_to: &[String],
+        matches_container: F,
+    ) -> Vec<String>
+    where
+        F: Fn(&WorkspaceExecutionContainerRef) -> bool,
+    {
+        let canonical_owns = self.work_items.iter().any(|item| {
+            item.id == canonical_id
+                && item.is_incomplete()
+                && item.execution_containers.iter().any(&matches_container)
+        });
+        if !canonical_owns {
+            return Vec::new();
+        }
+        let mut healed = Vec::new();
+        for item in &mut self.work_items {
+            if item.id == canonical_id
+                || (!restrict_to.is_empty() && !restrict_to.contains(&item.id))
+            {
+                continue;
+            }
+            let before = item.execution_containers.len();
+            item.execution_containers
+                .retain(|owned| !matches_container(owned));
+            if item.execution_containers.len() != before {
+                healed.push(item.id.clone());
+            }
+        }
+        healed
+    }
+
     pub fn refresh_derived_progress_summaries(&mut self) {
         for item in &mut self.work_items {
             backfill_work_item_progress_summary(item);
@@ -665,7 +719,7 @@ pub(crate) fn merge_workspace_pr_metadata(
     }
 }
 
-pub(crate) fn workspace_execution_container_same(
+pub fn workspace_execution_container_same(
     left: &WorkspaceExecutionContainerRef,
     right: &WorkspaceExecutionContainerRef,
 ) -> bool {
@@ -2001,5 +2055,139 @@ mod tests {
                 "{id} ref must be kept"
             );
         }
+    }
+
+    /// Issue #4465: the real accretion shape. A stale Work keeps its *own*
+    /// container and additionally picks up the container of a reused branch
+    /// (measured on `work-work-issue-2359-34a6ca7a`, which held both
+    /// `work/issue-2359` and `work/issue-4465`). The #3684 classifier cannot
+    /// see it because not every container is foreign, so `workspace.ensure`
+    /// stays ambiguous forever. Detaching the foreign *ref* — not the Work —
+    /// is the repair.
+    #[test]
+    fn detach_foreign_container_refs_removes_only_the_accreted_ref() {
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 16, 8, 39, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+        let own = container_for_test("work/issue-2359", "/repo/work/issue-2359");
+        let reused = container_for_test("work/issue-4465", "/repo/work/issue-4465");
+
+        let mut canonical = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+        canonical.agent_session_id = Some("session-new".to_string());
+        canonical.execution_container = Some(reused.clone());
+        projection.apply_event(canonical);
+
+        let mut stale = WorkEvent::new(WorkEventKind::Start, "work-stale", t0);
+        stale.agent_session_id = Some("session-old".to_string());
+        stale.execution_container = Some(own.clone());
+        projection.apply_event(stale);
+        let mut accreted = WorkEvent::new(WorkEventKind::Update, "work-stale", t0);
+        accreted.execution_container = Some(reused.clone());
+        projection.apply_event(accreted);
+
+        let healed = projection.detach_foreign_container_refs("work-canonical", &[], |c| {
+            workspace_execution_container_same(c, &reused)
+        });
+        assert_eq!(healed, vec!["work-stale".to_string()]);
+
+        let stale_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-stale")
+            .expect("stale item");
+        assert_eq!(
+            stale_item.execution_containers.len(),
+            1,
+            "only the accreted ref is detached: {:?}",
+            stale_item.execution_containers
+        );
+        assert!(
+            workspace_execution_container_same(&stale_item.execution_containers[0], &own),
+            "the stale Work keeps its own container"
+        );
+        assert!(
+            stale_item.is_incomplete() && !stale_item.discarded,
+            "detaching a ref never terminalizes the Work"
+        );
+        let canonical_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-canonical")
+            .expect("canonical item");
+        assert_eq!(
+            canonical_item.execution_containers.len(),
+            1,
+            "the canonical Work keeps the container it owns"
+        );
+        // Idempotent: a second heal finds nothing.
+        assert!(projection
+            .detach_foreign_container_refs("work-canonical", &[], |c| {
+                workspace_execution_container_same(c, &reused)
+            })
+            .is_empty());
+    }
+
+    /// Issue #4465 fail-closed boundaries: the canonical Work must exist, be
+    /// incomplete, and itself hold the container. Otherwise nothing is
+    /// detached — a missing or terminal canonical owner is not authority to
+    /// strip another Work's container.
+    #[test]
+    fn detach_foreign_container_refs_is_fail_closed_without_a_live_canonical_owner() {
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 16, 8, 39, 0).unwrap();
+        let reused = container_for_test("work/issue-4465", "/repo/work/issue-4465");
+
+        let seed = |with_canonical: bool, canonical_done: bool| {
+            let mut projection = WorkItemsProjection::empty(t0);
+            if with_canonical {
+                let mut canonical = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+                canonical.execution_container = Some(reused.clone());
+                projection.apply_event(canonical);
+                if canonical_done {
+                    projection.apply_event(WorkEvent::new(
+                        WorkEventKind::Done,
+                        "work-canonical",
+                        t0,
+                    ));
+                }
+            }
+            let mut stale = WorkEvent::new(WorkEventKind::Start, "work-stale", t0);
+            stale.execution_container = Some(reused.clone());
+            projection.apply_event(stale);
+            projection
+        };
+
+        assert!(
+            seed(false, false)
+                .detach_foreign_container_refs("work-canonical", &[], |c| {
+                    workspace_execution_container_same(c, &reused)
+                })
+                .is_empty(),
+            "a missing canonical Work must not strip refs"
+        );
+        assert!(
+            seed(true, true)
+                .detach_foreign_container_refs("work-canonical", &[], |c| {
+                    workspace_execution_container_same(c, &reused)
+                })
+                .is_empty(),
+            "a terminal canonical Work must not strip refs"
+        );
+
+        // The canonical Work exists and is live, but does not hold the
+        // container itself: still fail-closed.
+        let mut projection = WorkItemsProjection::empty(t0);
+        let mut canonical = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+        canonical.execution_container = Some(container_for_test("work/other", "/repo/work/other"));
+        projection.apply_event(canonical);
+        let mut stale = WorkEvent::new(WorkEventKind::Start, "work-stale", t0);
+        stale.execution_container = Some(reused.clone());
+        projection.apply_event(stale);
+        assert!(
+            projection
+                .detach_foreign_container_refs("work-canonical", &[], |c| {
+                    workspace_execution_container_same(c, &reused)
+                })
+                .is_empty(),
+            "a canonical Work that does not hold the container must not strip refs"
+        );
     }
 }

@@ -11797,7 +11797,7 @@ pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 11] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 14] = [
     "execution.release_prepared",
     "execution.continue",
     "execution.status",
@@ -11806,6 +11806,12 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 11] = [
     "execution.adopt",
     "workspace.ensure",
     "workspace.update",
+    // Issue #4465: the container-ambiguity refusal names these three. They
+    // were absent, so the one refusal that actually needed a prune route could
+    // not carry it across the bridge and the agent was left guessing.
+    "workspace.work_prune",
+    "workspace.candidates",
+    "workspace.join",
     "build.abort",
     "verify.plan",
     "verify.run",
