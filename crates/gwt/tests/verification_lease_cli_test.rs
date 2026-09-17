@@ -276,3 +276,38 @@ fn an_index_lease_is_invisible_to_the_verification_lane() {
         .complete(gwt_core::index_coordinator::JobOutcome::Completed)
         .unwrap();
 }
+
+/// Issue #4280 AC-2 / AC-4: a waiter reads how far the holder's `verify.run`
+/// has got (commands left and a paced estimate) instead of the TTL alone.
+#[test]
+fn status_reports_the_verification_holders_remaining_commands() {
+    use gwt_core::index_coordinator::{JobAdmission, JobOutcome, JobPriority, TargetKey};
+
+    let arena = Arena::new();
+    let coordinator = index_coordinator(arena.home.path());
+    let key = TargetKey::verification("repo", "holder");
+    let JobAdmission::Owner(guard) = coordinator
+        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(5))
+        .unwrap()
+    else {
+        panic!("holder target must be free");
+    };
+    let lease = guard
+        .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(2_700))
+        .unwrap();
+    // Two of five commands finished at 45 s each: three are left.
+    lease.publish_progress(2, 5, 45_000).unwrap();
+
+    let status = arena.run(STATUS);
+    assert_eq!(headline(&status), "verification lease: held", "{status}");
+    assert_eq!(field(&status, "holder_kind"), "verification", "{status}");
+    assert_eq!(field_u64(&status, "remaining_batches"), 3, "{status}");
+    assert_eq!(
+        field_u64(&status, "estimated_remaining_ms"),
+        135_000,
+        "{status}"
+    );
+
+    drop(lease);
+    guard.complete(JobOutcome::Completed).unwrap();
+}

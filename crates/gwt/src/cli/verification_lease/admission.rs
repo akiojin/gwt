@@ -84,6 +84,23 @@ impl Admission {
         )
     }
 
+    /// Publish how far this run's command matrix has got (Issue #4280 AC-2):
+    /// `done` of `total` commands finished in `elapsed`. Waiters then see the
+    /// commands left and a paced estimate instead of the TTL remainder. Best
+    /// effort, because progress is a diagnostic and never gates the run.
+    pub(crate) fn publish_progress(&self, done: usize, total: usize, elapsed: Duration) {
+        let Some(lease) = &self.lease else {
+            return;
+        };
+        let unit_ms = match done {
+            0 => 0,
+            done => elapsed.as_millis() as u64 / done as u64,
+        };
+        if let Err(err) = lease.publish_progress(done as u64, total as u64, unit_ms) {
+            tracing::warn!(error = %err, "verify.run admission: progress not published");
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn lease_id(&self) -> Option<&str> {
         Some(&self.lease_id)
@@ -243,8 +260,9 @@ fn deferred(
         None => "rerun `verify.run` after the current lease holder finishes".to_string(),
     };
     unexpected(format!(
-        "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — the wait counts \
-         as one gwt-verify lease attempt",
+        "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — a deferral is \
+         not a failure and there is no attempt cap: your turn stays reserved, so keep rerunning \
+         `verify.run` while the holder makes progress",
         started.elapsed().as_secs(),
         max_wait.as_secs()
     ))
@@ -569,6 +587,13 @@ mod tests {
             !without_eta.contains("verify.lease.acquire"),
             "canonical admission must not recommend detached manual acquisition: {without_eta}"
         );
+        // Issue #4280 AC-3: a deferral is a reserved turn, not a spent
+        // attempt — counting it toward a cap is what made waiters give up.
+        for message in [&with_eta, &without_eta] {
+            assert!(!message.contains("lease attempt"), "{message}");
+            assert!(message.contains("no attempt cap"), "{message}");
+            assert!(message.contains("turn stays reserved"), "{message}");
+        }
     }
 
     /// How long a released lease may still read as held before the release is
@@ -786,6 +811,30 @@ mod tests {
             "{}",
             admission.summary()
         );
+
+        drop(admission);
+        lease_root.assert_free("dropping the admission must release the lease");
+    }
+
+    /// Issue #4280 AC-2: the admitted run publishes its command progress, so
+    /// a waiter reads the commands left and a paced ETA from the status.
+    #[test]
+    fn admission_publishes_the_runs_command_progress() {
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let admission = admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap();
+
+        admission.publish_progress(0, 4, Duration::ZERO);
+        let status = lease_root.assert_held("the run holds the lease");
+        assert_eq!(status.remaining_batches, Some(4));
+        assert_eq!(status.estimated_remaining_ms, status.remaining_ms);
+
+        // Two commands took 60 s in total: two more at 30 s each.
+        admission.publish_progress(2, 4, Duration::from_secs(60));
+        let status = lease_root.assert_held("the run still holds the lease");
+        assert_eq!(status.remaining_batches, Some(2));
+        assert_eq!(status.estimated_remaining_ms, Some(60_000));
 
         drop(admission);
         lease_root.assert_free("dropping the admission must release the lease");
