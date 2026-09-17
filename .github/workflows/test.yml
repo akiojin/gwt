@@ -4,7 +4,55 @@ on:
   pull_request:
     branches: [develop, main]
 
+# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
+# update-branch `synchronize` starts a fresh run, and without this group the
+# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
+# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
+# only this PR's older run of this workflow. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
+  # cannot affect skip instead of queueing a Windows runner. Only jobs that are
+  # NOT a develop required status check may depend on this job: GitHub reports
+  # a skipped job as Success to branch protection, so gating a required check
+  # here would let a PR merge without running it. The gated jobs condition on
+  # `!cancelled() && needs.changes.outputs.docs_only != 'true'`, so a failed
+  # classification (API error) falls open to running them. Both properties are
+  # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
+  changes:
+    name: Classify changed files
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Classify changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+          # Documentation is Markdown anywhere plus docs/. Markdown the binaries
+          # embed is code: CHANGELOG.md (include_str! in gwt-core) and
+          # .claude/ + .codex/ (include_dir! in gwt-skills).
+          docs_only=true
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              CHANGELOG.md|.claude/*|.codex/*) docs_only=false ;;
+              docs/*|*.md) ;;
+              *) docs_only=false ;;
+            esac
+          done <<<"$files"
+          echo "$files"
+          echo "docs_only=$docs_only"
+          echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
+
   test:
     name: Test (Rust)
     runs-on: ubuntu-latest
@@ -53,7 +101,14 @@ jobs:
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps xvfb dbus
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
+      # Issue #4133: naming the scope is what lets cache-warm.yml populate it
+      # from develop/main. Without `shared-key` the key embeds GITHUB_JOB, so
+      # only a job with this exact id could ever write a cache this job reads —
+      # and no push-triggered workflow did, which is why every PR's first Rust
+      # job rebuilt 377 crates.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       # Issue #4055: 21 green runs measured this step at 500–725s (p95 ~660s)
       # and a slow runner crossed the old 15-minute cap with every suite ok
@@ -117,6 +172,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       - uses: actions/setup-python@v7
         with:
@@ -148,6 +205,8 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Run managed hook self-heal regressions
         shell: bash
@@ -231,6 +290,12 @@ jobs:
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
+      # Issue #3777: measure the warm 250ms acceptance contract without other
+      # tests competing for CPU and file I/O. The full default-parallel proof
+      # remains in nightly.yml alongside the other deadline-sensitive tests.
+      - name: Measure warm prompt latency in isolation
+        run: cargo test -p gwt --lib --all-features cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1
+        timeout-minutes: 15
 
   # The default-parallel determinism proof lives in nightly.yml (Issue #4134
   # AC-1). It re-ran on Windows a suite Linux had already run, cost 2806s, and
@@ -238,6 +303,8 @@ jobs:
   # develop rather than of one pull request.
   test-windows-agent-launch-e2e:
     name: Test (Windows agent launch)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -246,6 +313,8 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
         continue-on-error: true
       # Issue #4134 AC-2: the four provider/selector combinations used to be a
       # four-way matrix, and every shard paid the same 279s cold build to run
@@ -282,6 +351,8 @@ jobs:
 
   test-frontend:
     name: Test (Frontend + WebView E2E)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
