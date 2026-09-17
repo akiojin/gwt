@@ -1307,6 +1307,12 @@ pub struct IssueMonitorLaunchedIssue {
 pub struct IssueMonitorLaunchConfirmation {
     pub window_id: String,
     pub claim_id: Option<String>,
+    /// Issue #3712 AC-1: the delivery this ACK consumed. The pending delivery
+    /// is gone once the GUI ACKs, but the PM still has to be able to name it:
+    /// `stop_only` asks for claim, delivery, and window, and the status row
+    /// is the only place the PM can read them from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
     pub confirmed_at: String,
 }
 
@@ -2561,6 +2567,27 @@ impl StopIdentityMatch {
             },
         }
     }
+
+    /// Issue #3712 AC-1: a delivery still awaiting its ACK must be named
+    /// exactly (or a stale notification could revoke the launch that replaced
+    /// it). Once the ACK consumed it, an operator may name the consumed
+    /// delivery the status row reports, or omit it as pre-#3712 callers did;
+    /// any other delivery id never belonged to this launch.
+    fn deliveries_agree(
+        self,
+        requested: Option<&str>,
+        pending: Option<&str>,
+        confirmed: Option<&str>,
+    ) -> bool {
+        match self {
+            Self::Exact => requested == pending,
+            Self::Operator => match (requested, pending) {
+                (_, Some(_)) => requested == pending,
+                (None, None) => true,
+                (Some(requested), None) => Some(requested) == confirmed,
+            },
+        }
+    }
 }
 
 /// SPEC-3431 FR-033: why a stop request was refused. Every variant leaves the
@@ -3680,6 +3707,42 @@ pub struct IssueMonitorInboxSummary {
     /// without opening nine of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<MonitorFailureKind>,
+    /// Issue #3712 AC-5: the bound window's state as the canvas last
+    /// observed it, joined here so the PM reads pane and launch from one
+    /// snapshot instead of matching `pane.list` by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_state: Option<WindowState>,
+    /// Issue #3712 AC-2/AC-5: whether the Monitor's launch accounting agrees
+    /// with the canvas for this row. Present only for rows holding a bound
+    /// window; `missing` and `terminal` are the slot-leak shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_consistency: Option<IssueMonitorRuntimeConsistency>,
+}
+
+/// Issue #3712 AC-5: the per-row join computed while projecting the status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IssueMonitorRowRuntime {
+    pane_state: Option<WindowState>,
+    consistency: Option<IssueMonitorRuntimeConsistency>,
+}
+
+/// Issue #3712 AC-2/AC-5: how the Monitor's launch accounting relates to
+/// the latest canvas observation for one launched row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorRuntimeConsistency {
+    /// The bound window is on the canvas and its process has not ended.
+    Consistent,
+    /// The bound window is on the canvas but reads `stopped` or `error`: the
+    /// launch is over while the slot is still held.
+    Terminal,
+    /// The bound window is absent from a fresh canvas observation: the pane
+    /// is gone while the slot is still held.
+    Missing,
+    /// No fresh canvas observation covers this launch (no GUI connected, a
+    /// stale snapshot, or an observation older than the ACK), so nothing can
+    /// be said either way.
+    Unavailable,
 }
 
 /// Issue #4161 AC-9: serde cannot ask a `u32` whether it is worth serializing.
@@ -9290,6 +9353,24 @@ impl IssueMonitorState {
     /// relaunch them (mirroring the expired GitHub claim, which lapses after
     /// the same TTL).
     pub fn expire_stale_unbound_launches(&mut self, now: &str) -> Vec<u64> {
+        self.expire_stale_unbound_launches_with(now, crate::process::is_host_process_alive)
+    }
+
+    /// [`Self::expire_stale_unbound_launches`] with the materializer liveness
+    /// probe injected.
+    ///
+    /// Issue #3712 AC-2: a pending delivery is ACK-driven, not TTL-expired —
+    /// but only while the materializer that claimed it can still ACK. When
+    /// that process is gone and `claim_ttl_secs` has lapsed, nothing will ever
+    /// ACK the delivery, and the `launching` row is a slot leak (one held a
+    /// slot for 27 hours with no window). A delivery no materializer has
+    /// claimed yet keeps the ACK-driven contract: a restarting GUI claims it
+    /// on its next tick.
+    pub fn expire_stale_unbound_launches_with(
+        &mut self,
+        now: &str,
+        is_process_alive: impl Fn(u32) -> bool,
+    ) -> Vec<u64> {
         let ttl = self.config.claim_ttl_secs as i64;
         let unbound: Vec<u64> = self
             .active_launches
@@ -9299,11 +9380,31 @@ impl IssueMonitorState {
             .collect();
         let mut expired = Vec::new();
         for issue_number in unbound {
-            if self
+            if let Some(delivery) = self
                 .pending_launch_deliveries
                 .iter()
-                .any(|delivery| delivery.issue_number == issue_number)
+                .find(|delivery| delivery.issue_number == issue_number)
             {
+                let materializer_dead = delivery
+                    .materializer_pid
+                    .filter(|pid| *pid > 0)
+                    .is_some_and(|pid| !is_process_alive(pid));
+                let stale = rfc3339_elapsed_secs(&delivery.created_at, now)
+                    .is_some_and(|elapsed| elapsed >= ttl);
+                if !(materializer_dead && stale) {
+                    continue;
+                }
+                self.pending_launch_deliveries
+                    .retain(|delivery| delivery.issue_number != issue_number);
+                self.active_launches
+                    .retain(|active| *active != issue_number);
+                self.launching_claimed_at.remove(&issue_number);
+                self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+                if !self.queue.contains(&issue_number) {
+                    self.queue.push_back(issue_number);
+                    self.apply_priority_order_to_queue();
+                }
+                expired.push(issue_number);
                 continue;
             }
             match self.launching_claimed_at.get(&issue_number) {
@@ -9749,6 +9850,7 @@ impl IssueMonitorState {
                 .iter()
                 .map(|item| {
                     let (recoverable_merged, completion_reason) = self.completion_anomaly(item);
+                    let runtime = self.runtime_consistency_at(item.issue.number, now);
                     IssueMonitorInboxSummary {
                         issue_number: item.issue.number,
                         state: item.state,
@@ -9788,7 +9890,7 @@ impl IssueMonitorState {
                         // has to be readable from the same snapshot, or the exact
                         // match it enforces is unsatisfiable from the PM's side.
                         claim_id: self.live_claim_id(item.issue.number),
-                        delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                        delivery_id: self.launch_delivery_id(item.issue.number),
                         waiting: self
                             .autonomous_record(item.issue.number)
                             .and_then(|record| self.wait_summary(record, now)),
@@ -9828,6 +9930,8 @@ impl IssueMonitorState {
                                     .map(MonitorFailureKind::classify)
                             })
                             .flatten(),
+                        pane_state: runtime.pane_state,
+                        runtime_consistency: runtime.consistency,
                     }
                 })
                 .collect(),
@@ -11874,6 +11978,7 @@ impl IssueMonitorState {
     ) -> bool {
         let window_id = window_id.into();
         let mut launched_claim_id = None;
+        let mut consumed_delivery_id = None;
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
@@ -11885,6 +11990,7 @@ impl IssueMonitorState {
                         return false;
                     }
                     launched_claim_id = Some(delivery.claim_id.clone());
+                    consumed_delivery_id = Some(delivery.delivery_id.clone());
                     self.pending_launch_deliveries.remove(index);
                 }
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
@@ -11892,7 +11998,13 @@ impl IssueMonitorState {
                 }
             }
         }
-        self.complete_active_launch_with_claim(issue_number, window_id, launched_claim_id, None);
+        self.complete_active_launch_with_claim(
+            issue_number,
+            window_id,
+            launched_claim_id,
+            consumed_delivery_id,
+            None,
+        );
         true
     }
 
@@ -11982,7 +12094,7 @@ impl IssueMonitorState {
     }
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
-        self.complete_active_launch_with_claim(issue_number, window_id.into(), None, None);
+        self.complete_active_launch_with_claim(issue_number, window_id.into(), None, None, None);
     }
 
     /// Issue #4328: acknowledge a launch against the caller's clock.
@@ -12002,6 +12114,7 @@ impl IssueMonitorState {
             issue_number,
             window_id.into(),
             None,
+            None,
             Some(confirmed_at),
         );
     }
@@ -12019,6 +12132,7 @@ impl IssueMonitorState {
         issue_number: u64,
         window_id: String,
         claim_id: Option<String>,
+        delivery_id: Option<String>,
         confirmed_at: Option<&str>,
     ) {
         let repeated_ack = self.active_launches.contains(&issue_number)
@@ -12027,13 +12141,14 @@ impl IssueMonitorState {
             && self
                 .launch_confirmations
                 .get(&issue_number)
-                .is_some_and(|ack| ack.window_id == window_id);
+                .is_some_and(|ack| ack.window_id == window_id && ack.delivery_id == delivery_id);
         if !repeated_ack {
             self.launch_confirmations.insert(
                 issue_number,
                 IssueMonitorLaunchConfirmation {
                     window_id: window_id.clone(),
                     claim_id: claim_id.clone(),
+                    delivery_id: delivery_id.clone(),
                     confirmed_at: confirmed_at.map(str::to_string).unwrap_or_else(|| {
                         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
                     }),
@@ -13401,6 +13516,29 @@ impl IssueMonitorState {
             .map(|delivery| delivery.delivery_id.clone())
     }
 
+    /// Issue #3712 AC-1: the delivery the live launch's ACK consumed, while
+    /// that ACKed window is still the bound one. `None` before the ACK (the
+    /// delivery is still pending) and after the launch is released.
+    fn confirmed_launch_delivery_id(&self, issue_number: u64) -> Option<String> {
+        if !self.active_launches.contains(&issue_number) {
+            return None;
+        }
+        let window_id = self.launched_windows.get(&issue_number)?;
+        self.launch_confirmations
+            .get(&issue_number)
+            .filter(|ack| issue_monitor_window_ids_match(&ack.window_id, window_id))
+            .and_then(|ack| ack.delivery_id.clone())
+    }
+
+    /// Issue #3712 AC-1: the delivery id the status row reports and
+    /// [`Self::stop_only`] accepts — pending until the ACK, the consumed one
+    /// after it — so a PM copying the row always names a delivery that
+    /// belongs to this launch.
+    pub fn launch_delivery_id(&self, issue_number: u64) -> Option<String> {
+        self.pending_launch_delivery_id(issue_number)
+            .or_else(|| self.confirmed_launch_delivery_id(issue_number))
+    }
+
     /// SPEC-3431 FR-033: stop one launch and hold its issue, without requeueing.
     ///
     /// This is the "stop" half of the Monitor-owned lifecycle, and it is
@@ -13493,7 +13631,7 @@ impl IssueMonitorState {
         IssueMonitorLaunchIdentity {
             active: self.active_launches.contains(&issue_number),
             claim_id: self.live_claim_id(issue_number),
-            delivery_id: self.pending_launch_delivery_id(issue_number),
+            delivery_id: self.launch_delivery_id(issue_number),
             window_id: self.launched_window_id(issue_number),
         }
     }
@@ -13547,7 +13685,11 @@ impl IssueMonitorState {
         ) {
             return Err(IssueMonitorStopMismatch::ClaimMismatch);
         }
-        if target.delivery_id != self.pending_launch_delivery_id(issue_number) {
+        if !identity_match.deliveries_agree(
+            target.delivery_id.as_deref(),
+            self.pending_launch_delivery_id(issue_number).as_deref(),
+            self.confirmed_launch_delivery_id(issue_number).as_deref(),
+        ) {
             return Err(IssueMonitorStopMismatch::DeliveryMismatch);
         }
         let live_window = self.launched_window_id(issue_number);
@@ -14706,6 +14848,64 @@ impl IssueMonitorState {
         let snapshot = self.window_snapshot.as_ref()?;
         let age = rfc3339_elapsed_secs(&snapshot.observed_at, now)?;
         (age <= IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS).then_some(snapshot)
+    }
+
+    /// Issue #3712 AC-2/AC-5: join the bound window of `issue_number` with the
+    /// latest fresh canvas observation. Judged only for rows holding a slot
+    /// with a bound window; the same freshness and ordering gates as the idle
+    /// classifier, so the two can never disagree about which observation
+    /// counts.
+    fn runtime_consistency_at(&self, issue_number: u64, now: &str) -> IssueMonitorRowRuntime {
+        let none = IssueMonitorRowRuntime {
+            pane_state: None,
+            consistency: None,
+        };
+        if !self.active_launches.contains(&issue_number) {
+            return none;
+        }
+        let Some(window_id) = self.launched_windows.get(&issue_number) else {
+            return none;
+        };
+        let unavailable = IssueMonitorRowRuntime {
+            pane_state: None,
+            consistency: Some(IssueMonitorRuntimeConsistency::Unavailable),
+        };
+        let Some(snapshot) = self.fresh_window_snapshot(now) else {
+            return unavailable;
+        };
+        let owned_here = issue_monitor_qualified_window_id(window_id)
+            .is_some_and(|(tab_id, _)| tab_id == snapshot.project_tab_id);
+        if !owned_here
+            || !self.window_observation_covers_launch(
+                issue_number,
+                window_id,
+                &snapshot.observed_at,
+            )
+        {
+            return unavailable;
+        }
+        match snapshot
+            .windows
+            .iter()
+            .find(|observed| issue_monitor_window_ids_match(window_id, &observed.window_id))
+        {
+            None => IssueMonitorRowRuntime {
+                pane_state: None,
+                consistency: Some(IssueMonitorRuntimeConsistency::Missing),
+            },
+            Some(observed) => IssueMonitorRowRuntime {
+                pane_state: Some(observed.status),
+                consistency: Some(match observed.status {
+                    WindowState::Stopped | WindowState::Error => {
+                        IssueMonitorRuntimeConsistency::Terminal
+                    }
+                    WindowState::Running
+                    | WindowState::Starting
+                    | WindowState::Idle
+                    | WindowState::Waiting => IssueMonitorRuntimeConsistency::Consistent,
+                }),
+            },
+        }
     }
 
     fn review_verdict_published(&self, issue_number: u64) -> bool {
@@ -15882,6 +16082,8 @@ mod tests {
                     attempts: 0,
                     last_failure_message: None,
                     failure_kind: None,
+                    pane_state: None,
+                    runtime_consistency: None,
                 }],
                 closure_held: Vec::new(),
                 last_error: None,
@@ -16501,6 +16703,62 @@ mod tests {
         assert!(monitor
             .expire_stale_unbound_launches("2026-07-03T00:00:00Z")
             .is_empty());
+    }
+
+    /// Issue #3712 AC-2: a pending delivery is ACK-driven only while the
+    /// materializer that claimed it can still ACK. Once that process is gone
+    /// and the claim TTL has lapsed, the `launching` row is a slot leak (the
+    /// #4141 specimen held a slot for 27 hours with no window) and must return
+    /// to the queue exactly like an unbound claim does.
+    #[test]
+    fn a_pending_delivery_whose_materializer_died_expires_after_claim_ttl() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-02T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        assert_eq!(monitor.active_count(), 1);
+
+        // Before the TTL a dead materializer changes nothing: the GUI may be
+        // restarting and about to re-claim the delivery.
+        assert!(monitor
+            .expire_stale_unbound_launches_with("2026-07-02T00:10:00Z", |_| false)
+            .is_empty());
+        assert_eq!(monitor.prefs().pending_launch_deliveries.len(), 1);
+
+        // After the TTL a live materializer still owns the delivery.
+        assert!(monitor
+            .expire_stale_unbound_launches_with("2026-07-02T00:31:00Z", |pid| pid == 101)
+            .is_empty());
+        assert_eq!(monitor.active_count(), 1);
+
+        // After the TTL with the materializer gone the slot is released.
+        assert_eq!(
+            monitor.expire_stale_unbound_launches_with("2026-07-02T00:31:00Z", |_| false),
+            vec![42]
+        );
+        assert_eq!(monitor.active_count(), 0, "slot released");
+        assert!(
+            monitor.prefs().pending_launch_deliveries.is_empty(),
+            "the dead delivery is dropped, not replayed"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert!(monitor.queue.contains(&42), "the issue is claimable again");
     }
 
     #[test]
@@ -21601,6 +21859,7 @@ mod tests {
             "tab-1::agent-1038".to_string(),
             Some("gwt-auto-improve:f0000000-original".to_string()),
             None,
+            None,
         );
         monitor.complete_active_launch(4009, "tab-1::agent-1039");
         assert_eq!(monitor.active_count(), 2);
@@ -23082,6 +23341,156 @@ mod tests {
             Some("launch:effect-1"),
             "the PM cannot send a delivery id it cannot read"
         );
+    }
+
+    /// Issue #3712 AC-1: the identity `stop_only` accepts must stay readable
+    /// after the GUI ACK, on the row and across a prefs roundtrip. Before this,
+    /// the ACK consumed the delivery and the `launched` row lost `delivery_id`,
+    /// so the PM could never send the three components the guidance names.
+    #[test]
+    fn launched_row_keeps_its_delivery_id_after_the_ack() {
+        let mut monitor = acked_delivery_monitor();
+        assert!(
+            monitor.prefs().pending_launch_deliveries.is_empty(),
+            "the ACK still consumes the pending delivery"
+        );
+
+        let assert_identity = |monitor: &IssueMonitorState, label: &str| {
+            let status = monitor.agent_status();
+            let row = status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .expect("inbox row for the launched issue");
+            assert_eq!(row.state, MonitorInboxState::Launched, "{label}");
+            assert_eq!(row.claim_id.as_deref(), Some("claim-42"), "{label}: claim");
+            assert_eq!(
+                row.delivery_id.as_deref(),
+                Some("launch:effect-42"),
+                "{label}: the ACKed delivery stays on the launched row"
+            );
+            assert_eq!(
+                row.launched_window_id.as_deref(),
+                Some("tab-1::agent-42"),
+                "{label}: window"
+            );
+            let identity = monitor.launch_identity(42);
+            assert!(identity.active, "{label}");
+            assert_eq!(
+                identity.delivery_id.as_deref(),
+                Some("launch:effect-42"),
+                "{label}"
+            );
+        };
+        assert_identity(&monitor, "in memory");
+        // The offline status path rebuilds the inbox from prefs plus the Issue
+        // cache; the identity has to survive that rebuild.
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-06-26T00:05:00Z");
+        assert_identity(&restored, "after a prefs roundtrip");
+        // A relaunch after a stop must not inherit the consumed delivery.
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.stop_only(&target, "pm stop", "2026-06-26T01:00:00Z"),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+        assert_eq!(monitor.launch_identity(42).delivery_id, None);
+    }
+
+    /// Issue #3712 AC-1: a PM that copies the launched row's identity into
+    /// `issue.monitor.stop` must be accepted; a caller that omits the consumed
+    /// delivery keeps working; a stale delivery id still fails closed.
+    #[test]
+    fn stop_only_accepts_the_delivery_id_the_launched_row_reports() {
+        let monitor = acked_delivery_monitor();
+        let row_target = IssueMonitorStopTarget {
+            issue_number: 42,
+            claim_id: Some("claim-42".to_string()),
+            delivery_id: Some("launch:effect-42".to_string()),
+            window_id: Some("tab-1::agent-42".to_string()),
+        };
+
+        let mut from_row = monitor.clone();
+        assert_eq!(
+            from_row.stop_only(&row_target, "pm stop", "2026-06-26T01:00:00Z"),
+            IssueMonitorStopOutcome::Stopped {
+                window_id: "tab-1::agent-42".to_string()
+            },
+            "the identity read from the status row is the identity stop accepts"
+        );
+        assert_eq!(from_row.active_count(), 0);
+
+        let mut legacy = monitor.clone();
+        assert_eq!(
+            legacy.stop_only(
+                &IssueMonitorStopTarget {
+                    delivery_id: None,
+                    ..row_target.clone()
+                },
+                "pm stop",
+                "2026-06-26T01:00:00Z",
+            ),
+            IssueMonitorStopOutcome::Stopped {
+                window_id: "tab-1::agent-42".to_string()
+            },
+            "a caller that never saw the consumed delivery is not contradicted"
+        );
+
+        let mut stale = monitor.clone();
+        assert_eq!(
+            stale.stop_only(
+                &IssueMonitorStopTarget {
+                    delivery_id: Some("launch:effect-41".to_string()),
+                    ..row_target
+                },
+                "pm stop",
+                "2026-06-26T01:00:00Z",
+            ),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::DeliveryMismatch),
+            "a delivery that never belonged to this launch still fails closed"
+        );
+        assert_eq!(stale.active_count(), 1, "refusal is zero-mutation");
+    }
+
+    /// Issue #3712: one launch carried through claim, delivery, materialization
+    /// and the GUI ACK, the way the daemon and GUI drive it in production.
+    fn acked_delivery_monitor() -> IssueMonitorState {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-06-26T00:00:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-06-26T00:00:00Z",
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-1::agent-42",
+            |_| false,
+        ));
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-1::agent-42",
+        ));
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::agent-42",
+            Some("launch:effect-42"),
+        ));
+        monitor
     }
 
     /// Issue #3732: cached inbox metadata is not the durable launch identity
@@ -29944,6 +30353,108 @@ mod tests {
             .map(|idle| idle.idle_kind)
     }
 
+    /// Issue #3712 AC-5: the status row carries the pane's observed state and
+    /// whether the Monitor's launch accounting agrees with the canvas, so the
+    /// PM can tell a provider wait, an approval wait, and a dead launch apart
+    /// from one snapshot instead of joining `pane.list` by hand.
+    #[test]
+    fn agent_status_joins_pane_state_and_runtime_consistency_per_launched_row() {
+        let mut monitor = autonomous_launched_cohort(&[
+            (41, "tab-1::running-41"),
+            (42, "tab-1::waiting-42"),
+            (43, "tab-1::stopped-43"),
+            (44, "tab-1::gone-44"),
+        ]);
+        let row = |status: &IssueMonitorAgentStatus, number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .cloned()
+                .expect("row present")
+        };
+
+        // No fresh canvas observation: the join is reported as unavailable,
+        // never guessed.
+        let status = monitor.agent_status_at(IDLE_NOW);
+        for number in [41, 42, 43, 44] {
+            let row = row(&status, number);
+            assert_eq!(row.pane_state, None, "#{number}: no observation, no state");
+            assert_eq!(
+                row.runtime_consistency,
+                Some(IssueMonitorRuntimeConsistency::Unavailable),
+                "#{number}"
+            );
+            assert!(
+                row.last_activity_at.is_some(),
+                "#{number}: every launched row carries the activity clock"
+            );
+        }
+
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                idle_observation("tab-1::running-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::waiting-42", Some(42), WindowState::Waiting, false),
+                idle_observation("tab-1::stopped-43", Some(43), WindowState::Stopped, false),
+                // #44's window is gone from the canvas entirely.
+            ],
+        ));
+        let status = monitor.agent_status_at(IDLE_NOW);
+        let expected = [
+            (
+                41,
+                Some(WindowState::Running),
+                IssueMonitorRuntimeConsistency::Consistent,
+            ),
+            (
+                42,
+                Some(WindowState::Waiting),
+                IssueMonitorRuntimeConsistency::Consistent,
+            ),
+            (
+                43,
+                Some(WindowState::Stopped),
+                IssueMonitorRuntimeConsistency::Terminal,
+            ),
+            (44, None, IssueMonitorRuntimeConsistency::Missing),
+        ];
+        for (number, pane_state, consistency) in expected {
+            let row = row(&status, number);
+            assert_eq!(row.pane_state, pane_state, "#{number}: pane state");
+            assert_eq!(
+                row.runtime_consistency,
+                Some(consistency),
+                "#{number}: consistency"
+            );
+        }
+        let queued_row = {
+            let mut with_queued = monitor.clone();
+            with_queued.record_candidate(issue(45));
+            let status = with_queued.agent_status_at(IDLE_NOW);
+            row(&status, 45)
+        };
+        assert_eq!(queued_row.pane_state, None, "a queued row has no pane");
+        assert_eq!(
+            queued_row.runtime_consistency, None,
+            "consistency is only judged for rows holding a slot"
+        );
+
+        // A stale observation is as good as none.
+        let status = monitor.agent_status_at("2026-09-07T05:00:00Z");
+        assert_eq!(
+            row(&status, 41).runtime_consistency,
+            Some(IssueMonitorRuntimeConsistency::Unavailable)
+        );
+        assert_eq!(row(&status, 41).pane_state, None);
+
+        // The wire shape is what the PM reads.
+        let json = serde_json::to_value(row(&monitor.agent_status_at(IDLE_NOW), 43))
+            .expect("row serializes");
+        assert_eq!(json["pane_state"], serde_json::json!("stopped"));
+        assert_eq!(json["runtime_consistency"], serde_json::json!("terminal"));
+    }
+
     #[test]
     fn idle_windows_are_classified_per_launched_row() {
         // AC-1: four launched rows, one per classification.
@@ -30652,6 +31163,7 @@ mod tests {
             4258,
             "tab-1::agent-354".to_string(),
             Some("predecessor-claim".to_string()),
+            None,
             Some("2026-06-26T00:01:00Z"),
         );
         let observed_at = "2026-06-26T00:02:00Z";
@@ -30678,6 +31190,7 @@ mod tests {
             4258,
             "tab-1::agent-354".to_string(),
             Some("successor-claim".to_string()),
+            None,
             Some("2026-06-26T00:03:00Z"),
         );
         monitor.rebase_daemon_driver_prefs(&successor.prefs());
