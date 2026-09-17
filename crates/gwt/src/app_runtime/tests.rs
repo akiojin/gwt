@@ -45735,6 +45735,314 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     );
 }
 
+/// Issue #4376 AC-1 / AC-2 / AC-7: a manual Update click (attended monitor,
+/// no auto-apply) whose download lands while an agent pane is Running joins
+/// the `Auto` drain instead of offering an immediate restart: the hold is
+/// raised through the same control (#4037, launches held, ledgers and the
+/// monitor settings untouched), nothing is sent that could restart gwt, and
+/// the drain start is recorded with the auto path's notice. A quiet host
+/// keeps the ready modal's Restart now, exactly as before.
+#[test]
+fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_applying() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let seed = || {
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: false,
+                auto_apply_updates: None,
+                effect_authority_epoch: 7,
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-1".to_string(),
+                }],
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+    };
+
+    // Running agent pane: the click waits.
+    seed();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let events = runtime.update_staged_events_with("9.99.0", None);
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("drain status broadcast: {events:?}");
+    let drain = status.update_drain.as_ref().expect("drain raised");
+    assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
+    assert_eq!(drain.version, "9.99.0");
+    assert_eq!(
+        drain.blocking,
+        vec![gwt::update_drain::UpdateBlocker::ActivePane {
+            window_id: "tab-1::agent-1".to_string(),
+            label: "Sample".to_string(),
+            state: WindowProcessStatus::Starting,
+        }],
+        "the status names what the click is waiting for"
+    );
+    let toasts = update_resume_toasts(&events);
+    assert_eq!(toasts.len(), 1, "drain start recorded once: {toasts:?}");
+    assert!(
+        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("draining"),
+        "the auto path's notice is reused: {}",
+        toasts[0].1
+    );
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "a manual click with a running agent never requests a restart"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    assert_eq!(
+        persisted
+            .update_drain
+            .as_ref()
+            .map(|drain| drain.version.as_str()),
+        Some("9.99.0"),
+        "the hold is persisted for the Issue Monitor"
+    );
+    assert!(persisted.enabled, "the drain is a hold, not enabled:false");
+    assert!(
+        !persisted.autonomous_mode,
+        "the attended setting is left alone"
+    );
+    assert_eq!(
+        persisted.effect_authority_epoch, 7,
+        "the drain revokes nothing"
+    );
+    assert_eq!(
+        persisted.launched_issues.len(),
+        1,
+        "launch ledger untouched"
+    );
+
+    // Quiet host: no drain, the ready modal's Restart now applies as before.
+    seed();
+    let quiet_tab = sample_project_tab("tab-2", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut quiet = sample_runtime(temp.path(), vec![quiet_tab], Some("tab-2"));
+    assert!(
+        quiet.update_staged_events_with("9.99.0", None).is_empty(),
+        "a quiet host keeps the manual Restart now path"
+    );
+    assert!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .expect("reload prefs")
+            .update_drain
+            .is_none(),
+        "no hold is raised when nothing is running"
+    );
+}
+
+/// Issue #4376 AC-3 / AC-7: the manual-click drain is applied by the same
+/// tick as the auto path — attended monitor (`autonomous_mode:false`), the
+/// Running pane blocks, the pane going Idle settles over two ticks, the grace
+/// is announced, and the apply goes through `ApplyUpdateDrained`, never
+/// `ApplyUpdateRestartNow`. Agents are never stopped.
+#[test]
+fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
+    let temp = tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-09-15T00:00:00Z")
+        .expect("since")
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: false,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.99.0".to_string(),
+                since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. }))
+            .count()
+    };
+    let at = |secs: i64| since + chrono::Duration::seconds(secs);
+
+    assert!(runtime.update_drain_tick_events_at(at(15)).is_empty());
+    assert!(runtime.update_drain_tick_events_at(at(30)).is_empty());
+    assert_eq!(drained_events(&user_events), 0, "a Running pane blocks");
+    assert_eq!(
+        runtime
+            .window_status("tab-1::agent-1")
+            .unwrap_or(WindowProcessStatus::Idle),
+        WindowProcessStatus::Starting,
+        "the agent pane is never stopped by the drain"
+    );
+
+    runtime
+        .window_hook_states
+        .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    assert!(runtime.update_drain_tick_events_at(at(45)).is_empty());
+    let scheduled = runtime.update_drain_tick_events_at(at(60));
+    assert!(
+        scheduled.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                version,
+                phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+                grace_secs: Some(60),
+            } if version == "9.99.0"
+        )),
+        "the grace is announced to the CTA: {scheduled:?}"
+    );
+    assert_eq!(
+        drained_events(&user_events),
+        0,
+        "nothing applies inside the grace"
+    );
+    let applying = runtime.update_drain_tick_events_at(at(120));
+    assert!(
+        applying.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::UpdateAutoApply {
+                phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+                ..
+            }
+        )),
+        "the apply is announced: {applying:?}"
+    );
+    assert_eq!(
+        drained_events(&user_events),
+        1,
+        "exactly one graceful apply"
+    );
+    assert!(
+        user_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .all(|event| !matches!(event, UserEvent::ApplyUpdateRestartNow { .. })),
+        "the drained manual click never uses the Restart-now route"
+    );
+}
+
+/// Issue #4376 AC-4 / AC-7: after the restart that applied a manually
+/// requested update, the Issue Monitor setting from before the drain is in
+/// effect again. The drain is a #4037 admission hold layered over the
+/// setting — `enabled` is never flipped — so the resume marker records the
+/// raised hold per project and the settling bootstrap releases exactly that:
+/// a monitor that was enabled comes back enabled, one that was disabled stays
+/// disabled, and the drained launches stay attributable.
+#[test]
+fn app_runtime_restart_after_manual_drain_restores_pre_drain_monitor_setting() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for enabled_before_drain in [true, false] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo_with_initial_commit(&repo);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                enabled: enabled_before_drain,
+                autonomous_mode: false,
+                max_active_agents: 2,
+                update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    since: "2026-09-15T00:00:00Z".to_string(),
+                    reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                    blocking: Vec::new(),
+                }),
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number: 4376,
+                    window_id: "tab-1::agent-4376".to_string(),
+                }],
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed prefs");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let marker = update_resume_marker_for(&repo, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            runtime.update_resume_projects(),
+            marker.projects,
+            "the marker written at apply time records the raised hold"
+        );
+        gwt_core::update::persist_update_resume_marker(&marker).expect("persist marker");
+
+        runtime.bootstrap();
+
+        let restored = gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs after restart");
+        assert!(
+            restored.update_drain.is_none(),
+            "the hold raised by the manual click is released"
+        );
+        assert_eq!(
+            restored.enabled, enabled_before_drain,
+            "the pre-drain setting is in effect again (enabled_before_drain={enabled_before_drain})"
+        );
+        assert!(!restored.autonomous_mode, "attended mode is not promoted");
+        assert_eq!(restored.max_active_agents, 2);
+        assert_eq!(
+            restored
+                .launched_issues
+                .iter()
+                .map(|launch| launch.issue_number)
+                .collect::<Vec<_>>(),
+            vec![4376],
+            "the drained launch stays attributable"
+        );
+        assert!(
+            gwt_core::update::load_update_resume_marker().is_none(),
+            "the marker is consumed"
+        );
+    }
+}
+
 /// Issue #4076 AC-2 / AC-5 (#3906 AC-2 / AC-7 / AC-8): the drain tick applies
 /// only after two consecutive quiet ticks plus the 60 s cancel grace, through
 /// `ApplyUpdateDrained` (which main.rs routes into `ApplyUpdateGraceful`); a
