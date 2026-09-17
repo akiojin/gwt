@@ -77,11 +77,11 @@ pub(crate) use app_runtime::{
     build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
-    ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
-    BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared,
-    ProjectOpenTarget, ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress,
-    WindowCloseMonitorResult,
+    ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
+    AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, ContinueWorkReadinessWatch,
+    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch,
+    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget, ProjectTabRuntime,
+    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 #[cfg(test)]
@@ -1014,6 +1014,111 @@ fn spawn_workspace_projection_watcher(
     })
 }
 
+/// Issue #4406: Board refreshes run off the GUI event loop, one per project at
+/// a time. Changes that land while one runs collapse into a single rerun, and
+/// the scoped views travel with the refresh so each post applies incrementally.
+#[derive(Default)]
+struct BoardRefreshQueue {
+    in_flight: HashSet<PathBuf>,
+    rerun: HashSet<PathBuf>,
+    views: HashMap<PathBuf, app_runtime::BoardScopedViews>,
+}
+
+impl BoardRefreshQueue {
+    /// The views to start a refresh with, or `None` while one is already
+    /// running for the project (it reruns once that finishes).
+    fn begin(&mut self, project_root: &Path) -> Option<app_runtime::BoardScopedViews> {
+        if !self.in_flight.insert(project_root.to_path_buf()) {
+            self.rerun.insert(project_root.to_path_buf());
+            return None;
+        }
+        Some(self.views.remove(project_root).unwrap_or_default())
+    }
+
+    /// Record a finished refresh; `true` when a change arrived meanwhile.
+    fn finish(&mut self, project_root: &Path, views: app_runtime::BoardScopedViews) -> bool {
+        self.in_flight.remove(project_root);
+        self.views.insert(project_root.to_path_buf(), views);
+        self.rerun.remove(project_root)
+    }
+}
+
+/// Issue #4406: Active Work rebuilds run off the GUI event loop, one per
+/// project at a time. Requests that land while one runs collapse into a single
+/// rerun, so a burst of background scan completions costs one rebuild.
+#[derive(Default)]
+struct ActiveWorkRefreshQueue {
+    in_flight: HashSet<PathBuf>,
+    rerun: HashSet<PathBuf>,
+}
+
+impl ActiveWorkRefreshQueue {
+    /// `true` when the caller owns the refresh; `false` while one is already
+    /// running for the project (it reruns once that finishes).
+    fn begin(&mut self, project_root: &Path) -> bool {
+        if !self.in_flight.insert(project_root.to_path_buf()) {
+            self.rerun.insert(project_root.to_path_buf());
+            return false;
+        }
+        true
+    }
+
+    /// Record a finished refresh; `true` when a request arrived meanwhile.
+    fn finish(&mut self, project_root: &Path) -> bool {
+        self.in_flight.remove(project_root);
+        self.rerun.remove(project_root)
+    }
+}
+
+fn spawn_active_work_projection_refresh(
+    handle: &tokio::runtime::Handle,
+    proxy: &EventLoopProxy<UserEvent>,
+    job: app_runtime::ActiveWorkProjectionJob,
+) {
+    let proxy = proxy.clone();
+    let project_root = job.project_root.clone();
+    let tab_id = job.tab_id.clone();
+    drop(handle.spawn_blocking(move || {
+        // A panic must still report back, or the project stays in flight and
+        // its Workspace rail never refreshes again.
+        let refreshed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app_runtime::run_active_work_projection_refresh(job)
+        }))
+        .unwrap_or(app_runtime::ActiveWorkProjectionRefreshed {
+            tab_id,
+            view: None,
+            completed: false,
+        });
+        let _ = proxy.send_event(UserEvent::ActiveWorkProjectionRefreshed {
+            project_root,
+            refreshed: Box::new(refreshed),
+        });
+    }));
+}
+
+fn spawn_board_projection_refresh(
+    handle: &tokio::runtime::Handle,
+    proxy: &EventLoopProxy<UserEvent>,
+    job: app_runtime::BoardProjectionRefreshJob,
+    views: app_runtime::BoardScopedViews,
+) {
+    let proxy = proxy.clone();
+    drop(handle.spawn_blocking(move || {
+        let project_root = job.project_root.clone();
+        // A panic must still report back, or the project stays in flight and
+        // its Board never refreshes again.
+        let (refreshed, views) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app_runtime::run_board_projection_refresh(job, views)
+        }))
+        .unwrap_or_default();
+        let _ = proxy.send_event(UserEvent::BoardProjectionRefreshed {
+            project_root,
+            refreshed: Box::new(refreshed),
+            views,
+        });
+    }));
+}
+
 /// Daemon broadcast subscriber registry — one [`DaemonSubscriber`]
 /// per active project. Mirrors [`BoardProjectionWatcherRegistry`] but
 /// listens for `DaemonFrame::Event { channel: "board" }` from a running
@@ -1399,6 +1504,24 @@ enum UserEvent {
     BoardProjectionChanged {
         project_root: PathBuf,
     },
+    /// Issue #4406: a Board refresh finished off the GUI event loop.
+    BoardProjectionRefreshed {
+        project_root: PathBuf,
+        refreshed: Box<app_runtime::BoardProjectionRefreshed>,
+        views: app_runtime::BoardScopedViews,
+    },
+    /// Issue #4406 AC-3/AC-4: something a Workspace row shows changed, so the
+    /// project's Active Work projection needs rebuilding. The rebuild reads the
+    /// home works.json, every session ledger TOML and one execution diagnosis
+    /// per row, so it runs off the GUI event loop.
+    ActiveWorkProjectionChanged {
+        project_root: PathBuf,
+    },
+    /// Issue #4406: an Active Work rebuild finished off the GUI event loop.
+    ActiveWorkProjectionRefreshed {
+        project_root: PathBuf,
+        refreshed: Box<app_runtime::ActiveWorkProjectionRefreshed>,
+    },
     /// SPEC-2359 W-15 (FR-386): result of the background merged-branch scan.
     /// The runtime caches the set and rebroadcasts the Workspace projection
     /// so rows can show the "safe to delete" badge.
@@ -1438,21 +1561,29 @@ enum UserEvent {
         ai_summaries: std::collections::HashMap<String, String>,
     },
     /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
-    /// The handler runs the worktree reconcile AFTER the intake (so branches
-    /// already recorded elsewhere are not redundantly backfilled) and
-    /// rebroadcasts the Workspace projection when anything was applied.
+    /// The ingest worker runs worktree reconcile AFTER intake (so branches
+    /// already recorded elsewhere are not redundantly backfilled), then the
+    /// handler commits only prepared branch state and schedules a projection
+    /// refresh when anything was applied.
     WorkEventsIngested {
         project_root: PathBuf,
         changed: bool,
-        /// Issue #4378 AC-1: the worktree listing the startup ingest reused,
-        /// handed back so the reconcile does not list the worktrees again.
-        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
+        /// Issue #3777 AC-3: the branch set the ingest worker already
+        /// reconciled (Issue #4378 AC-1's listing is consumed there), so the
+        /// tao callback only commits it.
+        local_branches: Option<std::collections::HashSet<String>>,
     },
     /// Issue #4378 AC-2: the startup generation reaper finished on the
     /// blocking worker; Issue Monitor launch deliveries held meanwhile replay.
     StartupGenerationReaperCompleted,
     WorkspaceProjectionChanged {
         project_root: PathBuf,
+    },
+    ActiveWorkProjectionPrepared(Box<ActiveWorkProjectionPrepared>),
+    PreparedActiveWorkDispatch {
+        tab_id: String,
+        target: DispatchTarget,
+        payload: Arc<str>,
     },
     WorkspaceProjectionLoaded {
         project_root: PathBuf,
@@ -3015,6 +3146,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn board_refresh_queue_runs_one_refresh_per_project_and_collapses_changes() {
+        // Issue #4406: a burst of Board changes (file watcher + daemon) must
+        // not stack refreshes; the ones during a refresh collapse into one.
+        let mut queue = crate::BoardRefreshQueue::default();
+        let root = std::path::PathBuf::from("repo");
+        let views = queue.begin(&root).expect("first change starts a refresh");
+        assert!(queue.begin(&root).is_none(), "a refresh is already running");
+        assert!(queue.begin(&root).is_none());
+        assert!(
+            queue.begin(std::path::Path::new("other-repo")).is_some(),
+            "projects refresh independently"
+        );
+        assert!(
+            queue.finish(&root, views),
+            "changes meanwhile rerun it once"
+        );
+        let views = queue.begin(&root).expect("the rerun starts");
+        assert!(!queue.finish(&root, views), "no change, no rerun");
+    }
+
     fn drain_client_payloads(queue: &crate::embedded_server::ClientQueue) -> Vec<String> {
         let mut payloads = Vec::new();
         while let Some(payload) = queue.try_recv() {
@@ -3354,6 +3506,45 @@ mod tests {
         sample_runtime_with_events(temp_root, tabs, active_tab_id).0
     }
 
+    fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkProjectionView {
+        let tab_id = runtime
+            .active_tab_id
+            .clone()
+            .expect("active tab for projection completion");
+        let recorded_events = match &runtime.proxy {
+            AppEventProxy::Stub(events) => events.clone(),
+            AppEventProxy::Real(_) => panic!("test runtime must use a stub event proxy"),
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let completion = {
+                let mut events = recorded_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                events
+                    .iter()
+                    .position(|event| matches!(event, UserEvent::ActiveWorkProjectionPrepared(_)))
+                    .map(|index| events.remove(index))
+            };
+            if let Some(UserEvent::ActiveWorkProjectionPrepared(completion)) = completion {
+                let commit = runtime.handle_active_work_projection_prepared(*completion);
+                if commit.prepared_dispatch.is_some() {
+                    return runtime
+                        .active_work_projection_cache
+                        .borrow()
+                        .get(&tab_id)
+                        .cloned()
+                        .expect("committed active Work projection");
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background Active Work projection did not commit before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn sample_runtime_with_events(
         temp_root: &Path,
         tabs: Vec<ProjectTabRuntime>,
@@ -3444,13 +3635,20 @@ mod tests {
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
-            session_ledger_cache: std::cell::RefCell::new(
+            session_ledger_cache: Arc::new(Mutex::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
-            ),
-            work_items_cache: std::cell::RefCell::new(
+            )),
+            work_items_cache: Arc::new(Mutex::new(
                 gwt_core::workspace_projection::WorkItemsCache::new(),
-            ),
+            )),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_refresh: std::cell::RefCell::new(
+                super::app_runtime::ActiveWorkProjectionRefreshBroker::default(),
+            ),
+            active_work_session_ledger_cache: Arc::new(Mutex::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            )),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -3477,6 +3675,7 @@ mod tests {
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            branch_cleanup_operations: std::sync::Arc::new(gwt::BranchCleanupOperationStore::new()),
             server_url: None,
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -4491,7 +4690,7 @@ mod tests {
         ));
 
         let cleanup_missing =
-            runtime.run_branch_cleanup_events("client-1", "missing", &[], false, false);
+            runtime.run_branch_cleanup_events("client-1", "missing", &[], false, false, None);
         assert_eq!(cleanup_missing.len(), 1);
         assert!(matches!(
             cleanup_missing[0].event,
@@ -4499,7 +4698,7 @@ mod tests {
         ));
 
         let cleanup_wrong =
-            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false, false);
+            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false, false, None);
         assert_eq!(cleanup_wrong.len(), 1);
         assert!(matches!(
             cleanup_wrong[0].event,
@@ -4717,22 +4916,20 @@ mod tests {
         );
         // PTY exit alone keeps the window open so launch diagnostics remain
         // visible; explicit hook stop owns structural auto-close.
-        assert_eq!(close_events.len(), 3);
+        assert_eq!(close_events.len(), 2);
         assert!(matches!(
             close_events[0].event,
-            BackendEvent::ActiveWorkProjection { .. }
-        ));
-        assert!(matches!(
-            close_events[1].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_two_id && state == WindowProcessStatus::Stopped
         ));
         assert!(matches!(
-            close_events[2].event,
+            close_events[1].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Stopped
                     && detail.as_deref() == Some("Process exited")
         ));
+        let active_work = wait_for_active_work_projection(&mut runtime);
+        assert_eq!(active_work.active_agents, 1);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
         assert!(runtime.window_lookup.contains_key(&claude_two_id));
 
@@ -4932,12 +5129,16 @@ mod tests {
         let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
         let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
 
+        // Issue #4433 AC-1: progress and result are broadcast (not replied to
+        // the originating client) and carry the frontend operation id.
+        let cleanup_operation_id = "branches-1-1758000000000-1";
         let cleanup_events = runtime.run_branch_cleanup_events(
             "client-1",
             &branches_id,
             &[String::from("feature/prune-me")],
             false,
             false,
+            Some(cleanup_operation_id),
         );
         assert!(cleanup_events.is_empty());
         wait_for_recorded_event("branch cleanup progress dispatch", &events, |events| {
@@ -4946,8 +5147,14 @@ mod tests {
                     event,
                     UserEvent::Dispatch(dispatched)
                         if dispatched.iter().any(|outbound| matches!(
-                            outbound.event,
-                            BackendEvent::BranchCleanupProgress { .. }
+                            (&outbound.target, &outbound.event),
+                            (
+                                DispatchTarget::Broadcast,
+                                BackendEvent::BranchCleanupProgress {
+                                    operation_id: Some(operation_id),
+                                    ..
+                                },
+                            ) if operation_id == cleanup_operation_id
                         ))
                 )
             })
@@ -4958,12 +5165,43 @@ mod tests {
                     event,
                     UserEvent::Dispatch(dispatched)
                         if dispatched.iter().any(|outbound| matches!(
-                            outbound.event,
-                            BackendEvent::BranchCleanupResult { .. }
+                            (&outbound.target, &outbound.event),
+                            (
+                                DispatchTarget::Broadcast,
+                                BackendEvent::BranchCleanupResult {
+                                    operation_id: Some(operation_id),
+                                    ..
+                                },
+                            ) if operation_id == cleanup_operation_id
                         ))
                 )
             })
         });
+
+        // Issue #4433 AC-2: a client that reconnected mid-cleanup has a new
+        // client id and can still pull the operation's current state.
+        let sync_events =
+            runtime.sync_branch_cleanup_events("client-2", &branches_id, cleanup_operation_id);
+        assert_eq!(sync_events.len(), 1);
+        assert!(matches!(
+            (&sync_events[0].target, &sync_events[0].event),
+            (
+                DispatchTarget::Client(client_id),
+                BackendEvent::BranchCleanupResult {
+                    operation_id: Some(operation_id),
+                    ..
+                },
+            ) if client_id == "client-2" && operation_id == cleanup_operation_id
+        ));
+
+        // Issue #4433 AC-3: once consumed, the operation state is discarded and
+        // silence must not be synthesized into a stale cleanup result.
+        assert!(runtime
+            .clear_branch_cleanup_status_events(&branches_id, cleanup_operation_id)
+            .is_empty());
+        assert!(runtime
+            .sync_branch_cleanup_events("client-2", &branches_id, cleanup_operation_id)
+            .is_empty());
 
         let wizard_events =
             runtime.open_launch_wizard("client-1", &branches_id, "feature/demo", Some(42));
@@ -5262,6 +5500,7 @@ mod tests {
                 branches: vec!["feature/missing".to_string()],
                 delete_remote: false,
                 force_filesystem_delete: false,
+                operation_id: None,
             },
         );
         assert!(cleanup_events.is_empty());
@@ -9154,6 +9393,8 @@ fn main() -> std::io::Result<()> {
     // plain quit once the ACKs land.
     let mut deferred_quit_reason: Option<GuiShutdownReason> = None;
     let mut gui_shutdown_backstop_armed = false;
+    let mut board_refresh_queue = BoardRefreshQueue::default();
+    let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -9352,17 +9593,66 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::DaemonRuntimeApprovalOverlay { id, waiting }) => {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
+                // `begin` takes `&mut` state, so this cannot become a match
+                // guard; bind it first to keep `collapsible_match` quiet.
+                let started = active_work_refresh_queue.begin(&project_root);
+                if started {
+                    match app.active_work_projection_refresh_job(&project_root) {
+                        Some(job) => spawn_active_work_projection_refresh(
+                            runtime.handle(),
+                            &proxy,
+                            job,
+                        ),
+                        // No open tab owns the project — nothing to rebuild.
+                        None => drop(active_work_refresh_queue.finish(&project_root)),
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionRefreshed {
+                project_root,
+                refreshed,
+            }) => {
+                clients.dispatch(app.apply_active_work_projection_refresh(*refreshed));
+                if active_work_refresh_queue.finish(&project_root)
+                    && active_work_refresh_queue.begin(&project_root)
+                {
+                    match app.active_work_projection_refresh_job(&project_root) {
+                        Some(job) => spawn_active_work_projection_refresh(
+                            runtime.handle(),
+                            &proxy,
+                            job,
+                        ),
+                        None => drop(active_work_refresh_queue.finish(&project_root)),
+                    }
+                }
+            }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
-                let events = app.handle_board_projection_changed_events(&project_root);
-                clients.dispatch(events);
+                if let Some(views) = board_refresh_queue.begin(&project_root) {
+                    let job = app.board_projection_refresh_job(&project_root);
+                    spawn_board_projection_refresh(runtime.handle(), &proxy, job, views);
+                }
+            }
+            Event::UserEvent(UserEvent::BoardProjectionRefreshed {
+                project_root,
+                refreshed,
+                views,
+            }) => {
+                clients.dispatch(app.apply_board_projection_refresh(*refreshed));
+                if board_refresh_queue.finish(&project_root, views) {
+                    if let Some(views) = board_refresh_queue.begin(&project_root) {
+                        let job = app.board_projection_refresh_job(&project_root);
+                        spawn_board_projection_refresh(runtime.handle(), &proxy, job, views);
+                    }
+                }
             }
             Event::UserEvent(UserEvent::WorkEventsIngested {
                 project_root,
                 changed,
-                worktree_inventory,
+                local_branches,
             }) => {
                 let events =
-                    app.handle_work_events_ingested(project_root, changed, worktree_inventory);
+                    app.handle_work_events_ingested(project_root, changed, local_branches);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::StartupGenerationReaperCompleted) => {
@@ -9424,6 +9714,45 @@ fn main() -> std::io::Result<()> {
                     app.handle_workspace_projection_changed_events(&project_root, &projection);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
+                let commit = app.handle_active_work_projection_prepared(*prepared);
+                let mut dispatch_ms = 0;
+                if let Some(prepared_dispatch) = commit.prepared_dispatch {
+                    let dispatch_started = std::time::Instant::now();
+                    clients.dispatch_prepared_active_work(
+                        prepared_dispatch.payload,
+                        DispatchTarget::Broadcast,
+                    );
+                    dispatch_ms = dispatch_started.elapsed().as_millis() as u64;
+                }
+                if let Some(profile) = commit.profile {
+                    tracing::debug!(
+                        target: "gwt.frontend.timing",
+                        marker = "issue_3777_runtime_hook_profile",
+                        source_event = profile.source_event,
+                        composed_state = profile.composed_state,
+                        cache_hit = profile.cache_hit,
+                        lock_wait_ms = profile.lock_wait_ms,
+                        parse_ms = profile.parse_ms,
+                        clone_ms = profile.clone_ms,
+                        serialization_ms = profile.serialization_ms,
+                        projection_ms = profile.projection_ms,
+                        dispatch_ms,
+                        "RuntimeHook Active Work projection profile"
+                    );
+                }
+            }
+            Event::UserEvent(UserEvent::PreparedActiveWorkDispatch {
+                tab_id,
+                target,
+                payload,
+            }) if app.active_tab_id.as_deref() == Some(tab_id.as_str()) => {
+                clients.dispatch_prepared_active_work(payload, target);
+            }
+            // A background projection that finished after the user moved to
+            // another tab is dropped: the tab it was prepared for is no longer
+            // the one on screen (Issue #3777).
+            Event::UserEvent(UserEvent::PreparedActiveWorkDispatch { .. }) => {}
             Event::UserEvent(UserEvent::WindowCloseFinalized {
                 window_id,
                 project_root,

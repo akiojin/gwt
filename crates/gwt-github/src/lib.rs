@@ -33,7 +33,8 @@ pub use cache::{
 };
 pub use client::{
     fake::FakeIssueClient, ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient,
-    IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
+    IssueCloseReason, IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary,
+    UpdatedAt,
 };
 pub use routing::{
     decide_routing, split_section_into_parts, Routing, SplitError, COMMENT_PART_BUDGET_BYTES,

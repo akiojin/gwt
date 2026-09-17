@@ -16,11 +16,12 @@ use std::{
 
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
-    CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueFieldsPatch,
-    IssueNumber, IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError,
-    OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation,
-    RepositoryComment, RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
-    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
+    CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueCloseReason,
+    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
+    RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
+    RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
+    UpdatedAt,
 };
 
 /// In-memory fake [`IssueClient`].
@@ -718,12 +719,20 @@ impl IssueClient for FakeIssueClient {
         &self,
         number: IssueNumber,
         new_state: IssueState,
+        reason: Option<IssueCloseReason>,
     ) -> Result<IssueSnapshot, ApiError> {
         let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.record(&mut state, "set_state", &number.to_string());
+        // A close reason is appended to the recorded detail so callers can
+        // assert it reached the client, not merely that a call happened
+        // (SPEC #4249 FR-001). A reasonless call logs exactly as before.
+        let detail = match reason {
+            Some(reason) => format!("{number}:{}", reason.as_str()),
+            None => number.to_string(),
+        };
+        self.record(&mut state, "set_state", &detail);
         let issue = state
             .issues
             .get_mut(&number)
