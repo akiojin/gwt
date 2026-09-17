@@ -961,7 +961,10 @@ JSON
 ```
 
 Lease transitions are recorded in
-`~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
+`~/.gwt/runtime/verification-coordinator/lease-events.jsonl`. Verification
+has its own coordinator lane: semantic search and index builds keep excluding
+each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
+a time), and neither lane waits for the other.
 
 ### GitHub API budget
 
