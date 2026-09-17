@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gwt_github::SpecOpsError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use super::verification_lease::admission::attribute_worktree;
@@ -216,36 +216,36 @@ pub(super) fn run<E: CliEnv>(
     }
 }
 
-#[derive(Debug, Serialize)]
-struct GcRemoval {
-    worktree: PathBuf,
-    target: PathBuf,
-    bytes: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcRemoval {
+    pub worktree: PathBuf,
+    pub target: PathBuf,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcFailure {
+    pub worktree: PathBuf,
+    pub target: PathBuf,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
-struct GcFailure {
-    worktree: PathBuf,
-    target: PathBuf,
-    reason: String,
+pub(crate) struct GcReport {
+    pub dry_run: bool,
+    pub base: String,
+    pub include_unmerged: bool,
+    pub include_protected_workspaces: bool,
+    pub candidates: Vec<GcCandidate>,
+    pub kept: Vec<GcKept>,
+    pub reclaimable_bytes: u64,
+    pub removed: Vec<GcRemoval>,
+    pub failed: Vec<GcFailure>,
+    pub reclaimed_bytes: u64,
+    pub disk_space: crate::disk_space::DiskSpaceStatus,
 }
 
-#[derive(Debug, Serialize)]
-struct GcReport {
-    dry_run: bool,
-    base: String,
-    include_unmerged: bool,
-    include_protected_workspaces: bool,
-    candidates: Vec<GcCandidate>,
-    kept: Vec<GcKept>,
-    reclaimable_bytes: u64,
-    removed: Vec<GcRemoval>,
-    failed: Vec<GcFailure>,
-    reclaimed_bytes: u64,
-    disk_space: crate::disk_space::DiskSpaceStatus,
-}
-
-fn run_gc(
+pub(crate) fn run_gc(
     repo_path: &Path,
     base: &str,
     options: GcOptions,

@@ -98,6 +98,30 @@ impl PerfRuntime {
         );
     }
 
+    /// Record one non-time quantity of a route (Issue #4397 AC-4), such as a
+    /// state size or an item count: an unbudgeted sample in its own unit.
+    pub fn record_route_metric(
+        &mut self,
+        route: PerfRoute,
+        metric: &str,
+        value: f64,
+        unit: PerfUnit,
+    ) {
+        if !self.sink.is_enabled() || !value.is_finite() {
+            return;
+        }
+        if self.governor.should_sample() {
+            let sample = PerfRecord::sample(
+                Utc::now(),
+                PerfStream::Ui,
+                route.metric_target(metric),
+                value,
+                unit,
+            );
+            let _ = self.sink.append(&sample);
+        }
+    }
+
     /// Record one gwtd operation measurement.
     pub fn record_operation(&mut self, operation: &str, elapsed: Duration, read_only: bool) {
         let role = if read_only {
@@ -213,6 +237,11 @@ pub fn record_route(route: PerfRoute, elapsed: Duration) {
 /// Record one route phase, or do nothing when uninstalled.
 pub fn record_route_phase(route: PerfRoute, phase: &str, elapsed: Duration) {
     with_runtime(|runtime| runtime.record_route_phase(route, phase, elapsed));
+}
+
+/// Record one route metric, or do nothing when uninstalled.
+pub fn record_route_metric(route: PerfRoute, metric: &str, value: f64, unit: PerfUnit) {
+    with_runtime(|runtime| runtime.record_route_metric(route, metric, value, unit));
 }
 
 /// Record one gwtd operation measurement, or do nothing when uninstalled.
@@ -405,6 +434,45 @@ mod tests {
             crate::perf::summary::budget_for_target(&records[0].target, None, runtime.budgets()),
             None,
             "phases carry no budget of their own"
+        );
+    }
+
+    /// Issue #4397 AC-4: the intake state size and the per-pass re-derivation
+    /// count land beside the route as unbudgeted samples in their own unit.
+    #[test]
+    fn route_metrics_land_as_unbudgeted_samples_in_their_unit() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let mut runtime =
+            PerfRuntime::from_config(&PerfConfig::default()).expect("create perf runtime");
+
+        runtime.record_route_metric(
+            PerfRoute::WorkEventsIngest,
+            "state_bytes",
+            4096.0,
+            PerfUnit::Bytes,
+        );
+        runtime.record_route_metric(
+            PerfRoute::WorkEventsIngest,
+            "sources_rederived",
+            40.0,
+            PerfUnit::Count,
+        );
+
+        let records = read_all();
+        assert_eq!(records.len(), 2, "two samples, no violation");
+        assert_eq!(records[0].target, "metric:work_events.ingest.state_bytes");
+        assert_eq!(records[0].unit, "bytes");
+        assert_eq!(
+            records[1].target,
+            "metric:work_events.ingest.sources_rederived"
+        );
+        assert_eq!(records[1].unit, "count");
+        assert!((records[1].value - 40.0).abs() < f64::EPSILON);
+        assert_eq!(
+            crate::perf::summary::budget_for_target(&records[0].target, None, runtime.budgets()),
+            None,
+            "metrics carry no budget"
         );
     }
 
