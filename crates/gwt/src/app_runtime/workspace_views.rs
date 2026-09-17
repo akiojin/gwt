@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use gwt::cli::hook::health::ManagedHookFailureSnapshot;
 
@@ -34,8 +35,105 @@ use super::{
     retain_live_workspace_agents, save_workspace_launch_projection,
     workspace_cleanup_candidate_for_projection, workspace_projection_owner_title,
     ActiveAgentSession, AppRuntime, BackendEvent, ClientId, IssueBranchLinkStore, OutboundEvent,
-    ProjectTabRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    ProjectTabRuntime, UserEvent, WindowProcessStatus, WorkspaceLaunchProjectionKind,
+    WorkspaceResumeContext,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ActiveWorkProjectionProfile {
+    pub(crate) source_event: &'static str,
+    pub(crate) composed_state: &'static str,
+    pub(crate) cache_hit: bool,
+    pub(crate) lock_wait_ms: u64,
+    pub(crate) parse_ms: u64,
+    pub(crate) clone_ms: u64,
+    pub(crate) serialization_ms: u64,
+    pub(crate) projection_ms: u64,
+}
+
+impl Default for ActiveWorkProjectionProfile {
+    fn default() -> Self {
+        Self {
+            source_event: "other",
+            composed_state: "other",
+            cache_hit: false,
+            lock_wait_ms: 0,
+            parse_ms: 0,
+            clone_ms: 0,
+            serialization_ms: 0,
+            projection_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedActiveWorkDispatch {
+    pub(crate) payload: Arc<str>,
+    pub(crate) profile: ActiveWorkProjectionProfile,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedActiveWorkProjection {
+    projection: gwt::ActiveWorkProjectionView,
+    dispatch: PreparedActiveWorkDispatch,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveWorkProjectionPrepared {
+    pub(crate) project_root: PathBuf,
+    pub(crate) tab_id: String,
+    pub(crate) generation: u64,
+    pub(crate) profile: ActiveWorkProjectionProfile,
+    pub(crate) result: Result<Option<PreparedActiveWorkProjection>, String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ActiveWorkProjectionCommit {
+    pub(crate) prepared_dispatch: Option<PreparedActiveWorkDispatch>,
+    pub(crate) profile: Option<ActiveWorkProjectionProfile>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeHookProjectionProfileContext {
+    source_event: &'static str,
+    composed_state: &'static str,
+}
+
+#[derive(Clone)]
+struct ActiveWorkProjectionPrepareInput {
+    project_root: PathBuf,
+    tab_id: String,
+    tab: ProjectTabRuntime,
+    sessions: Vec<ActiveAgentSession>,
+    window_pty_statuses: HashMap<String, WindowProcessStatus>,
+    sessions_dir: PathBuf,
+    session_ledger_cache: Arc<Mutex<crate::session_ledger_cache::SessionLedgerCache>>,
+    work_items_cache: Arc<Mutex<gwt_core::workspace_projection::WorkItemsCache>>,
+    work_known_branch_refs: Option<HashSet<String>>,
+    work_merged_branches: Option<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    work_dirty_branches: Option<HashSet<String>>,
+    work_live_process_branches: Option<HashSet<String>>,
+    work_cleanup_ready_branches: Option<HashMap<String, String>>,
+    work_tip_subjects: Option<HashMap<String, String>>,
+    work_pr_titles: Option<HashMap<String, String>>,
+    work_ai_summaries: Option<HashMap<String, String>>,
+    local_worktree_branches: Option<HashSet<String>>,
+    profile_context: Option<RuntimeHookProjectionProfileContext>,
+}
+
+#[derive(Default)]
+struct ActiveWorkProjectionProjectRefresh {
+    latest_generation: u64,
+    running_generation: Option<u64>,
+    pending: Option<(u64, ActiveWorkProjectionPrepareInput)>,
+}
+
+#[derive(Default)]
+pub(crate) struct ActiveWorkProjectionRefreshBroker {
+    next_generation: u64,
+    projects: HashMap<PathBuf, ActiveWorkProjectionProjectRefresh>,
+    pending_cache_evictions: HashSet<PathBuf>,
+}
 
 fn projection_worktree_path_key(path: &Path) -> PathBuf {
     let mut key = PathBuf::new();
@@ -2732,6 +2830,237 @@ pub(super) fn save_resumed_workspace_projection(
     )
 }
 
+fn prepare_active_work_projection(
+    input: ActiveWorkProjectionPrepareInput,
+) -> Result<Option<PreparedActiveWorkProjection>, String> {
+    #[cfg(test)]
+    FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(|count| count.set(count.get() + 1));
+    let sessions = input.sessions.iter().collect::<Vec<_>>();
+    let cache_lock_started = Instant::now();
+    let mut work_items_cache = input
+        .work_items_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache_lock_wait_micros = cache_lock_started.elapsed().as_micros() as u64;
+    let (work_items, mut load_profile) = work_items_cache
+        .load_or_synthesize_shared(&input.project_root)
+        .map_err(|error| error.to_string())?;
+    load_profile.lock_wait_micros = load_profile
+        .lock_wait_micros
+        .saturating_add(cache_lock_wait_micros);
+    drop(work_items_cache);
+    // The cache loader also performs the one-time legacy migration while its
+    // project lock is held. Read current.json afterwards so a legacy-only
+    // Recent Project is represented in this first authoritative projection.
+    let saved_parse_started = Instant::now();
+    let saved_projection_path =
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&input.project_root);
+    let saved_projection =
+        gwt_core::workspace_projection::load_workspace_projection_from_path(&saved_projection_path)
+            .map_err(|error| error.to_string())?;
+    load_profile.parse_micros = load_profile
+        .parse_micros
+        .saturating_add(saved_parse_started.elapsed().as_micros() as u64);
+    let loaded_projection = saved_projection.or_else(|| {
+        (!work_items.work_items.is_empty()).then(|| {
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                &input.project_root,
+            )
+        })
+    });
+    let projection_started = Instant::now();
+
+    let view = if let Some(mut projection) = loaded_projection {
+        let had_saved_agents = !projection.agents.is_empty();
+        let cleanup_candidate = workspace_cleanup_candidate_for_projection(&projection, &sessions);
+        merge_active_sessions_into_projection(
+            &mut projection,
+            sessions.iter().copied(),
+            chrono::Utc::now(),
+        );
+        let updated_at = chrono::Utc::now();
+        retain_live_workspace_agents(&mut projection, &sessions, updated_at);
+        projection.reconcile_shell_status(
+            |window_id| {
+                matches!(
+                    input.window_pty_statuses.get(window_id),
+                    Some(WindowProcessStatus::Running)
+                )
+            },
+            updated_at,
+        );
+        if had_saved_agents && !projection.has_current_agents() {
+            projection.reset_idle_identity(&input.tab.title, updated_at);
+        }
+        let journal_entries =
+            gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+                &input.project_root,
+                WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+            )
+            .map_err(|error| error.to_string())?
+            .iter()
+            .map(workspace_journal_entry_view_from_entry)
+            .collect::<Vec<_>>();
+        let agent_sessions = input
+            .session_ledger_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .load(&input.sessions_dir);
+        let session_index = work_session_index(&agent_sessions);
+        let resume_branches = ResumeBranchIndex::scanned(input.work_known_branch_refs.as_ref());
+        let workspaces = work_items
+            .work_items
+            .iter()
+            .map(|item| workspace_work_item_view_from_item(item, &session_index, resume_branches))
+            .collect::<Vec<_>>();
+        let mut view = active_work_projection_from_saved_with_journal(
+            projection,
+            journal_entries,
+            workspaces,
+            cleanup_candidate,
+        );
+        let hook_failures = ManagedHookFailureSnapshot::read();
+        view.managed_hook_health = managed_hook_health_view_for_project(
+            &input.project_root,
+            &input.sessions_dir,
+            &sessions,
+            &hook_failures,
+        );
+        assign_and_merge_workspace_groups(&mut view.active_works, &input.project_root);
+        attach_registry_sessions_to_active_works(
+            &mut view.active_works,
+            &agent_sessions,
+            gwt_core::repo_hash::detect_repo_hash(&input.project_root),
+            &session_index,
+            resume_branches,
+        );
+        attach_managed_hook_health_to_active_works(
+            &mut view.active_works,
+            &input.sessions_dir,
+            &sessions,
+            &hook_failures,
+        );
+        let dirty_branches = input.work_dirty_branches.as_ref();
+        mark_merged_active_works(
+            &mut view.active_works,
+            input.work_merged_branches.as_ref(),
+            dirty_branches,
+        );
+        apply_work_summary_external_sources(
+            &mut view.active_works,
+            input.work_pr_titles.as_ref(),
+            input.work_ai_summaries.as_ref(),
+            input.work_tip_subjects.as_ref(),
+        );
+        mark_remote_only_active_works(
+            &mut view.active_works,
+            input.local_worktree_branches.as_ref(),
+        );
+        let cleanup_ready_branches = input.work_cleanup_ready_branches.as_ref();
+        let live_process_branches = input.work_live_process_branches.as_ref();
+        if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
+            cleanup_candidate_has_live_process(candidate, live_process_branches)
+        }) {
+            view.cleanup_candidate = None;
+        }
+        mark_workspace_cleanup_candidates(
+            &mut view.active_works,
+            cleanup_ready_branches,
+            dirty_branches,
+            &sessions,
+            live_process_branches,
+        );
+        view
+    } else {
+        let hook_failures = ManagedHookFailureSnapshot::read();
+        let mut view = active_work_projection_from_live_sessions(
+            &input.tab_id,
+            &input.tab.title,
+            &sessions,
+            managed_hook_health_view_for_project(
+                &input.project_root,
+                &input.sessions_dir,
+                &sessions,
+                &hook_failures,
+            ),
+        );
+        if let Some(view) = view.as_mut() {
+            attach_managed_hook_health_to_active_works(
+                &mut view.active_works,
+                &input.sessions_dir,
+                &sessions,
+                &hook_failures,
+            );
+        }
+        view.unwrap_or_else(|| empty_active_work_projection_view(&input.tab_id, &input.tab))
+    };
+    let projection_ms = projection_started.elapsed().as_millis() as u64;
+    let clone_started = Instant::now();
+    let event = BackendEvent::ActiveWorkProjection {
+        projection: Box::new(view.clone()),
+    };
+    let clone_ms = clone_started.elapsed().as_millis() as u64;
+    let (payload, serialization_ms) =
+        serialize_active_work_projection_event_with(&event, |event| {
+            serde_json::to_string(event).map_err(|error| error.to_string())
+        })?;
+    let context = input
+        .profile_context
+        .unwrap_or(RuntimeHookProjectionProfileContext {
+            source_event: "other",
+            composed_state: "other",
+        });
+    Ok(Some(PreparedActiveWorkProjection {
+        projection: view,
+        dispatch: PreparedActiveWorkDispatch {
+            payload,
+            profile: ActiveWorkProjectionProfile {
+                source_event: context.source_event,
+                composed_state: context.composed_state,
+                cache_hit: load_profile.cache_hit,
+                lock_wait_ms: load_profile.lock_wait_micros / 1_000,
+                parse_ms: load_profile.parse_micros / 1_000,
+                clone_ms,
+                serialization_ms,
+                projection_ms,
+            },
+        },
+    }))
+}
+
+pub(super) fn serialize_active_work_projection_event_with<F>(
+    event: &BackendEvent,
+    serializer: F,
+) -> Result<(Arc<str>, u64), String>
+where
+    F: FnOnce(&BackendEvent) -> Result<String, String>,
+{
+    let started = Instant::now();
+    let payload = Arc::from(serializer(event)?);
+    Ok((payload, started.elapsed().as_millis() as u64))
+}
+
+#[cfg(debug_assertions)]
+fn complete_active_work_projection_playwright_rendezvous(project_root: &Path) {
+    if std::env::var("GWT_PLAYWRIGHT_ACTIVE_WORK_RENDEZVOUS").as_deref() != Ok("1") {
+        return;
+    }
+    let directory = gwt_core::paths::gwt_home().join("issue-3777-active-work-rendezvous");
+    if !directory.join("started").is_file() {
+        return;
+    }
+    let Ok(requested_path) = std::fs::read_to_string(directory.join("work-items-path")) else {
+        return;
+    };
+    let requested_path = PathBuf::from(requested_path.trim());
+    let requested_path = dunce::canonicalize(&requested_path).unwrap_or(requested_path);
+    let actual_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root);
+    let actual_path = dunce::canonicalize(&actual_path).unwrap_or(actual_path);
+    if requested_path == actual_path {
+        let _ = std::fs::write(directory.join("completed"), b"completed\n");
+    }
+}
+
 /// Build the lifecycle-event payload without copying the unbounded historical
 /// Work and journal vectors. The cache remains the owner of those vectors; a
 /// later background materialization sends the complete projection.
@@ -3309,7 +3638,13 @@ impl AppRuntime {
     pub(super) fn active_work_projection_reply(&self, client_id: &str) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        let projection = self.cached_or_in_memory_active_work_projection_for_tab(tab_id, tab);
+        if self.dispatch_cached_active_work_projection(
+            tab_id,
+            super::DispatchTarget::Client(client_id.to_string()),
+        ) {
+            return None;
+        }
+        let projection = self.in_memory_active_work_projection_for_tab(tab_id, tab);
         Some(OutboundEvent::reply(
             client_id,
             BackendEvent::ActiveWorkProjection {
@@ -3335,16 +3670,270 @@ impl AppRuntime {
             .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab))
     }
 
-    fn cached_or_in_memory_active_work_projection_for_tab(
+    fn dispatch_cached_active_work_projection(
         &self,
         tab_id: &str,
-        tab: &ProjectTabRuntime,
-    ) -> gwt::ActiveWorkProjectionView {
-        self.active_work_projection_cache
+        target: super::DispatchTarget,
+    ) -> bool {
+        let payload = self
+            .active_work_projection_payload_cache
             .borrow()
             .get(tab_id)
-            .cloned()
-            .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab))
+            .cloned();
+        let Some(payload) = payload else {
+            return false;
+        };
+        self.proxy.send(UserEvent::PreparedActiveWorkDispatch {
+            tab_id: tab_id.to_string(),
+            target,
+            payload,
+        });
+        true
+    }
+
+    fn active_work_projection_prepare_input(
+        &self,
+        tab: &ProjectTabRuntime,
+        profile_context: Option<RuntimeHookProjectionProfileContext>,
+    ) -> ActiveWorkProjectionPrepareInput {
+        let project_root = tab.project_root.clone();
+        ActiveWorkProjectionPrepareInput {
+            project_root: project_root.clone(),
+            tab_id: tab.id.clone(),
+            tab: tab.clone(),
+            sessions: self
+                .active_agent_sessions
+                .values()
+                .filter(|session| session.tab_id == tab.id)
+                .cloned()
+                .collect(),
+            window_pty_statuses: self.window_pty_statuses.clone(),
+            sessions_dir: self.sessions_dir.clone(),
+            session_ledger_cache: self.active_work_session_ledger_cache.clone(),
+            work_items_cache: self.work_items_cache.clone(),
+            work_known_branch_refs: self.work_known_branch_refs.get(&project_root).cloned(),
+            work_merged_branches: self.work_merged_branches.get(&project_root).cloned(),
+            work_dirty_branches: self.work_dirty_branches.get(&project_root).cloned(),
+            work_live_process_branches: self.work_live_process_branches.get(&project_root).cloned(),
+            work_cleanup_ready_branches: self
+                .work_cleanup_ready_branches
+                .get(&project_root)
+                .cloned(),
+            work_tip_subjects: self.work_tip_subjects.get(&project_root).cloned(),
+            work_pr_titles: self.work_pr_titles.get(&project_root).cloned(),
+            work_ai_summaries: self.work_ai_summaries.get(&project_root).cloned(),
+            local_worktree_branches: self
+                .local_worktree_branches
+                .borrow()
+                .get(&project_root)
+                .cloned(),
+            profile_context,
+        }
+    }
+
+    fn spawn_active_work_projection_prepare(
+        &self,
+        generation: u64,
+        input: ActiveWorkProjectionPrepareInput,
+    ) {
+        let project_root = input.project_root.clone();
+        let tab_id = input.tab_id.clone();
+        let proxy = self.proxy.clone();
+        let task_proxy = proxy.clone();
+        let task_project_root = project_root.clone();
+        let task_tab_id = tab_id.clone();
+        let fallback_profile = input
+            .profile_context
+            .map(|context| ActiveWorkProjectionProfile {
+                source_event: context.source_event,
+                composed_state: context.composed_state,
+                ..ActiveWorkProjectionProfile::default()
+            })
+            .unwrap_or_default();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = prepare_active_work_projection(input);
+            #[cfg(debug_assertions)]
+            complete_active_work_projection_playwright_rendezvous(&task_project_root);
+            let profile = result
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map_or(fallback_profile, |prepared| prepared.dispatch.profile);
+            task_proxy.send(UserEvent::ActiveWorkProjectionPrepared(Box::new(
+                ActiveWorkProjectionPrepared {
+                    project_root: task_project_root,
+                    tab_id: task_tab_id,
+                    generation,
+                    profile,
+                    result,
+                },
+            )));
+        }) {
+            proxy.send(UserEvent::ActiveWorkProjectionPrepared(Box::new(
+                ActiveWorkProjectionPrepared {
+                    project_root,
+                    tab_id,
+                    generation,
+                    profile: fallback_profile,
+                    result: Err(error),
+                },
+            )));
+        }
+    }
+
+    fn schedule_active_work_projection_refresh(
+        &self,
+        project_root: &Path,
+        profile_context: Option<RuntimeHookProjectionProfileContext>,
+    ) {
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| projection_worktree_paths_match(&tab.project_root, project_root))
+        else {
+            return;
+        };
+        self.active_work_projection_refresh
+            .borrow_mut()
+            .pending_cache_evictions
+            .retain(|root| !projection_worktree_paths_match(root, project_root));
+        let mut input = self.active_work_projection_prepare_input(tab, profile_context);
+        let key = input.project_root.clone();
+        let next = {
+            let mut broker = self.active_work_projection_refresh.borrow_mut();
+            broker.next_generation = broker.next_generation.wrapping_add(1).max(1);
+            let generation = broker.next_generation;
+            let project = broker.projects.entry(key).or_default();
+            if input.profile_context.is_none() {
+                // A normal refresh may supersede a pending RuntimeHook build,
+                // but it must not erase the profile attribution before that
+                // latest-wins build gets a chance to run.
+                input.profile_context = project
+                    .pending
+                    .as_ref()
+                    .and_then(|(_, pending)| pending.profile_context);
+            }
+            project.latest_generation = generation;
+            project.pending = Some((generation, input));
+            if project.running_generation.is_some() {
+                None
+            } else {
+                let next = project.pending.take();
+                project.running_generation = next.as_ref().map(|(generation, _)| *generation);
+                next
+            }
+        };
+        if let Some((generation, input)) = next {
+            self.spawn_active_work_projection_prepare(generation, input);
+        }
+    }
+
+    pub(crate) fn schedule_runtime_hook_active_work_projection_refresh(
+        &self,
+        project_root: &Path,
+        source_event: &'static str,
+        composed_state: &'static str,
+    ) {
+        self.schedule_active_work_projection_refresh(
+            project_root,
+            Some(RuntimeHookProjectionProfileContext {
+                source_event,
+                composed_state,
+            }),
+        );
+    }
+
+    pub(crate) fn handle_active_work_projection_prepared(
+        &mut self,
+        prepared: ActiveWorkProjectionPrepared,
+    ) -> ActiveWorkProjectionCommit {
+        self.drain_pending_work_items_cache_evictions();
+        let mut commit = ActiveWorkProjectionCommit {
+            prepared_dispatch: None,
+            profile: Some(prepared.profile),
+        };
+        let key = prepared.project_root.clone();
+        let (accept, next) = {
+            let mut broker = self.active_work_projection_refresh.borrow_mut();
+            let Some(project) = broker.projects.get_mut(&key) else {
+                return commit;
+            };
+            if project.running_generation != Some(prepared.generation) {
+                // A closed project may be reopened before its prior worker
+                // reports completion. That old generation owns no state in
+                // the new broker entry and must not clear or advance it.
+                return commit;
+            }
+            let accept = project.latest_generation == prepared.generation
+                && self.tabs.iter().any(|tab| {
+                    tab.id == prepared.tab_id
+                        && projection_worktree_paths_match(
+                            &tab.project_root,
+                            &prepared.project_root,
+                        )
+                });
+            project.running_generation = None;
+            let next = project.pending.take();
+            project.running_generation = next.as_ref().map(|(generation, _)| *generation);
+            (accept, next)
+        };
+
+        if accept {
+            match prepared.result {
+                Ok(Some(prepared_projection)) => {
+                    self.active_work_projection_payload_cache
+                        .borrow_mut()
+                        .insert(
+                            prepared.tab_id.clone(),
+                            prepared_projection.dispatch.payload.clone(),
+                        );
+                    self.active_work_projection_cache
+                        .borrow_mut()
+                        .insert(prepared.tab_id.clone(), prepared_projection.projection);
+                    if self.active_tab_id.as_deref() == Some(prepared.tab_id.as_str()) {
+                        commit.prepared_dispatch = Some(prepared_projection.dispatch);
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        tab_id = %prepared.tab_id,
+                        "background Active Work projection was not authoritative; preserving last-good cache"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "gwt.frontend.timing",
+                        error = %error,
+                        "background Active Work projection preparation failed; preserving last-good cache"
+                    );
+                }
+            }
+        }
+
+        if let Some((generation, input)) = next {
+            self.spawn_active_work_projection_prepare(generation, input);
+        }
+        commit
+    }
+
+    #[cfg(test)]
+    pub(super) fn build_active_work_projection_for_tab_for_test(
+        &self,
+        _tab_id: &str,
+        tab: &ProjectTabRuntime,
+    ) -> Option<gwt::ActiveWorkProjectionView> {
+        let prepared =
+            prepare_active_work_projection(self.active_work_projection_prepare_input(tab, None))
+                .ok()
+                .flatten()?;
+        let view = prepared.projection;
+        self.active_work_projection_payload_cache
+            .borrow_mut()
+            .insert(tab.id.clone(), prepared.dispatch.payload);
+        self.active_work_projection_cache
+            .borrow_mut()
+            .insert(tab.id.clone(), view.clone());
+        Some(view)
     }
 
     /// Apply the accepted in-memory stop to the already materialized Work view
@@ -3481,6 +4070,10 @@ impl AppRuntime {
                 format!("{} active agents", projection.active_agents)
             };
         }
+        drop(cache);
+        self.active_work_projection_payload_cache
+            .borrow_mut()
+            .remove(tab_id);
     }
 
     /// Merge one disk-watcher payload into the already materialized Active
@@ -3504,23 +4097,33 @@ impl AppRuntime {
         let mut cache = self.active_work_projection_cache.borrow_mut();
         if let Some(projection) = cache.get_mut(&tab_id) {
             merge_workspace_projection_membership_cache_only(projection, project_root, fresh);
-            return;
+        } else {
+            // A watcher can win the race with the first full background
+            // materialization. Seed the cache from its authoritative current-state
+            // membership instead of falling back to possibly stale live-session
+            // bookkeeping. `WorkspaceProjection` contains no historical Session,
+            // Work, or journal vectors, so this cold-cache construction is bounded
+            // by visible membership.
+            let mut projection = active_work_projection_from_saved_with_journal(
+                fresh.clone(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            assign_and_merge_workspace_groups_cache_only(
+                &mut projection.active_works,
+                project_root,
+            );
+            cache.insert(tab_id.clone(), projection);
         }
-
-        // A watcher can win the race with the first full background
-        // materialization. Seed the cache from its authoritative current-state
-        // membership instead of falling back to possibly stale live-session
-        // bookkeeping. `WorkspaceProjection` contains no historical Session,
-        // Work, or journal vectors, so this cold-cache construction is bounded
-        // by visible membership.
-        let mut projection = active_work_projection_from_saved_with_journal(
-            fresh.clone(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
-        assign_and_merge_workspace_groups_cache_only(&mut projection.active_works, project_root);
-        cache.insert(tab_id, projection);
+        drop(cache);
+        // The prepared payload is an immutable serialization of the previous
+        // structured snapshot. Keep the two caches coherent: until the latest
+        // background generation commits, FrontendReady/tab-change must use the
+        // bounded structured fallback instead of replaying pre-patch bytes.
+        self.active_work_projection_payload_cache
+            .borrow_mut()
+            .remove(&tab_id);
     }
 
     /// Rebuild the cache for the project whose background completion just
@@ -3536,8 +4139,70 @@ impl AppRuntime {
         &self,
         project_root: &Path,
     ) -> Vec<OutboundEvent> {
-        self.request_active_work_projection_refresh(project_root);
+        self.schedule_active_work_projection_refresh(project_root, None);
         Vec::new()
+    }
+
+    /// Release projection state owned by a closed tab. A duplicate tab keeps
+    /// the shared parsed Work cache, but pending work captured from the closed
+    /// tab is discarded. Closing the final tab releases the repository-scale
+    /// decoded projection and its prepared wire payload immediately.
+    pub(crate) fn discard_active_work_projection_for_closed_tab(
+        &self,
+        tab_id: &str,
+        project_root: &Path,
+        project_still_open: bool,
+    ) {
+        self.active_work_projection_cache
+            .borrow_mut()
+            .remove(tab_id);
+        self.active_work_projection_payload_cache
+            .borrow_mut()
+            .remove(tab_id);
+
+        let mut broker = self.active_work_projection_refresh.borrow_mut();
+        if project_still_open {
+            for (key, project) in &mut broker.projects {
+                if projection_worktree_paths_match(key, project_root)
+                    && project
+                        .pending
+                        .as_ref()
+                        .is_some_and(|(_, input)| input.tab_id == tab_id)
+                {
+                    project.pending = None;
+                }
+            }
+            return;
+        }
+        broker
+            .projects
+            .retain(|key, _| !projection_worktree_paths_match(key, project_root));
+        broker
+            .pending_cache_evictions
+            .insert(project_root.to_path_buf());
+        drop(broker);
+        self.drain_pending_work_items_cache_evictions();
+    }
+
+    /// Eviction is deliberately `try_lock`-only because a repository-scale
+    /// Work parse owns this mutex on a background worker. If it is busy, the
+    /// close request remains in the broker and the worker completion retries
+    /// after releasing the cache lock.
+    fn drain_pending_work_items_cache_evictions(&self) {
+        use std::sync::TryLockError;
+
+        let mut cache = match self.work_items_cache.try_lock() {
+            Ok(cache) => cache,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(TryLockError::WouldBlock) => return,
+        };
+        let pending = {
+            let mut broker = self.active_work_projection_refresh.borrow_mut();
+            std::mem::take(&mut broker.pending_cache_evictions)
+        };
+        for project_root in pending {
+            cache.evict(&project_root);
+        }
     }
 
     /// Issue #4406: ask the event loop to rebuild `project_root`'s Active Work
@@ -3603,14 +4268,9 @@ impl AppRuntime {
     }
 
     pub(crate) fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
-        let tab_id = self.active_tab_id.as_ref()?;
-        let tab = self.tab(tab_id)?;
-        let projection = self.active_work_projection_for_tab(tab_id, tab)?;
-        Some(OutboundEvent::broadcast(
-            BackendEvent::ActiveWorkProjection {
-                projection: Box::new(projection),
-            },
-        ))
+        let project_root = self.active_project_root()?.to_path_buf();
+        self.schedule_active_work_projection_refresh(&project_root, None);
+        None
     }
 
     /// Issue #3783: lifecycle acknowledgements must not enter the disk-backed
@@ -3692,7 +4352,11 @@ impl AppRuntime {
     pub(super) fn active_work_projection_broadcast_on_tab_change(&self) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        let projection = self.cached_or_in_memory_active_work_projection_for_tab(tab_id, tab);
+        if self.dispatch_cached_active_work_projection(tab_id, super::DispatchTarget::Broadcast) {
+            return None;
+        }
+        self.schedule_active_work_projection_refresh(&tab.project_root, None);
+        let projection = self.in_memory_active_work_projection_for_tab(tab_id, tab);
         Some(OutboundEvent::broadcast(
             BackendEvent::ActiveWorkProjection {
                 projection: Box::new(projection),
@@ -3708,20 +4372,11 @@ impl AppRuntime {
     /// completions go through [`Self::request_active_work_projection_refresh`].
     pub(super) fn active_work_projection_for_tab(
         &self,
-        tab_id: &str,
+        _tab_id: &str,
         tab: &ProjectTabRuntime,
     ) -> Option<gwt::ActiveWorkProjectionView> {
-        let view = build_active_work_projection(&self.active_work_projection_job(tab_id, tab));
-        let mut cache = self.active_work_projection_cache.borrow_mut();
-        match view.as_ref() {
-            Some(view) => {
-                cache.insert(tab_id.to_string(), view.clone());
-            }
-            None => {
-                cache.remove(tab_id);
-            }
-        }
-        view
+        self.schedule_active_work_projection_refresh(&tab.project_root, None);
+        None
     }
 
     /// Issue #4406: capture everything [`build_active_work_projection`] reads
