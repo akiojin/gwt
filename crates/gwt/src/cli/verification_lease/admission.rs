@@ -18,6 +18,7 @@ use gwt_core::index_coordinator::{
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::board::{BoardCommand, BoardPostCommand};
+use crate::cli::verification_lease::holder_activity::HolderActivity;
 use crate::cli::verification_lease::{self, DEFAULT_TTL_MINUTES};
 use crate::cli::CliEnv;
 
@@ -81,6 +82,23 @@ impl Admission {
             self.lease_id,
             self.waited.as_secs(),
         )
+    }
+
+    /// Publish how far this run's command matrix has got (Issue #4280 AC-2):
+    /// `done` of `total` commands finished in `elapsed`. Waiters then see the
+    /// commands left and a paced estimate instead of the TTL remainder. Best
+    /// effort, because progress is a diagnostic and never gates the run.
+    pub(crate) fn publish_progress(&self, done: usize, total: usize, elapsed: Duration) {
+        let Some(lease) = &self.lease else {
+            return;
+        };
+        let unit_ms = match done {
+            0 => 0,
+            done => elapsed.as_millis() as u64 / done as u64,
+        };
+        if let Err(err) = lease.publish_progress(done as u64, total as u64, unit_ms) {
+            tracing::warn!(error = %err, "verify.run admission: progress not published");
+        }
     }
 
     #[cfg(test)]
@@ -150,7 +168,19 @@ pub(crate) struct HolderNotice {
 /// that as `0s left` told agents the host was about to free up when the
 /// holder was in fact unbounded — the background issue index job was exactly
 /// that holder.
-fn holder_notice(status: &HeavyLeaseStatus) -> HolderNotice {
+fn holder_notice(status: &HeavyLeaseStatus, activity: Option<&HolderActivity>) -> HolderNotice {
+    let mut notice = holder_identity_notice(status);
+    // Issue #4405 AC-4: `(pid 21468, 0s left)` alone reads as a hang. Say
+    // whether the holder is progressing or starved of CPU.
+    if let Some(activity) = activity.filter(|_| status.held) {
+        notice
+            .detail
+            .push_str(&format!("; {}", activity.describe()));
+    }
+    notice
+}
+
+fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
     if !status.held {
         return HolderNotice {
             detail: "verification lease was contended".to_string(),
@@ -197,7 +227,16 @@ fn holder_notice(status: &HeavyLeaseStatus) -> HolderNotice {
 
 fn describe_holder(coordinator: &IndexCoordinator) -> HolderNotice {
     match coordinator.heavy_lease_status() {
-        Ok(status) => holder_notice(&status),
+        Ok(status) => {
+            let activity = status
+                .owner
+                .as_ref()
+                .filter(|_| status.held)
+                .and_then(|owner| {
+                    verification_lease::holder_activity::observe(owner.pid, status.acquired_at_ms)
+                });
+            holder_notice(&status, activity.as_ref())
+        }
         Err(err) => HolderNotice {
             detail: format!("verification lease status unavailable: {err}"),
             retry_after: None,
@@ -221,8 +260,9 @@ fn deferred(
         None => "rerun `verify.run` after the current lease holder finishes".to_string(),
     };
     unexpected(format!(
-        "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — the wait counts \
-         as one gwt-verify lease attempt",
+        "verify: deferred — host busy for {}s (budget {}s): {detail}; {next} — a deferral is \
+         not a failure and there is no attempt cap: your turn stays reserved, so keep rerunning \
+         `verify.run` while the holder makes progress",
         started.elapsed().as_secs(),
         max_wait.as_secs()
     ))
@@ -445,26 +485,32 @@ mod tests {
     /// waiting indefinitely.
     #[test]
     fn holder_notice_reports_an_eta_only_when_the_holder_has_a_ttl() {
-        let timed = holder_notice(&HeavyLeaseStatus {
-            held: true,
-            target: Some("repo--issues".to_string()),
-            owner: Some(gwt_core::index_coordinator::OwnerIdentity {
-                pid: 32420,
-                start_id: "start".to_string(),
-            }),
-            remaining_ms: Some(320_000),
-            ..HeavyLeaseStatus::default()
-        });
+        let timed = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("repo--issues".to_string()),
+                owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                    pid: 32420,
+                    start_id: "start".to_string(),
+                }),
+                remaining_ms: Some(320_000),
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
         assert_eq!(timed.retry_after, Some(Duration::from_secs(320)));
         assert!(timed.detail.contains("repo--issues"), "{}", timed.detail);
         assert!(timed.detail.contains("320s left"), "{}", timed.detail);
 
-        let untimed = holder_notice(&HeavyLeaseStatus {
-            held: true,
-            target: Some("repo--issues".to_string()),
-            remaining_ms: None,
-            ..HeavyLeaseStatus::default()
-        });
+        let untimed = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("repo--issues".to_string()),
+                remaining_ms: None,
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
         assert_eq!(untimed.retry_after, None);
         assert!(
             !untimed.detail.contains("0s left"),
@@ -473,9 +519,45 @@ mod tests {
         );
         assert!(untimed.detail.contains("no TTL"), "{}", untimed.detail);
 
-        let free = holder_notice(&HeavyLeaseStatus::default());
+        let free = holder_notice(&HeavyLeaseStatus::default(), None);
         assert_eq!(free.retry_after, None);
         assert!(free.detail.contains("contended"), "{}", free.detail);
+    }
+
+    /// Issue #4405 AC-4: a waiter must be able to tell a starved holder from
+    /// a hung one. `host busy for 60s ... (pid 21468, 0s left)` read as a
+    /// hang, and four windows considered `execution.blocked` over it.
+    #[test]
+    fn holder_notice_says_a_starved_holder_is_running_not_hung() {
+        let status = HeavyLeaseStatus {
+            held: true,
+            target: Some("repo--verification--wt".to_string()),
+            owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                pid: 21468,
+                start_id: "start".to_string(),
+            }),
+            remaining_ms: Some(0),
+            ..HeavyLeaseStatus::default()
+        };
+        let starved = HolderActivity {
+            held_ms: 7_260_000,
+            cpu_percent: 1.4,
+            processes: 3,
+            host_cpu_percent: Some(95.0),
+        };
+        let notice = holder_notice(&status, Some(&starved));
+        assert!(notice.detail.contains("pid 21468"), "{}", notice.detail);
+        assert!(notice.detail.contains("starved"), "{}", notice.detail);
+        assert!(notice.detail.contains("not hung"), "{}", notice.detail);
+
+        let progressing = HolderActivity {
+            held_ms: 600_000,
+            cpu_percent: 380.0,
+            processes: 5,
+            host_cpu_percent: Some(95.0),
+        };
+        let notice = holder_notice(&status, Some(&progressing));
+        assert!(notice.detail.contains("progressing"), "{}", notice.detail);
     }
 
     /// Issue #4140 AC-3: every refusal carries a concrete next step, so an
@@ -505,6 +587,13 @@ mod tests {
             !without_eta.contains("verify.lease.acquire"),
             "canonical admission must not recommend detached manual acquisition: {without_eta}"
         );
+        // Issue #4280 AC-3: a deferral is a reserved turn, not a spent
+        // attempt — counting it toward a cap is what made waiters give up.
+        for message in [&with_eta, &without_eta] {
+            assert!(!message.contains("lease attempt"), "{message}");
+            assert!(message.contains("no attempt cap"), "{message}");
+            assert!(message.contains("turn stays reserved"), "{message}");
+        }
     }
 
     /// How long a released lease may still read as held before the release is
@@ -535,7 +624,7 @@ mod tests {
         fn new() -> Self {
             let home = tempfile::tempdir().unwrap();
             let _home_guard = ScopedGwtHome::set(home.path());
-            let coordinator = IndexCoordinator::open_default().unwrap();
+            let coordinator = IndexCoordinator::open_default_verification().unwrap();
             let root = Self {
                 coordinator,
                 home,
@@ -727,6 +816,30 @@ mod tests {
         lease_root.assert_free("dropping the admission must release the lease");
     }
 
+    /// Issue #4280 AC-2: the admitted run publishes its command progress, so
+    /// a waiter reads the commands left and a paced ETA from the status.
+    #[test]
+    fn admission_publishes_the_runs_command_progress() {
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let admission = admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap();
+
+        admission.publish_progress(0, 4, Duration::ZERO);
+        let status = lease_root.assert_held("the run holds the lease");
+        assert_eq!(status.remaining_batches, Some(4));
+        assert_eq!(status.estimated_remaining_ms, status.remaining_ms);
+
+        // Two commands took 60 s in total: two more at 30 s each.
+        admission.publish_progress(2, 4, Duration::from_secs(60));
+        let status = lease_root.assert_held("the run still holds the lease");
+        assert_eq!(status.remaining_batches, Some(2));
+        assert_eq!(status.estimated_remaining_ms, Some(60_000));
+
+        drop(admission);
+        lease_root.assert_free("dropping the admission must release the lease");
+    }
+
     #[test]
     fn canonical_runs_in_the_same_worktree_do_not_share_admission() {
         let lease_root = IsolatedLeaseRoot::new();
@@ -746,11 +859,92 @@ mod tests {
         lease_root.assert_free("the next run releases its own lease");
     }
 
+    /// Issue #4285 AC-1 / AC-3 / AC-4: a canonical verification holding its
+    /// lease must not stop a query encode, and the model lane must still
+    /// admit only one model-loaded runner tree (FR-417 / AS-30) while both
+    /// lanes are busy.
+    #[test]
+    fn search_and_index_keep_their_own_exclusion_while_verification_holds_its_lease() {
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let admission = admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap();
+        lease_root.assert_held("admission must hold the verification lease");
+
+        let model_lane = IndexCoordinator::open_default().unwrap();
+        assert_ne!(
+            model_lane.heavy_lock_path(),
+            lease_root.coordinator.heavy_lock_path(),
+            "verification and the model lane must not share heavy.lock"
+        );
+        // AC-1: the query encode is admitted while verification runs.
+        let search = model_lane
+            .acquire_interactive_search_heavy(
+                &TargetKey::search("repo", None),
+                Duration::from_millis(500),
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "search must not wait for canonical verification: {err} — {}",
+                    lease_root.describe()
+                )
+            });
+        // AC-3: a build cannot load a second model tree next to the search.
+        let JobAdmission::Owner(build) = model_lane
+            .request_job(
+                &TargetKey::repo_shared("repo", "issues"),
+                JobPriority::Background,
+                Duration::from_millis(250),
+            )
+            .unwrap()
+        else {
+            panic!("the build target must be free");
+        };
+        match build.acquire_heavy(Duration::from_millis(120)) {
+            Err(CoordinatorError::Timeout { .. }) => {}
+            Err(other) => panic!("expected a timeout on the model lane: {other:?}"),
+            Ok(_) => panic!("the model lane must stay exclusive next to a search"),
+        }
+        build.complete(JobOutcome::Completed).unwrap();
+        drop(search);
+        drop(admission);
+        lease_root.assert_free("dropping the admission must release the lease");
+    }
+
+    /// Issue #4285 AC-2: a query encode holding the model lane must not stop
+    /// canonical verification from being admitted.
+    #[test]
+    fn verification_is_admitted_while_a_search_holds_the_model_lease() {
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let model_lane = IndexCoordinator::open_default().unwrap();
+        let _search = model_lane
+            .acquire_interactive_search_heavy(
+                &TargetKey::search("repo", None),
+                Duration::from_millis(500),
+            )
+            .unwrap();
+
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let admission =
+            admit(&mut env, worktree.path(), Duration::from_secs(1)).unwrap_or_else(|err| {
+                panic!(
+                    "verification must not wait for a search: {err} — {}",
+                    lease_root.describe()
+                )
+            });
+        lease_root.assert_held("admission must hold the verification lease");
+        drop(admission);
+        lease_root.assert_free("dropping the admission must release the lease");
+    }
+
     #[test]
     fn admit_defers_when_another_target_holds_the_lease() {
         let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
-        let other = TargetKey::repo_shared("other-repo", "issues");
+        // Issue #4285: only another canonical verification contends on this
+        // lane; index builds and searches live on the model lane.
+        let other = TargetKey::verification("other-repo", "other-worktree");
         let JobAdmission::Owner(guard) = lease_root
             .coordinator
             .request_job(

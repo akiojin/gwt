@@ -7,7 +7,7 @@ description: "Use when the user wants to create, inspect, update, or unblock a p
 
 ## Overview
 
-Single skill for the full PR lifecycle: create, check status, fix blockers, and deliver (drive to merge). Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user. Deliver mode is opt-in only and is never auto-detected.
+Single skill for the full PR lifecycle: create, check status, fix blockers, and deliver (drive to merge). Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user. Deliver is automatic for autonomous execution after the Ready PR Gate passes; manual launches require an explicit delivery request.
 
 Use the current user's language for decision summaries, blocker reports, and
 next-step guidance returned from this workflow.
@@ -84,11 +84,13 @@ On invocation, run Shared Preflight, then route:
    - "fix CI" / "fix the PR" / "resolve blockers" → **fix** mode
    - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
    - "deliver" / "drive to merge" / "merge it" / "land the PR" / "ship it" /
-     "watch until merged" → **deliver** mode (opt-in only; Ready PR Gate must
-     already be satisfied)
-3. **Auto-detect** (no explicit mode) — use the commit-count-first
-   decision from Preflight Step 7. Auto-detect never selects **deliver**;
-   enabling auto-merge requires an explicit user request:
+     "watch until merged" → **deliver** mode (Ready PR Gate must be satisfied)
+3. **Autonomous execution** — when `execution.status` reports
+   `launch_route: autonomous`, use **deliver** after verification and the Ready
+   PR Gate pass, continuing through the existing CI auto-merge path until merged.
+4. **Auto-detect for manual launches** (no explicit mode) — use the
+   commit-count-first decision from Preflight Step 7. Manual auto-detect never
+   selects **deliver**; enabling auto-merge requires an explicit user request:
    - open PR + `mergeable: CONFLICTING|DIRTY|BEHIND` → **fix**
    - `N > 0` + no open PR → **create**
    - `N > 0` + open PR + clean merge state → **create** (push-only + post-push fix)
@@ -150,17 +152,19 @@ Ready for review only when all of the following are true:
 - rollback / follow-up boundaries are explained in the PR body when relevant
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`
 - `User Verification Result` is `confirmed`, `n/a`, `n/a (autonomous)`,
-  `deferred (autonomous execution)`, or `skipped(<reason>)`. The two autonomous
-  values are what an unattended gwt Issue Monitor launch records — read the
-  launch route from `execution.status` (`launch_route`), not from an environment
-  variable: the user-verification handoff is waived for that launch mode, and
-  any UI surface is carried by `Agent Visual Check: pass` instead. Never rewrite
-  either as `confirmed` — the user confirmed nothing.
-- A `deferred (autonomous execution)` result reaches a **Draft** PR only, and
-  gwt enforces it: `pr.ready` and non-draft `pr.create` refuse a body carrying
-  that value. Automation ends at PR creation; the owner makes the merge
-  decision after sweeping the deferred PRs (`pr.list` with
-  `include: ["body"]`, field `deferred_user_verification`).
+  `deferred (autonomous execution)`, or `skipped(<reason>)`. For autonomous
+  launches read `execution.status` (`launch_route`) and record
+  `n/a (autonomous)`; UI work additionally needs `Agent Visual Check: pass`
+  and actual passing headed Chromium dark/light evidence in the same fresh
+  `verify.run` record (selected with `params.headed_e2e_commands`). Never
+  rewrite the agent's own check as human `confirmed`.
+- The legacy `deferred (autonomous execution)` value on existing autonomous
+  PRs permits Ready with fresh passing evidence, without rewriting the body or
+  asking for human confirmation. `pr.list` still exposes
+  `deferred_user_verification` when `include: ["body"]` is requested: autonomous
+  values, including legacy deferred, yield `false`; manual or generic deferred
+  yields `true`. Without body hydration the field is absent. Manual verification
+  is unchanged.
 - every PR body checklist item is checked or explicitly marked N/A with
   a reason
 
@@ -430,17 +434,17 @@ gwtd has no merge operation. The merge itself is performed by the
 repository's merge automation (GitHub auto-merge, or a workflow that merges
 non-Draft PRs once checks pass) or by a human. Deliver has two levers: JSON
 operation `pr.ready` hands the PR to that automation, and JSON operation
-`pr.draft` holds the merge, because a Draft PR cannot be merged.
+`pr.draft` can explicitly hold a merge when the owner requests it,
+because a Draft PR cannot be merged. It is not a prerequisite for routine pushes.
 
-### Opt-in only (never auto-routed)
+### Entry: autonomous execution or explicit manual request
 
-Deliver mode is opt-in only: it is entered **only** when the user explicitly
-asks to deliver / drive to merge / merge / land / ship the PR. The Mode
-Auto-Detection matrix never selects Deliver on its own, because handing a PR
-to merge automation is an outward-facing, hard-to-reverse action — once
-handed over, the PR merges the moment required checks go green. If no open PR
-exists, Deliver first falls back to Create (Ready PR Gate applies) and then
-drives the newly created PR.
+For `launch_route: autonomous`, Deliver continues verified work through a
+Ready PR and the existing CI auto-merge path until merged. Human visual
+confirmation is not required, and a Draft PR is not the terminal outcome for
+passing work. Manual Deliver is opt-in only and never auto-routed: the user must
+explicitly ask to deliver / drive to merge / merge / land / ship the PR. If no
+open PR exists, first use Create with the Ready PR Gate, then drive that PR.
 
 ### Hard PR Gate (mandatory before handing the PR to merge automation)
 
@@ -449,31 +453,28 @@ the PR scope. Deliver applies a stricter gate than Create/Fix because merge
 automation removes the last human checkpoint:
 
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`
-- `User Verification Result` is `confirmed`, `n/a`, or `n/a (autonomous)` (not
-  `pending`, `rejected(<reason>)`, `skipped(<reason>)`, or
-  `deferred (autonomous execution)` — a skip is enough to *create* a PR but not
-  to merge unattended, and a deferral is by definition a check the owner has
-  not made yet). `n/a (autonomous)` qualifies because that waiver is a property
-  of the launch mode rather than a postponed check, but it still requires
-  `Agent Visual Check: pass` when a UI surface is in scope.
+- `User Verification Result` is `confirmed`, `n/a`, or `n/a (autonomous)`.
+  Existing autonomous PRs may retain the legacy `deferred (autonomous execution)`
+  body value with fresh passing evidence. `pending`, `rejected(<reason>)`, and
+  `skipped(<reason>)` do not authorize delivery. Autonomous UI work requires
+  `Agent Visual Check: pass` plus the same record's measured passing headed
+  Chromium results for dark and light themes.
 - the PR is a releaseable slice with no known blockers
 
-If verification is `pending`, do **not** hand the PR over through `pr.ready`;
-keep it Draft. Stop and route the failure for repair (back to the TDD loop,
-`gwt-verify`, or `gwt-discussion`). Never downgrade a `pending` result to
-`skipped` to pass the gate.
+If verification is `pending`, do **not** hand new work over through `pr.ready`.
+Route the failure for repair (back to the TDD loop, `gwt-verify`, or
+`gwt-discussion`). Never downgrade `pending` to `skipped` to pass the gate.
 
-### Core invariant: only a clear, gated snapshot is ever mergeable
+### Preserve the repository's delivery policy
 
-The PR may sit non-Draft under merge automation **only** when it is fully
-clear (no blocking CI, no conflict/BEHIND, no unresolved thread, no open
-CHANGES_REQUESTED) **and** the Hard PR Gate is satisfied. Before **any**
-code-changing push, hold the merge through `pr.draft` first; after the push,
-**re-run the Hard PR Gate** and only then **re-arm** by handing the PR back
-through `pr.ready`. This makes the automation merge only a snapshot that
-passed verification, and inherits the skill's rule that every code-changing
-re-push needs a fresh `gwt-verify --mode pre-pr` PASS — it does not override
-it.
+Keep auto-merge enabled across routine pushes and base synchronization. Run
+fresh `gwt-verify --mode pre-pr` before every code-changing push. Use JSON
+operation `pr.update_branch` for a BEHIND PR; when the PM owns synchronization,
+hand it off on the Board instead of updating the branch concurrently.
+
+Do not require an unavailable merge operation or a Draft/Ready cycle for each
+push. An explicit owner-requested hold uses `pr.draft`; resume through
+`pr.ready` only after the Ready PR Gate passes again.
 
 ### Drive-to-merge loop
 
@@ -481,18 +482,16 @@ it.
    user-supplied number; read state with `pr.view` (`[MERGED]` bracket plus
    `mergeable:` / `merge_state:` / `ci:` / `review:` lines).
 2. Inspect with Fix `--mode all` and resolve **every** BLOCKING item through
-   the existing Fix Implementation / Comment Response flow — before arming.
-   Re-gate per the Core invariant on each code-changing push.
+   the existing Fix Implementation / Comment Response flow. Re-run the Hard
+   PR Gate before each code-changing push.
 3. Confirm the PR has merge automation (GitHub auto-merge enabled on it, or a
    repository workflow that merges non-Draft PRs). Without it the merge needs
    a human: report the clear, gated PR and stop, because gwtd cannot merge it.
-4. Hand over **only a clear snapshot**: if the PR is Draft, JSON operation
-   `pr.ready`. Automation usually waits only for required checks, so on repos
-   that do not enforce conversation-resolution/approval branch protection,
-   keep the PR Draft until `pr.view` reads CLEAN, then hand it over.
-5. Poll `pr.view` ~30s. On any **new** blocker (BEHIND, new failing check, new
-   thread/CHANGES_REQUESTED): hold the merge through `pr.draft`, resolve,
-   re-gate, **re-arm** with `pr.ready`. Re-run only **infrastructure-transient** CI failures with
+4. Hand over **only a verified snapshot**: if an inherited PR is Draft, use
+   JSON operation `pr.ready` after the gate passes. Preserve enabled auto-merge.
+5. Poll `pr.view` ~30s. Resolve any **new** blocker (BEHIND, new failing check,
+   new thread/CHANGES_REQUESTED) through Fix while preserving auto-merge.
+   Re-run only **infrastructure-transient** CI failures with
    JSON operation `actions.rerun` for the failed jobs (max 3); a test/build timeout or compile/
    test failure is code, not transient — fix it. The poll is bounded (~20 polls
    / ~10 min) then hands off via `board.post`.

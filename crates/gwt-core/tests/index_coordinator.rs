@@ -1244,7 +1244,10 @@ fn issues_index_job_yields_the_heavy_lease_to_a_waiting_verification_run() {
     // The lease is released before the reason is written, so the winner can
     // be here first; the reason is what the assertion is about, not the
     // ordering of two independent writes.
-    wait_for_file(&result, Duration::from_secs(10));
+    poll_until(Duration::from_secs(10), || {
+        fs::read_to_string(&result)
+            .is_ok_and(|content| content == HeavyYieldReason::Preempted.as_str())
+    });
     assert_eq!(
         fs::read_to_string(&result).unwrap_or_default(),
         HeavyYieldReason::Preempted.as_str(),
@@ -1294,7 +1297,10 @@ fn issues_index_job_releases_the_heavy_lease_when_its_hold_cap_lapses() {
         !stop.exists(),
         "the cap must fire while the index job is still running"
     );
-    wait_for_file(&result, Duration::from_secs(10));
+    poll_until(Duration::from_secs(10), || {
+        fs::read_to_string(&result)
+            .is_ok_and(|content| content == HeavyYieldReason::CapReached.as_str())
+    });
     assert_eq!(
         fs::read_to_string(&result).unwrap_or_default(),
         HeavyYieldReason::CapReached.as_str(),
@@ -1419,7 +1425,10 @@ fn background_index_job_yields_the_heavy_lease_to_an_interactive_search() {
     let waited = started.elapsed();
 
     assert!(!stop.exists(), "the background build must still be running");
-    wait_for_file(&result, Duration::from_secs(10));
+    poll_until(Duration::from_secs(10), || {
+        fs::read_to_string(&result)
+            .is_ok_and(|content| content == HeavyYieldReason::Preempted.as_str())
+    });
     assert_eq!(
         fs::read_to_string(&result).unwrap_or_default(),
         HeavyYieldReason::Preempted.as_str(),
@@ -1612,17 +1621,26 @@ fn sustained_interactive_traffic_and_background_index_work_both_progress() {
     wait_for_file(&ready, Duration::from_secs(30));
     let (baseline, _) = read_counter(&ledger);
 
-    // Three full bursts of searches, issued back to back.
+    // Three full bursts with a live background waiter at each release.
+    // The helper drops its pending registration between jobs; its ready
+    // marker alone does not prove sustained contention. Hold each search
+    // lease until that background worker has queued its next attempt.
     let rounds = 3 * MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
     for round in 1..=rounds {
-        coordinator
+        let lease = coordinator
             .acquire_interactive_search_heavy(&search_key, Duration::from_secs(20))
             .unwrap_or_else(|err| {
                 let _ = fs::write(&stop, b"stop");
                 panic!("interactive search {round}/{rounds} must still be served: {err}")
-            })
-            .release()
-            .expect("release search lease");
+            });
+        poll_until(Duration::from_secs(20), || {
+            coordinator
+                .heavy_lease_status()
+                .expect("read queued background waiter")
+                .pending
+                >= 1
+        });
+        lease.release().expect("release search lease");
     }
 
     let (after, _) = read_counter(&ledger);

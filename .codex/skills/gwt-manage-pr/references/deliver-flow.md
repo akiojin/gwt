@@ -18,35 +18,30 @@ on the PR, or a repository workflow that merges non-Draft PRs once their checks
 pass — or by a human. Deliver works through two JSON operations:
 
 - `pr.ready` hands the PR to that automation (arms the merge).
-- `pr.draft` **holds the merge**: a Draft PR cannot be merged, whichever
-  automation would otherwise merge it.
+- `pr.draft` explicitly holds a merge when the owner requests it: a Draft PR
+  cannot be merged. Resume with `pr.ready` after the Ready PR Gate passes.
+  Routine pushes do not require this hold.
 
-## Core invariant: only a clear, gated snapshot is ever mergeable
+## Preserve enabled auto-merge
 
-Merge automation is destructive — once a PR is handed over, it merges the
-instant its required checks pass, with no further human step. To keep that
-safe, Deliver holds a single invariant:
+Keep auto-merge enabled across routine pushes and base synchronization. Before
+every code-changing push, run fresh `gwt-verify --mode pre-pr` and satisfy the
+User Verification Result gate. CI checks the pushed snapshot before merging.
 
-> The PR may sit non-Draft under merge automation **only** when it is fully
-> clear (no blocking CI, no conflict/BEHIND, no unresolved thread, no open
-> CHANGES_REQUESTED) **and** the Hard PR Gate is satisfied. Before **any**
-> code-changing push, the merge is **held** first; after the push it is
-> **re-gated** and only then **re-armed**.
+For a BEHIND PR, use JSON operation `pr.update_branch`. If the PM owns base
+synchronization, post the delivery handoff on the Board and let the PM perform
+it; do not race another updater. Resolve actual content conflicts through Fix.
+Do not require a Draft/Ready cycle or an unavailable merge operation merely
+because code or the base branch changed.
 
-This makes the automation merge only a snapshot that passed
-`gwt-verify --mode pre-pr` and the user verification gate. It inherits the
-skill's own rule (see SKILL.md "Ready PR Gate"): *every code-changing re-push
-to a Ready/non-draft PR must be preceded by a fresh `gwt-verify --mode pre-pr`
-PASS with a satisfied `User Verification Result`*. Deliver does not override
-that rule — it enforces it on every drive iteration.
+## Entry contract
 
-## Entry contract (opt-in only)
-
-- Deliver runs **only** on explicit user intent: "deliver", "drive to merge",
-  "merge it", "land the PR", "ship it", or an equivalent direct request to take
-  the PR to merged.
-- Deliver is **never auto-routed**. The Mode Auto-Detection 2x2 matrix must not
-  select Deliver on its own.
+- For `execution.status` reporting `launch_route: autonomous`, continue
+  through a verified Ready PR and the existing CI auto-merge path until merged.
+  Human visual confirmation is not a prerequisite.
+- For manual launches, Deliver runs only on explicit user intent: "deliver",
+  "drive to merge", "merge it", "land the PR", "ship it", or an equivalent
+  direct request. Manual auto-detection does not select Deliver.
 - If no open PR exists for the current branch, fall back to Create mode first
   (Ready PR Gate applies). If Create can only produce a **Draft** (the Ready PR
   Gate is not satisfied), **stop with NO ACTION** — do not enter the drive loop
@@ -62,7 +57,12 @@ automation removes the last human checkpoint:
 - `User Verification Result` is `confirmed` (user visually verified), `n/a`
   (the change has no user-visible surface, so visual verification does not
   apply), or `n/a (autonomous)` (an unattended gwt Issue Monitor launch, where
-  the handoff is waived and `Agent Visual Check: pass` carries any UI surface).
+  the handoff is waived). UI work requires `Agent Visual Check: pass` and
+  actual passing headed Chromium results for dark and light themes in the same
+  fresh `verify.run` record, selected with `params.headed_e2e_commands`.
+- Existing autonomous PRs may retain the legacy
+  `deferred (autonomous execution)` body value and pass with fresh evidence;
+  no body rewrite or human confirmation is required.
 - The PR is a releaseable slice with no known blockers in its scope.
 
 Refuse to hand the PR over when any of these hold:
@@ -77,20 +77,15 @@ Refuse to hand the PR over when any of these hold:
   Session (`execution.status` → `launch_route: autonomous`; the legacy
   `GWT_AUTONOMOUS_EXECUTION` marker still counts when present, but its absence
   proves nothing), not from the agent finding the check inconvenient.
-- `User Verification Result` is `deferred (autonomous execution)`. That value
-  says the owner's visual check has not happened yet, so the PR stays Draft by
-  design and gwt refuses to mark it Ready. It reaches merge automation only
-  after the owner sweeps it and the result becomes `confirmed`.
 - `gwt-verify --mode pre-pr` returns `Overall: FAIL` or `failed: tooling-missing`.
 
-On gate failure, stop. Do not hand the PR over through `pr.ready`; if it is
-already non-Draft, hold it through `pr.draft`. Route the failure for repair
-(back to the TDD loop, `gwt-verify`, or `gwt-discussion`) and report
+On gate failure, do not push unverified code or hand new work over through
+`pr.ready`. Route the failure for repair (back to the TDD loop, `gwt-verify`,
+or `gwt-discussion`) and report
 `NO ACTION` with the failing gate item. Never downgrade a `pending` result to
 `skipped` to get past the gate.
 
-This same gate is re-run after every code-changing push during the drive loop
-(see the Core invariant and Step 6).
+Re-run this gate before every code-changing push during the drive loop.
 
 ## Step 2: Resolve the PR
 
@@ -116,12 +111,13 @@ the existing Fix Implementation / Comment Response flow in `fix-flow.md` —
 - `CHANGE-REQUEST` / `REVIEW-COMMENT` / `UNRESOLVED-THREAD` -> apply the change,
   reply to and resolve the thread (`pr.review_threads.reply_and_resolve`), then
   post the reviewer summary (`pr.comment`).
-- `CONFLICT` / `BRANCH-BEHIND` -> `git fetch origin <base> && git merge
-  origin/<base> && git push` (never rebase); resolve conflicts per fix-flow.
+- `CONFLICT` -> fetch the base, merge it locally, resolve conflicts per
+  fix-flow, verify, then push (never rebase).
+- `BRANCH-BEHIND` -> JSON operation `pr.update_branch`, or a Board handoff
+  when the PM owns base synchronization.
 
-Per the Core invariant, **every code-changing push here re-runs the Hard PR
-Gate (Step 1) before the drive proceeds**. Keep the merge held while any
-blocking item remains.
+**Every code-changing push re-runs the Hard PR Gate (Step 1) first.** Keep
+auto-merge enabled while resolving blockers; CI remains the delivery gate.
 
 ## Step 4: Confirm the PR has merge automation
 
@@ -149,26 +145,10 @@ required checks still running, hand it over: if the PR is Draft, use JSON
 operation `pr.ready`. The automation merges the PR once all **required**
 status checks pass.
 
-### Branch-protection dependency (read before relying on merge automation)
-
-Merge automation usually waits only for **required status checks**. It does
-**not** block on unresolved review threads or `CHANGES_REQUESTED` reviews
-unless the repository's branch protection enforces *require conversation
-resolution* and/or *required approvals*. On repositories that do **not**
-enforce those rules, a review filed after hand-over can be raced by the
-server-side merge before the synchronous Fix loop processes it.
-
-- Preferred on protected repos (conversation-resolution + approvals enforced):
-  hand over from a clear snapshot as above.
-- On repos **without** those protections: keep the PR Draft through the watch
-  loop (Step 6), and hand it over only when `pr.view` reports
-  `mergeable: MERGEABLE` / `merge_state: CLEAN` with required checks green and
-  no unresolved thread. **Re-read `pr.view` immediately before `pr.ready`** and
-  require that clear state at that instant (guard against a base advance or
-  check flip between read and hand-over).
-
-The Hard PR Gate (Step 1) and the per-push re-gate (Core invariant) still apply
-— only a verified, gated snapshot is handed over.
+Merge automation follows the repository's required checks and review rules.
+Resolve review blockers through Fix and preserve the existing protection
+settings and enabled auto-merge. An explicit owner-requested hold is the
+separate `pr.draft` operation described above.
 
 ## Step 6: Watch for merge, re-gate on any new blocker
 
@@ -180,13 +160,9 @@ Poll JSON operation `pr.view` to observe progress toward merge:
   automation" is not "merged."
 - If a **new** blocker appears before merge — base advanced (`merge_state:
   BEHIND`), a required check fails, a new review thread, a new
-  `CHANGES_REQUESTED` — first **hold the merge** through JSON operation
-  `pr.draft`, then resolve it.
-
-  Resolve the blocker through the Fix flow (Step 3). For any code-changing push,
-  **re-run the Hard PR Gate (Step 1)**, then **re-arm** by handing the PR back
-  through `pr.ready` (Step 5) only after the PR is clear and gated again. Never
-  leave a PR mergeable across a code-changing push.
+  `CHANGES_REQUESTED` — resolve it through the Fix flow (Step 3) while keeping
+  auto-merge enabled. For any code-changing push, **re-run the Hard PR Gate
+  (Step 1)** first. Use `pr.update_branch` or the PM handoff for base sync.
 - This poll is **bounded**. If required checks stay pending/queued with no
   progress for ~20 polls (~10 minutes) and nothing is failing, post JSON
   operation `board.post` with `params.kind:"blocked"`, the PR number, the
@@ -247,8 +223,8 @@ merged" completion goal so monitoring survives turn boundaries, using the same
 goal-start contract as `/release` step 5.4:
 
 - **Codex** (goals enabled): call `create_goal` with an objective like "Drive
-  PR #<number> to merged: keep only the verified snapshot mergeable, hold the
-  merge with `pr.draft` and re-gate on every code-changing push, re-run only
+  PR #<number> to merged: keep auto-merge enabled and re-gate before every
+  code-changing push, synchronize the base through its assigned owner, re-run only
   infrastructure-transient CI failures, and finish when `pr.view` shows
   `[MERGED]` (`merged_at` set). Stop and report on non-transient failures or a
   blocker that survives the Loop Safety Guard. Cap at 60 minutes / 30 turns."
@@ -297,12 +273,12 @@ Report using the skill's Final Report Contract. When the PR reached the
 
 | Prohibited | Required alternative |
 |---|---|
-| Hand a PR to merge automation on `pending` / `skipped` verification | Gate on `confirmed` or `n/a` (Step 1) |
-| Leave a PR mergeable across a code-changing push | Hold with `pr.draft`, re-gate, re-arm with `pr.ready` per push (Core invariant / Step 6) |
-| Hand over while a blocker still exists | Resolve all blockers first, hand over a clear snapshot (Step 5) |
-| Rely on merge automation to block on threads on an unprotected repo | Keep the PR Draft until CLEAN, then hand over (Step 5) |
-| Look for a gwtd merge operation or merge with `gh pr merge` | gwtd has no merge operation; rely on merge automation or a human (Step 4) |
-| Auto-route into Deliver without an explicit request | Deliver is opt-in only |
-| Report "delivered" after handing the PR over | Report Delivered only when `pr.view` shows `[MERGED]` (`merged_at` set) |
+| Enable auto-merge on `pending` / `skipped` verification | Gate on `confirmed` or `n/a` (Step 1) |
+| Require disabling auto-merge before routine pushes | Keep auto-merge enabled and verify before each code-changing push |
+| Arm auto-merge while a blocker still exists | Resolve all blockers first, arm from a clear snapshot (Step 5) |
+| Leave review blockers unresolved | Resolve threads through Fix and preserve repository protection settings |
+| Auto-route a manual launch into Deliver without an explicit request | Manual Deliver is opt-in; autonomous delivery follows its launch contract |
+
+| Report "delivered" after enabling auto-merge | Report Delivered only when `pr.view` shows `[MERGED]` (`merged_at` set) |
 | Blindly rerun a test/build timeout or compile/test failure | Classify infra-transient vs code, then use `actions.rerun` only for infrastructure failures (Step 7) |
 | Poll `merged_at` forever | Bounded poll + `board.post` blocked handoff or goal (Step 6/9) |
