@@ -224,8 +224,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "workspace.work_prune" | "workspace.work-prune" => {
+            // Issue #4465 AC-4'': this operation closes, discards and detaches
+            // durable Work state across every Work in the project, so a scope
+            // parameter it does not implement is a refusal. `params.work` was
+            // silently dropped and the call then applied machine-wide.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "ids"],
+                "workspace.work_prune",
+            )?;
             CliCommand::Workspace(WorkspaceCommand::WorkPrune {
-                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+                // Issue #4465 AC-8: an unqualified call reports candidates
+                // only; applying requires an explicit opt-out.
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
                 ids: optional_string_vec(params, "ids")?,
                 project_root: optional_string(params, "project_root")?,
             })
@@ -2205,6 +2216,7 @@ mod tests {
                 review_status: "APPROVED".to_string(),
                 body: String::new(),
                 closing_issues: Vec::new(),
+                fallback_owner_closed: false,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
@@ -3012,6 +3024,40 @@ mod tests {
             ok("workspace.projection-prune", json!({})),
             CliCommand::Workspace(WorkspaceCommand::ProjectionPrune { .. })
         ));
+    }
+
+    /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
+    /// an unqualified call only reports candidates. The first call used to be
+    /// an immediate `APPLIED` across every Work on the machine (1100 rows,
+    /// other projects included).
+    #[test]
+    fn workspace_work_prune_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok("workspace.work-prune", json!({"dry_run": false})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    /// Issue #4465 AC-4'': a scope parameter this operation does not implement
+    /// must be refused, never dropped. `params.work` was silently ignored and
+    /// the call then applied to the whole machine — the first specimen of the
+    /// #4444 dropped-params family that changes state.
+    #[test]
+    fn workspace_work_prune_rejects_an_unknown_scope_param() {
+        match err(
+            "workspace.work_prune",
+            json!({"work": "work-work-issue-4029-124040a6"}),
+        ) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("work"), "{message}");
+                assert!(message.contains("ids"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

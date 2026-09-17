@@ -3238,6 +3238,13 @@ fn spawn_issue_monitor_scan_with_deadline(
         #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        // Issue #4391 AC-1: once free space crosses the threshold the
+        // `disk_space` warning reports, reclaim merged, idle worktrees'
+        // build caches. The sweep runs on its own thread and never holds the
+        // scan. Unit tests drive this worker against scratch repositories and
+        // must not start a host-wide sweep on a CI runner that is low on disk.
+        #[cfg(not(test))]
+        crate::worktree::gc::maybe_spawn(&scope.project_root);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
     })
 }
@@ -3810,6 +3817,7 @@ fn execute_issue_monitor_effect(
                         crate::issue_monitor_settlement::settle_merged_issue(
                             &client,
                             &repository,
+                            &scope.project_root,
                             *issue_number,
                             *pr_number,
                             merge_sha.as_deref(),
@@ -5504,6 +5512,9 @@ mod tests {
             &fake_gh,
             r###"#!/bin/sh
 case "$*" in
+  *" --include") printf 'HTTP/2.0 200 OK\n\r\n' ;;
+esac
+case "$*" in
   *"--method POST"*|*"--method PATCH"*|*"-X POST"*|*"-X PATCH"*|*"pr merge"*)
     if [ -n "$GWT_FAKE_GH_MUTATION_MARKER" ]; then
       : > "$GWT_FAKE_GH_MUTATION_MARKER"
@@ -5674,7 +5685,7 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   # The REST list is paged: only the first page carries rows, like GitHub
   # (a fixture larger than per_page would otherwise page forever).
   case "$*" in
-    *"issue list"* | *"/issues?"*"&page=1")
+    *"issue list"* | *"/issues?"*"&page=1 --include")
       cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
       exit 0
       ;;

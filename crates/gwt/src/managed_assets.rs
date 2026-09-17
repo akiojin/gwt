@@ -769,6 +769,141 @@ const PM_MANAGED_ASSET_TRANSACTION_ROOTS: &[&str] = &[
     ".gwt/hermes",
 ];
 
+/// Reject indirection only where refresh writes or prunes. Snapshot copying
+/// preserves user-owned links verbatim and never traverses their targets.
+fn preflight_pm_managed_asset_refresh(worktree: &Path) -> io::Result<()> {
+    for relative in [
+        ".claude/settings.local.json",
+        ".codex/hooks.json",
+        ".gwt/opencode/plugins/gwt-hooks.js",
+        ".gwt/opencode/opencode.json",
+        ".gwt/opencode/skip-permissions.json",
+        ".gwt/openclaw/openclaw.json",
+        ".gwt/openclaw/plugins/gwt-hook-bridge/package.json",
+        ".gwt/openclaw/plugins/gwt-hook-bridge/openclaw.plugin.json",
+        ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
+        ".gwt/hermes/config.yaml",
+        ".gwt/hermes/agent-hooks/gwt-hook.sh",
+    ] {
+        preflight_pm_managed_asset_path(worktree, &worktree.join(relative), "write")?;
+    }
+    // The Hermes credential bridge replaces links without following them.
+    // Its parent is checked above; .env/auth.json remain valid link leaves.
+    for relative in [
+        ".claude/skills",
+        ".codex/skills",
+        ".gwt/hermes/skills",
+        ".claude/commands",
+        ".claude/hooks/scripts",
+        ".codex/hooks/scripts",
+    ] {
+        let root = worktree.join(relative);
+        preflight_pm_managed_asset_path(worktree, &root, "write/prune")?;
+        if !root.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with("gwt-") {
+                preflight_pm_managed_asset_tree(&entry.path())?;
+            }
+        }
+    }
+    // Use the writer's canonical names too: on case-insensitive filesystems
+    // an existing GWT-execute directory is also the gwt-execute write target.
+    for relative in [".claude/skills", ".codex/skills", ".gwt/hermes/skills"] {
+        for entry in gwt_skills::assets::CLAUDE_SKILLS.dirs() {
+            let name = entry.path().file_name().unwrap_or_default();
+            if name.to_string_lossy().starts_with("gwt-") {
+                preflight_pm_managed_asset_tree(&worktree.join(relative).join(name))?;
+            }
+        }
+    }
+    for relative in [".claude/skills", ".codex/skills"] {
+        for name in ["gwt-pm", "gwt-coordination"] {
+            preflight_pm_managed_asset_tree(&worktree.join(relative).join(name))?;
+        }
+    }
+    // Commands also contain non-gwt names (currently release.md). Their
+    // existing tracked files are preserved by distribution; the command root
+    // and its ancestors have already been checked above.
+    let tracked_paths = gwt_skills::distribute::tracked_gwt_asset_paths(worktree);
+    for entry in gwt_skills::assets::CLAUDE_COMMANDS.entries() {
+        let path = worktree.join(".claude/commands").join(entry.path());
+        if entry.as_file().is_some()
+            && path.exists()
+            && gwt_skills::distribute::should_skip_tracked_path(worktree, &path, &tracked_paths)
+        {
+            continue;
+        }
+        preflight_pm_managed_asset_path(worktree, &path, "write/prune")?;
+        preflight_pm_managed_asset_tree(&path)?;
+    }
+    if let Some(plan) = gwt_skills::plan_managed_git_hooks(worktree) {
+        let self_ignore = plan.hooks_dir.join(".gitignore");
+        if !self_ignore.exists() {
+            preflight_pm_managed_asset_path(worktree, &self_ignore, "write")?;
+        }
+        for hook in plan.hooks {
+            if !hook.target.exists() || gwt_skills::git_hooks::is_managed_hook(&hook.target) {
+                preflight_pm_managed_asset_path(worktree, &hook.target, "write")?;
+            }
+        }
+    }
+    preflight_pm_managed_asset_path(worktree, &resolve_git_exclude_path(worktree)?, "write")
+}
+
+fn preflight_pm_managed_asset_path(
+    worktree: &Path,
+    path: &Path,
+    operation: &str,
+) -> io::Result<()> {
+    // Git's exclude may live in the linked main checkout. Stop at the shared
+    // ancestor so OS aliases above the checkouts (e.g. /var) remain valid.
+    let shared = worktree
+        .ancestors()
+        .find(|ancestor| path.starts_with(ancestor));
+    let ancestors = path
+        .ancestors()
+        .take_while(|ancestor| Some(*ancestor) != shared)
+        .collect::<Vec<_>>();
+    for node in ancestors.into_iter().rev() {
+        match fs::symlink_metadata(node) {
+            Ok(metadata) => {
+                reject_pm_managed_asset_indirection(node, &metadata).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("PM managed asset {operation} preflight: {error}"),
+                    )
+                })?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn preflight_pm_managed_asset_tree(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    reject_pm_managed_asset_indirection(path, &metadata).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("PM managed asset write/prune preflight: {error}"),
+        )
+    })?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            preflight_pm_managed_asset_tree(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
 struct PmManagedAssetSnapshot {
     entries: Vec<PmManagedAssetSnapshotEntry>,
     gwt_parent: PathBuf,
@@ -784,6 +919,7 @@ struct PmManagedAssetSnapshotEntry {
 
 impl PmManagedAssetSnapshot {
     fn capture(worktree: &Path) -> io::Result<Self> {
+        preflight_pm_managed_asset_refresh(worktree)?;
         let project_state = worktree
             .parent()
             .and_then(Path::parent)
@@ -1072,19 +1208,8 @@ fn remove_pm_managed_asset_node(path: &Path) -> io::Result<()> {
 }
 
 fn copy_pm_managed_asset_node(source: &Path, destination: &Path) -> io::Result<()> {
-    copy_pm_managed_asset_node_at(source, destination, source)
-}
-
-fn copy_pm_managed_asset_node_at(
-    source: &Path,
-    destination: &Path,
-    transaction_root: &Path,
-) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
-        if !pm_managed_asset_symlink_is_allowed(transaction_root, source) {
-            reject_pm_managed_asset_indirection(source, &metadata)?;
-        }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1098,11 +1223,7 @@ fn copy_pm_managed_asset_node_at(
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            copy_pm_managed_asset_node_at(
-                &entry.path(),
-                &destination.join(entry.file_name()),
-                transaction_root,
-            )?;
+            copy_pm_managed_asset_node(&entry.path(), &destination.join(entry.file_name()))?;
         }
         fs::set_permissions(destination, metadata.permissions())?;
         return Ok(());
@@ -1119,20 +1240,6 @@ fn copy_pm_managed_asset_node_at(
             source.display()
         ),
     ))
-}
-
-fn pm_managed_asset_symlink_is_allowed(transaction_root: &Path, source: &Path) -> bool {
-    transaction_root.file_name().and_then(|name| name.to_str()) == Some("hermes")
-        && transaction_root
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some(".gwt")
-        && source.parent() == Some(transaction_root)
-        && matches!(
-            source.file_name().and_then(|name| name.to_str()),
-            Some(".env" | "auth.json")
-        )
 }
 
 #[cfg(unix)]
@@ -1758,6 +1865,97 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_snapshot_preserves_project_and_hermes_symlinks_verbatim() {
+        let (_temp, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
+        let sentinel = worktree.join("shared/agent.md");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, "project agent content").unwrap();
+        let links = [
+            (".claude/agents/planner", "../../shared/agent.md"),
+            (".codex/skills/unity-tools", "../missing-skills"),
+            (".gwt/hermes/.env", "/outside/hermes/.env"),
+            (".gwt/hermes/auth.json", "../../credentials/auth.json"),
+        ];
+        for (relative, target) in links {
+            let path = worktree.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+        }
+        repoint_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+        std::fs::create_dir_all(worktree.join(".husky/_")).unwrap();
+        std::fs::write(worktree.join(".husky/pre-commit"), "echo tracked hook").unwrap();
+        for name in ["pre-commit", ".gitignore"] {
+            std::os::unix::fs::symlink(&sentinel, worktree.join(".husky/_").join(name)).unwrap();
+        }
+        let snapshot = super::PmManagedAssetSnapshot::capture(&worktree).unwrap();
+        // Rollback must recover both valid and dangling links verbatim.
+        std::fs::remove_file(worktree.join(links[0].0)).unwrap();
+        snapshot.restore().unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        for name in ["pre-commit", ".gitignore"] {
+            assert_eq!(
+                std::fs::read_link(worktree.join(".husky/_").join(name)).unwrap(),
+                sentinel
+            );
+        }
+        for (relative, target) in links {
+            assert_eq!(
+                std::fs::read_link(worktree.join(relative)).unwrap(),
+                Path::new(target)
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(sentinel).unwrap(),
+            "project agent content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_refresh_rejects_managed_write_and_prune_symlinks_before_mutation() {
+        let mut paths = vec![
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/commands/release.md",
+            ".claude/hooks/scripts/gwt-retired.sh",
+            ".gwt/opencode/plugins",
+        ];
+        let probe = tempfile::tempdir().unwrap();
+        std::fs::create_dir(probe.path().join("GWT-case")).unwrap();
+        if probe.path().join("gwt-case").exists() {
+            paths.push(".codex/skills/GWT-execute");
+        }
+        for relative in paths {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+            let worktree = gwt_core::paths::gwt_projects_dir().join("test/pm/worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            repoint_git(&worktree, &["init", "--quiet"]);
+            let outside = temp.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            let sentinel = outside.join("sentinel");
+            std::fs::write(&sentinel, "user content").unwrap();
+            let path = worktree.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            let error = super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree)
+                .expect_err("managed indirection must fail before refresh")
+                .to_string();
+            assert!(!worktree.join(".claude/settings.local.json").exists());
+            assert!(
+                error.contains("write") || error.contains("prune"),
+                "{error}"
+            );
+            assert!(
+                error.to_lowercase().contains(&relative.to_lowercase()),
+                "{error}"
+            );
+            assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "user content");
+            assert_eq!(std::fs::read_link(path).unwrap(), outside);
+        }
     }
 
     fn repoint_fixture(incoming: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, String) {

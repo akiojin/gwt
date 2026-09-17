@@ -462,7 +462,7 @@ pub fn is_gwt_managed_skill_or_command_path(relative: &Path) -> bool {
         .any(|prefix| relative.starts_with(prefix))
 }
 
-fn should_skip_tracked_path(
+pub fn should_skip_tracked_path(
     worktree: &Path,
     target: &Path,
     tracked_paths: &HashSet<PathBuf>,
@@ -480,7 +480,7 @@ fn should_skip_tracked_path(
         .unwrap_or(false)
 }
 
-fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
+pub fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
     match hidden_command("git")
         .arg("-C")
         .arg(worktree)

@@ -1065,6 +1065,7 @@ if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
 )\r\n\
 set \"gwt_arg1=%~1\"\r\n\
 set \"gwt_arg2=%~2\"\r\n\
+if /I \"%~3\"==\"--include\" (echo HTTP/1.1 200 OK& echo.)\r\n\
 if /I \"%GWT_FAKE_GH_MODE%\"==\"cache_merge_empty\" (\r\n\
   if /I \"%gwt_arg2:~0,26%\"==\"repos/{owner}/{repo}/pulls\" (\r\n\
     echo []\r\n\
@@ -1099,6 +1100,9 @@ exit /b 0\r\n",
 	if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
 	  printf '%s\n' 'gh refresh failed' >&2
 	  exit 1
+fi
+if [ "$3" = "--include" ]; then
+  printf 'HTTP/1.1 200 OK\r\n\r\n'
 fi
 # SPEC #4093 FR-003: the merged-PR readback is the REST closed-pulls sync.
 case "$1 $2" in
@@ -62192,6 +62196,20 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // #4484: a tracked project plugin link must survive PM regeneration.
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(repo.join(".claude/agents")).unwrap();
+        std::os::unix::fs::symlink("../../README.md", repo.join(".claude/agents/project.md"))
+            .unwrap();
+        run_git(&repo, &["add", ".claude/agents/project.md"]);
+        fs::create_dir_all(repo.join(".claude/commands")).unwrap();
+        std::os::unix::fs::symlink("../../README.md", repo.join(".claude/commands/release.md"))
+            .unwrap();
+        run_git(&repo, &["add", ".claude/commands/release.md"]);
+        run_git(&repo, &["commit", "-qm", "track project agent symlink"]);
+        run_git(&repo, &["push", "origin", "develop"]);
+    }
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -62242,6 +62260,32 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         scratch.is_dir(),
         "PM spawn preparation must create the project-state scratch directory at {}",
         scratch.display()
+    );
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).unwrap();
+    assert!(prefs.settings.auto_start);
+    assert_eq!(
+        prefs.worktree_freshness.as_ref().map(|state| state.state),
+        Some(gwt::pm_registry::PmWorktreeFreshnessState::Fresh)
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::read_link(pm_worktree.join(".claude/agents/project.md")).unwrap(),
+        PathBuf::from("../../README.md")
+    );
+    // Exercise the launch-completion registration after the automatic preparation.
+    #[cfg(unix)]
+    assert_eq!(
+        fs::read_link(pm_worktree.join(".claude/commands/release.md")).unwrap(),
+        PathBuf::from("../../README.md")
+    );
+    runtime.register_pm_after_launch(&repo, "pm-project-symlink", "claude", &pm_worktree);
+    assert_eq!(
+        gwt::pm_registry::load_pm_prefs(&prefs_path)
+            .unwrap()
+            .registration
+            .map(|registration| registration.session_id),
+        Some("pm-project-symlink".to_string())
     );
 }
 
