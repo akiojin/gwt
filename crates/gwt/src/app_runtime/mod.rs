@@ -1308,6 +1308,11 @@ pub struct AppRuntime {
     /// notification center once the frontend canvas is ready.
     pub(crate) pending_update_resume_notice: Option<(String, String)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    /// Startup restore decisions taken before the canvas was ready. The drain
+    /// picks them up and emits one summary once the asynchronous spawns have
+    /// settled (Issue #4305 AC-5).
+    pub(crate) pending_startup_restore_log: Option<startup::RestoreAdmissionLog>,
+    pub(crate) pending_restore_summaries: Vec<startup::PendingRestoreSummary>,
     /// Issue #4143 (AC-3): windows spawned by an *automatic* restore (startup
     /// auto-resume / Open Project) whose launch has not reached PTY start yet,
     /// mapped to the restored Session id. Nobody is watching such a window, so
@@ -2948,6 +2953,8 @@ impl AppRuntime {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_startup_restore_log: None,
+            pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -6856,10 +6863,14 @@ impl AppRuntime {
 
     /// Issue #3906 AC-3: a staged update (manifest persisted) raises the
     /// `Auto` update drain when the Issue Monitor runs unattended and
-    /// auto-apply is on (the default while autonomous). Attended mode keeps
-    /// the manual update button and raises nothing. AC-5 / AC-6: an install
-    /// that needs elevation, or a version whose apply already failed, is
-    /// refused unattended and falls back to the manual button with a notice.
+    /// auto-apply is on (the default while autonomous). Issue #4376 AC-1 /
+    /// AC-2: an attended monitor raises the same drain when the download of
+    /// a manual Update click lands while the host is not quiescent (agent
+    /// panes running, claims pending, ...), so the click waits for the
+    /// agents instead of restarting over them; a quiet host keeps the ready
+    /// modal's Restart now. AC-5 / AC-6: an install that needs elevation, or
+    /// a version whose apply already failed, is refused unattended and falls
+    /// back to the manual button with a notice.
     pub(crate) fn update_staged_events(&mut self, version: &str) -> Vec<OutboundEvent> {
         let last_failed_version = gwt_core::update::load_update_apply_result()
             .filter(|result| result.outcome == gwt_core::update::UpdateApplyOutcome::Failure)
@@ -6890,7 +6901,25 @@ impl AppRuntime {
         };
         let auto_apply = prefs.auto_apply_updates.unwrap_or(prefs.autonomous_mode);
         if !(prefs.autonomous_mode && auto_apply) {
-            return Vec::new();
+            // Issue #4376 AC-1 / AC-2 / AC-3: a manual Update click waits for
+            // the agents that are running. The payload is staged; when the
+            // host is not quiescent right now, the click joins the `Auto`
+            // drain below exactly like the unattended path — new launches
+            // are held (#4037), agents are never stopped, and the drain tick
+            // applies once the same quiescence check clears. A quiet host
+            // keeps the ready modal's Restart now.
+            let monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            if self.update_drain_blockers(&monitor).is_empty() {
+                return Vec::new();
+            }
+            tracing::info!(
+                target: "gwt::update",
+                version,
+                "manual update click landed on a busy host; joining the update drain"
+            );
         }
         if let Some(refusal) = refusal {
             tracing::warn!(
@@ -7356,6 +7385,16 @@ impl AppRuntime {
                 base_geometry_revision,
             ),
             FrontendEvent::CloseWindow { id, .. } => self.close_window_events(&id),
+            FrontendEvent::RecoverRestoredWindow { id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id: id,
+                    reason: Some(
+                        "recovery requires an authenticated agent WebSocket principal".to_string(),
+                    ),
+                },
+            )],
             FrontendEvent::StopWindow { id } => self.stop_window_events(&id),
             FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(),
             FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
@@ -8216,6 +8255,16 @@ impl AppRuntime {
                     },
                 ))
             }
+            request @ AgentFrontendRequest::RecoverRestoredWindow { .. } => {
+                // Recovery uses peer teardown too: release the capability
+                // registry read lock before closing the target window.
+                let Some(principal) = issuer.accept_current_grant(&grant) else {
+                    return AgentFrontendDispatchOutcome::StaleCapability;
+                };
+                AgentFrontendDispatchOutcome::Dispatched(
+                    self.handle_agent_frontend_event(client_id, principal, request),
+                )
+            }
             AgentFrontendRequest::PmSendInput {
                 operation_id,
                 window_id,
@@ -8323,6 +8372,69 @@ impl AppRuntime {
                 )];
                 events.extend(outcome.events);
                 events
+            }
+            AgentFrontendRequest::RecoverRestoredWindow {
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } => {
+                let refusal = |reason: &str| {
+                    vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::PaneCloseResult {
+                            ok: false,
+                            window_id: id.clone(),
+                            reason: Some(reason.to_string()),
+                        },
+                    )]
+                };
+                if !self.agent_principal_authorizes_window(&principal, &id) {
+                    return refusal("window is outside the authenticated project scope");
+                }
+                let actual_session_id = self
+                    .window_lookup
+                    .get(&id)
+                    .and_then(|address| self.tab(&address.tab_id).map(|tab| (tab, address)))
+                    .and_then(|(tab, address)| tab.workspace.window(&address.raw_id))
+                    .and_then(|window| window.session_id.as_deref());
+                if actual_session_id != Some(session_id.as_str()) {
+                    return refusal("window session changed since recovery was planned");
+                }
+                let path = self.sessions_dir.join(format!("{session_id}.toml"));
+                let automatic_restore = gwt_agent::Session::load(&path).is_ok_and(|session| {
+                    session.id == session_id
+                        && session.launch_origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                        && session
+                            .restore_source_session_id
+                            .as_deref()
+                            .is_some_and(|id| !id.is_empty())
+                });
+                if !automatic_restore {
+                    return refusal("window session is not a proven automatic restore");
+                }
+                let actual_pid = self
+                    .runtimes
+                    .get(&id)
+                    .and_then(|runtime| runtime.pty.process_id());
+                if actual_pid != Some(child_pid)
+                    || gwt::process::host_process_start_time(child_pid) != Some(child_started_at)
+                {
+                    return refusal(
+                        "window process changed or is unavailable; refresh recovery candidates",
+                    );
+                }
+                // No event-loop turn intervenes between matching the live
+                // target and the ordinary scoped peer-close/self-close checks.
+                self.handle_agent_frontend_event(
+                    client_id,
+                    principal,
+                    AgentFrontendRequest::CloseWindow {
+                        id,
+                        request_id: None,
+                        responder: None,
+                    },
+                )
             }
             AgentFrontendRequest::SendInput { text } => {
                 let window_id = match self.agent_principal_session_window(&principal) {

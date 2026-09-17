@@ -3617,6 +3617,8 @@ mod tests {
             startup_worktree_inventories: HashMap::new(),
             pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_startup_restore_log: None,
+            pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             update_resume_tab_ids: std::collections::HashSet::new(),
