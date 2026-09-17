@@ -917,7 +917,10 @@ JSON
 ```
 
 lease の遷移は
-`~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
+`~/.gwt/runtime/verification-coordinator/lease-events.jsonl` に記録されます。
+検証は専用の coordinator レーンを持ちます。semantic search と index build は
+従来どおり `~/.gwt/runtime/index-coordinator` 上で相互排他（model を load する
+runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### GitHub API 予算
 
@@ -963,6 +966,8 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
 を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
 リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
+`auto` がメジャーになることはありません。コミットの breaking marker は
+Release PR 本文に列挙されるだけで、メジャー昇格は `major` を明示した場合のみです。
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
 ます。手動フォールバック手順は `.claude/commands/release.md` にあります。

@@ -222,6 +222,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["intake.outcome-record"],
     },
     Operation {
+        name: "issue.close",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.comment",
         aliases: &[],
     },
@@ -318,6 +322,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["issue.monitor.wait-invalidate"],
     },
     Operation {
+        name: "issue.reopen",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.spec.audit",
         aliases: &[],
     },
@@ -371,6 +379,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pane.read",
+        aliases: &[],
+    },
+    Operation {
+        name: "pane.recover",
         aliases: &[],
     },
     Operation {

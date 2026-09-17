@@ -961,7 +961,10 @@ JSON
 ```
 
 Lease transitions are recorded in
-`~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
+`~/.gwt/runtime/verification-coordinator/lease-events.jsonl`. Verification
+has its own coordinator lane: semantic search and index builds keep excluding
+each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
+a time), and neither lane waits for the other.
 
 ### GitHub API budget
 
@@ -1010,7 +1013,10 @@ Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
 and bumps the version, regenerates the `CHANGELOG`, and opens a
 `develop → main` Release PR — so you can release from any branch without
 switching to `develop` locally. The `bump` input is `auto` (default),
-`patch`, `minor`, or `major`. Review and merge the generated Release PR;
+`patch`, `minor`, or `major`. `auto` never produces a major release:
+breaking markers in commits are only listed in the Release PR body, and a
+major bump requires choosing `major` explicitly. Review and merge the
+generated Release PR;
 merging to `main` then runs the release pipeline (tag, GitHub Release,
 cross‑platform binaries). The manual fallback procedure lives in
 `.claude/commands/release.md`.
