@@ -28,6 +28,9 @@ pub enum StartupPhase {
     IndexRuntimeReady,
     ShellInteractive,
     TerminalInteractive,
+    /// Issue #4378: one `git worktree list` run during startup. Unlike the
+    /// milestones above it can repeat, so it is counted rather than missing.
+    WorktreeInventory,
 }
 
 impl StartupPhase {
@@ -46,6 +49,7 @@ impl StartupPhase {
             Self::IndexRuntimeReady => "index_runtime_ready",
             Self::ShellInteractive => "shell_interactive",
             Self::TerminalInteractive => "terminal_interactive",
+            Self::WorktreeInventory => "worktree_inventory",
         }
     }
 
@@ -247,6 +251,27 @@ impl StartupRun {
     pub fn forget_terminal(&mut self, id: &str) {
         self.terminals.remove(id);
     }
+
+    /// Issue #4378 AC-4: one startup worktree listing. Rows repeat on purpose
+    /// so the report shows how many listings ran. Listings after the restore
+    /// drain belong to later project work, the boundary startup terminals use.
+    pub fn worktree_inventory(&mut self, start_ms: f64, duration_ms: f64) -> Option<PerfRecord> {
+        if self.seen.contains(&StartupPhase::RestoreDrain)
+            || !start_ms.is_finite()
+            || !duration_ms.is_finite()
+            || start_ms < 0.0
+            || duration_ms < 0.0
+        {
+            return None;
+        }
+        Some(self.sample(
+            StartupPhase::WorktreeInventory,
+            start_ms,
+            duration_ms,
+            None,
+            None,
+        ))
+    }
 }
 
 struct TimedRun {
@@ -266,6 +291,8 @@ pub fn begin(started: Instant) {
         .is_ok()
     {
         record(StartupPhase::ProcessStart, started, 0.0);
+        // Issue #4378 AC-4: every `git worktree list`, whichever caller runs it.
+        gwt_git::worktree::set_worktree_list_observer(record_worktree_inventory);
     }
 }
 
@@ -311,6 +338,14 @@ pub fn session_load(started: Instant, count: usize) {
     let duration_ms = started.elapsed().as_secs_f64() * 1_000.0;
     record_at(started, |run, offset| {
         run.session_load(offset, duration_ms, count)
+    });
+}
+
+/// Issue #4378 AC-4: record one worktree listing that began at `started`.
+pub fn record_worktree_inventory(started: Instant) {
+    let duration_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    record_at(started, |run, offset| {
+        run.worktree_inventory(offset, duration_ms)
     });
 }
 
@@ -411,6 +446,10 @@ pub struct StartupReport {
     pub missing_phases: Vec<StartupPhase>,
     pub first_frame_budget_ms: f64,
     pub first_frame_within_budget: Option<bool>,
+    /// Issue #4378 AC-4: `git worktree list` runs during startup and their
+    /// total cost. Each run is also a `worktree_inventory` row in `phases`.
+    pub worktree_inventory_count: usize,
+    pub worktree_inventory_ms: f64,
 }
 
 pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
@@ -460,6 +499,11 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
         .into_iter()
         .filter(|phase| !phases.iter().any(|present| present.phase == *phase))
         .collect();
+    let inventory = phases
+        .iter()
+        .filter(|phase| phase.phase == StartupPhase::WorktreeInventory);
+    let worktree_inventory_count = inventory.clone().count();
+    let worktree_inventory_ms = inventory.map(|phase| phase.duration_ms).sum();
     Some(StartupReport {
         startup_id: newest.startup_id.clone(),
         process_started_at: newest.process_started_at,
@@ -468,6 +512,8 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
         missing_phases,
         first_frame_budget_ms,
         first_frame_within_budget,
+        worktree_inventory_count,
+        worktree_inventory_ms,
     })
 }
 
@@ -578,6 +624,25 @@ mod tests {
         let report = latest_startup(&records).unwrap();
         assert_eq!(report.first_frame_budget_ms, 2_000.0);
         assert_eq!(report.first_frame_within_budget, Some(false));
+    }
+
+    /// Issue #4378 AC-4: every startup worktree listing is its own row, so the
+    /// report shows how many ran and what they cost. Listings after the
+    /// restore drain belong to later project work and are not counted.
+    #[test]
+    fn startup_report_counts_worktree_inventory_listings_until_restore_drain() {
+        let mut run = StartupRun::new(Utc::now());
+        let records = [
+            run.worktree_inventory(100.0, 250.0).unwrap(),
+            run.worktree_inventory(900.0, 240.0).unwrap(),
+            run.phase(StartupPhase::RestoreDrain, 0.0, 3_000.0).unwrap(),
+        ];
+        assert!(run.worktree_inventory(4_000.0, 260.0).is_none());
+
+        let records = records.into_iter().map(read_record).collect::<Vec<_>>();
+        let report = latest_startup(&records).unwrap();
+        assert_eq!(report.worktree_inventory_count, 2);
+        assert_eq!(report.worktree_inventory_ms, 490.0);
     }
 
     #[test]

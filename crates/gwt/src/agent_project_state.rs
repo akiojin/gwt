@@ -51,6 +51,20 @@ pub fn adopt_authenticated_execution(
             "execution.adopt requires schema version 1 and a non-empty reason",
         ));
     }
+    // Issue #4443 AC-10: the reserved recovery-envelope namespace is a caller
+    // input error. Left to the CLI guard downstream it surfaced as an opaque
+    // `http_status=500 code=internal`, which reads as an unhandled exception
+    // and tells the agent nothing it can act on.
+    if request
+        .reason
+        .trim()
+        .starts_with(crate::cli::execution_state::RECOVERY_ENVELOPE_PREFIX)
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "execution.adopt reason uses a reserved recovery-envelope namespace; pass a plain reason describing the takeover",
+        ));
+    }
     if request.claimed_session_id != session_id {
         return Err(execution_binding_error(
             "execution_adoption_session_mismatch",
@@ -244,13 +258,24 @@ pub struct AgentWorkspaceUpdateError {
     pub diagnostic_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mismatched_fields: Vec<String>,
+    /// Issue #4443 AC-2: the gwtd operations the caller can run to get out of
+    /// this refusal. Derived from the refusal's own prose, so it cannot name a
+    /// route the Host did not mean, and restricted to
+    /// [`crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS`] so it cannot
+    /// name an operation that does not exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_operations: Vec<String>,
 }
 
 impl AgentWorkspaceUpdateError {
     pub fn new(code: AgentWorkspaceUpdateErrorCode, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
+            recovery_operations: crate::cli::execution_state::recovery_operations_named_in(
+                &message,
+            ),
             code,
-            message: message.into(),
+            message,
             diagnostic_reason: None,
             mismatched_fields: Vec::new(),
         }

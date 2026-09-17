@@ -524,3 +524,262 @@ test("Workspace-owned cleanup result re-renders the modal even without a Branche
   assert.match(dialogEl.textContent, /Deleted local branch/);
   assert.equal(workspaceRenderCount, 1);
 });
+
+// Issue #4433: cleanup progress/result used to be replied to the originating
+// client only, and a mid-cleanup disconnect was rendered as a cleanup failure.
+// A reconnected client must be able to re-sync the running operation instead.
+function mountCleanupSurface(surfaceModule, windowId) {
+  const { document, modalEl, dialogEl, createNode } = mount();
+  const sent = [];
+  const windowEl = document.createElement("section");
+  windowEl.className = "workspace-overview-root";
+  const surface = surfaceModule.createBranchesCleanupSurface({
+    send: (message) => sent.push(message),
+    createNode,
+    windowMap: new Map([[windowId, windowEl]]),
+    focusWindowLocally() {},
+    sendWindowFocus() {},
+    branchCleanupModal: modalEl,
+    branchCleanupDialog: dialogEl,
+    launchPending: { settleWhere() {} },
+    visibleBounds: () => ({}),
+    getActiveWorkProjection: () => null,
+    renderWorkspaceWindows: () => {},
+  });
+  return { surface, sent, dialogEl };
+}
+
+test("Issue #4433: a cleanup run is tagged with an operation id", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "branches-1";
+  const { surface, sent, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+
+  surface.openWorkspaceCleanup(
+    { branch: "work/old", remote_delete_available: false },
+    windowId,
+  );
+  Array.from(dialogEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Run cleanup")
+    .click();
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "run_branch_cleanup");
+  assert.equal(typeof sent[0].operation_id, "string");
+  assert.ok(sent[0].operation_id.length > 0);
+});
+
+test("Issue #4433: losing the connection mid-cleanup does not fake a failure", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "branches-1";
+  const { surface, sent, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+
+  surface.openWorkspaceCleanup(
+    { branch: "work/old", remote_delete_available: false },
+    windowId,
+  );
+  Array.from(dialogEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Run cleanup")
+    .click();
+  const operationId = sent[0].operation_id;
+
+  assert.equal(
+    surface.markRunningBranchCleanupConnectionInterrupted(windowId),
+    true,
+  );
+  surface.renderBranchCleanupModal();
+
+  assert.equal(
+    dialogEl.querySelector("h2").textContent,
+    "Cleaning up branches",
+    "a disconnect must not flip the modal to a cleanup result",
+  );
+  assert.doesNotMatch(dialogEl.textContent, /Connection lost/);
+  assert.match(dialogEl.textContent, /Reconnecting/);
+
+  // On reconnect the client re-subscribes to the operation it started.
+  sent.length = 0;
+  surface.syncRunningBranchCleanups();
+  assert.deepEqual(sent, [
+    { kind: "sync_branch_cleanup", id: windowId, operation_id: operationId },
+  ]);
+
+  // The replayed result lands normally and clears the reconnect notice.
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_result",
+    id: windowId,
+    operation_id: operationId,
+    results: [
+      {
+        branch: "work/old",
+        execution_branch: "work/old",
+        status: "success",
+        message: "Deleted local branch",
+      },
+    ],
+  });
+  assert.equal(dialogEl.querySelector("h2").textContent, "Cleanup result");
+  assert.match(dialogEl.textContent, /Deleted local branch/);
+});
+
+test("Issue #4433: a superseded operation's events are ignored", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "branches-1";
+  const { surface, sent, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+
+  surface.openWorkspaceCleanup(
+    { branch: "work/old", remote_delete_available: false },
+    windowId,
+  );
+  Array.from(dialogEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Run cleanup")
+    .click();
+
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_result",
+    id: windowId,
+    operation_id: "a-previous-run",
+    results: [
+      {
+        branch: "work/stale",
+        execution_branch: "work/stale",
+        status: "failed",
+        message: "Stale failure from a previous cleanup",
+      },
+    ],
+  });
+
+  assert.equal(
+    dialogEl.querySelector("h2").textContent,
+    "Cleaning up branches",
+    "a result from a superseded operation must not replace the running view",
+  );
+  assert.doesNotMatch(dialogEl.textContent, /Stale failure/);
+  void sent;
+});
+
+test("Issue #4433: closing a finished cleanup releases its backend status", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "branches-1";
+  const { surface, sent, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+
+  surface.openWorkspaceCleanup(
+    { branch: "work/old", remote_delete_available: false },
+    windowId,
+  );
+  Array.from(dialogEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Run cleanup")
+    .click();
+  const operationId = sent[0].operation_id;
+
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_result",
+    id: windowId,
+    operation_id: operationId,
+    results: [],
+  });
+
+  sent.length = 0;
+  Array.from(dialogEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Close")
+    .click();
+
+  assert.deepEqual(sent, [
+    {
+      kind: "clear_branch_cleanup_status",
+      id: windowId,
+      operation_id: operationId,
+    },
+  ]);
+});
+
+test("Issue #4433: an interrupted cleanup can still be dismissed by the user", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "branches-1";
+  const { surface, sent, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+
+  surface.openWorkspaceCleanup(
+    { branch: "work/old", remote_delete_available: false },
+    windowId,
+  );
+  Array.from(dialogEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Run cleanup")
+    .click();
+  surface.markRunningBranchCleanupConnectionInterrupted(windowId);
+  surface.renderBranchCleanupModal();
+
+  const dismiss = Array.from(dialogEl.querySelectorAll("button")).find(
+    (button) => button.textContent === "Close",
+  );
+  assert.ok(dismiss, "an interrupted cleanup must offer a way out of the modal");
+  dismiss.click();
+  surface.renderBranchCleanupModal();
+  assert.equal(surface.ensureBranchListState(windowId).cleanupModal.open, false);
+  void sent;
+});
+
+test("Issue #4433: a reloaded client adopts a cleanup it never started", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "branches-1";
+  const { surface, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+
+  // A WebView reload wipes the page state, so the backend replays the live
+  // operation on the initial sync and the client has nothing to match it to.
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_progress",
+    id: windowId,
+    operation_id: "op-from-before-the-reload",
+    branch: "work/old",
+    execution_branch: "work/old",
+    index: 1,
+    total: 2,
+    phase: "running",
+    message: "Removing work/old",
+  });
+
+  assert.equal(dialogEl.querySelector("h2").textContent, "Cleaning up branches");
+  assert.match(dialogEl.textContent, /Cleaning 1 of 2: work\/old/);
+  assert.equal(
+    surface.ensureBranchListState(windowId).cleanupModal.operationId,
+    "op-from-before-the-reload",
+  );
+});
+
+test("Issue #4433: late progress does not reopen a finished cleanup", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "branches-1";
+  const { surface, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+  const operationId = "op-1";
+
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_result",
+    id: windowId,
+    operation_id: operationId,
+    results: [
+      {
+        branch: "work/old",
+        execution_branch: "work/old",
+        status: "success",
+        message: "Deleted local branch",
+      },
+    ],
+  });
+  assert.equal(dialogEl.querySelector("h2").textContent, "Cleanup result");
+
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_progress",
+    id: windowId,
+    operation_id: operationId,
+    branch: "work/old",
+    execution_branch: "work/old",
+    index: 1,
+    total: 1,
+    phase: "running",
+    message: "Removing work/old",
+  });
+
+  assert.equal(
+    dialogEl.querySelector("h2").textContent,
+    "Cleanup result",
+    "a progress frame that arrives after the result must not rewind the modal",
+  );
+});
