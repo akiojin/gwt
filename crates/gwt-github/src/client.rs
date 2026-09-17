@@ -72,7 +72,6 @@ pub enum IssueState {
 pub enum IssueCloseReason {
     Completed,
     NotPlanned,
-    Duplicate,
 }
 
 impl IssueCloseReason {
@@ -81,7 +80,6 @@ impl IssueCloseReason {
         match self {
             Self::Completed => "completed",
             Self::NotPlanned => "not_planned",
-            Self::Duplicate => "duplicate",
         }
     }
 
@@ -91,13 +89,12 @@ impl IssueCloseReason {
         match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "completed" => Some(Self::Completed),
             "not_planned" => Some(Self::NotPlanned),
-            "duplicate" => Some(Self::Duplicate),
             _ => None,
         }
     }
 
     /// Every accepted spelling, for refusal messages.
-    pub const ACCEPTED: [&'static str; 3] = ["completed", "not_planned", "duplicate"];
+    pub const ACCEPTED: [&'static str; 2] = ["completed", "not_planned"];
 }
 
 /// Snapshot of a single Issue including its body and every artifact comment.

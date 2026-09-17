@@ -4747,7 +4747,7 @@ mod tests {
             &mut env,
             IssueCommand::Close {
                 number: 7,
-                reason: Some(gwt_github::client::IssueCloseReason::Duplicate),
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
                 comment: Some("absorbed by #4249".to_string()),
             },
             &mut out,
@@ -4755,7 +4755,7 @@ mod tests {
         .expect("close with reason and comment");
         assert_eq!(code, 0, "{out}");
         let result = state_result(&out);
-        assert_eq!(result["reason"], "duplicate", "{out}");
+        assert_eq!(result["reason"], "not_planned", "{out}");
         assert!(result["comment_id"].is_u64(), "{out}");
 
         let calls: Vec<String> = env
@@ -4768,7 +4768,7 @@ mod tests {
             calls,
             vec![
                 "create_comment:#7".to_string(),
-                "set_state:#7:duplicate".to_string()
+                "set_state:#7:not_planned".to_string()
             ],
             "the comment must land before the close, and the reason must reach the client"
         );
@@ -4946,7 +4946,7 @@ mod tests {
         for command in [
             IssueCommand::Close {
                 number: 7,
-                reason: Some(gwt_github::client::IssueCloseReason::Duplicate),
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
                 comment: None,
             },
             IssueCommand::Reopen {

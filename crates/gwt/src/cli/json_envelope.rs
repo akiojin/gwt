@@ -3848,7 +3848,7 @@ mod tests {
                 ..
             })
         ));
-        for reason in ["completed", "not_planned", "duplicate"] {
+        for reason in ["completed", "not_planned"] {
             assert!(
                 matches!(
                     ok("issue.close", json!({"number": 7, "reason": reason})),
@@ -3860,6 +3860,11 @@ mod tests {
                 "{reason}"
             );
         }
+        // Duplicate closure needs a canonical issue ID; tracked in #4489.
+        assert!(matches!(
+            err("issue.close", json!({"number": 7, "reason": "duplicate"})),
+            CliParseError::InvalidJson(_)
+        ));
         match err("issue.close", json!({"number": 7, "reason": "wontfix"})) {
             CliParseError::InvalidJson(message) => {
                 assert!(message.contains("not_planned"), "{message}")

@@ -365,7 +365,7 @@ fn red_58_set_state_closed_sends_state_field() {
         .set_state(
             IssueNumber(5),
             IssueState::Closed,
-            Some(gwt_github::IssueCloseReason::Duplicate),
+            Some(gwt_github::IssueCloseReason::NotPlanned),
         )
         .unwrap();
 
@@ -373,7 +373,7 @@ fn red_58_set_state_closed_sends_state_field() {
     let payload: serde_json::Value =
         serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(payload["state"], "closed");
-    assert_eq!(payload["state_reason"], "duplicate");
+    assert_eq!(payload["state_reason"], "not_planned");
     assert_eq!(snap.state, IssueState::Closed);
 
     client.transport().enqueue(ok_body(
