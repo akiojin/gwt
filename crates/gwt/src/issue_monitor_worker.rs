@@ -1186,6 +1186,10 @@ pub fn reconcile_issue_monitor_merges(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    // Issue #4477 AC-1: stamp the delivery onto the rows it belongs to before
+    // anything acts on it, so `recoverable_merged` reports a delivered Issue
+    // that is still Open even when nothing settles it this scan.
+    monitor.record_merged_deliveries(&deliveries);
     let mut merged = monitor.reconcile_merged_branches(&merged_branches);
     if !merged.is_empty() {
         tracing::info!(

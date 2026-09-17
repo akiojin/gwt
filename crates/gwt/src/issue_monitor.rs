@@ -852,6 +852,14 @@ pub struct IssueClosureRecord {
     /// their local observation clock as a GitHub revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_updated_at: Option<String>,
+    /// Issue #4477: whether this lineage actually went Closed → Reopened.
+    /// `generation` cannot answer that — a Live scan re-stamps a `Reopened`
+    /// record for every Open Issue it reads, so an Issue nobody ever closed
+    /// reaches generation 60 simply by being observed. Records written before
+    /// this field default to `false`, which is the right reading for the six
+    /// never-closed Issues it was introduced for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reopened_after_close: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3859,6 +3867,12 @@ pub struct IssueMonitorState {
     /// necessarily reached disk. Baseline Open observations do not enter it.
     #[serde(default, skip)]
     closure_reopen_tombstones: BTreeSet<u64>,
+    /// Issue #4477: the merged delivery observed on each inbox row's own work
+    /// branch, keyed by Issue number. Rebuilt by every merge reconciliation and
+    /// never persisted, because the merged-PR store it is derived from is the
+    /// durable copy.
+    #[serde(default, skip)]
+    merged_deliveries: BTreeMap<u64, MergedIssueDelivery>,
     /// Issue #4231 AC-2: open Issues the last scan skipped because a closure
     /// record holds them. Rebuilt by every scan; never persisted.
     #[serde(default, skip)]
@@ -5817,6 +5831,7 @@ impl IssueMonitorState {
             completion_records: BTreeMap::new(),
             closure_records: BTreeMap::new(),
             closure_reopen_tombstones: BTreeSet::new(),
+            merged_deliveries: BTreeMap::new(),
             closure_held: BTreeSet::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
@@ -6124,6 +6139,12 @@ impl IssueMonitorState {
             }
         }
         winner.generation = current.generation.max(incoming.generation);
+        // Issue #4477: a reopen observed by either writer is a fact about the
+        // lineage, not about the winning revision, so it survives the rebase —
+        // fail-closed, because the flag only ever withholds an automatic close.
+        // A Closed winner has ended that lineage and clears it.
+        winner.reopened_after_close = winner.state == IssueClosureState::Reopened
+            && (current.reopened_after_close || incoming.reopened_after_close);
         winner
     }
 
@@ -6357,6 +6378,9 @@ impl IssueMonitorState {
                             evidence
                         },
                         issue_updated_at: revision_floor,
+                        // Re-observing the same lifecycle state is not a
+                        // closure event either way: carry the fact forward.
+                        reopened_after_close: current.reopened_after_close,
                     },
                 );
             }
@@ -6406,6 +6430,9 @@ impl IssueMonitorState {
                 state,
                 evidence,
                 issue_updated_at: revision_floor,
+                // Issue #4477: only this transition — a lineage that was
+                // Closed and is now Reopened — is a reopen. A close resets it.
+                reopened_after_close: reopening_closed,
             },
         );
         if reopening_closed {
@@ -9676,10 +9703,21 @@ impl IssueMonitorState {
     }
 
     fn completion_anomaly(&self, item: &IssueMonitorInboxItem) -> (bool, Option<String>) {
-        if item.state != MonitorInboxState::Merged
-            || item.issue.state != IssueMonitorIssueState::Open
-        {
+        if item.issue.state != IssueMonitorIssueState::Open {
             return (false, None);
+        }
+        if item.state != MonitorInboxState::Merged {
+            // Issue #4477 AC-1: the work branch's own merged PR is the delivery
+            // evidence. GitHub's closing reference cannot supply it — a PR
+            // merged into `develop` never closes its Issue — so a delivered row
+            // otherwise looks like ordinary queued work and relaunches forever.
+            return match self.merged_deliveries.get(&item.issue.number) {
+                Some(delivery) if !self.issue_is_closed(item.issue.number) => (
+                    true,
+                    Some(format!("delivered_by_pr_{}", delivery.pr_number)),
+                ),
+                _ => (false, None),
+            };
         }
         let Some(record) = self.completion_records.get(&item.issue.number) else {
             return (true, Some("legacy_unverified".to_string()));
@@ -10168,6 +10206,23 @@ impl IssueMonitorState {
             .collect()
     }
 
+    /// Issue #4477 AC-1: remember which inbox rows have a merged delivery on
+    /// their own work branch, so the delivered-but-open anomaly can be reported
+    /// without asking GitHub for a closing reference — one that never fires
+    /// here, because deliveries merge into `develop` and not the default
+    /// branch. Replaces the whole projection: a row whose delivery is gone is
+    /// no longer delivered.
+    pub fn record_merged_deliveries(&mut self, deliveries: &BTreeMap<String, MergedIssueDelivery>) {
+        self.merged_deliveries = self
+            .inbox
+            .iter()
+            .filter_map(|item| {
+                let branch = &item.launch_plan.as_ref()?.branch_name;
+                Some((item.issue.number, deliveries.get(branch)?.clone()))
+            })
+            .collect();
+    }
+
     /// Whether `delivery` may still be settled for `issue_number`. Fail-closed:
     /// a settled delivery, a pending settlement, a closed Issue, and a reopen
     /// with no settlement history all refuse.
@@ -10183,7 +10238,17 @@ impl IssueMonitorState {
         if settled.is_some_and(|settlement| {
             settlement.pr_number == delivery.pr_number && settlement.merge_sha == delivery.merge_sha
         }) {
-            return false;
+            // Issue #4477: `AwaitClose` only annotated the merge and left the
+            // Issue for a human, so it is a record of inaction, not a finished
+            // settlement. Enabling auto-close afterwards must still be able to
+            // act on that same delivery; anything that acted stays final.
+            let awaiting_only = matches!(
+                settled.map(|settlement| &settlement.action),
+                Some(MergedIssueSettlementAction::AwaitClose { .. })
+            );
+            if !(awaiting_only && self.auto_close_merged_issues_enabled()) {
+                return false;
+            }
         }
         if self.pending_effects.iter().any(|effect| {
             matches!(
@@ -10200,15 +10265,20 @@ impl IssueMonitorState {
         }) {
             return false;
         }
-        // AC-4: a closure lineage beyond its first generation means the Issue
-        // was closed and reopened. Only a delivery merged after gwt's own
-        // earlier settlement may settle it again; anything else is a human
-        // decision.
+        // AC-4: an Issue that was closed and reopened is a human decision. Only
+        // a delivery merged after gwt's own earlier settlement may settle it
+        // again.
+        //
+        // Issue #4477: the signal is the lineage's own reopen fact, not its
+        // generation. Every Live scan re-stamps a `Reopened` record for every
+        // Open Issue, so generation counts observations — six delivered Issues
+        // nobody had ever closed sat at generations 43-60 and were refused here
+        // forever, relaunching up to fifteen times each.
         let reopened = self
             .closure_records
             .get(&issue_number)
             .is_some_and(|record| {
-                record.state == IssueClosureState::Reopened && record.generation > 1
+                record.state == IssueClosureState::Reopened && record.reopened_after_close
             });
         if reopened {
             let merged_at = delivery
@@ -12932,6 +13002,8 @@ impl IssueMonitorState {
                 state: IssueClosureState::Closed,
                 evidence,
                 issue_updated_at,
+                // A close ends the previous reopen lineage.
+                reopened_after_close: false,
             },
         );
         self.closure_reopen_tombstones.remove(&issue_number);
@@ -20048,6 +20120,7 @@ mod tests {
                 state: IssueClosureState::Closed,
                 evidence: IssueClosureEvidence::CompleteLiveAbsence,
                 issue_updated_at: Some("2026-09-10T02:52:14Z".to_string()),
+                reopened_after_close: false,
             }],
             ..IssueMonitorPrefs::default()
         };
@@ -29388,6 +29461,141 @@ mod tests {
                 "AC-4: a reopened Issue gwt never settled is a human decision"
             );
         }
+    }
+
+    /// Issue #4477 AC-1: every Live scan re-stamps a `Reopened` closure record
+    /// for an Open Issue, so the lineage generation counts observations, not
+    /// closures. Reading `generation > 1` as "closed and reopened" made every
+    /// delivered Issue gwt never closed permanently unsettleable — the state
+    /// the six Issues relaunched up to fifteen times each were stuck in.
+    #[test]
+    fn repeatedly_observed_open_row_still_settles_its_merged_delivery() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        for day in 1..=4 {
+            let mut observed = checked_issue(42);
+            observed.updated_at = Some(format!("2026-09-0{day}T00:00:00Z"));
+            scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                &[observed],
+                IssueMonitorCandidateSource::Live,
+                Path::new("."),
+                &format!("2026-09-0{day}T00:00:01Z"),
+            );
+        }
+        let record = monitor
+            .prefs()
+            .closure_records
+            .into_iter()
+            .find(|record| record.issue_number == 42)
+            .expect("closure lineage");
+        assert_eq!(record.state, IssueClosureState::Reopened);
+        assert!(
+            record.generation > 1,
+            "an Issue nobody closed still advances its lineage: {record:?}"
+        );
+        let mut deliveries = BTreeMap::new();
+        deliveries.insert(
+            "work/issue-42".to_string(),
+            merged_delivery(7, "aaa", "2026-09-05T00:00:00Z"),
+        );
+        assert_eq!(
+            monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .iter()
+                .map(|(issue, delivery)| (issue.number, delivery.pr_number))
+                .collect::<Vec<_>>(),
+            vec![(42, 7)],
+            "AC-1: a delivery settles an Issue gwt never closed"
+        );
+
+        // The six live Issues carry pre-#4477 records with no reopen fact at
+        // all. Reading those as "never reopened" is what lets them settle.
+        let legacy: IssueClosureRecord = serde_json::from_str(
+            r#"{"issue_number":4286,"generation":60,"state":"reopened","evidence":"explicit_revision"}"#,
+        )
+        .expect("pre-#4477 closure record");
+        assert!(!legacy.reopened_after_close);
+    }
+
+    /// Issue #4477 AC-1: the delivered-but-open anomaly is read from the work
+    /// branch's own merged PR, never from GitHub's closing reference — which
+    /// cannot fire at all while deliveries merge into `develop`.
+    #[test]
+    fn delivered_open_row_reports_recoverable_merged_from_its_work_branch() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(
+            &mut monitor,
+            &[checked_issue(42), checked_issue(43)],
+            "2026-09-01T00:00:00Z",
+        );
+        let mut deliveries = BTreeMap::new();
+        deliveries.insert(
+            "work/issue-42".to_string(),
+            merged_delivery(7, "aaa", "2026-09-01T00:00:00Z"),
+        );
+        monitor.record_merged_deliveries(&deliveries);
+        let status = monitor.agent_status();
+        let delivered = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .expect("delivered row");
+        assert!(delivered.recoverable_merged);
+        assert_eq!(
+            delivered.completion_reason.as_deref(),
+            Some("delivered_by_pr_7")
+        );
+        let undelivered = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 43)
+            .expect("undelivered row");
+        assert!(!undelivered.recoverable_merged);
+        assert_eq!(undelivered.completion_reason, None);
+    }
+
+    /// Issue #4477 AC-2/AC-4: with auto-close off the delivery is annotated and
+    /// the Issue stays queued. Turning auto-close on must then act on that same
+    /// delivery instead of treating the annotation as a finished settlement.
+    #[test]
+    fn await_close_settlement_does_not_bar_a_later_auto_close() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
+        let mut deliveries = BTreeMap::new();
+        deliveries.insert(
+            "work/issue-42".to_string(),
+            merged_delivery(7, "aaa", "2026-09-01T00:00:00Z"),
+        );
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".to_string()),
+            MergedIssueSettlementAction::AwaitClose { unmet: vec![] },
+            "2026-09-01T01:00:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "AC-4: auto-close off leaves the delivered row in the queue"
+        );
+        assert!(
+            monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .is_empty(),
+            "AC-4: nothing else happens while auto-close is off"
+        );
+        monitor
+            .set_auto_close_merged_issues_with_effect_revocation(Some(true))
+            .expect("authority epoch");
+        assert_eq!(
+            monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .iter()
+                .map(|(issue, _)| issue.number)
+                .collect::<Vec<_>>(),
+            vec![42],
+            "AC-2: enabling auto-close acts on the delivery the annotation left open"
+        );
     }
 
     #[test]
