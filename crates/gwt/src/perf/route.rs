@@ -30,9 +30,17 @@ pub const DEFAULT_PANE_CREATE_BUDGET_MS: f64 = 5_000.0;
 /// Covers the embedding model query and the batched scope search.
 pub const DEFAULT_SEARCH_BUDGET_MS: f64 = 2_000.0;
 
+/// Individual ceiling for one Work events ingest trigger, in milliseconds.
+///
+/// Issue #4397 AC-2: runs on a background worker after a tab switch, agent
+/// launch or project open, and must stay proportional to what changed.
+pub const DEFAULT_WORK_EVENTS_INGEST_BUDGET_MS: f64 = 5_000.0;
+
 const TARGET_PREFIX: &str = "route:";
 /// Perf-log `target` prefix for one phase inside a route (Issue #4283 AC-5).
 const PHASE_TARGET_PREFIX: &str = "phase:";
+/// Perf-log `target` prefix for a non-time quantity of a route (Issue #4397).
+const METRIC_TARGET_PREFIX: &str = "metric:";
 
 /// One instrumented end-to-end route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,11 +59,13 @@ pub enum PerfRoute {
     PromptSend,
     /// One index search attempt.
     Search,
+    /// One Work events ingest trigger, off the GUI event loop.
+    WorkEventsIngest,
 }
 
 impl PerfRoute {
     /// Every instrumented route, in the order `perf.summary` reports them.
-    pub const ALL: [PerfRoute; 7] = [
+    pub const ALL: [PerfRoute; 8] = [
         PerfRoute::Startup,
         PerfRoute::ProjectOpen,
         PerfRoute::ProjectSwitch,
@@ -63,6 +73,7 @@ impl PerfRoute {
         PerfRoute::PaneClose,
         PerfRoute::PromptSend,
         PerfRoute::Search,
+        PerfRoute::WorkEventsIngest,
     ];
 
     /// Stable short name, without the perf-log target prefix.
@@ -75,6 +86,7 @@ impl PerfRoute {
             PerfRoute::PaneClose => "pane.close",
             PerfRoute::PromptSend => "prompt.send",
             PerfRoute::Search => "search",
+            PerfRoute::WorkEventsIngest => "work_events.ingest",
         }
     }
 
@@ -89,6 +101,12 @@ impl PerfRoute {
     /// budget of their own, so `from_target` never resolves one.
     pub fn phase_target(self, phase: &str) -> String {
         format!("{PHASE_TARGET_PREFIX}{}.{phase}", self.name())
+    }
+
+    /// The perf-log `target` field for one named quantity of this route, such
+    /// as a state size or an item count. Metrics carry no budget either.
+    pub fn metric_target(self, metric: &str) -> String {
+        format!("{METRIC_TARGET_PREFIX}{}.{metric}", self.name())
     }
 
     /// Recover a route from a perf-log `target` field.
@@ -113,6 +131,7 @@ impl PerfRoute {
             PerfRoute::ProjectOpen => DEFAULT_PROJECT_OPEN_BUDGET_MS,
             PerfRoute::PaneCreate => DEFAULT_PANE_CREATE_BUDGET_MS,
             PerfRoute::Search => DEFAULT_SEARCH_BUDGET_MS,
+            PerfRoute::WorkEventsIngest => DEFAULT_WORK_EVENTS_INGEST_BUDGET_MS,
         }
     }
 }
@@ -172,6 +191,28 @@ mod tests {
         assert_eq!(
             PerfRoute::Search.budget_ms(&budgets),
             DEFAULT_SEARCH_BUDGET_MS
+        );
+        assert_eq!(
+            PerfRoute::WorkEventsIngest.budget_ms(&budgets),
+            DEFAULT_WORK_EVENTS_INGEST_BUDGET_MS
+        );
+    }
+
+    /// Issue #4397 AC-4: the Work events ingest is its own route.
+    #[test]
+    fn work_events_ingest_route_names_its_metrics_beside_the_route() {
+        assert!(PerfRoute::ALL.contains(&PerfRoute::WorkEventsIngest));
+        assert_eq!(
+            PerfRoute::WorkEventsIngest.target(),
+            "route:work_events.ingest"
+        );
+        assert_eq!(
+            PerfRoute::WorkEventsIngest.metric_target("state_bytes"),
+            "metric:work_events.ingest.state_bytes"
+        );
+        assert_eq!(
+            PerfRoute::from_target("metric:work_events.ingest.state_bytes"),
+            None
         );
     }
 }

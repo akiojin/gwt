@@ -694,6 +694,33 @@ fn persisted_snapshots_match(left: &IssueSnapshot, right: &IssueSnapshot) -> boo
 /// generated docs but `pub` is required so the hook code can link against it.
 #[doc(hidden)]
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_durability(path, bytes, Durability::FlushToDevice)
+}
+
+/// Whether an atomic write waits for the storage device before returning.
+///
+/// Issue #3777: `sync_all` is the only call in this helper that blocks on the
+/// device, and on a contended Windows runner it measured 522ms for a
+/// half-kilobyte file. A UserPromptSubmit hook performs several such writes
+/// under a 200ms budget, so state that the next hook event rewrites anyway
+/// asks for [`Durability::RenameOnly`]: the rename still publishes the file
+/// whole, only the "survives an OS crash" guarantee is dropped.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Wait for the device. For data that must survive an OS crash.
+    FlushToDevice,
+    /// Publish atomically without waiting for the device. For transient state
+    /// that is rewritten on the next event.
+    RenameOnly,
+}
+
+#[doc(hidden)]
+pub fn write_atomic_with_durability(
+    path: &Path,
+    bytes: &[u8],
+    durability: Durability,
+) -> std::io::Result<()> {
     let parent = path.parent().expect("path must have a parent");
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(
@@ -708,7 +735,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        if durability == Durability::FlushToDevice {
+            f.sync_all()?;
+        }
     }
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),

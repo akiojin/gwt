@@ -2095,6 +2095,7 @@ fn rebase_rejects_an_older_explicit_reopen_above_an_absence_revision_floor() {
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-03T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2105,6 +2106,7 @@ fn rebase_rejects_an_older_explicit_reopen_above_an_absence_revision_floor() {
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::CompleteLiveAbsence,
             issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2135,6 +2137,7 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2145,6 +2148,7 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::CompleteLiveAbsence,
             issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2269,6 +2273,7 @@ fn rebase_keeps_a_newer_generation_reopen_at_the_absence_floor_revision() {
         state: IssueClosureState::Reopened,
         evidence: IssueClosureEvidence::ExplicitRevision,
         issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+        reopened_after_close: false,
     };
     let absence = IssueClosureRecord {
         issue_number: 42,
@@ -2276,6 +2281,7 @@ fn rebase_keeps_a_newer_generation_reopen_at_the_absence_floor_revision() {
         state: IssueClosureState::Closed,
         evidence: IssueClosureEvidence::CompleteLiveAbsence,
         issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+        reopened_after_close: false,
     };
     for (local, disk) in [
         (reopened.clone(), absence.clone()),
@@ -2314,6 +2320,7 @@ fn revision_winner_preserves_the_highest_merged_generation() {
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2324,6 +2331,7 @@ fn revision_winner_preserves_the_highest_merged_generation() {
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2354,6 +2362,7 @@ fn equal_explicit_revision_conflict_prefers_closed_over_higher_generation_reopen
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2364,6 +2373,7 @@ fn equal_explicit_revision_conflict_prefers_closed_over_higher_generation_reopen
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2390,6 +2400,7 @@ fn explicit_closed_evidence_survives_equivalent_timestamp_absence_rebase() {
             state: IssueClosureState::Closed,
             evidence,
             issue_updated_at: Some(revision.to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
