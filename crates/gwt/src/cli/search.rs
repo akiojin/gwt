@@ -249,6 +249,10 @@ fn render_not_ready(out: &mut String, json: bool, error: &crate::index_search::I
             "affected_scopes": not_ready.affected_scopes,
             "waited_ms": not_ready.waited_ms,
             "retry_after_ms": not_ready.retry_after_ms,
+            // Issue #4455 AC-3: a preflight caller must be able to tell a
+            // running rebuild apart from an index nobody is repairing.
+            "rebuild_in_progress": not_ready.rebuild_in_progress,
+            "rebuilding_scopes": not_ready.rebuilding_scopes,
         });
         out.push_str(&payload.to_string());
         out.push('\n');
@@ -535,6 +539,8 @@ mod tests {
             affected_scopes: vec!["files".to_string()],
             waited_ms: 30_100,
             retry_after_ms: 5_000,
+            rebuild_in_progress: true,
+            rebuilding_scopes: vec!["files".to_string()],
         });
         render_not_ready(&mut out, true, &error);
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
@@ -544,6 +550,13 @@ mod tests {
         assert_eq!(payload["affected_scopes"][0], "files");
         assert_eq!(payload["waited_ms"], 30_100);
         assert_eq!(payload["retry_after_ms"], 5_000);
+        // Issue #4455 AC-3: a preflight caller must be able to tell a running
+        // rebuild apart from an index nobody is repairing.
+        assert_eq!(
+            payload["rebuild_in_progress"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(payload["rebuilding_scopes"][0], "files");
         assert_eq!(error.exit_code(), 75);
     }
 
@@ -651,6 +664,8 @@ mod tests {
             affected_scopes: vec!["files".to_string()],
             waited_ms: 30_000,
             retry_after_ms: 5_000,
+            rebuild_in_progress: false,
+            rebuilding_scopes: Vec::new(),
         });
         render_not_ready(&mut out, false, &error);
         assert!(out.contains("index not ready"), "{out}");

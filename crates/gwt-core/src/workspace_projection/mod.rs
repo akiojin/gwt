@@ -37,6 +37,7 @@ pub use persistence::{
     append_workspace_journal_entry_to_path, append_workspace_work_event_to_path, apply_prune_plan,
     classify_workspace_projections, decode_workspace_work_event_line,
     decompose_legacy_multi_branch_work_items, decompose_legacy_multi_branch_work_items_paths,
+    detach_foreign_container_refs, detach_foreign_container_refs_for_work_event_root,
     emit_workspace_discard_event_for_session, emit_workspace_discard_event_for_session_outcome,
     emit_workspace_discard_event_for_session_outcome_paths,
     emit_workspace_discard_event_for_session_paths, emit_workspace_discard_event_if_absent,
@@ -89,9 +90,9 @@ pub use persistence::{
     ExternalWorkspaceCommitResolution, PruneAction, PruneSkipReason, PruneSummary,
     ResumeOwnerBleedRepairReport, SessionBoundWorkspaceMutationTarget,
     SessionBoundWorkspaceTerminalTarget, StaleReason, TrackedWorkEventPolicy, WorkItemsCache,
-    WorkItemsRebuildOutcome, WorkspaceRetentionConfig, WorkspaceSessionAssignment,
-    WorkspaceTerminalEventOutcome, WorktreeReconcileSource, WORKSPACE_AGENT_IDENTITY_RESET_VERSION,
-    WORK_ITEMS_REBUILD_VERSION,
+    WorkItemsLoadProfile, WorkItemsRebuildOutcome, WorkspaceRetentionConfig,
+    WorkspaceSessionAssignment, WorkspaceTerminalEventOutcome, WorktreeReconcileSource,
+    WORKSPACE_AGENT_IDENTITY_RESET_VERSION, WORK_ITEMS_REBUILD_VERSION,
 };
 pub(crate) use persistence::{
     with_workspace_current_and_work_items_lock, with_workspace_work_items_lock, write_atomic,
@@ -101,7 +102,7 @@ pub use projection::{
     WorkspaceCleanupReason, WorkspaceJournalEntry, WorkspaceLaunchUpdate, WorkspaceProjection,
     WorkspaceProjectionUpdate, WorkspaceStartUpdate,
 };
-pub(crate) use work_items::workspace_execution_container_same;
+pub use work_items::workspace_execution_container_same;
 pub use work_items::{
     DuplicateWorkEventProvenance, WorkAgentRef, WorkEvent, WorkEventApplyOutcome, WorkEventKind,
     WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceIssueLink,

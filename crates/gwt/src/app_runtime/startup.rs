@@ -111,6 +111,8 @@ pub(crate) enum RestoreOrigin {
 pub(super) enum RestoreRefusal {
     IntakePruned,
     WorktreeMissing,
+    LaunchNotStarted,
+    WindowClosed,
     WindowNotOpen,
     NotAutoResumeCandidate,
     Stale,
@@ -146,6 +148,8 @@ impl RestoreRefusal {
         match self {
             Self::IntakePruned => "intake_pruned".to_string(),
             Self::WorktreeMissing => "worktree_missing".to_string(),
+            Self::LaunchNotStarted => "launch_not_started".to_string(),
+            Self::WindowClosed => "window_closed".to_string(),
             Self::WindowNotOpen => "window_not_open".to_string(),
             Self::NotAutoResumeCandidate => "not_auto_resume_candidate".to_string(),
             Self::Stale => "stale".to_string(),
@@ -193,10 +197,35 @@ impl RestoreRefusal {
 
 /// Issue #4143 (AC-2 / AC-4): per-target restore decisions plus the one-line
 /// startup summary that tells the operator why the canvas has fewer windows.
-#[derive(Debug, Default)]
-pub(super) struct RestoreAdmissionLog {
+///
+/// The log times its own sweep: it is created when the sweep starts, and
+/// Issue #4305 (AC-5) defers the summary until the asynchronous spawns settle,
+/// so nothing outside has to carry the start instant alongside it.
+#[derive(Debug)]
+pub(crate) struct RestoreAdmissionLog {
     counts: std::collections::BTreeMap<String, usize>,
     suppressed: usize,
+    started_at: Instant,
+}
+
+impl Default for RestoreAdmissionLog {
+    fn default() -> Self {
+        Self {
+            counts: std::collections::BTreeMap::new(),
+            suppressed: 0,
+            started_at: Instant::now(),
+        }
+    }
+}
+
+/// One restore sweep remains pending until every prepared window has either
+/// installed its PTY or finished without one.
+#[derive(Debug)]
+pub(crate) struct PendingRestoreSummary {
+    scope: &'static str,
+    pending: HashSet<String>,
+    restored: usize,
+    admission: RestoreAdmissionLog,
 }
 
 impl RestoreAdmissionLog {
@@ -233,16 +262,17 @@ impl RestoreAdmissionLog {
             .join(", ")
     }
 
-    /// Issue #4441 (AC-5): the restored count and how long the selection took,
-    /// on the same line as the refusal breakdown, so "restore is what made
-    /// startup slow" is a measurement next time rather than an inference.
-    fn emit_summary(&self, scope: &str, restored: usize, elapsed_ms: u64) {
+    /// Issue #4441 (AC-5): the restored count and how long the sweep took, on
+    /// the same line as the refusal breakdown, so "restore is what made startup
+    /// slow" is a measurement next time rather than an inference.
+    fn emit_summary(&self, scope: &str, restored: usize) {
         tracing::info!(
             target: "gwt.restore.admission",
             scope,
             restored,
+            skipped = self.suppressed,
             suppressed = self.suppressed,
-            elapsed_ms,
+            elapsed_ms = self.started_at.elapsed().as_millis() as u64,
             reasons = %self.reasons(),
             "session restore admission summary"
         );
@@ -280,18 +310,19 @@ pub(super) fn prepare_open_project_window_restores(
                 let session_id = window.session_id.as_deref()?;
                 let path = sessions_dir.join(format!("{session_id}.toml"));
                 let session = gwt_agent::Session::load_and_migrate(&path).ok()?;
-                if !session.worktree_path.exists() {
-                    return None;
-                }
                 let project_state_root = session
                     .project_state_root
                     .as_deref()
                     .unwrap_or(&session.worktree_path);
-                let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                    project_state_root,
-                    Some(session.branch.as_str()),
-                    &session.worktree_path,
-                ));
+                // Keep invalid destinations in the prepared sweep so the
+                // runtime can include their refusal in its single summary.
+                let workspace_resume_context = session.worktree_path.is_dir().then(|| {
+                    workspace_resume_context_for_work_item(
+                        project_state_root,
+                        Some(session.branch.as_str()),
+                        &session.worktree_path,
+                    )
+                });
                 Some(PreparedProjectWindowRestore::Agent {
                     window_id: window.id.clone(),
                     session: Box::new(session),
@@ -902,7 +933,6 @@ impl AppRuntime {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
-        let started_at = Instant::now();
         let now = chrono::Utc::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         let mut restored_owner_issues = std::collections::HashSet::new();
@@ -934,7 +964,10 @@ impl AppRuntime {
                 .any(|active| active.session_id == session.id);
             let selection = startup_restore_selection(StartupRestoreFacts {
                 intake_pruned,
-                worktree_exists: session.worktree_path.exists(),
+                // Issue #4305 (AC-1): the worktree must still be a directory on
+                // this machine. A leftover file at that path is not a worktree,
+                // and a Session restored onto one cannot do any work.
+                worktree_exists: session.worktree_path.is_dir(),
                 has_placeholder: placeholder_tab.is_some(),
                 window_was_open: startup_auto_resume_window_was_open(&session),
                 auto_resume_candidate: session.exact_auto_resume_candidate(),
@@ -1025,13 +1058,12 @@ impl AppRuntime {
                     workspace_resume_context,
                 });
         }
-        // Issue #4143 (AC-4): one line the operator can read to see why the
-        // canvas came back with fewer windows than it had.
-        admission.emit_summary(
-            "startup restore",
-            self.pending_startup_auto_resume_sessions.len(),
-            started_at.elapsed().as_millis() as u64,
-        );
+        // Issue #4143 (AC-4) / Issue #4305 (AC-5): the canvas-ready drain owns
+        // the one summary line the operator reads. Queueing is not restoring —
+        // a worktree may disappear after preparation, and the PTY spawn that
+        // actually restores a window completes asynchronously — so the counts
+        // are only final once every prepared window has settled.
+        self.pending_startup_restore_log = Some(admission);
     }
 
     /// Issue #4143 (AC-2): decide whether automatic restore may spawn
@@ -1392,6 +1424,64 @@ pub(super) fn reap_defunct_active_generations(
 }
 
 impl AppRuntime {
+    fn defer_restore_summary(
+        &mut self,
+        scope: &'static str,
+        previous_windows: &HashSet<String>,
+        restored: usize,
+        admission: RestoreAdmissionLog,
+    ) {
+        let pending = self
+            .restore_launch_windows
+            .keys()
+            .filter(|id| !previous_windows.contains(*id))
+            .cloned()
+            .collect::<HashSet<_>>();
+        if pending.is_empty() {
+            admission.emit_summary(scope, restored);
+        } else {
+            self.pending_restore_summaries.push(PendingRestoreSummary {
+                scope,
+                pending,
+                restored,
+                admission,
+            });
+        }
+    }
+
+    pub(super) fn record_restore_window_outcome(
+        &mut self,
+        window_id: &str,
+        outcome: Result<(), RestoreRefusal>,
+    ) {
+        let Some(index) = self
+            .pending_restore_summaries
+            .iter()
+            .position(|summary| summary.pending.contains(window_id))
+        else {
+            return;
+        };
+        let summary = &mut self.pending_restore_summaries[index];
+        summary.pending.remove(window_id);
+        match outcome {
+            Ok(()) => summary.restored += 1,
+            Err(reason) => {
+                let session_id = self
+                    .restore_launch_windows
+                    .get(window_id)
+                    .and_then(Option::as_deref)
+                    .unwrap_or(window_id);
+                summary.admission.refuse(session_id, reason);
+            }
+        }
+        if summary.pending.is_empty() {
+            let summary = self.pending_restore_summaries.remove(index);
+            summary
+                .admission
+                .emit_summary(summary.scope, summary.restored);
+        }
+    }
+
     pub(super) fn startup_auto_resume_ready_events(
         &mut self,
         bounds: WindowGeometry,
@@ -1406,8 +1496,21 @@ impl AppRuntime {
 
         let resume_started = Instant::now();
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
+        // Issue #4143 (AC-4): exactly one summary line per startup. Only the
+        // drain that follows a queued sweep has something to report; a later
+        // canvas-ready round trip must stay silent instead of emitting an
+        // empty second line.
+        let queued_sweep = self.pending_startup_restore_log.is_some();
+        let mut admission = self.pending_startup_restore_log.take().unwrap_or_default();
+        let previous_windows = self.restore_launch_windows.keys().cloned().collect();
         let total = pending.len();
         for (index, pending_session) in pending.into_iter().enumerate() {
+            if !pending_session.session.worktree_path.is_dir() {
+                admission.refuse(&pending_session.session.id, RestoreRefusal::WorktreeMissing);
+                continue;
+            }
+            let session_id = pending_session.session.id.clone();
+            let pending_before = self.pending_auto_resume_sources.len();
             let fallback_geometry =
                 startup_auto_resume_window_geometry(index, total, bounds.clone());
             let mut spawned = self.spawn_restored_agent_session(
@@ -1417,7 +1520,13 @@ impl AppRuntime {
                 fallback_geometry,
                 RestoreOrigin::Automatic,
             );
+            if self.pending_auto_resume_sources.len() == pending_before {
+                admission.refuse(&session_id, RestoreRefusal::LaunchNotStarted);
+            }
             events.append(&mut spawned);
+        }
+        if queued_sweep {
+            self.defer_restore_summary("startup restore", &previous_windows, 0, admission);
         }
         let resume_ms = resume_started.elapsed().as_millis() as u64;
 
@@ -1467,6 +1576,12 @@ impl AppRuntime {
         fallback_geometry: WindowGeometry,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
+        // Preparation and canvas readiness are asynchronous. Recheck the cwd
+        // at the shared spawn boundary, including an explicit user restart.
+        if !session.worktree_path.is_dir() {
+            RestoreAdmissionLog::default().refuse(&session.id, RestoreRefusal::WorktreeMissing);
+            return Vec::new();
+        }
         if self.restore_would_resurrect_a_foreign_pm(tab_id, &session) {
             return Vec::new();
         }
@@ -1719,10 +1834,10 @@ impl AppRuntime {
         tab_id: &str,
         restores: Vec<PreparedProjectWindowRestore>,
     ) -> Vec<OutboundEvent> {
-        let started_at = Instant::now();
         let mut events = Vec::new();
         let mut admission = RestoreAdmissionLog::default();
         let mut restored = 0usize;
+        let previous_windows = self.restore_launch_windows.keys().cloned().collect();
         for restore in restores {
             let window_id = match &restore {
                 PreparedProjectWindowRestore::Agent { window_id, .. }
@@ -1743,6 +1858,10 @@ impl AppRuntime {
                     fallback_geometry,
                     ..
                 } => {
+                    if !session.worktree_path.is_dir() {
+                        admission.refuse(&session.id, RestoreRefusal::WorktreeMissing);
+                        continue;
+                    }
                     if self
                         .active_agent_sessions
                         .values()
@@ -1772,6 +1891,8 @@ impl AppRuntime {
                         }
                         continue;
                     }
+                    let session_id = session.id.clone();
+                    let pending_before = self.pending_auto_resume_sources.len();
                     let mut spawned = self.spawn_restored_agent_session(
                         tab_id,
                         *session,
@@ -1779,7 +1900,9 @@ impl AppRuntime {
                         fallback_geometry,
                         RestoreOrigin::Automatic,
                     );
-                    restored += 1;
+                    if self.pending_auto_resume_sources.len() == pending_before {
+                        admission.refuse(&session_id, RestoreRefusal::LaunchNotStarted);
+                    }
                     events.append(&mut spawned);
                 }
                 PreparedProjectWindowRestore::Process {
@@ -1791,13 +1914,20 @@ impl AppRuntime {
                     // too, so its pre-PTY failure must not persist either.
                     self.restore_launch_windows.insert(combined.clone(), None);
                     events.extend(self.start_window(tab_id, &window_id, preset, geometry));
+                    if self.runtimes.contains_key(&combined) {
+                        restored += 1;
+                    } else {
+                        self.restore_launch_windows.remove(&combined);
+                        admission.refuse(&window_id, RestoreRefusal::LaunchNotStarted);
+                    }
                 }
             }
         }
-        admission.emit_summary(
+        self.defer_restore_summary(
             "open project restore",
+            &previous_windows,
             restored,
-            started_at.elapsed().as_millis() as u64,
+            admission,
         );
         events
     }

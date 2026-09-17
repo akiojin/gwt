@@ -223,6 +223,7 @@ pub(crate) mod pm;
 mod profile;
 mod project_tabs;
 mod pty_io;
+mod recovery_center;
 mod runtime_events;
 mod settings_update;
 mod startup;
@@ -319,6 +320,12 @@ use workspace_views::{
     workspace_execution_diagnosis_view, workspace_work_agent_view_from_ref,
     workspace_work_event_kind_wire,
 };
+pub(crate) use workspace_views::{ActiveWorkProjectionPrepared, ActiveWorkProjectionRefreshBroker};
+
+struct WorkspaceWorktreeReconcileOutcome {
+    local_branches: std::collections::HashSet<String>,
+    backfilled: usize,
+}
 
 #[derive(Debug, Clone)]
 pub struct ActiveAgentSession {
@@ -425,6 +432,12 @@ pub enum DispatchTarget {
 pub(crate) enum KnowledgeWireMetadata {
     SemanticRetry(gwt::KnowledgeSemanticRetry),
     NonSemanticError,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryCenterAction {
+    pub(crate) generation: u64,
+    pub(crate) board_entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1182,6 +1195,10 @@ pub struct AppRuntime {
     /// settles, so a same-id successor can invalidate the stale worker.
     pub(crate) window_lifecycle_generations: Arc<Mutex<HashMap<String, u64>>>,
     pub(crate) board_all_view_windows: HashSet<String>,
+    /// Process-local Recovery Center row capabilities for the latest
+    /// generation. Values contain only an optional public Board entry id.
+    pub(crate) recovery_center_handles: HashMap<String, RecoveryCenterAction>,
+    pub(crate) recovery_center_generation: u64,
     pub(crate) session_state_path: PathBuf,
     pub(crate) log_dir: PathBuf,
     pub(crate) proxy: AppEventProxy,
@@ -1303,6 +1320,11 @@ pub struct AppRuntime {
     /// notification center once the frontend canvas is ready.
     pub(crate) pending_update_resume_notice: Option<(String, String)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    /// Startup restore decisions taken before the canvas was ready. The drain
+    /// picks them up and emits one summary once the asynchronous spawns have
+    /// settled (Issue #4305 AC-5).
+    pub(crate) pending_startup_restore_log: Option<startup::RestoreAdmissionLog>,
+    pub(crate) pending_restore_summaries: Vec<startup::PendingRestoreSummary>,
     /// Issue #4143 (AC-3): windows spawned by an *automatic* restore (startup
     /// auto-resume / Open Project) whose launch has not reached PTY start yet,
     /// mapped to the restored Session id. Nobody is watching such a window, so
@@ -1386,13 +1408,24 @@ pub struct AppRuntime {
     /// `RefCell`, because the projection build now runs off the event loop.
     pub(crate) session_ledger_cache: Arc<Mutex<crate::session_ledger_cache::SessionLedgerCache>>,
     /// Same root fix for the home works.json (megabytes of Work items +
-    /// events): cache hit clones instead of re-parsing per projection event.
+    /// events): shared cache hits reuse an Arc instead of re-parsing or deep
+    /// cloning per projection event.
     pub(crate) work_items_cache: Arc<Mutex<gwt_core::workspace_projection::WorkItemsCache>>,
     /// SPEC-3170 FR-076: latest fully built projection per tab. FrontendReady
     /// replays this snapshot (or a live-session-only fallback) without
     /// entering disk-backed projection loading on the GUI event loop.
     pub(crate) active_work_projection_cache:
         std::cell::RefCell<HashMap<String, gwt::ActiveWorkProjectionView>>,
+    /// Background-serialized wire snapshots paired with the view cache. Tab
+    /// changes and frontend hydration reuse these Arcs instead of cloning and
+    /// serializing a large Work graph on tao.
+    pub(crate) active_work_projection_payload_cache: std::cell::RefCell<HashMap<String, Arc<str>>>,
+    /// Issue #3777: project-scoped latest-wins Work projection preparation.
+    /// All disk-backed projection work is owned by its single background worker.
+    pub(crate) active_work_projection_refresh:
+        std::cell::RefCell<ActiveWorkProjectionRefreshBroker>,
+    pub(crate) active_work_session_ledger_cache:
+        Arc<Mutex<crate::session_ledger_cache::SessionLedgerCache>>,
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
@@ -1483,6 +1516,11 @@ pub struct AppRuntime {
     /// windows. Reset every time the user reopens the picker, so this is a
     /// transient in-memory map and is not persisted with the session state.
     pub(crate) file_tree_worktree_roots: HashMap<String, PathBuf>,
+    /// Issue #4433: latest Branch Cleanup status per cleanup surface, so a
+    /// client that reconnects mid-cleanup can pull the in-flight operation's
+    /// state instead of reporting a failure that never happened. Shared with
+    /// the cleanup worker threads, and not persisted with the session state.
+    pub(crate) branch_cleanup_operations: Arc<gwt::BranchCleanupOperationStore>,
     /// SPEC-2785 FR-E: embedded server URL captured after the axum bind so
     /// `open_server_url_events` can reject requests whose origin differs from
     /// the bound URL. `None` before the server is started (e.g. during early
@@ -2891,6 +2929,8 @@ impl AppRuntime {
             window_lookup: HashMap::new(),
             window_lifecycle_generations: Arc::new(Mutex::new(HashMap::new())),
             board_all_view_windows: HashSet::new(),
+            recovery_center_handles: HashMap::new(),
+            recovery_center_generation: 0,
             session_state_path,
             log_dir,
             proxy: AppEventProxy::new(proxy),
@@ -2927,6 +2967,8 @@ impl AppRuntime {
             continue_work_outcomes: HashMap::new(),
             continue_work_waiters: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_startup_restore_log: None,
+            pending_restore_summaries: Vec::new(),
             restore_launch_windows: HashMap::new(),
             pending_tool_runtime_migrations: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -2952,6 +2994,13 @@ impl AppRuntime {
                 gwt_core::workspace_projection::WorkItemsCache::new(),
             )),
             active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
+            active_work_projection_refresh: std::cell::RefCell::new(
+                ActiveWorkProjectionRefreshBroker::default(),
+            ),
+            active_work_session_ledger_cache: Arc::new(Mutex::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            )),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -2978,6 +3027,7 @@ impl AppRuntime {
             attachment_uploads,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            branch_cleanup_operations: Arc::new(gwt::BranchCleanupOperationStore::new()),
             server_url: None,
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -3046,9 +3096,9 @@ impl AppRuntime {
     }
 
     /// SPEC-2359 W-16 (FR-387): run the cross-machine work events ingest on a
-    /// background thread, then hand control back to the event loop via
-    /// [`UserEvent::WorkEventsIngested`] so the worktree reconcile runs in
-    /// intake → reconcile order (plan decision 9).
+    /// background thread, reconcile worktrees in intake → reconcile order,
+    /// then hand only prepared cache state back through
+    /// [`UserEvent::WorkEventsIngested`].
     pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
         self.spawn_work_events_ingest_with_inventory(project_root, force, None);
     }
@@ -3116,26 +3166,34 @@ impl AppRuntime {
                 tracing::warn!(%error, "resume owner bleed repair failed");
                 false
             });
+            let reconcile = Self::reconcile_workspace_worktrees_off_event_loop(
+                &project_root,
+                worktree_inventory.as_deref().map(Vec::as_slice),
+            );
+            let reconciled = reconcile
+                .as_ref()
+                .is_some_and(|outcome| outcome.backfilled > 0);
             proxy.send(UserEvent::WorkEventsIngested {
                 project_root,
-                changed: summary.changed() || repaired,
-                worktree_inventory,
+                changed: summary.changed() || repaired || reconciled,
+                local_branches: reconcile.map(|outcome| outcome.local_branches),
             });
         });
     }
 
-    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]:
-    /// reconcile worktrees after the intake, kick the merge scan, and
-    /// rebroadcast the projection when the intake applied anything.
+    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]: commit
+    /// prepared branch state, kick background scans, and schedule a projection
+    /// refresh when intake/reconcile changed persisted Work state.
     pub(crate) fn handle_work_events_ingested(
         &mut self,
         project_root: PathBuf,
         changed: bool,
-        worktree_inventory: Option<Arc<Vec<gwt::worktree_inventory::WorktreeEntry>>>,
+        local_branches: Option<std::collections::HashSet<String>>,
     ) -> Vec<OutboundEvent> {
-        match worktree_inventory {
-            Some(entries) => self.reconcile_workspace_worktrees_from(&project_root, &entries),
-            None => self.reconcile_workspace_worktrees(&project_root),
+        if let Some(local_branches) = local_branches {
+            self.local_worktree_branches
+                .borrow_mut()
+                .insert(project_root.clone(), local_branches);
         }
         self.spawn_work_merge_status_scan(project_root.clone());
         self.spawn_work_tip_subjects_scan(project_root.clone());
@@ -3446,26 +3504,67 @@ impl AppRuntime {
     /// plus the home works projection) so the Workspace list shows the union
     /// of existing worktrees and unclosed records. Errors are logged and
     /// swallowed — reconciliation must never block startup or project open.
+    #[cfg(test)]
     pub(crate) fn reconcile_workspace_worktrees(&self, project_root: &Path) {
-        let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
-            Ok(entries) => entries,
-            Err(error) => {
-                tracing::warn!(
-                    "workspace worktree reconcile: enumerate failed for {}: {error}",
-                    project_root.display()
-                );
-                return;
-            }
-        };
-        self.reconcile_workspace_worktrees_from(project_root, &entries);
+        self.commit_workspace_worktree_reconcile(
+            project_root,
+            Self::reconcile_workspace_worktrees_off_event_loop(project_root, None),
+        );
     }
 
     /// Issue #4378 AC-1: the reconcile against a listing the caller holds.
+    #[cfg(test)]
     pub(crate) fn reconcile_workspace_worktrees_from(
         &self,
         project_root: &Path,
         entries: &[gwt::worktree_inventory::WorktreeEntry],
     ) {
+        self.commit_workspace_worktree_reconcile(
+            project_root,
+            Self::reconcile_workspace_worktrees_off_event_loop(project_root, Some(entries)),
+        );
+    }
+
+    #[cfg(test)]
+    fn commit_workspace_worktree_reconcile(
+        &self,
+        project_root: &Path,
+        outcome: Option<WorkspaceWorktreeReconcileOutcome>,
+    ) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.local_worktree_branches
+            .borrow_mut()
+            .insert(project_root.to_path_buf(), outcome.local_branches);
+    }
+
+    /// Issue #3777 AC-3/AC-5: the whole reconcile — enumerate, branch set and
+    /// backfill — runs on the ingest worker, so the tao callback only commits
+    /// the prepared `local_branches`. `entries` is the listing the caller
+    /// already holds (Issue #4378 AC-1); enumerate only when it is absent.
+    fn reconcile_workspace_worktrees_off_event_loop(
+        project_root: &Path,
+        entries: Option<&[gwt::worktree_inventory::WorktreeEntry]>,
+    ) -> Option<WorkspaceWorktreeReconcileOutcome> {
+        let enumerated;
+        let entries = match entries {
+            Some(entries) => entries,
+            None => {
+                enumerated = match gwt::worktree_inventory::enumerate_worktrees(project_root, None)
+                {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        tracing::warn!(
+                            "workspace worktree reconcile: enumerate failed for {}: {error}",
+                            project_root.display()
+                        );
+                        return None;
+                    }
+                };
+                enumerated.as_slice()
+            }
+        };
         // SPEC-2359 W16-3 (FR-390): refresh the local-worktree branch set the
         // remote_only view marking reads (cache lookup only — no git spawn at
         // view time).
@@ -3475,28 +3574,39 @@ impl AppRuntime {
             .map(crate::runtime_support::normalize_branch_name)
             .filter(|branch| !branch.is_empty())
             .collect();
-        self.local_worktree_branches
-            .borrow_mut()
-            .insert(project_root.to_path_buf(), local_branches);
         let sources = gwt::worktree_inventory::worktree_reconcile_sources(entries);
         if sources.is_empty() {
-            return;
+            return Some(WorkspaceWorktreeReconcileOutcome {
+                local_branches,
+                backfilled: 0,
+            });
         }
-        match gwt_core::workspace_projection::reconcile_worktree_work_items(
+        let backfilled = match gwt_core::workspace_projection::reconcile_worktree_work_items(
             project_root,
             &sources,
             chrono::Utc::now(),
         ) {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(
-                "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
-                project_root.display()
-            ),
-            Err(error) => tracing::warn!(
-                "workspace worktree reconcile failed for {}: {error}",
-                project_root.display()
-            ),
-        }
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
+                        project_root.display()
+                    );
+                }
+                count
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "workspace worktree reconcile failed for {}: {error}",
+                    project_root.display()
+                );
+                0
+            }
+        };
+        Some(WorkspaceWorktreeReconcileOutcome {
+            local_branches,
+            backfilled,
+        })
     }
 
     /// SPEC-2970 FR-009/FR-013: persist the Claude account-usage opt-in and
@@ -6745,7 +6855,7 @@ impl AppRuntime {
         active_executions.sort();
         active_executions.dedup();
         let held_verification_leases =
-            gwt_core::index_coordinator::IndexCoordinator::open_default()
+            gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
                 .ok()
                 .and_then(|coordinator| coordinator.heavy_lease_status().ok())
                 .filter(|lease| lease.held && !lease.expired)
@@ -6767,10 +6877,14 @@ impl AppRuntime {
 
     /// Issue #3906 AC-3: a staged update (manifest persisted) raises the
     /// `Auto` update drain when the Issue Monitor runs unattended and
-    /// auto-apply is on (the default while autonomous). Attended mode keeps
-    /// the manual update button and raises nothing. AC-5 / AC-6: an install
-    /// that needs elevation, or a version whose apply already failed, is
-    /// refused unattended and falls back to the manual button with a notice.
+    /// auto-apply is on (the default while autonomous). Issue #4376 AC-1 /
+    /// AC-2: an attended monitor raises the same drain when the download of
+    /// a manual Update click lands while the host is not quiescent (agent
+    /// panes running, claims pending, ...), so the click waits for the
+    /// agents instead of restarting over them; a quiet host keeps the ready
+    /// modal's Restart now. AC-5 / AC-6: an install that needs elevation, or
+    /// a version whose apply already failed, is refused unattended and falls
+    /// back to the manual button with a notice.
     pub(crate) fn update_staged_events(&mut self, version: &str) -> Vec<OutboundEvent> {
         let last_failed_version = gwt_core::update::load_update_apply_result()
             .filter(|result| result.outcome == gwt_core::update::UpdateApplyOutcome::Failure)
@@ -6801,7 +6915,25 @@ impl AppRuntime {
         };
         let auto_apply = prefs.auto_apply_updates.unwrap_or(prefs.autonomous_mode);
         if !(prefs.autonomous_mode && auto_apply) {
-            return Vec::new();
+            // Issue #4376 AC-1 / AC-2 / AC-3: a manual Update click waits for
+            // the agents that are running. The payload is staged; when the
+            // host is not quiescent right now, the click joins the `Auto`
+            // drain below exactly like the unattended path — new launches
+            // are held (#4037), agents are never stopped, and the drain tick
+            // applies once the same quiescence check clears. A quiet host
+            // keeps the ready modal's Restart now.
+            let monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                prefs.clone(),
+            );
+            if self.update_drain_blockers(&monitor).is_empty() {
+                return Vec::new();
+            }
+            tracing::info!(
+                target: "gwt::update",
+                version,
+                "manual update click landed on a busy host; joining the update drain"
+            );
         }
         if let Some(refusal) = refusal {
             tracing::warn!(
@@ -7139,6 +7271,19 @@ impl AppRuntime {
                 }
                 self.frontend_sync_events(&client_id)
             }
+            FrontendEvent::LoadRecoveryCenter { request_id } => {
+                self.load_recovery_center_events(&client_id, &request_id)
+            }
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id,
+                generation,
+                action_handle,
+            } => self.open_recovery_center_board_entry_events(
+                &client_id,
+                &request_id,
+                generation,
+                &action_handle,
+            ),
             FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
                 self.set_claude_account_usage_enabled_events(enabled)
             }
@@ -7267,6 +7412,16 @@ impl AppRuntime {
                 base_geometry_revision,
             ),
             FrontendEvent::CloseWindow { id, .. } => self.close_window_events(&id),
+            FrontendEvent::RecoverRestoredWindow { id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id: id,
+                    reason: Some(
+                        "recovery requires an authenticated agent WebSocket principal".to_string(),
+                    ),
+                },
+            )],
             FrontendEvent::StopWindow { id } => self.stop_window_events(&id),
             FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(),
             FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
@@ -7510,23 +7665,33 @@ impl AppRuntime {
                 branches,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id,
             } => self.run_branch_cleanup_events(
                 &client_id,
                 &id,
                 &branches,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id.as_deref(),
             ),
             FrontendEvent::RunWorkspaceCleanup {
                 branch,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id,
             } => self.run_workspace_cleanup_events(
                 &client_id,
                 &branch,
                 delete_remote,
                 force_filesystem_delete,
+                operation_id.as_deref(),
             ),
+            FrontendEvent::SyncBranchCleanup { id, operation_id } => {
+                self.sync_branch_cleanup_events(&client_id, &id, &operation_id)
+            }
+            FrontendEvent::ClearBranchCleanupStatus { id, operation_id } => {
+                self.clear_branch_cleanup_status_events(&id, &operation_id)
+            }
             FrontendEvent::RebuildIndexCell {
                 project_root,
                 scope,
@@ -8117,6 +8282,16 @@ impl AppRuntime {
                     },
                 ))
             }
+            request @ AgentFrontendRequest::RecoverRestoredWindow { .. } => {
+                // Recovery uses peer teardown too: release the capability
+                // registry read lock before closing the target window.
+                let Some(principal) = issuer.accept_current_grant(&grant) else {
+                    return AgentFrontendDispatchOutcome::StaleCapability;
+                };
+                AgentFrontendDispatchOutcome::Dispatched(
+                    self.handle_agent_frontend_event(client_id, principal, request),
+                )
+            }
             AgentFrontendRequest::PmSendInput {
                 operation_id,
                 window_id,
@@ -8224,6 +8399,69 @@ impl AppRuntime {
                 )];
                 events.extend(outcome.events);
                 events
+            }
+            AgentFrontendRequest::RecoverRestoredWindow {
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } => {
+                let refusal = |reason: &str| {
+                    vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::PaneCloseResult {
+                            ok: false,
+                            window_id: id.clone(),
+                            reason: Some(reason.to_string()),
+                        },
+                    )]
+                };
+                if !self.agent_principal_authorizes_window(&principal, &id) {
+                    return refusal("window is outside the authenticated project scope");
+                }
+                let actual_session_id = self
+                    .window_lookup
+                    .get(&id)
+                    .and_then(|address| self.tab(&address.tab_id).map(|tab| (tab, address)))
+                    .and_then(|(tab, address)| tab.workspace.window(&address.raw_id))
+                    .and_then(|window| window.session_id.as_deref());
+                if actual_session_id != Some(session_id.as_str()) {
+                    return refusal("window session changed since recovery was planned");
+                }
+                let path = self.sessions_dir.join(format!("{session_id}.toml"));
+                let automatic_restore = gwt_agent::Session::load(&path).is_ok_and(|session| {
+                    session.id == session_id
+                        && session.launch_origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                        && session
+                            .restore_source_session_id
+                            .as_deref()
+                            .is_some_and(|id| !id.is_empty())
+                });
+                if !automatic_restore {
+                    return refusal("window session is not a proven automatic restore");
+                }
+                let actual_pid = self
+                    .runtimes
+                    .get(&id)
+                    .and_then(|runtime| runtime.pty.process_id());
+                if actual_pid != Some(child_pid)
+                    || gwt::process::host_process_start_time(child_pid) != Some(child_started_at)
+                {
+                    return refusal(
+                        "window process changed or is unavailable; refresh recovery candidates",
+                    );
+                }
+                // No event-loop turn intervenes between matching the live
+                // target and the ordinary scoped peer-close/self-close checks.
+                self.handle_agent_frontend_event(
+                    client_id,
+                    principal,
+                    AgentFrontendRequest::CloseWindow {
+                        id,
+                        request_id: None,
+                        responder: None,
+                    },
+                )
             }
             AgentFrontendRequest::SendInput { text } => {
                 let window_id = match self.agent_principal_session_window(&principal) {
@@ -8672,6 +8910,11 @@ impl AppRuntime {
         // for another roundtrip.
         events.extend(self.migration_detected_replies(client_id));
         events.extend(self.migration_recovery_replies(client_id));
+        // Issue #4433 AC-2: a WebView reload wipes the page's cleanup state, so
+        // the reloaded client cannot name the operation to re-sync. Hand it
+        // every live cleanup here instead, or it would see nothing until the
+        // worker happens to emit again.
+        events.extend(self.live_branch_cleanup_replies(client_id));
         events
     }
 }
