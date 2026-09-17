@@ -2948,7 +2948,7 @@ pub struct OwnerExecutionDiagnosis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_worktree: Option<String>,
     /// Exact runtime evidence for the holder: `live`, `terminal`, `defunct`,
-    /// `host_dead`, `absent`, `unknown`, or `not_evaluated`.
+    /// `host_dead`, `child_exited`, `absent`, `unknown`, or `not_evaluated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_runtime: Option<String>,
     /// Whether the generation reaper is allowed to release this generation as
@@ -10778,6 +10778,49 @@ pub fn settle(
     crate::cli::trusted_store::with_write_lease(worktree, || {
         settle_locked(worktree, session_id, settlement)
     })
+}
+
+/// Identity of the Session holding a worktree's execution control record when
+/// the caller is not that Session (Issue #4454).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignExecutionRecordHolder {
+    pub holder_session_id: String,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+}
+
+/// Prove that `session_id` holds no execution authority over this worktree's
+/// Work, and name the Session that does (Issue #4454).
+///
+/// Stop gates use this to tell an orphan window from an authority holder
+/// before demanding a settlement. Every refusal path stays conservative: a
+/// missing record (never launched, so the settlement operations accept the
+/// caller), a failed integrity check (the execution control gate owns that
+/// case and blocks first), and a concurrent generation owned by `session_id`
+/// all return `None`. A Session that might hold authority is therefore never
+/// mistaken for an orphan.
+pub(crate) fn foreign_record_holder(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<ForeignExecutionRecordHolder>> {
+    let Some(flat) = load(worktree)? else {
+        return Ok(None);
+    };
+    if !integrity_ok(&flat) || flat.primary_session_id == session_id {
+        return Ok(None);
+    }
+    let owner = ExecutionOwnerKey {
+        kind: flat.owner_kind,
+        number: flat.owner_number,
+    };
+    if concurrent_generation_record_for_session(worktree, owner, session_id)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(ForeignExecutionRecordHolder {
+        holder_session_id: flat.primary_session_id,
+        owner_kind: flat.owner_kind,
+        owner_number: flat.owner_number,
+    }))
 }
 
 /// SPEC #3590 FR-009: the execution projection a Session owns when the flat
@@ -18766,6 +18809,9 @@ mod tests {
         .unwrap();
 
         let held = diagnose_owner(worktree.path(), owner);
+        // Issue #3712 AC-3: the literal the PM reads for this shape, so a
+        // living GUI Host can never be mistaken for a living agent again.
+        assert_eq!(held.holder_runtime.as_deref(), Some("child_exited"));
         assert!(
             held.reclaimable,
             "a living GUI host does not keep its dead child alive"
