@@ -4172,7 +4172,9 @@ pub(super) fn run<E: CliEnv>(
                     },
                     headed_e2e_commands: &headed_e2e_commands,
                     on_progress: Some(&mut |done, total, elapsed| {
-                        admission.publish_progress(done, total, elapsed)
+                        if let Some(admission) = admission.as_ref() {
+                            admission.publish_progress(done, total, elapsed);
+                        }
                     }),
                 },
             );
