@@ -824,9 +824,18 @@ fn preflight_pm_managed_asset_refresh(worktree: &Path) -> io::Result<()> {
             preflight_pm_managed_asset_tree(&worktree.join(relative).join(name))?;
         }
     }
-    // Commands also contain non-gwt names (currently release.md).
+    // Commands also contain non-gwt names (currently release.md). Their
+    // existing tracked files are preserved by distribution; the command root
+    // and its ancestors have already been checked above.
+    let tracked_paths = gwt_skills::distribute::tracked_gwt_asset_paths(worktree);
     for entry in gwt_skills::assets::CLAUDE_COMMANDS.entries() {
         let path = worktree.join(".claude/commands").join(entry.path());
+        if entry.as_file().is_some()
+            && path.exists()
+            && gwt_skills::distribute::should_skip_tracked_path(worktree, &path, &tracked_paths)
+        {
+            continue;
+        }
         preflight_pm_managed_asset_path(worktree, &path, "write/prune")?;
         preflight_pm_managed_asset_tree(&path)?;
     }

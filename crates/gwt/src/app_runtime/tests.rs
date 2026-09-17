@@ -61860,6 +61860,10 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         std::os::unix::fs::symlink("../../README.md", repo.join(".claude/agents/project.md"))
             .unwrap();
         run_git(&repo, &["add", ".claude/agents/project.md"]);
+        fs::create_dir_all(repo.join(".claude/commands")).unwrap();
+        std::os::unix::fs::symlink("../../README.md", repo.join(".claude/commands/release.md"))
+            .unwrap();
+        run_git(&repo, &["add", ".claude/commands/release.md"]);
         run_git(&repo, &["commit", "-qm", "track project agent symlink"]);
         run_git(&repo, &["push", "origin", "develop"]);
     }
@@ -61927,6 +61931,11 @@ fn pm_ensure_spawns_fresh_pm_when_unregistered() {
         PathBuf::from("../../README.md")
     );
     // Exercise the launch-completion registration after the automatic preparation.
+    #[cfg(unix)]
+    assert_eq!(
+        fs::read_link(pm_worktree.join(".claude/commands/release.md")).unwrap(),
+        PathBuf::from("../../README.md")
+    );
     runtime.register_pm_after_launch(&repo, "pm-project-symlink", "claude", &pm_worktree);
     assert_eq!(
         gwt::pm_registry::load_pm_prefs(&prefs_path)
