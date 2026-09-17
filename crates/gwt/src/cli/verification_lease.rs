@@ -30,6 +30,159 @@ pub(crate) mod admission;
 /// Issue #4405: starved-versus-progressing reading of the lease holder.
 pub(crate) mod holder_activity;
 
+const CARGO_SCOPED_SUBCOMMANDS: &[&str] = &["test", "t", "nextest"];
+/// Flags that widen a `cargo test` past a single target, wherever they sit.
+const CARGO_SCOPE_WIDENING_FLAGS: &[&str] = &[
+    "--workspace",
+    "--all",
+    "--all-features",
+    "--all-targets",
+    "--benches",
+    "--bins",
+    "--examples",
+    "--tests",
+    "--doc",
+    "--bench",
+    "--exclude",
+];
+/// Flags that name one target, so they narrow a `cargo test` on their own.
+const CARGO_NAMED_TARGET_SELECTORS: &[&str] = &["--test", "--bin", "--example"];
+
+/// How much of the shared host one *requested* verification command needs.
+///
+/// Classify the requested command line before canonical verification starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandWeight {
+    /// Narrow enough that several worktrees can run it side by side.
+    Light,
+    /// Builds or runs enough of the tree to need the host to itself.
+    Heavy,
+}
+
+/// Classify one command `verify.run` was asked to execute (Issue #4196).
+///
+/// The host lease exists to stop several worktrees compiling the world at
+/// once, and every `cargo test` used to claim it whatever its scope: a single
+/// `--test <name>` queued behind `cargo test --workspace --all-features`, and
+/// the fleet's verification throughput was pinned at one window at a time. So
+/// the weight follows the scope the command will actually build — a widening
+/// flag is heavy, and a run narrowed to named targets of at most one package
+/// is light.
+///
+/// Anything this module cannot bound stays heavy. An unrecognized program may
+/// compile the world, and guessing light for it would trade one window's wait
+/// for the host-wide oversubscription the lease was built to prevent
+/// (Issue #3913).
+pub(crate) fn classify_command(command: &str) -> CommandWeight {
+    let Ok(args) = crate::cli::verification_record::split_command_line(command) else {
+        return CommandWeight::Heavy;
+    };
+    let Some(program) = args.first() else {
+        return CommandWeight::Heavy;
+    };
+    if Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        != Some("cargo")
+    {
+        return CommandWeight::Heavy;
+    }
+    // Cargo's own arguments end at a bare `--`; everything after it is the
+    // test binary's filter and says nothing about what cargo will build.
+    let cargo_args: Vec<&str> = args[1..]
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| *arg != "--")
+        .collect();
+    // Only skip global arguments known not to consume a value. Otherwise a
+    // --config path (even one named "fmt") could be mistaken for a command.
+    let mut args = cargo_args.iter().copied();
+    let subcommand = loop {
+        let Some(arg) = args.next() else {
+            return CommandWeight::Heavy;
+        };
+        if arg.starts_with('+')
+            || matches!(
+                arg,
+                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
+            )
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            return CommandWeight::Heavy;
+        }
+        break arg;
+    };
+    if matches!(subcommand, "fmt" | "metadata") {
+        return CommandWeight::Light;
+    }
+    if !CARGO_SCOPED_SUBCOMMANDS.contains(&subcommand) {
+        return CommandWeight::Heavy;
+    }
+    classify_cargo_scope(&cargo_args)
+}
+
+/// Weigh a scoped `cargo test` by the selection it builds.
+///
+/// `--lib` is deliberately not enough on its own. This repository is a virtual
+/// workspace with `default-members`, so `cargo test --lib` with no package
+/// selects the lib target of *every* default member — the workspace-wide build
+/// this classification exists to catch, wearing a narrowing flag.
+fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
+    let mut named_targets = 0usize;
+    let mut lib_target = false;
+    let mut packages = 0usize;
+    let mut args = cargo_args.iter().copied();
+    while let Some(arg) = args.next() {
+        // `--test=name` and `--test name` select the same target.
+        let (flag, inline_value) = arg
+            .split_once('=')
+            .map_or((arg, None), |(name, value)| (name, Some(value)));
+        if CARGO_SCOPE_WIDENING_FLAGS.contains(&flag) {
+            return CommandWeight::Heavy;
+        }
+        if flag == "--lib" {
+            lib_target = true;
+        }
+        let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
+        let package = flag == "-p" || flag == "--package" || attached_package.is_some();
+        if package || CARGO_NAMED_TARGET_SELECTORS.contains(&flag) {
+            let Some(value) = attached_package.or(inline_value).or_else(|| args.next()) else {
+                return CommandWeight::Heavy;
+            };
+            // Cargo expands these itself, including quoted package patterns.
+            if value.is_empty() || value.starts_with('-') || value.contains(['*', '?', '[', ']']) {
+                return CommandWeight::Heavy;
+            }
+            if package {
+                packages += 1;
+            } else {
+                named_targets += 1;
+            }
+        }
+    }
+    if packages > 1 || named_targets + usize::from(lib_target) > 1 {
+        return CommandWeight::Heavy;
+    }
+    if named_targets == 1 || (lib_target && packages == 1) {
+        CommandWeight::Light
+    } else {
+        CommandWeight::Heavy
+    }
+}
+
+/// The first command of a matrix that needs the host to itself, if any.
+///
+/// A matrix is only as light as its heaviest command, and naming the command
+/// that forces the wait is what lets an agent see in advance whether the run
+/// will queue — previously that was only discoverable by idling.
+pub(crate) fn first_heavy_command(commands: &[String]) -> Option<&String> {
+    commands
+        .iter()
+        .find(|command| classify_command(command) == CommandWeight::Heavy)
+}
+
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
 const CONTROL_DIR: &str = "verification.control";
@@ -350,6 +503,127 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    fn command_strings(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    /// Issue #4196 AC-1 / AC-3: what a requested command weighs follows the
+    /// scope it will actually build, not merely the fact that it says
+    /// `cargo test`. AC-3 pins the two ends down: a workspace-wide run is
+    /// heavy and a single named test target is light.
+    #[test]
+    fn classify_command_reads_the_scope_of_a_cargo_run() {
+        // AC-3: the two cases the Issue fixes by name.
+        assert_eq!(
+            classify_command("cargo test --workspace --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test -p gwt --test verification_lease"),
+            CommandWeight::Light
+        );
+
+        // A widening flag wins wherever it sits on the line.
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test --all-targets --test admission"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test --workspace --exclude gwt --lib"),
+            CommandWeight::Heavy
+        );
+        // Global option values and Cargo's glob/attached selector syntax must
+        // not let a broad run masquerade as one package and one target.
+        for command in [
+            "cargo --config net.offline=true test --workspace --all-features",
+            "cargo test -p 'gwt-*' --lib",
+            "cargo test -p gwt --test '*'",
+            "cargo test -pgwt -pgwt-core --test admission",
+            "cargo test -p gwt --test admission --test verification_lease",
+            "cargo test -p gwt --lib --test admission",
+            "cargo test -p gwt --test admission --bench benchmark",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+        }
+        assert_eq!(
+            classify_command("cargo test -pgwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Nothing narrows these: they build every target of the selected
+        // packages, which is the run the lease exists for.
+        assert_eq!(classify_command("cargo test"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test -p gwt-core"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test -p gwt -p gwt-core --lib"),
+            CommandWeight::Heavy,
+            "several packages is not one narrow target"
+        );
+        // `--lib` names a target *per package*, and this is a virtual
+        // workspace with `default-members`: with no package selected it builds
+        // every member's lib, so it must not read as narrow.
+        assert_eq!(classify_command("cargo test --lib"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Cargo's own arguments end at `--`; the rest is the test binary's
+        // filter and says nothing about what cargo builds.
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib -- --all-features"),
+            CommandWeight::Light
+        );
+        assert_eq!(
+            classify_command("cargo +nightly test -p gwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Other cargo subcommands keep the weight they already had.
+        assert_eq!(
+            classify_command("cargo clippy --all-targets --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(classify_command("cargo fmt --check"), CommandWeight::Light);
+        assert_eq!(classify_command("cargo metadata"), CommandWeight::Light);
+
+        // Anything this module cannot bound stays heavy: guessing light for an
+        // unrecognized program would trade one window's wait for the host-wide
+        // oversubscription the lease was built to prevent.
+        assert_eq!(
+            classify_command("npx playwright test --headed"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(classify_command("cargo"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test 'unbalanced"),
+            CommandWeight::Heavy
+        );
+    }
+
+    /// Issue #4196 AC-2 / AC-4: a matrix is only as light as its heaviest
+    /// command, and the caller can name the one that forces the wait instead
+    /// of leaving the agent to discover it by idling.
+    #[test]
+    fn first_heavy_command_names_what_forces_the_host_lease() {
+        let light = command_strings(&["cargo fmt --check", "cargo test -p gwt --test admission"]);
+        assert_eq!(first_heavy_command(&light), None);
+        assert_eq!(first_heavy_command(&[]), None);
+
+        let mixed = command_strings(&["cargo test -p gwt --lib", "cargo test --workspace"]);
+        assert_eq!(
+            first_heavy_command(&mixed).map(String::as_str),
+            Some("cargo test --workspace")
+        );
+    }
+
     use super::*;
     use gwt_core::index_coordinator::JobPriority;
 
