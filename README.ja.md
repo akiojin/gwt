@@ -917,7 +917,10 @@ JSON
 ```
 
 lease の遷移は
-`~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
+`~/.gwt/runtime/verification-coordinator/lease-events.jsonl` に記録されます。
+検証は専用の coordinator レーンを持ちます。semantic search と index build は
+従来どおり `~/.gwt/runtime/index-coordinator` 上で相互排他（model を load する
+runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
 ### GitHub API 予算
 
@@ -928,8 +931,20 @@ cache-first で、`~/.gwt/projects/<hash>/pr-inventory-cache.json` の
 `statusCheckRollup` / `body` は変更のあった PR だけ個別に取得します。判断に
 ライブ状態が必要なときだけ `params.refresh:true` を渡し、重いフィールドは
 `params.include`（`["checks","body"]`、既定は `["checks"]`）で選びます。応答には
-`source` / `cache_age_secs` / `throttled` / `github_calls` が含まれ、予算が
+`source` / `cache_age_secs` / `throttled` / `github_calls` に加え、
+`hydrated`（個別取得に成功したPR数）と `skipped_unchanged`（ライブ読み取りで変更なしと判定したPR数、キャッシュ応答では0）が含まれ、予算が
 予備域を下回ると最後のスナップショットが返り `throttled` に理由が入ります。
+
+変更のない Draft / CI 未起動 PR の空チェック結果は、スナップショットの期限後も再利用します。
+`updatedAt` または head commit が変わると再取得し、実行中のチェックは既定で10分ごとに再取得します。
+個別取得は同時最大5件、1回の読み取りで最大30件です。`~/.gwt/config.toml` で
+それぞれの間隔を独立して設定できます（0を指定するとその待ち時間を無効にします）。
+
+```toml
+[pr_inventory]
+cache_ttl_secs = 300
+checks_refresh_secs = 600
+```
 
 予算の観測は無料エンドポイントで行います:
 

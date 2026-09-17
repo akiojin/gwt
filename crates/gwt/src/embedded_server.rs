@@ -192,7 +192,7 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
 pub(super) struct PreparedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
@@ -222,7 +222,7 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         _ => (None, None, None),
     };
     PreparedOutbound {
-        payload: serde_json::to_string(event).expect("backend event json"),
+        payload: Arc::from(serde_json::to_string(event).expect("backend event json")),
         kind,
         coalesce_key,
         repair_pane_id,
@@ -280,12 +280,12 @@ pub(super) fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbou
             );
         }
     }
-    prepared.payload = serde_json::to_string(&payload).expect("backend event json");
+    prepared.payload = Arc::from(serde_json::to_string(&payload).expect("backend event json"));
     prepared
 }
 
 struct QueuedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
@@ -522,7 +522,7 @@ impl ClientQueue {
             Vec::new()
         };
         Some(DrainStep::Message {
-            payload: entry.payload,
+            payload: entry.payload.to_string(),
             repair_panes,
         })
     }
@@ -809,6 +809,60 @@ impl ClientHub {
             }
         }
     }
+
+    /// Issue #3777: enqueue a background-serialized Active Work snapshot
+    /// without reserializing its large Work/event graph on the tao thread.
+    pub(super) fn dispatch_prepared_active_work(&self, payload: Arc<str>, target: DispatchTarget) {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+            let clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients
+                .iter()
+                .map(|(id, registration)| {
+                    (
+                        id.clone(),
+                        registration.queue.clone(),
+                        registration.receives_broadcasts,
+                    )
+                })
+                .collect()
+        };
+        let kind = "active_work_projection";
+        let prepared = PreparedOutbound {
+            payload,
+            kind,
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: queue_class_for_kind(kind),
+            // Not a PTY event: it belongs to no terminal pane and carries no
+            // position in a pane's output stream (Issue #4095).
+            terminal_pane: None,
+            stream_seq: None,
+        };
+        let mut dead_clients = Vec::new();
+        for (client_id, queue, receives_broadcasts) in snapshot {
+            let selected = match &target {
+                DispatchTarget::Broadcast => receives_broadcasts,
+                DispatchTarget::Client(target_id) => target_id == &client_id,
+            };
+            if selected && queue.enqueue(&prepared) {
+                dead_clients.push(client_id);
+            }
+        }
+        if !dead_clients.is_empty() {
+            let mut clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for client_id in dead_clients {
+                if let Some(registration) = clients.remove(&client_id) {
+                    registration.queue.close();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -914,6 +968,12 @@ pub(crate) enum AgentFrontendRequest {
         request_id: Option<String>,
         responder: Option<AgentSelfCloseResponder>,
     },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
+    },
     SendInput {
         text: String,
     },
@@ -936,6 +996,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
+            Self::RecoverRestoredWindow { .. } => {
+                formatter.write_str("AgentFrontendRequest::RecoverRestoredWindow(<redacted>)")
+            }
             Self::SendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
             }
@@ -954,6 +1017,7 @@ impl AgentFrontendRequest {
         matches!(
             self,
             Self::CloseWindow { .. }
+                | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }
                 | Self::PmSendInput { .. }
                 | Self::IssueMonitorScanNow { .. }
@@ -1489,6 +1553,56 @@ struct AgentCapabilityRegistry {
     inner: Arc<RwLock<AgentCapabilityRegistryState>>,
 }
 
+struct AgentAdoptionPublisher<'a> {
+    registry: &'a AgentCapabilityRegistry,
+    grant: &'a AgentCapabilityGrant,
+    guard: Option<std::sync::RwLockWriteGuard<'a, AgentCapabilityRegistryState>>,
+    published: Option<gwt_agent::SessionExecutionBinding>,
+}
+
+impl gwt::cli::execution_state::ExecutionAdoptionPublisher for AgentAdoptionPublisher<'_> {
+    fn acquire(&mut self) -> std::io::Result<()> {
+        // The durable coordinator invokes this only after owner and Session
+        // leases. Never hold the registry while waiting for those leases.
+        let guard = self
+            .registry
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !AgentCapabilityRegistry::grant_is_current_in_state(&guard, self.grant)
+            || guard
+                .manual_handoff_reservations
+                .values()
+                .any(|reservation| {
+                    self.grant.principal().active_execution_binding() == Some(&reservation.binding)
+                })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "agent capability changed or is reserved before adoption; no authority was updated",
+            ));
+        }
+        self.guard = Some(guard);
+        Ok(())
+    }
+
+    fn publish(&mut self, binding: gwt_agent::SessionExecutionBinding) {
+        // Issue #4443 AC-10: publication without a held guard means the
+        // transaction never acquired this grant. Dropping the publication is a
+        // refusal the caller reports; panicking here reached the agent as an
+        // opaque `500 code=internal` from the adoption handler instead.
+        let Some(mut guard) = self.guard.take() else {
+            return;
+        };
+        let mut principal = self.grant.principal().clone();
+        principal.execution_authority = AgentExecutionAuthority::Active(Box::new(binding.clone()));
+        guard
+            .principals_by_token
+            .insert(self.grant.token.clone(), principal);
+        self.published = Some(binding);
+    }
+}
+
 impl AgentCapabilityRegistry {
     fn preflight_issue(&self, project_root: &Path, session_id: &str) -> Result<(), String> {
         let principal = AgentSessionPrincipal::new(project_root, session_id)?;
@@ -1895,6 +2009,46 @@ impl AgentCapabilityRegistry {
         expected_binding: &gwt_agent::SessionExecutionBinding,
     ) -> Result<(), String> {
         self.promote_to_active(token, expected_binding, true, true)
+    }
+
+    fn adopt_execution(
+        &self,
+        grant: &AgentCapabilityGrant,
+        request: gwt::AgentExecutionAdoptionRequest,
+    ) -> Result<gwt::AgentExecutionAdoptionReceipt, AgentWorkspaceUpdateError> {
+        let principal = grant.principal();
+        let binding = principal.active_execution_binding().ok_or_else(|| AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+            "execution.adopt requires a bound Host capability; use execution.continue for an unbound Session",
+        ))?;
+        let mut publisher = AgentAdoptionPublisher {
+            registry: self,
+            grant,
+            guard: None,
+            published: None,
+        };
+        gwt::adopt_authenticated_execution(
+            principal.canonical_project_root(),
+            principal.session_id(),
+            binding,
+            request,
+            &mut publisher,
+        )?;
+        // Issue #4443 AC-10: a success that published no binding leaves the
+        // capability registry behind the durable record, so there is no receipt
+        // to return. Report it as the conflict it is — the `.expect()` that
+        // stood here panicked inside `spawn_blocking` and the handler's
+        // `Err(_)` arm answered `500 code=internal`.
+        let published = publisher.published.ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                "Host adoption settled the durable record but published no capability binding; run JSON operation `execution.status` and follow its `available_recoveries` before retrying",
+            )
+        })?;
+        Ok(gwt::AgentExecutionAdoptionReceipt {
+            schema_version: 1,
+            execution_binding: published,
+        })
     }
 
     fn promote_to_active(
@@ -2812,6 +2966,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
             "/internal/execution-continuation",
             post(execution_continuation_handler),
         )
+        .route(
+            "/internal/execution-adoption",
+            post(execution_adoption_handler),
+        )
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route(
             "/internal/work-terminalization",
@@ -3236,10 +3394,10 @@ async fn workspace_update_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
 
@@ -3274,11 +3432,10 @@ async fn workspace_update_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host workspace mutation task failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host workspace mutation task failed before a response was produced".to_string(),
+            ),
         ),
     }
 }
@@ -3291,10 +3448,10 @@ async fn work_terminalization_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
 
@@ -3329,11 +3486,10 @@ async fn work_terminalization_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host Work terminalization task failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host Work terminalization task failed before a response was produced".to_string(),
+            ),
         ),
     }
 }
@@ -3346,10 +3502,10 @@ async fn build_abort_terminalization_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
 
@@ -3384,11 +3540,10 @@ async fn build_abort_terminalization_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host build abort mutation task failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host build abort mutation task failed before a response was produced".to_string(),
+            ),
         ),
     }
 }
@@ -3414,10 +3569,10 @@ async fn execution_binding_probe_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
     // This route authorizes agent-initiated producing mutation. Prepared
@@ -3451,11 +3606,46 @@ async fn execution_binding_probe_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host execution binding probe failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host execution binding probe failed before a response was produced".to_string(),
+            ),
+        ),
+    }
+}
+
+async fn execution_adoption_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<gwt::AgentExecutionAdoptionRequest>,
+) -> Response {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+    let project_root = grant.principal().canonical_project_root().to_path_buf();
+    let capabilities = state.agent_capabilities.clone();
+    match tokio::task::spawn_blocking(move || capabilities.adopt_execution(&grant, request)).await {
+        Ok(Ok(receipt)) => {
+            state
+                .proxy
+                .send(UserEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            workspace_update_error_response(workspace_update_error_status(error.code), error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host adoption failed; inspect execution.status before retrying",
+            ),
         ),
     }
 }
@@ -3468,10 +3658,10 @@ async fn execution_continuation_handler(
     let Some(grant) = agent_capability_grant(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
     let project_root = grant.principal().canonical_project_root().to_path_buf();
@@ -3492,11 +3682,10 @@ async fn execution_continuation_handler(
         Err(_) => {
             return workspace_update_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                AgentWorkspaceUpdateError {
-                    code: AgentWorkspaceUpdateErrorCode::Internal,
-                    message: "Host continuation task failed before a response was produced"
-                        .to_string(),
-                },
+                AgentWorkspaceUpdateError::new(
+                    AgentWorkspaceUpdateErrorCode::Internal,
+                    "Host continuation task failed before a response was produced".to_string(),
+                ),
             );
         }
     };
@@ -3511,12 +3700,11 @@ async fn execution_continuation_handler(
     {
         return workspace_update_error_response(
             StatusCode::CONFLICT,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::TransactionConflict,
-                message:
-                    "agent capability changed before continuation authority could be published"
-                        .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                "agent capability changed before continuation authority could be published"
+                    .to_string(),
+            ),
         );
     }
     state
@@ -3530,15 +3718,16 @@ fn execution_binding_error_response(diagnostic_reason: &'static str) -> Response
         reason = diagnostic_reason,
         "Host-managed operation rejected an execution binding"
     );
-    workspace_update_error_response(
-        StatusCode::CONFLICT,
-        AgentWorkspaceUpdateError {
-            code: AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
-            message:
-                "Execution binding is missing, stale, or no longer current; relaunch the Session before retrying"
-                    .to_string(),
-        },
-    )
+    // Issue #4443 AC-2: `authority_mismatch` is the refusal agents got stuck
+    // on, and "relaunch the Session" is not something an agent can do. Name the
+    // diagnosis operation it can run, whose `available_recoveries` resolves to
+    // the exact next operation for this record.
+    let mut error = AgentWorkspaceUpdateError::new(
+        AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+        "Execution binding is missing, stale, or no longer current; run JSON operation `execution.status` and follow its `available_recoveries`, or relaunch the Session",
+    );
+    error.diagnostic_reason = Some(diagnostic_reason.into());
+    workspace_update_error_response(StatusCode::CONFLICT, error)
 }
 
 #[derive(Serialize)]
@@ -3546,6 +3735,14 @@ struct AgentWorkspaceUpdateErrorResponse {
     code: AgentWorkspaceUpdateErrorCode,
     reason: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_reason: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mismatched_fields: Vec<String>,
+    /// Issue #4443 AC-2: the route out, as canonical operation names the agent
+    /// bridge is allowed to surface.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recovery_operations: Vec<String>,
 }
 
 fn workspace_update_error_response(
@@ -3568,6 +3765,9 @@ fn workspace_update_error_response(
             code: error.code,
             reason,
             message: error.message,
+            diagnostic_reason: error.diagnostic_reason,
+            mismatched_fields: error.mismatched_fields,
+            recovery_operations: error.recovery_operations,
         }),
     )
         .into_response()
@@ -3610,6 +3810,19 @@ impl AgentPaneSessionScope {
                     && self.grant.principal().authorizes_producing_mutation() =>
             {
                 Some(AgentFrontendRequest::SendInput { text })
+            }
+            FrontendEvent::RecoverRestoredWindow {
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } if self.allowed_window_ids.contains(&id) => {
+                Some(AgentFrontendRequest::RecoverRestoredWindow {
+                    id,
+                    session_id,
+                    child_pid,
+                    child_started_at,
+                })
             }
             FrontendEvent::PmPaneSendInput {
                 operation_id,
@@ -4307,6 +4520,23 @@ fn handle_frontend_message(
 ) {
     let (id, data) = match event {
         FrontendEvent::TerminalInput { id, data } => (id, data),
+        FrontendEvent::StartupFirstFrame { navigation_ms } => {
+            gwt::perf::startup::first_frame(navigation_ms);
+            // Keep the shell/event-loop readiness acknowledgement separate
+            // from the paint observation when restore is still draining.
+            state.proxy.send(UserEvent::Frontend {
+                client_id: client_id.to_string(),
+                event: FrontendEvent::StartupFirstFrame { navigation_ms },
+                received_at,
+            });
+            return;
+        }
+        FrontendEvent::StartupTerminalReady { id } => {
+            // Input uses this WebSocket fast path too: an unrelated event-loop
+            // backlog must not inflate the time at which keys can reach the PTY.
+            gwt::perf::startup::terminal_ready(&id);
+            return;
+        }
         other => {
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
@@ -5489,6 +5719,33 @@ mod tests {
     /// pane inside its own project scope, and the close reply kind must pass
     /// the outbound filter so the caller hears the outcome.
     #[test]
+    fn agent_pane_scope_limits_recovery_to_project_windows() {
+        let project = tempfile::tempdir().expect("project");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let principal = AgentSessionPrincipal::new(project.path(), "pm-session")
+            .expect("observation principal");
+        let mut scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        scope.allowed_window_ids.insert("owned-window".to_string());
+        let request = |id: &str| {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": id, "session_id": "restored-session",
+                "child_pid": 123, "child_started_at": 456
+            }))
+            .expect("recovery request")
+        };
+
+        assert!(scope
+            .filter_inbound(request("owned-window"))
+            .is_some_and(
+                |request| request.mutates_host_state() && !request.requires_producing_authority()
+            ));
+        assert!(scope.filter_inbound(request("foreign-window")).is_none());
+    }
+
+    #[test]
     fn agent_pane_scope_allows_observation_grant_close_and_passes_close_result() {
         let project = tempfile::tempdir().expect("project tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
@@ -6100,19 +6357,21 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{ "id": window_id }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{ "id": window_id }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6282,24 +6541,26 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{
-                                "id": window_id,
-                                "preset": "agent",
-                                "status": "idle",
-                                "session_id": "target-session"
-                            }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{
+                                    "id": window_id,
+                                    "preset": "agent",
+                                    "status": "idle",
+                                    "session_id": "target-session"
+                                }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6549,21 +6810,23 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": {
-                                "windows": [{ "id": "tab-owned::agent-1" }]
-                            }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": {
+                                    "windows": [{ "id": "tab-owned::agent-1" }]
+                                }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -7473,6 +7736,338 @@ mod tests {
     }
 
     #[test]
+    fn execution_adoption_synchronizes_host_binding_before_terminal_work_update() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/adoption"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/adoption.git",
+            ],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            assert!(gwt_core::process::run_git_logged(&args, Some(&repo))
+                .unwrap()
+                .status
+                .success());
+        }
+        let repo = dunce::canonicalize(repo).unwrap();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4278,
+        };
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/adoption", gwt_agent::AgentId::Codex);
+        session.id = "adoption-successor".into();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            "adoption-predecessor",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let before = gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        };
+        session.set_execution_binding(Some(before.clone())).unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+        let runtime = Runtime::new().unwrap();
+        let (proxy, _) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue_bound(&repo, &session.id, before.clone())
+            .unwrap();
+        let _bridge_url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &target.url);
+        let _bridge_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, &target.token);
+        let mut env = gwt::cli::TestEnv::new(repo.clone());
+        let code = gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Execution(gwt::cli::execution_state::ExecutionCommand::Adopt {
+                reason: "recover the previous execution".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        let client = reqwest::blocking::Client::new();
+        let mut url = reqwest::Url::parse(&target.url).unwrap();
+        url.set_path("/internal/execution-adoption");
+        let request = serde_json::json!({"schema_version":1, "claimed_session_id":session.id, "reason":"recover the previous execution"});
+        let adopted = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        )
+        .unwrap();
+        let after = adopted.execution_binding.unwrap();
+        assert_ne!(after.identity, before.identity);
+        assert_eq!(
+            after.capability_generation,
+            before.capability_generation + 1
+        );
+        assert_eq!(
+            issuer.active_execution_binding_for_token(&target.token),
+            Some(after.clone())
+        );
+        let replay = client
+            .post(url.clone())
+            .bearer_auth(&target.token)
+            .json(&request)
+            .send()
+            .unwrap();
+        assert_eq!(
+            replay.status(),
+            HttpStatusCode::OK,
+            "{}",
+            replay.text().unwrap()
+        );
+        assert_eq!(
+            issuer.active_execution_binding_for_token(&target.token),
+            Some(after.clone())
+        );
+
+        let result = gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Workspace(gwt::cli::WorkspaceCommand::Ensure {
+                agent_session: session.id.clone(),
+                title_summary: "Host adoption synchronization".into(),
+                current_focus: None,
+                spec: None,
+                issue: Some(owner.number),
+                topic: None,
+                boundary: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(result, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        url.set_path("/internal/workspace-update");
+        let response = client
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&serde_json::json!({
+                "schema_version":1, "claimed_session_id":session.id,
+                "observation":gwt::observe_agent_runtime(&repo).unwrap(),
+                "intent":{"status_category":"done"}
+            }))
+            .send()
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            HttpStatusCode::OK,
+            "{}",
+            response.text().unwrap()
+        );
+        server.shutdown();
+    }
+
+    /// Issue #4443 AC-10 / AC-2: no request may drive the adoption bridge to
+    /// `http_status=500 code=internal`, the shape the PM recorded when #3697's
+    /// 409 turned into a 500 in the same session. A caller-input refusal answers
+    /// `400 invalid_request`, and a state refusal answers `409` carrying the
+    /// operation the agent can actually run.
+    #[test]
+    fn execution_adoption_refuses_without_an_internal_server_error() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/legacy-adoption"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/legacy-adoption.git",
+            ],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            assert!(gwt_core::process::run_git_logged(&args, Some(&repo))
+                .unwrap()
+                .status
+                .success());
+        }
+        let repo = dunce::canonicalize(repo).unwrap();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4443,
+        };
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/legacy-adoption", gwt_agent::AgentId::Codex);
+        session.id = "legacy-adoption-successor".into();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            "legacy-adoption-predecessor",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        // The dead host left the flat record behind without its owner
+        // generation ledger: the state the relaunched Session inherits.
+        let trusted = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("trusted store for the fixture worktree");
+        let owners = trusted
+            .parent()
+            .expect("trusted store root")
+            .join("execution-owners");
+        assert!(owners.is_dir(), "fixture never wrote an owner ledger");
+        std::fs::remove_dir_all(&owners).unwrap();
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+        let runtime = Runtime::new().unwrap();
+        let (proxy, _) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue_bound(&repo, &session.id, binding.clone())
+            .unwrap();
+        let client = reqwest::blocking::Client::new();
+        let mut url = reqwest::Url::parse(&target.url).unwrap();
+        url.set_path("/internal/execution-adoption");
+        let adopt = |reason: &str| {
+            let response = client
+                .post(url.clone())
+                .bearer_auth(&target.token)
+                .json(&serde_json::json!({
+                    "schema_version": 1,
+                    "claimed_session_id": session.id,
+                    "reason": reason,
+                }))
+                .send()
+                .unwrap();
+            (response.status(), response.text().unwrap())
+        };
+
+        // A reserved-namespace reason is a caller input error. It used to reach
+        // the CLI guard and come back as an opaque `500 code=internal`.
+        let (status, body) = adopt("gwt:execution-recovery:v1:forged");
+        assert_ne!(
+            status,
+            HttpStatusCode::INTERNAL_SERVER_ERROR,
+            "a caller input error answered as an unhandled exception: {body}"
+        );
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST, "{body}");
+
+        // The inherited record refuses on state, and the refusal must name the
+        // operation this agent can run to get out of it.
+        let (status, body) = adopt("recover the dead host's record");
+        assert_ne!(
+            status,
+            HttpStatusCode::INTERNAL_SERVER_ERROR,
+            "a state refusal answered as an unhandled exception: {body}"
+        );
+        assert_eq!(status, HttpStatusCode::CONFLICT, "{body}");
+        let refusal = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(
+            refusal["recovery_operations"],
+            serde_json::json!(["execution.repair"]),
+            "the refusal names no recovery operation: {body}"
+        );
+
+        // AC-2: the route out must survive the agent-side bridge client, which
+        // previously reported only `code=` and `bridge_reason=`.
+        let bridge_target = gwt::HookForwardTarget {
+            url: target.url.clone(),
+            token: target.token.clone(),
+        };
+        let bridged = gwt::daemon_runtime::send_execution_adoption_via_agent_bridge(
+            &bridge_target,
+            &gwt::AgentExecutionAdoptionRequest {
+                schema_version: 1,
+                claimed_session_id: session.id.clone(),
+                reason: "recover the dead host's record".into(),
+            },
+            &session,
+        )
+        .expect_err("the inherited record refuses adoption");
+        assert!(
+            bridged.contains("execution.repair"),
+            "the agent-visible refusal dropped the Host's recovery route: {bridged}"
+        );
+        assert!(
+            !binding.identity.generation_id.is_empty(),
+            "fixture binding is structurally valid"
+        );
+        server.shutdown();
+    }
+
+    #[test]
     fn execution_binding_probe_fences_an_older_host_with_the_durable_capability_epoch() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -7761,6 +8356,24 @@ mod tests {
 
         let stale = probe(&target_a);
         assert_eq!(stale.status(), HttpStatusCode::CONFLICT);
+        let diagnostic: serde_json::Value = stale.json().expect("stale binding diagnostic");
+        assert_eq!(
+            diagnostic["diagnostic_reason"],
+            "session_binding_identity_mismatch"
+        );
+        assert_eq!(
+            diagnostic["mismatched_fields"],
+            serde_json::json!(["capability_generation"])
+        );
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+        let before_adopt = std::fs::read(&session_path).unwrap();
+        let mut adoption_url = reqwest::Url::parse(&target_a.url).unwrap();
+        adoption_url.set_path("/internal/execution-adoption");
+        let rejected_adopt = client.post(adoption_url).bearer_auth(&target_a.token)
+            .json(&serde_json::json!({"schema_version":1,"claimed_session_id":session.id,"reason":"stale Host must not recover itself"}))
+            .send().unwrap();
+        assert_eq!(rejected_adopt.status(), HttpStatusCode::CONFLICT);
+        assert_eq!(std::fs::read(&session_path).unwrap(), before_adopt);
         let current = probe(&target_b);
         assert_eq!(current.status(), HttpStatusCode::OK);
         let receipt: gwt::AgentExecutionBindingProbeReceipt =
@@ -8525,6 +9138,33 @@ mod tests {
             retryable: true,
             retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
         }
+    }
+
+    #[test]
+    fn prepared_active_work_enqueue_reuses_the_background_payload_allocation() {
+        let queue = ClientQueue::default();
+        let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
+        let prepared = PreparedOutbound {
+            payload: payload.clone(),
+            kind: "active_work_projection",
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: QueueClass::IdempotentLatest,
+            terminal_pane: None,
+            stream_seq: None,
+        };
+
+        assert!(!queue.enqueue(&prepared));
+
+        let state = queue
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued = state.entries.front().expect("queued Active Work payload");
+        assert!(
+            Arc::ptr_eq(&queued.payload, &payload),
+            "tao-side enqueue must retain the background Arc instead of cloning 4 MB"
+        );
     }
 
     #[test]

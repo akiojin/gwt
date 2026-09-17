@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 pub const COORDINATOR_SCHEMA_VERSION: u32 = 1;
 
 /// Scope reserved for heavy verification runs (SPEC #3576 FR-2b). Verification
-/// claims the same host-wide heavy lease as index jobs: the contended resource
-/// is host CPU, so a second exclusion mechanism would only add a lock ordering
-/// problem.
+/// claims a host-wide heavy lease of its own lane
+/// ([`verification_coordinator_root`], Issue #4285): the contended resource
+/// is host CPU, not the model-loaded runner tree that searches and index
+/// builds exclude on, so the two lanes never wait for each other.
 pub const VERIFICATION_SCOPE: &str = "verification";
 /// Issue #4086: how long a refused verification claimant stays pending as a
 /// reservation with no live process behind it. The gwt-verify retry cadence
@@ -69,6 +70,7 @@ const INTERACTIVE_BURST_FILE: &str = "heavy.burst.json";
 const RESERVATION_PREFIX: &str = "reservation-";
 
 const COORDINATOR_DIR_NAME: &str = "index-coordinator";
+const VERIFICATION_COORDINATOR_DIR_NAME: &str = "verification-coordinator";
 const LEASE_EVENT_LOG_NAME: &str = "lease-events.jsonl";
 /// Issue #4210: the arrival counter every heavy claimant draws from. It is
 /// deliberately not a `.json` file, so the registration sweep never mistakes
@@ -88,6 +90,30 @@ pub fn coordinator_root_from(gwt_home: &Path) -> PathBuf {
 /// Coordinator root for the current process (`~/.gwt/runtime/index-coordinator`).
 pub fn coordinator_root() -> PathBuf {
     crate::paths::gwt_runtime_dir().join(COORDINATOR_DIR_NAME)
+}
+
+/// Verification lane root under an explicit gwt home
+/// (`<gwt_home>/runtime/verification-coordinator`), see
+/// [`verification_coordinator_root`].
+pub fn verification_coordinator_root_from(gwt_home: &Path) -> PathBuf {
+    gwt_home
+        .join("runtime")
+        .join(VERIFICATION_COORDINATOR_DIR_NAME)
+}
+
+/// Verification lane root for the current process
+/// (`~/.gwt/runtime/verification-coordinator`), Issue #4285.
+///
+/// Canonical verification excludes on host CPU; searches and index builds
+/// exclude on the model-loaded runner tree (FR-417 / AS-30). Sharing one
+/// root made each lane wait for the other's resource: a 40-minute
+/// verification stopped every semantic search, and a search reservation
+/// queued in front of verification. A separate root gives the verification
+/// lane its own kernel lock, FIFO, reservations, ticket, and ledger while
+/// the model lane — and the Python runner that reads `heavy.pending` /
+/// `heavy.progress.json` from it — stays exactly where it was.
+pub fn verification_coordinator_root() -> PathBuf {
+    crate::paths::gwt_runtime_dir().join(VERIFICATION_COORDINATOR_DIR_NAME)
 }
 
 /// Job target key (FR-382). Repo-shared scopes use `(repo_hash, scope)`;
@@ -609,6 +635,13 @@ impl IndexCoordinator {
     /// Open the default host-wide coordinator root.
     pub fn open_default() -> Result<Self, CoordinatorError> {
         Self::open(coordinator_root())
+    }
+
+    /// Open the default verification lane root (Issue #4285). Same
+    /// coordinator, different root: canonical verifications serialize among
+    /// themselves here and never contend with the model lane.
+    pub fn open_default_verification() -> Result<Self, CoordinatorError> {
+        Self::open(verification_coordinator_root())
     }
 
     pub fn root(&self) -> &Path {
@@ -1954,6 +1987,28 @@ mod tests {
     fn open_default_creates_the_coordinator_root() {
         let coordinator = IndexCoordinator::open_default().expect("open default");
         assert!(coordinator.root().is_dir());
+    }
+
+    /// Issue #4285: verification excludes on host CPU, search and index
+    /// builds on the model-loaded runner tree. Two resources, two roots — so
+    /// the lock, FIFO, reservations, ticket, and ledger are all disjoint.
+    #[test]
+    fn verification_coordinator_root_is_disjoint_from_the_index_root() {
+        let home = Path::new("/home/gwt/.gwt");
+        let index = coordinator_root_from(home);
+        let verification = verification_coordinator_root_from(home);
+        assert_ne!(index, verification);
+        assert!(verification.starts_with(home.join("runtime")));
+        assert!(!verification.starts_with(&index));
+        assert!(!index.starts_with(&verification));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
+        let verification = IndexCoordinator::open_default_verification().unwrap();
+        let index = IndexCoordinator::open_default().unwrap();
+        assert_eq!(verification.root(), verification_coordinator_root());
+        assert_ne!(verification.heavy_lock_path(), index.heavy_lock_path());
+        assert_ne!(verification.heavy_pending_dir(), index.heavy_pending_dir());
     }
 
     #[test]

@@ -81,26 +81,25 @@ arrange a rerun → regression: arrange a fresh launch → neither possible: esc
 /// they concluded (SPEC-1935 FR-133).
 pub const USER_VERIFICATION_RESULT_LABEL: &str = "User Verification Result:";
 
-/// The value an autonomous execution records when its change has a UI surface
-/// that nobody was there to look at (Issue #4217 FR-003).
-///
-/// Deliberately distinct from both `confirmed` and `n/a`: the verification was
-/// not performed and was not unnecessary — it was postponed. A PR carrying it
-/// stays Draft until the owner sweeps it (FR-004).
+/// Legacy autonomous result accepted during the #4326 migration. New
+/// autonomous runs record `n/a (autonomous)` and deliver through CI auto-merge.
 pub const DEFERRED_USER_VERIFICATION_RESULT: &str = "deferred (autonomous execution)";
 
-/// Whether a PR body records a *postponed* user verification.
-///
-/// Matches the recorded value rather than the whole line, so the reason text an
-/// agent appends cannot smuggle the PR past the Draft gate, and a body that
-/// merely discusses deferral in prose does not trip it.
+/// Read the first recorded result, including Markdown forms used in PR bodies.
+#[must_use]
+pub fn user_verification_result(body: &str) -> Option<String> {
+    user_verification_results(body)
+        .next()
+        .map(|value| value.trim_matches(['*', '`', ' ']).to_ascii_lowercase())
+}
+
+/// Autonomous verification is no longer waiting on a human (#4326).
+/// Other deferred results retain their existing inventory meaning.
 #[must_use]
 pub fn body_defers_user_verification(body: &str) -> bool {
     user_verification_results(body).any(|value| {
-        value
-            .trim_start_matches(['*', '`', ' '])
-            .to_ascii_lowercase()
-            .starts_with("deferred")
+        let value = value.trim_matches(['*', '`', ' ']).to_ascii_lowercase();
+        value.starts_with("deferred") && !value.starts_with(DEFERRED_USER_VERIFICATION_RESULT)
     })
 }
 
@@ -132,6 +131,10 @@ pub struct PrInventoryOptions {
     /// One-step override of the reserve / burst throttle, with the reason the
     /// decision cannot wait. Never bypasses an open refusal window.
     pub force_reason: Option<String>,
+    /// Snapshot reuse interval, independent of checks polling.
+    pub cache_ttl_secs: u64,
+    /// Poll running checks at most once per interval on unchanged PRs.
+    pub checks_refresh_secs: u64,
 }
 
 impl Default for PrInventoryOptions {
@@ -142,6 +145,8 @@ impl Default for PrInventoryOptions {
             refresh: false,
             include: PrInventoryInclude::default(),
             force_reason: None,
+            cache_ttl_secs: PR_INVENTORY_CACHE_TTL_SECS as u64,
+            checks_refresh_secs: 600,
         }
     }
 }
@@ -262,6 +267,7 @@ pub struct PrInventoryFields {
     pub review_status: String,
     pub body: String,
     pub closing_issues: Vec<PrClosingIssue>,
+    pub fallback_owner_closed: bool,
 }
 
 /// Result of classifying one open PR for the PM inventory.
@@ -468,6 +474,7 @@ impl PrInventoryItem {
             review_status: self.review_status.clone(),
             body: self.body.clone(),
             closing_issues: self.closing_issues.clone(),
+            fallback_owner_closed: self.owner_issue_closed,
         }
     }
 
@@ -544,7 +551,8 @@ pub fn classify_pr_lifecycle_with(
     now: DateTime<Utc>,
     options: &PrInventoryOptions,
 ) -> PrLifecycleDecision {
-    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues);
+    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues)
+        || (fields.closing_issues.is_empty() && fields.fallback_owner_closed);
     let class = if looks_superseded(&fields.title, &fields.body) || owner_issue_closed {
         PrLifecycleClass::Superseded
     } else if mergeability_unknown(fields) {
@@ -580,7 +588,8 @@ pub fn classify_pr_lifecycle_with(
 /// Default action and executability for an already-decided class. `stale`
 /// and `dwell_hours` are filled by the caller, which owns the clock.
 fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLifecycleDecision {
-    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues);
+    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues)
+        || (fields.closing_issues.is_empty() && fields.fallback_owner_closed);
     let default_action = match (class, fields.is_draft) {
         (PrLifecycleClass::MergeCandidate, true) => "mark ready".to_string(),
         (PrLifecycleClass::MergeCandidate, false) => "propose merge".to_string(),
@@ -756,6 +765,10 @@ fn inventory_item_from_value(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string(),
+        fallback_owner_closed: value
+            .get("fallbackOwnerState")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|state| state.eq_ignore_ascii_case("CLOSED")),
         closing_issues: value
             .get("closingIssuesReferences")
             .map(parse_closing_issues)
@@ -784,9 +797,9 @@ pub fn parse_pr_inventory_json_with(
 
 /// The bulk list query (Issue #3891 AC-2): no `body`, no `statusCheckRollup`.
 /// Both are hydrated per PR, and only when that PR needs it.
-const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences";
+const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,headRefOid,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences";
 const INVENTORY_LIGHT_JSON_FIELDS_WITHOUT_CLOSING: &str =
-    "number,title,url,isDraft,headRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
+    "number,title,url,isDraft,headRefName,headRefOid,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
 
 /// File under the machine-local project dir that remembers the previous
 /// `pr.list` observation per PR (Issue #3868 AC-6).
@@ -797,7 +810,7 @@ pub const PR_INVENTORY_HISTORY_FILE: &str = "pr-inventory-history.json";
 /// repository on this machine, so N readers cost one fetch per TTL.
 pub const PR_INVENTORY_CACHE_FILE: &str = "pr-inventory-cache.json";
 
-/// How long a snapshot answers `pr.list` without touching GitHub. One PM
+/// Default time a snapshot answers `pr.list` without touching GitHub. One PM
 /// cycle: repeated reads inside a cycle are free, and a cycle never sees data
 /// older than the previous cycle.
 pub const PR_INVENTORY_CACHE_TTL_SECS: i64 = 300;
@@ -805,11 +818,14 @@ pub const PR_INVENTORY_CACHE_TTL_SECS: i64 = 300;
 /// Per-PR hydration calls allowed in one read. Bounds the spawn burst on a
 /// cold cache; the rest hydrate on the next read.
 const PR_INVENTORY_HYDRATION_CAP: usize = 30;
+const PR_INVENTORY_HYDRATION_CONCURRENCY: usize = 5;
 
 /// Heavy fields of one PR, keyed by the `updated_at` they were fetched for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrInventoryHeavy {
     pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub head_ref_oid: Option<String>,
     pub status_check_rollup: Option<serde_json::Value>,
     pub body: Option<String>,
     pub hydrated_at: DateTime<Utc>,
@@ -899,6 +915,10 @@ pub struct PrInventoryRead {
     pub throttled: Option<String>,
     /// Budget-spending `gh` calls this read made (the free probe excluded).
     pub github_calls: u32,
+    /// PRs whose heavy fields were successfully fetched during this read.
+    pub hydrated: usize,
+    /// PRs skipped as unchanged after a live bulk comparison; zero on cache reads.
+    pub skipped_unchanged: usize,
     /// Issue #4074 FR-005: `work/issue-*` branches with commits and no open PR
     /// to land them. Read from local refs, so it stays truthful even when the
     /// PR rows came from cache.
@@ -915,6 +935,9 @@ pub struct UnlandedBranchProbe {
     pub branch: String,
     pub ahead: usize,
     pub last_commit_at: Option<DateTime<Utc>>,
+    /// Whether a projected merge changes files outside `.gwt`. `None` means
+    /// the local probe could not reach a safe conclusion.
+    pub has_non_gwt_changes: Option<bool>,
 }
 
 /// A branch whose commits have nowhere to land: unique work against
@@ -931,6 +954,10 @@ pub struct UnlandedBranch {
     pub ahead: usize,
     pub last_commit_at: Option<DateTime<Utc>>,
     pub has_open_pr: bool,
+    /// `false` identifies residue confined to gwt's bookkeeping. Unknown
+    /// results stay visible to avoid hiding potentially unlanded source.
+    #[serde(default)]
+    pub has_non_gwt_changes: Option<bool>,
 }
 
 /// Keep the branches a PM must triage, oldest residue first.
@@ -955,6 +982,7 @@ pub fn classify_unlanded_branches(
             ahead: probe.ahead,
             last_commit_at: probe.last_commit_at,
             has_open_pr: false,
+            has_non_gwt_changes: probe.has_non_gwt_changes,
         })
         .collect();
     rows.sort_by(|left, right| {
@@ -963,6 +991,93 @@ pub fn classify_unlanded_branches(
             .then_with(|| left.branch.cmp(&right.branch))
     });
     rows
+}
+
+/// Return whether merging `branch_ref` into `base_ref` changes anything
+/// outside gwt's `.gwt` bookkeeping directory.
+///
+/// The merge is projected with `merge-tree`, so neither the index nor the
+/// working tree is changed. Conflicts outside `.gwt` are conservatively
+/// treated as potential source changes; an unparseable conflicted projection
+/// is an error rather than a bookkeeping-only result.
+pub fn branch_has_non_gwt_changes(
+    repo_path: &Path,
+    base_ref: &str,
+    branch_ref: &str,
+) -> std::result::Result<bool, String> {
+    let merge = gwt_core::process::run_git_logged(
+        &[
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "-z",
+            base_ref,
+            branch_ref,
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| error.to_string())?;
+    let exit_code = merge.status.code();
+    if !matches!(exit_code, Some(0 | 1)) {
+        let detail = String::from_utf8_lossy(&merge.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("git merge-tree failed with status {}", merge.status)
+        } else {
+            detail
+        });
+    }
+
+    let mut fields = merge.stdout.split(|byte| *byte == 0);
+    let projected_tree = fields
+        .next()
+        .and_then(|tree| std::str::from_utf8(tree).ok())
+        .filter(|tree| {
+            matches!(tree.len(), 40 | 64) && tree.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| "git merge-tree did not return a valid projected tree".to_string())?;
+
+    if exit_code == Some(1) {
+        let conflict_paths: Vec<&[u8]> = fields
+            .by_ref()
+            .take_while(|path| !path.is_empty())
+            .collect();
+        if conflict_paths.is_empty() {
+            return Err("git merge-tree reported conflicts without conflict paths".to_string());
+        }
+        if conflict_paths
+            .iter()
+            .any(|path| *path != b".gwt" && !path.starts_with(b".gwt/"))
+        {
+            return Ok(true);
+        }
+    }
+
+    let diff = gwt_core::process::run_git_logged(
+        &[
+            "diff",
+            "--quiet",
+            base_ref,
+            projected_tree,
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**",
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| error.to_string())?;
+    match diff.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => {
+            let detail = String::from_utf8_lossy(&diff.stderr).trim().to_string();
+            Err(if detail.is_empty() {
+                format!("git diff failed with status {}", diff.status)
+            } else {
+                detail
+            })
+        }
+    }
 }
 
 /// Parse `git for-each-ref --format=%(refname:short)%09%(committerdate:iso-strict)`
@@ -1018,6 +1133,12 @@ pub fn collect_unlanded_work_branches(
             continue;
         };
         probes.push(UnlandedBranchProbe {
+            has_non_gwt_changes: branch_has_non_gwt_changes(
+                repo_path,
+                base_ref,
+                &format!("origin/{branch}"),
+            )
+            .ok(),
             branch,
             ahead: divergence.ahead,
             last_commit_at,
@@ -1080,8 +1201,8 @@ pub fn fetch_pr_inventory_tracked(
 ///    served and the skip is reported; with no snapshot the inventory is
 ///    unobservable, not empty.
 /// 3. A live read is the light list query plus per-PR hydration of the
-///    requested heavy fields, only for PRs whose real data changed or whose
-///    CI is not final yet.
+///    requested heavy fields, only for changed PRs, missing fields, or
+///    running checks whose independent refresh interval has elapsed.
 fn fetch_pr_inventory_cached_with<F>(
     repo_path: &Path,
     cache_path: &Path,
@@ -1091,13 +1212,14 @@ fn fetch_pr_inventory_cached_with<F>(
     mut run_gh: F,
 ) -> Result<PrInventoryRead>
 where
-    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput> + Sync,
 {
     let mut cache = PrInventoryCache::load(cache_path);
     let cache_age = cache.age_secs(now);
     if !options.refresh {
         if let Some(age) = cache_age {
-            if (0..PR_INVENTORY_CACHE_TTL_SECS).contains(&age)
+            if age >= 0
+                && (age as u64) < options.cache_ttl_secs
                 && cache.include.covers(options.include)
             {
                 return Ok(PrInventoryRead {
@@ -1107,6 +1229,8 @@ where
                     cache_age_secs: Some(age),
                     throttled: None,
                     github_calls: 0,
+                    hydrated: 0,
+                    skipped_unchanged: 0,
                     unlanded_branches: Vec::new(),
                 });
             }
@@ -1127,6 +1251,8 @@ where
                 cache_age_secs: cache_age,
                 throttled: Some(reason),
                 github_calls: 0,
+                hydrated: 0,
+                skipped_unchanged: 0,
                 unlanded_branches: Vec::new(),
             });
         }
@@ -1137,38 +1263,70 @@ where
         )));
     }
 
-    let (rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
+    let (mut rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
+    let owner_calls = hydrate_fallback_owners(repo_path, &mut rows, ledger, now, &mut run_gh)?;
+    github_calls += owner_calls as u32;
     let mut heavy = BTreeMap::new();
-    let mut hydrated = 0usize;
+    // The fallback owner-state batch is a hydration too: it spends one of the
+    // shared PR_INVENTORY_HYDRATION_CAP slots instead of adding a new burst
+    // allowance (#4141 AC-6 over the #3891 budget ledger).
+    let mut hydrated = owner_calls;
+    let mut skipped_unchanged = 0usize;
+    let mut pending = Vec::new();
     for row in &rows {
         let Some(number) = row.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
         };
         let updated_at =
             parse_github_timestamp(row.get("updatedAt").and_then(serde_json::Value::as_str));
+        let head_ref_oid = row.get("headRefOid").and_then(serde_json::Value::as_str);
         let previous = cache.heavy.remove(&number);
-        let mut entry = previous.clone();
-        if let Some(fields) = hydration_needed(previous.as_ref(), updated_at, options.include, now)
+        if let Some(fields) =
+            hydration_needed(previous.as_ref(), updated_at, head_ref_oid, options, now)
         {
-            if hydrated < PR_INVENTORY_HYDRATION_CAP {
-                hydrated += 1;
-                github_calls += 1;
-                if let Ok((rollup, body)) = hydrate_pr(repo_path, number, fields, &mut run_gh) {
-                    entry = Some(PrInventoryHeavy {
-                        updated_at,
-                        status_check_rollup: rollup.or_else(|| {
-                            previous
-                                .as_ref()
-                                .and_then(|p| p.status_check_rollup.clone())
-                        }),
-                        body: body.or_else(|| previous.as_ref().and_then(|p| p.body.clone())),
-                        hydrated_at: now,
-                    });
-                }
+            if pending.len() + owner_calls < PR_INVENTORY_HYDRATION_CAP {
+                pending.push((number, updated_at, head_ref_oid, fields));
             }
+        } else if previous.is_some() && !options.include.is_empty() {
+            skipped_unchanged += 1;
         }
-        if let Some(entry) = entry {
+        if let Some(entry) = previous {
             heavy.insert(number, entry);
+        }
+    }
+    github_calls += pending.len() as u32;
+    for batch in pending.chunks(PR_INVENTORY_HYDRATION_CONCURRENCY) {
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|(number, _, _, fields)| {
+                    let run_gh = &run_gh;
+                    scope.spawn(move || hydrate_pr(repo_path, *number, *fields, run_gh))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("PR hydration worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        for ((number, updated_at, head_ref_oid, _), result) in batch.iter().zip(results) {
+            if let Ok((rollup, body)) = result {
+                // Only retain omitted fields from the same revision. A changed
+                // head must not bless checks fetched for an earlier commit.
+                let previous = heavy.get(number).filter(|p| {
+                    p.updated_at == *updated_at && p.head_ref_oid.as_deref() == *head_ref_oid
+                });
+                let entry = PrInventoryHeavy {
+                    updated_at: *updated_at,
+                    head_ref_oid: head_ref_oid.map(str::to_string),
+                    status_check_rollup: rollup
+                        .or_else(|| previous.and_then(|p| p.status_check_rollup.clone())),
+                    body: body.or_else(|| previous.and_then(|p| p.body.clone())),
+                    hydrated_at: now,
+                };
+                heavy.insert(*number, entry);
+                hydrated += 1;
+            }
         }
     }
     cache = PrInventoryCache {
@@ -1190,8 +1348,117 @@ where
         cache_age_secs: Some(0),
         throttled: None,
         github_calls,
+        hydrated,
+        skipped_unchanged,
         unlanded_branches: Vec::new(),
     })
+}
+
+/// Resolve head-derived owners once per inventory TTL, independently of PR
+/// updatedAt. The batch consumes one of the existing hydration call slots.
+fn hydrate_fallback_owners<F>(
+    repo_path: &Path,
+    rows: &mut [serde_json::Value],
+    ledger: &BudgetLedger,
+    now: DateTime<Utc>,
+    run_gh: &mut F,
+) -> Result<usize>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let owners: std::collections::BTreeSet<_> = rows
+        .iter()
+        .filter_map(|row| {
+            if row
+                .get("closingIssuesReferences")
+                .map(parse_closing_issues)
+                .is_some_and(|v| !v.is_empty())
+            {
+                return None;
+            }
+            row.get("headRefName")
+                .and_then(serde_json::Value::as_str)
+                .and_then(launch_ref_issue)
+        })
+        .collect();
+    if owners.is_empty() {
+        return Ok(0);
+    }
+    let fields = owners
+        .iter()
+        .map(|n| format!("owner_{n}:issue(number:{n}){{state}}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rate_limit = github_budget::GRAPHQL_RATE_LIMIT_SELECTION;
+    let query = format!("query=query($owner:String!,$repo:String!){{{rate_limit} repository(owner:$owner,name:$repo){{{fields}}}}}");
+    let output = run_gh(
+        repo_path,
+        &[
+            "api",
+            "graphql",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "repo={repo}",
+            "-f",
+            &query,
+        ],
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|e| GwtError::Other(format!("owner issue states JSON: {e}")))?;
+    if let Some(rate_limit) = github_budget::parse_graphql_rate_limit(&value) {
+        ledger.record_graphql_response(
+            &github_budget::spawn_source(&["api", "graphql"]),
+            &rate_limit,
+            now,
+        );
+    }
+    // gh exits nonzero for partial GraphQL responses too. Only a NOT_FOUND
+    // attached to a requested issue alias is a recoverable per-owner failure.
+    let mut missing = std::collections::BTreeSet::new();
+    for error in value["errors"].as_array().into_iter().flatten() {
+        let path = error["path"].as_array();
+        let owner = path
+            .filter(|p| p.len() == 2 && p[0] == "repository")
+            .and_then(|p| p[1].as_str())
+            .and_then(|alias| alias.strip_prefix("owner_"))
+            .and_then(|n| n.parse::<u64>().ok())
+            .filter(|n| owners.contains(n));
+        if error["type"] != "NOT_FOUND" || owner.is_none() {
+            return Err(GwtError::Git(format!("owner issue states: {error}")));
+        }
+        missing.insert(owner.expect("validated owner alias"));
+    }
+    if !output.success && missing.is_empty() {
+        return Err(GwtError::Git(format!(
+            "gh owner issue states: {}",
+            output.stderr
+        )));
+    }
+    for row in rows {
+        let Some(owner) = row["headRefName"]
+            .as_str()
+            .and_then(launch_ref_issue)
+            .filter(|n| owners.contains(n))
+        else {
+            continue;
+        };
+        let state = &value["data"]["repository"][format!("owner_{owner}")]["state"];
+        if missing.contains(&owner) {
+            row["fallbackOwnerState"] = serde_json::json!("UNKNOWN");
+            continue;
+        }
+        if !state.as_str().is_some_and(|s| s == "OPEN" || s == "CLOSED") {
+            return Err(GwtError::Git(format!(
+                "owner issue #{owner} state unavailable"
+            )));
+        }
+        row["fallbackOwnerState"] = state.clone();
+    }
+    if !missing.is_empty() {
+        eprintln!("warning: owner issue state unavailable (NOT_FOUND): {missing:?}");
+    }
+    Ok(1)
 }
 
 /// Issue #3891 AC-4: the reason a periodic read must not spend right now.
@@ -1223,28 +1490,31 @@ where
 }
 
 /// Which heavy fields PR `number` must (re-)fetch, or `None` when the cached
-/// entry still answers: unchanged real data, final CI, body already held.
+/// entry still answers: unchanged data, no running checks due, body already held.
 fn hydration_needed(
     previous: Option<&PrInventoryHeavy>,
     updated_at: Option<DateTime<Utc>>,
-    wanted: PrInventoryInclude,
+    head_ref_oid: Option<&str>,
+    options: &PrInventoryOptions,
     now: DateTime<Utc>,
 ) -> Option<PrInventoryInclude> {
+    let wanted = options.include;
     if wanted.is_empty() {
         return None;
     }
     let Some(previous) = previous else {
         return Some(wanted);
     };
-    if previous.updated_at != updated_at {
+    if previous.updated_at != updated_at || previous.head_ref_oid.as_deref() != head_ref_oid {
         return Some(wanted);
     }
     let checks = wanted.checks
         && match &previous.status_check_rollup {
             None => true,
             Some(rollup) => {
-                !ci_is_final(&ci_status_from_rollup(Some(rollup)))
-                    && (now - previous.hydrated_at).num_seconds() >= PR_INVENTORY_CACHE_TTL_SECS
+                ci_status_from_rollup(Some(rollup)) == "PENDING"
+                    && (now - previous.hydrated_at).num_seconds().max(0) as u64
+                        >= options.checks_refresh_secs
             }
         };
     let body = wanted.body && previous.body.is_none();
@@ -1252,19 +1522,15 @@ fn hydration_needed(
     (!needed.is_empty()).then_some(needed)
 }
 
-fn ci_is_final(ci_status: &str) -> bool {
-    ci_status.eq_ignore_ascii_case("SUCCESS") || ci_status.eq_ignore_ascii_case("FAILURE")
-}
-
 /// One `gh pr view <n> --json <fields>` for the heavy fields.
 fn hydrate_pr<F>(
     repo_path: &Path,
     number: u64,
     fields: PrInventoryInclude,
-    run_gh: &mut F,
+    run_gh: &F,
 ) -> Result<(Option<serde_json::Value>, Option<String>)>
 where
-    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+    F: Fn(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
     let json_fields = fields.view_json_fields();
@@ -1278,7 +1544,15 @@ where
     let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|error| GwtError::Other(format!("gh pr view {number} JSON: {error}")))?;
     Ok((
-        value.get("statusCheckRollup").cloned(),
+        // Preserve "fetched, no checks" across Option<Value> serialization:
+        // Some(Null) would otherwise reload as None and trigger another fetch.
+        value.get("statusCheckRollup").map(|rollup| {
+            if rollup.is_null() {
+                serde_json::json!([])
+            } else {
+                rollup.clone()
+            }
+        }),
         value
             .get("body")
             .and_then(serde_json::Value::as_str)
@@ -1437,30 +1711,48 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
 
 /// Determine CI status from a `statusCheckRollup` array.
 fn ci_status_from_rollup(rollup: Option<&serde_json::Value>) -> String {
-    rollup
+    match ci_from_rollup(rollup) {
+        CiStatus::Passing => "SUCCESS",
+        CiStatus::Failing => "FAILURE",
+        CiStatus::Pending => "PENDING",
+        CiStatus::Unknown => "UNKNOWN",
+    }
+    .to_string()
+}
+
+fn ci_from_rollup(rollup: Option<&serde_json::Value>) -> CiStatus {
+    let Some(checks) = rollup
         .and_then(serde_json::Value::as_array)
-        .map(|checks| {
-            if checks.is_empty() {
-                return "UNKNOWN".to_string();
+        .filter(|c| !c.is_empty())
+    else {
+        return CiStatus::Unknown;
+    };
+    let mut pending = false;
+    for check in checks {
+        let state = if let Some(state) = check["state"].as_str() {
+            state
+        } else {
+            if check["status"]
+                .as_str()
+                .is_some_and(|s| !s.eq_ignore_ascii_case("COMPLETED"))
+            {
+                pending = true;
+                continue;
             }
-            let any_failure = checks.iter().any(|c| {
-                c["conclusion"].as_str() == Some("FAILURE")
-                    || c["conclusion"].as_str() == Some("failure")
-            });
-            let any_pending = checks.iter().any(|c| {
-                c["status"].as_str() == Some("IN_PROGRESS")
-                    || c["status"].as_str() == Some("QUEUED")
-                    || c["conclusion"].is_null()
-            });
-            if any_failure {
-                "FAILURE".to_string()
-            } else if any_pending {
-                "PENDING".to_string()
-            } else {
-                "SUCCESS".to_string()
-            }
-        })
-        .unwrap_or_else(|| "UNKNOWN".to_string())
+            check["conclusion"].as_str().unwrap_or("")
+        };
+        match state.to_ascii_uppercase().as_str() {
+            "SUCCESS" | "SKIPPED" | "NEUTRAL" => {}
+            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" | "STALE" => return CiStatus::Failing,
+            _ => pending = true,
+        }
+    }
+    if pending {
+        CiStatus::Pending
+    } else {
+        CiStatus::Passing
+    }
 }
 
 fn parse_github_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
@@ -2013,30 +2305,7 @@ pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
     let json: serde_json::Value =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr view JSON: {e}")))?;
 
-    let ci = match json.get("statusCheckRollup") {
-        Some(serde_json::Value::Array(checks)) => {
-            let all_pass = checks.iter().all(|c| {
-                c.get("conclusion")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s == "SUCCESS" || s == "NEUTRAL" || s == "SKIPPED")
-            });
-            let any_fail = checks.iter().any(|c| {
-                c.get("conclusion")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s == "FAILURE" || s == "CANCELLED" || s == "TIMED_OUT")
-            });
-            if checks.is_empty() {
-                CiStatus::Pending
-            } else if any_fail {
-                CiStatus::Failing
-            } else if all_pass {
-                CiStatus::Passing
-            } else {
-                CiStatus::Pending
-            }
-        }
-        _ => CiStatus::Unknown,
-    };
+    let ci = ci_from_rollup(json.get("statusCheckRollup"));
 
     let mergeable = json
         .get("mergeable")
@@ -2182,7 +2451,8 @@ where
     // SPEC #4093 FR-002: the inventory is a paged REST read (`core` budget,
     // one request per 100 rows), never `gh pr list` (GraphQL).
     let pages = crate::gh_rest::read_pages_with("repos/{owner}/{repo}/pulls?state=open", |path| {
-        let output = run_gh(repo_path, &["api", path]).map_err(|error| error.to_string())?;
+        let output =
+            run_gh(repo_path, &["api", path, "--include"]).map_err(|error| error.to_string())?;
         if output.success {
             Ok(output.stdout)
         } else {
@@ -2718,7 +2988,7 @@ mod tests {
             calls.push(args.iter().map(|arg| arg.to_string()).collect());
             Ok(GhCliOutput {
                 success: true,
-                stdout: r#"[{"number":7,"head":{"ref":"work/issue-43"}},{"number":9,"head":{"ref":"work/issue-43"}},{"number":8,"head":{"ref":"work/issue-44"}},{"number":10,"head":{"ref":""}}]"#.to_string(),
+                stdout: "HTTP/2.0 200 OK\n\r\n".to_owned() + r#"[{"number":7,"head":{"ref":"work/issue-43"}},{"number":9,"head":{"ref":"work/issue-43"}},{"number":8,"head":{"ref":"work/issue-44"}},{"number":10,"head":{"ref":""}}]"#,
                 stderr: String::new(),
             })
         })
@@ -2729,7 +2999,8 @@ mod tests {
             calls[0],
             [
                 "api",
-                "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1"
+                "repos/{owner}/{repo}/pulls?state=open&per_page=100&page=1",
+                "--include"
             ]
         );
         assert_eq!(
@@ -2987,6 +3258,61 @@ mod tests {
     }
 
     #[test]
+    fn completed_success_and_skipped_checks_are_not_false_failure_or_pending() {
+        // PM observations: #4144 had 13 SUCCESS + 2 SKIPPED; #4246 had
+        // 17 SUCCESS + 2 SKIPPED and was incorrectly treated as CI pending.
+        for (number, successes) in [(4144, 13), (4246, 17)] {
+            let mut checks = vec![
+                serde_json::json!({
+                    "status":"COMPLETED", "conclusion":"SUCCESS"
+                });
+                successes
+            ];
+            for name in ["Enable auto-merge", "Test (e5 e2e, optional)"] {
+                checks.push(serde_json::json!({"name":name,
+                    "status":"COMPLETED","conclusion":"SKIPPED"}));
+            }
+            let json = serde_json::json!({"number":number,"isDraft":true,
+                "statusCheckRollup":checks});
+            let inventory =
+                parse_pr_inventory_json(&serde_json::json!([json]).to_string(), Utc::now())
+                    .unwrap();
+            assert_eq!(inventory[0].ci_status, "SUCCESS", "PR #{number}");
+            assert_eq!(
+                parse_pr_check_report_json(&json.to_string()).unwrap().ci,
+                CiStatus::Passing
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_rollup_is_consistent_across_inventory_and_check_report() {
+        let mut checks = serde_json::json!([
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"},
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"NEUTRAL"},
+            {"__typename":"StatusContext","context":"CodeRabbit","state":"SUCCESS"}
+        ]);
+        let assert_ci = |checks: &serde_json::Value, label, ci| {
+            let json = serde_json::json!({"statusCheckRollup":checks}).to_string();
+            assert_eq!(parse_pr_status_json(&json).unwrap().ci_status, label);
+            assert_eq!(parse_pr_check_report_json(&json).unwrap().ci, ci);
+        };
+        assert_ci(&checks, "SUCCESS", CiStatus::Passing);
+        checks
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"status":"QUEUED","conclusion":null}));
+        assert_ci(&checks, "PENDING", CiStatus::Pending);
+        checks
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"state":"FAILURE"}));
+        assert_ci(&checks, "FAILURE", CiStatus::Failing);
+        assert_ci(&serde_json::json!([]), "UNKNOWN", CiStatus::Unknown);
+    }
+
+    #[test]
     fn parse_pr_status_open() {
         let json = r#"{
             "number": 123,
@@ -3168,12 +3494,12 @@ mod tests {
 
         let report = parse_pr_check_report_json(json).unwrap();
 
-        assert_eq!(report.ci, CiStatus::Pending);
+        assert_eq!(report.ci, CiStatus::Unknown);
         assert_eq!(report.merge, MergeStatus::Behind);
         assert_eq!(report.review, ReviewStatus::Pending);
         assert_eq!(
             report.summary,
-            "PR: Update branch required | CI: Pending | Merge: Behind | Review: Pending"
+            "PR: Update branch required | CI: Unknown | Merge: Behind | Review: Pending"
         );
     }
 
@@ -3189,12 +3515,12 @@ mod tests {
 
         let report = parse_pr_check_report_json(json).unwrap();
 
-        assert_eq!(report.ci, CiStatus::Pending);
+        assert_eq!(report.ci, CiStatus::Unknown);
         assert_eq!(report.merge, MergeStatus::Conflicts);
         assert_eq!(report.review, ReviewStatus::Pending);
         assert_eq!(
             report.summary,
-            "PR: Waiting on CI | CI: Pending | Merge: Conflicts | Review: Pending"
+            "PR: Waiting on CI | CI: Unknown | Merge: Conflicts | Review: Pending"
         );
     }
 
@@ -3919,6 +4245,7 @@ mod tests {
             ci_status: "SUCCESS".to_string(),
             review_status: "APPROVED".to_string(),
             body: "Closes #10".to_string(),
+            fallback_owner_closed: false,
             closing_issues: vec![],
         }
     }
@@ -4279,7 +4606,92 @@ mod tests {
             branch: branch.to_string(),
             ahead,
             last_commit_at: Some(last_commit_at.parse().expect("commit date")),
+            has_non_gwt_changes: Some(true),
         }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = gwt_core::process::run_git_logged(args, Some(repo)).expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_merge_projection_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-b", "develop"]);
+        git(tmp.path(), &["config", "user.email", "tests@example.com"]);
+        git(tmp.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(tmp.path().join("source.txt"), "initial\n").expect("write source");
+        std::fs::create_dir_all(tmp.path().join(".gwt")).expect("create .gwt");
+        std::fs::write(tmp.path().join(".gwt/state"), "initial\n").expect("write state");
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "initial"]);
+        tmp
+    }
+
+    #[test]
+    fn merge_projection_detects_source_changes() {
+        let tmp = init_merge_projection_repo();
+        git(tmp.path(), &["switch", "-c", "work/issue-4314"]);
+        std::fs::write(tmp.path().join("source.txt"), "feature\n").expect("write feature");
+        git(tmp.path(), &["add", "source.txt"]);
+        git(tmp.path(), &["commit", "-m", "feature"]);
+
+        assert_eq!(
+            branch_has_non_gwt_changes(tmp.path(), "develop", "work/issue-4314"),
+            Ok(true)
+        );
+        let nested = tmp.path().join("crates/example");
+        std::fs::create_dir_all(&nested).expect("create nested cwd");
+        assert_eq!(
+            branch_has_non_gwt_changes(&nested, "develop", "work/issue-4314"),
+            Ok(true),
+            "the source comparison is anchored at the repository root"
+        );
+    }
+
+    #[test]
+    fn merge_projection_ignores_squash_equivalent_source_and_gwt_only_residue() {
+        let tmp = init_merge_projection_repo();
+        git(tmp.path(), &["switch", "-c", "work/issue-4314"]);
+        std::fs::write(tmp.path().join("source.txt"), "landed\n").expect("write branch source");
+        std::fs::write(tmp.path().join(".gwt/state"), "branch bookkeeping\n")
+            .expect("write branch state");
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "branch change"]);
+
+        git(tmp.path(), &["switch", "develop"]);
+        std::fs::write(tmp.path().join("source.txt"), "landed\n").expect("write landed source");
+        git(tmp.path(), &["add", "source.txt"]);
+        git(tmp.path(), &["commit", "-m", "squash landed source"]);
+
+        assert_eq!(
+            branch_has_non_gwt_changes(tmp.path(), "develop", "work/issue-4314"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn merge_projection_ignores_conflicts_confined_to_gwt() {
+        let tmp = init_merge_projection_repo();
+        git(tmp.path(), &["switch", "-c", "work/issue-4314"]);
+        std::fs::write(tmp.path().join(".gwt/state"), "branch\n").expect("write branch state");
+        git(tmp.path(), &["add", ".gwt/state"]);
+        git(tmp.path(), &["commit", "-m", "branch bookkeeping"]);
+
+        git(tmp.path(), &["switch", "develop"]);
+        std::fs::write(tmp.path().join(".gwt/state"), "base\n").expect("write base state");
+        git(tmp.path(), &["add", ".gwt/state"]);
+        git(tmp.path(), &["commit", "-m", "base bookkeeping"]);
+
+        assert_eq!(
+            branch_has_non_gwt_changes(tmp.path(), "develop", "work/issue-4314"),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -4317,6 +4729,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["work/issue-3551", "work/issue-4069"]
         );
+    }
+
+    #[test]
+    fn unlanded_inventory_keeps_unknown_source_status_visible() {
+        let mut probe = unlanded_probe("work/issue-4314", 1, "2026-09-14T00:00:00Z");
+        probe.has_non_gwt_changes = None;
+
+        let rows = classify_unlanded_branches(vec![probe], &[]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].has_non_gwt_changes, None);
     }
 
     #[test]
@@ -4423,18 +4846,15 @@ mod tests {
     /// appended after `confirmed` can move a PR into or out of the sweep list.
     #[test]
     fn deferred_user_verification_is_read_from_the_recorded_value() {
-        for deferring in [
+        let deferring = "User Verification Result: Deferred — owner sweeps this later";
+        assert!(
+            body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
+            "must recognize the deferred value: {deferring}"
+        );
+        for settled in [
             "User Verification Result: deferred (autonomous execution)",
             "- User Verification Result: deferred (autonomous execution)",
             "**User Verification Result:** deferred (autonomous execution)",
-            "User Verification Result: Deferred — owner sweeps this later",
-        ] {
-            assert!(
-                body_defers_user_verification(&format!("## Verification\n{deferring}\n")),
-                "must recognize the deferred value: {deferring}"
-            );
-        }
-        for settled in [
             "User Verification Result: confirmed",
             "User Verification Result: n/a (autonomous)",
             "User Verification Result: n/a (no UI surface)",
@@ -4474,7 +4894,7 @@ mod tests {
             ..PrInventoryOptions::default()
         };
         let hydrated = inventory_item_from_fields(fields.clone(), now_3868(), &options);
-        assert_eq!(hydrated.deferred_user_verification, Some(true));
+        assert_eq!(hydrated.deferred_user_verification, Some(false));
 
         fields.body = "Closes #10\nUser Verification Result: confirmed\n".to_string();
         let confirmed = inventory_item_from_fields(fields, now_3868(), &options);
@@ -4694,6 +5114,7 @@ mod tests {
             "url": format!("https://github.com/o/r/pull/{number}"),
             "isDraft": false,
             "headRefName": format!("work/issue-{number}"),
+            "closingIssuesReferences": [{"number":number,"state":"OPEN"}],
             "updatedAt": updated_at,
             "mergeable": "MERGEABLE",
             "mergeStateStatus": merge_state,
@@ -4742,6 +5163,7 @@ mod tests {
                 )),
                 ["pr", "list", ..] => {
                     let json_fields = args[args.len() - 1];
+                    assert!(json_fields.contains("headRefOid"));
                     assert!(
                         !json_fields.contains("statusCheckRollup") && !json_fields.contains("body"),
                         "the list query must stay light (AC-2): {json_fields}"
@@ -4768,18 +5190,134 @@ mod tests {
         now: DateTime<Utc>,
         options: &PrInventoryOptions,
     ) -> Result<PrInventoryRead> {
+        let gh = std::sync::Mutex::new(gh);
         fetch_pr_inventory_cached_with(
             Path::new("/tmp/repo"),
             &tmp.join(PR_INVENTORY_CACHE_FILE),
             ledger,
             now,
             options,
-            |_, args| gh.run(args),
+            |_, args| gh.lock().unwrap().run(args),
         )
     }
 
     fn light_list_call() -> String {
         format!("pr list --state open --limit 100 --json {INVENTORY_LIGHT_JSON_FIELDS}")
+    }
+
+    #[test]
+    fn missing_fallback_owner_does_not_hide_other_closed_owners() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::at(tmp.path());
+        let mut rows = vec![
+            serde_json::json!({"headRefName":"work/issue-3972"}),
+            serde_json::json!({"headRefName":"work/issue-999999"}),
+        ];
+        hydrate_fallback_owners(Path::new("/tmp/repo"), &mut rows, &ledger, now_3891(), &mut |_, _| Ok(GhCliOutput {
+            success: false, stderr: "Could not resolve to an Issue".into(),
+            stdout: serde_json::json!({"data":{"repository":{"owner_3972":{"state":"CLOSED"},"owner_999999":null}},
+                "errors":[{"type":"NOT_FOUND","path":["repository","owner_999999"]}]}).to_string()
+        })).unwrap();
+        assert_eq!(rows[0]["fallbackOwnerState"], "CLOSED");
+        assert_eq!(rows[1]["fallbackOwnerState"], "UNKNOWN");
+    }
+
+    #[test]
+    fn inventory_resolves_fallback_owner_state_within_call_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut rows: Vec<_> = (1..=35)
+            .map(|n| light_row(n, "2026-09-01T00:00:00Z", "CLEAN"))
+            .collect();
+        for row in &mut rows {
+            row["headRefName"] = serde_json::json!("work/issue-3972");
+            row["closingIssuesReferences"] = serde_json::json!([]);
+        }
+        let mut gh = FakeGh::new(rows);
+        let mut owner_closed = false;
+        for offset in [0, PR_INVENTORY_CACHE_TTL_SECS + 1] {
+            // The hydration loop fans out across threads, so `run_gh` is a
+            // `Fn + Sync`: the call counter and the fake CLI need interior
+            // mutability rather than a captured `&mut`.
+            let owner_calls = std::sync::atomic::AtomicUsize::new(0);
+            let calls_before = gh.calls.len();
+            let now = now_3891() + chrono::Duration::seconds(offset);
+            let read = {
+                let gh = std::sync::Mutex::new(&mut gh);
+                fetch_pr_inventory_cached_with(
+                    Path::new("/tmp/repo"),
+                    &tmp.path().join(PR_INVENTORY_CACHE_FILE),
+                    &ledger,
+                    now,
+                    &PrInventoryOptions::default(),
+                    |_, args| {
+                        if args.starts_with(&["api", "graphql"]) {
+                            owner_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let query = args.join(" ");
+                            assert_eq!(query.matches("issue(number:3972)").count(), 1);
+                            assert!(query.contains(github_budget::GRAPHQL_RATE_LIMIT_SELECTION));
+                            ledger.record_spawn_from(
+                                GitHubQuota::GraphQl,
+                                &github_budget::spawn_source(args),
+                                now,
+                            );
+                            Ok(GhCliOutput {
+                                success: true,
+                                stderr: String::new(),
+                                stdout: serde_json::json!({"data":{
+                                    "rateLimit":{"cost":3,"remaining":4700,"resetAt":"2026-09-02T01:00:00Z","nodeCount":1},
+                                    "repository":{"owner_3972":{"state":
+                                    if owner_closed {"CLOSED"} else {"OPEN"}
+                                }}}})
+                                .to_string(),
+                            })
+                        } else {
+                            gh.lock().unwrap().run(args)
+                        }
+                    },
+                )
+                .unwrap()
+            };
+            let owner_calls = owner_calls.into_inner();
+            assert_eq!(owner_calls, 1);
+            let budget = ledger.snapshot(now);
+            assert_eq!(
+                budget.local["graphql"].points_last_hour,
+                if offset == 0 { 3 } else { 6 }
+            );
+            assert_eq!(budget.probe.unwrap().resources["graphql"].remaining, 4700);
+            let actual_calls = owner_calls
+                + gh.calls[calls_before..]
+                    .iter()
+                    .filter(|call| call.as_str() != "api rate_limit")
+                    .count();
+            assert_eq!(read.github_calls as usize, actual_calls);
+            if offset == 0 {
+                assert_eq!(actual_calls, 31);
+                assert_eq!(
+                    gh.calls[calls_before..]
+                        .iter()
+                        .filter(|call| call.starts_with("pr view "))
+                        .count(),
+                    29
+                );
+            }
+            assert!(read.github_calls <= 31);
+            assert!(read.items.iter().all(|item| item.owner_issue == Some(3972)
+                && item.owner_issue_closed == owner_closed
+                && item.closing_issues.is_empty()));
+            owner_closed = true;
+        }
+        let cached = cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 2),
+            &PrInventoryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(cached.github_calls, 0);
+        assert!(cached.items.iter().all(|item| item.owner_issue_closed));
     }
 
     #[test]
@@ -4801,6 +5339,8 @@ mod tests {
         )
         .expect("read");
 
+        // Hydration order is intentionally independent of inventory order.
+        gh.calls[2..].sort();
         assert_eq!(
             gh.calls,
             vec![
@@ -4812,6 +5352,8 @@ mod tests {
         );
         assert_eq!(read.source, "github");
         assert_eq!(read.github_calls, 3, "the free probe is not a budget call");
+        assert_eq!(read.hydrated, 2);
+        assert_eq!(read.skipped_unchanged, 0);
         assert_eq!(read.throttled, None);
         assert_eq!(read.items[0].lifecycle, "MERGE-CANDIDATE");
         assert_eq!(read.items[1].lifecycle, "CI-RED");
@@ -4888,9 +5430,64 @@ mod tests {
         );
         assert_eq!(second.source, "cache");
         assert_eq!(second.github_calls, 0);
+        assert_eq!(
+            second.skipped_unchanged, 0,
+            "cache hits do not compare live revisions"
+        );
         assert_eq!(second.cache_age_secs, Some(60));
         assert_eq!(second.items[0].lifecycle, first.items[0].lifecycle);
         assert_eq!(second.items[0].ci_status, "SUCCESS");
+    }
+
+    /// Issue #4308 AC-1/AC-3: an unchanged PM cycle costs one bulk read,
+    /// even when every draft has no checks and the snapshot TTL has elapsed.
+    #[test]
+    fn inventory_unchanged_drafts_after_ttl_need_only_the_bulk_list() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let rows = (1..=30)
+            .map(|number| {
+                let mut row = light_row(number, "2026-09-01T00:00:00Z", "CLEAN");
+                row["isDraft"] = serde_json::json!(true);
+                row["headRefOid"] = serde_json::json!(format!("head-{number}"));
+                row
+            })
+            .collect();
+        let mut gh = FakeGh::new(rows);
+        gh.views = (1..=30)
+            .map(|number| (number, r#"{"statusCheckRollup":[]}"#.to_string()))
+            .collect();
+        gh.views
+            .insert(30, r#"{"statusCheckRollup":null}"#.to_string());
+        let options = PrInventoryOptions::default();
+        cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("warm");
+        gh.calls.clear();
+        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let read = cached_read(tmp.path(), &ledger, &mut gh, later, &options).expect("periodic");
+        assert_eq!(gh.calls, vec![light_list_call()]);
+        assert_eq!(read.github_calls, 1);
+        assert_eq!(read.items.len(), 30);
+        assert_eq!(read.hydrated, 0);
+        assert_eq!(read.skipped_unchanged, 30);
+
+        // A head change invalidates an empty rollup even without updatedAt changing.
+        gh.calls.clear();
+        gh.rows[0]["headRefOid"] = serde_json::json!("new-head");
+        cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+            &options,
+        )
+        .expect("changed head");
+        assert_eq!(
+            gh.calls,
+            vec![
+                light_list_call(),
+                "pr view 1 --json statusCheckRollup".to_string()
+            ]
+        );
     }
 
     /// AC-2: heavy fields are re-fetched only for PRs whose real data changed
@@ -4911,22 +5508,30 @@ mod tests {
         cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("first");
         gh.calls.clear();
 
-        // TTL elapsed, nothing changed: only the pending PR is re-checked.
+        // The snapshot TTL elapsed, but the independent checks interval has not.
         let second_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
         cached_read(tmp.path(), &ledger, &mut gh, second_at, &options).expect("second");
         assert_eq!(
             gh.calls,
+            vec![light_list_call()],
+            "pending checks must not be refreshed at every snapshot expiry"
+        );
+        gh.calls.clear();
+
+        let checks_at = now_3891() + chrono::Duration::seconds(602);
+        cached_read(tmp.path(), &ledger, &mut gh, checks_at, &options).expect("checks due");
+        assert_eq!(
+            gh.calls,
             vec![
                 light_list_call(),
-                "pr view 4 --json statusCheckRollup".to_string(),
-            ],
-            "the probe is still fresh and PR 3 is final, so neither is re-read"
+                "pr view 4 --json statusCheckRollup".to_string()
+            ]
         );
         gh.calls.clear();
 
         // PR 3 got a new commit: its updatedAt moved, so it is hydrated again.
         gh.rows[0] = light_row(3, "2026-09-02T00:30:00Z", "CLEAN");
-        let third_at = second_at + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let third_at = checks_at + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
         let third = cached_read(tmp.path(), &ledger, &mut gh, third_at, &options).expect("third");
         assert!(
             gh.calls
@@ -4935,6 +5540,75 @@ mod tests {
             gh.calls
         );
         assert_eq!(third.items[0].lifecycle, "MERGE-CANDIDATE");
+    }
+
+    #[test]
+    fn inventory_hydrates_five_changed_prs_concurrently() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let gh = FakeGh::new(
+            (1..=35)
+                .map(|number| light_row(number, "2026-09-01T00:00:00Z", "CLEAN"))
+                .collect(),
+        );
+        let options = PrInventoryOptions::default();
+        let gh = Mutex::new(gh);
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let read_at = |now| {
+            fetch_pr_inventory_cached_with(
+                Path::new("/tmp/repo"),
+                &tmp.path().join(PR_INVENTORY_CACHE_FILE),
+                &ledger,
+                now,
+                &options,
+                |_, args| {
+                    let output = gh.lock().unwrap().run(args);
+                    if args.starts_with(&["pr", "view"]) {
+                        let active = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(active, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        running.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    output
+                },
+            )
+        };
+        let cold = read_at(now_3891()).expect("warm first 30");
+        assert_eq!(cold.github_calls, 31, "the per-read cap remains 30");
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            5,
+            "cold reads must be bounded too"
+        );
+        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        read_at(later).expect("warm remaining 5");
+        {
+            let mut gh = gh.lock().unwrap();
+            for row in &mut gh.rows[..5] {
+                row["updatedAt"] = serde_json::json!("2026-09-01T00:10:00Z");
+            }
+            gh.calls.clear();
+        }
+        peak.store(0, Ordering::SeqCst);
+        let read = read_at(later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1))
+            .expect("changed cycle");
+        assert_eq!(read.github_calls, 6);
+        assert_eq!(read.hydrated, 5);
+        assert_eq!(read.skipped_unchanged, 30);
+        let peak = peak.load(Ordering::SeqCst);
+        assert_eq!(peak, 5, "the five changed PRs should hydrate together");
+        assert_eq!(
+            read.items
+                .iter()
+                .map(|item| item.number)
+                .collect::<Vec<_>>(),
+            (1..=35).collect::<Vec<_>>()
+        );
     }
 
     /// AC-4 / AC-7: with the budget below the reserve, a periodic read is

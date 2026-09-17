@@ -9,8 +9,8 @@ use gwt::issue_monitor::{
     scan_issue_monitor_candidates_with_provenance, AutonomousIssueRecord, AutonomousPhase,
     IssueClosureEvidence, IssueClosureRecord, IssueClosureState, IssueMonitorCandidateSource,
     IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorIssue, IssueMonitorIssueState,
-    IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorState, MonitorInboxState,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    IssueMonitorPrefs, IssueMonitorReadiness, IssueMonitorState, IssueMonitorUpdateDrainReason,
+    MonitorInboxState, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
 };
 use gwt::issue_monitor_worker::{
     scan_loaded_issue_monitor_candidates, LoadedIssueMonitorCandidates,
@@ -2095,6 +2095,7 @@ fn rebase_rejects_an_older_explicit_reopen_above_an_absence_revision_floor() {
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-03T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2105,6 +2106,7 @@ fn rebase_rejects_an_older_explicit_reopen_above_an_absence_revision_floor() {
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::CompleteLiveAbsence,
             issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2135,6 +2137,7 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2145,6 +2148,7 @@ fn higher_generation_absence_closes_open_even_when_its_floor_is_older() {
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::CompleteLiveAbsence,
             issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2269,6 +2273,7 @@ fn rebase_keeps_a_newer_generation_reopen_at_the_absence_floor_revision() {
         state: IssueClosureState::Reopened,
         evidence: IssueClosureEvidence::ExplicitRevision,
         issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+        reopened_after_close: false,
     };
     let absence = IssueClosureRecord {
         issue_number: 42,
@@ -2276,6 +2281,7 @@ fn rebase_keeps_a_newer_generation_reopen_at_the_absence_floor_revision() {
         state: IssueClosureState::Closed,
         evidence: IssueClosureEvidence::CompleteLiveAbsence,
         issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+        reopened_after_close: false,
     };
     for (local, disk) in [
         (reopened.clone(), absence.clone()),
@@ -2314,6 +2320,7 @@ fn revision_winner_preserves_the_highest_merged_generation() {
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-04T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2324,6 +2331,7 @@ fn revision_winner_preserves_the_highest_merged_generation() {
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2354,6 +2362,7 @@ fn equal_explicit_revision_conflict_prefers_closed_over_higher_generation_reopen
             state: IssueClosureState::Reopened,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2364,6 +2373,7 @@ fn equal_explicit_revision_conflict_prefers_closed_over_higher_generation_reopen
             state: IssueClosureState::Closed,
             evidence: IssueClosureEvidence::ExplicitRevision,
             issue_updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2390,6 +2400,7 @@ fn explicit_closed_evidence_survives_equivalent_timestamp_absence_rebase() {
             state: IssueClosureState::Closed,
             evidence,
             issue_updated_at: Some(revision.to_string()),
+            reopened_after_close: false,
         }],
         ..IssueMonitorPrefs::default()
     };
@@ -2771,6 +2782,61 @@ fn legacy_failure_migration_is_one_shot_even_when_no_initial_target_exists() {
     assert_eq!(monitor.queue_len(), 0);
 }
 
+/// Issue #4436 AC-1 / AC-2: a readiness read that failed for one Issue is
+/// reported on that Issue's own row, and the pass is not declared failed.
+///
+/// One `gwt-spec` Issue whose cache entry could not be parsed used to publish
+/// `issue readiness refresh failed: …` as the monitor-wide `last_error`, which
+/// put `issue.monitor.status` into `error` for a scan whose list and whose
+/// other Issues had refreshed completely. The reason never reached the row it
+/// described, so the only way to find the Issue was to read the banner.
+#[test]
+fn a_readiness_refresh_failure_lands_on_its_own_row_not_on_the_whole_scan() {
+    let repo = init_resolvable_git_repo();
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+    monitor.set_gui_connected(true);
+
+    let loaded = LoadedIssueMonitorCandidates {
+        issues: vec![issue(4378, &["bug"]), issue(4388, &["gwt-spec"])],
+        source: IssueMonitorCandidateSource::Live,
+        live_error: None,
+        readiness_failures: vec![gwt::IssueReadinessFailure {
+            number: 4388,
+            reason: "targeted refresh parse failed: broken index map".to_string(),
+        }],
+    };
+
+    scan_loaded_issue_monitor_candidates(
+        &mut monitor,
+        &loaded,
+        repo.path(),
+        "2026-09-16T02:35:00Z",
+    );
+
+    let skipped = monitor.inbox_item(4388).expect("skipped row");
+    assert_eq!(skipped.state, MonitorInboxState::NotReady);
+    assert!(
+        skipped
+            .exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("broken index map")),
+        "the row must carry its own reason, got {:?}",
+        skipped.exclusion_reason
+    );
+
+    let unrelated = monitor.inbox_item(4378).expect("unrelated row");
+    assert_eq!(
+        unrelated.state,
+        MonitorInboxState::Queued,
+        "an unrelated Issue keeps its place in the queue"
+    );
+    assert_eq!(
+        monitor.status_view().last_error,
+        None,
+        "one skipped Issue is not a failed readiness refresh"
+    );
+}
+
 #[test]
 fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     let repo = init_resolvable_git_repo();
@@ -2784,6 +2850,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
         issues: vec![issue(42, &["bug"]), issue(43, &["enhancement"])],
         source: IssueMonitorCandidateSource::Live,
         live_error: None,
+        readiness_failures: Vec::new(),
     };
     scan_loaded_issue_monitor_candidates(
         &mut monitor,
@@ -3713,4 +3780,257 @@ fn a_claim_block_is_revalidated_once_the_issue_changed_under_it() {
     assert_eq!(item.state, MonitorInboxState::Queued);
     assert_eq!(item.blocked_by_claim_id, None);
     assert_eq!(item.claim_expires_at, None);
+}
+
+/// Build the 2026-08-17 blackout shape: an enabled monitor holding failed work
+/// and running nothing at all.
+fn blacked_out_monitor() -> IssueMonitorState {
+    let mut monitor = IssueMonitorState::with_prefs(
+        IssueMonitorConfig {
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        },
+        IssueMonitorPrefs {
+            enabled: true,
+            failed_issues: vec![IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "an execution generation already exists for issue #42".to_string(),
+                window_id: None,
+            }],
+            ..IssueMonitorPrefs::default()
+        },
+    );
+    // Every launch path is gated on an attached GUI, so the outage is only
+    // meaningful when one is there to launch through.
+    monitor.set_gui_connected(true);
+    monitor
+}
+
+/// A raised update drain (#4037) holds admission on purpose: the fleet is meant
+/// to be at zero agents until the staged update applies. The same is true of a
+/// provider quota hold. Both landed on develop after the blackout check was
+/// written, and both look identical to the outage from the inside — enabled,
+/// GUI attached, backlog runnable, nothing running — so without this the field
+/// fires on every routine drain and readers learn to skip it.
+#[test]
+fn a_deliberate_launch_hold_is_not_a_blackout() {
+    let mut monitor = blacked_out_monitor();
+    monitor.set_update_drain(
+        IssueMonitorUpdateDrainReason::Manual,
+        "9.91.0",
+        "2026-08-17T00:00:00Z",
+    );
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+        "a drained fleet is idle by instruction, not by outage"
+    );
+
+    // Clearing the drain re-arms the check: the onset starts at the first scan
+    // that sees a fleet which could be launching and is not.
+    monitor.clear_update_drain();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T01:00:00Z");
+
+    assert!(
+        monitor
+            .agent_status_at("2026-08-17T02:00:00Z")
+            .agent_blackout
+            .is_some(),
+        "once admission reopens, a fleet that still runs nothing is an outage"
+    );
+}
+
+/// A detached GUI cannot launch anything by design — the ordinary state
+/// whenever the app is closed. An outage raised for it would fire nightly.
+#[test]
+fn a_detached_gui_is_not_a_blackout() {
+    let mut monitor = blacked_out_monitor();
+    monitor.set_gui_connected(false);
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+    );
+}
+
+/// Issue #3628 AC-5: the blackout itself. Nine issues fell to `agent_failed`,
+/// zero agents ran, and every escalation surface stayed empty — `needs_human`
+/// had nothing in it, so the operator had no signal that the fleet was down.
+#[test]
+fn agent_status_at_escalates_a_fleet_with_no_agent_running() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T00:00:29Z")
+            .agent_blackout,
+        None,
+        "a fleet inside the blackout window is not yet escalated"
+    );
+
+    let escalated = monitor.agent_status_at("2026-08-17T00:00:30Z");
+    assert!(
+        escalated
+            .agent_blackout
+            .as_deref()
+            .is_some_and(|reason| reason.contains("2026-08-17T00:00:00Z")),
+        "the blackout must name when the fleet went to zero: {:?}",
+        escalated.agent_blackout
+    );
+    assert!(
+        escalated.needs_human.is_empty(),
+        "the blackout is a fleet fact and must not be faked onto an issue"
+    );
+}
+
+/// The clock is "how long has the fleet been at zero", not "how long since the
+/// last scan". A recovered agent must clear it, or the escalation outlives the
+/// outage it reports.
+#[test]
+fn a_running_agent_clears_the_blackout_clock() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+    assert!(monitor
+        .agent_status_at("2026-08-17T00:01:00Z")
+        .agent_blackout
+        .is_some());
+
+    monitor.complete_active_launch(42, "tab-1::agent-1");
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:01:10Z");
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T00:02:00Z")
+            .agent_blackout,
+        None,
+        "a running agent means the fleet is not down"
+    );
+}
+
+/// An idle monitor with nothing to run is not a blackout. Flagging it would
+/// train readers to ignore the field.
+#[test]
+fn an_empty_backlog_is_not_a_blackout() {
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        poll_interval_secs: 10,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+    );
+}
+
+/// A disabled monitor runs nothing on purpose.
+#[test]
+fn a_disabled_monitor_never_reports_a_blackout() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+    monitor.set_enabled(false);
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+    );
+}
+
+/// Issue #3616: work deliberately parked until a provider quota resets is
+/// waiting, not stranded. A blackout raised for it would fire on every rate
+/// limit and be tuned out before the real outage arrived.
+#[test]
+fn work_parked_until_a_quota_reset_is_not_a_blackout() {
+    let mut monitor = IssueMonitorState::with_prefs(
+        IssueMonitorConfig {
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        },
+        IssueMonitorPrefs {
+            enabled: true,
+            autonomous_records: vec![AutonomousIssueRecord {
+                issue_number: 42,
+                retry_not_before: Some("2026-08-18T00:00:00Z".to_string()),
+                retry_hold_reason: Some("provider usage limit".to_string()),
+                ..AutonomousIssueRecord::new(42)
+            }],
+            ..IssueMonitorPrefs::default()
+        },
+    );
+    monitor.set_gui_connected(true);
+    monitor.record_candidate(issue(42, &["auto-improve"]));
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    assert_eq!(
+        monitor
+            .agent_status_at("2026-08-17T01:00:00Z")
+            .agent_blackout,
+        None,
+        "a queue held behind a future retry floor is parked, not blacked out"
+    );
+}
+
+/// The onset has to survive the process that observed it. The question "has
+/// the fleet been down for a while?" is asked precisely when the driver that
+/// watched it go down is gone.
+#[test]
+fn the_blackout_onset_survives_a_prefs_roundtrip() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+
+    let prefs = monitor.prefs();
+    assert_eq!(
+        prefs.agent_blackout_since.as_deref(),
+        Some("2026-08-17T00:00:00Z")
+    );
+
+    let restored = IssueMonitorState::with_prefs(
+        IssueMonitorConfig {
+            poll_interval_secs: 10,
+            ..IssueMonitorConfig::default()
+        },
+        prefs,
+    );
+    assert!(
+        restored
+            .agent_status_at("2026-08-17T00:01:00Z")
+            .agent_blackout
+            .is_some(),
+        "a reader holding only the prefs file must still see the outage"
+    );
+}
+
+/// The blackout must not be maskable by an unrelated per-issue error. In the
+/// incident `last_error` already carried a launch failure, which is exactly how
+/// a projection onto that field would have stayed invisible.
+#[test]
+fn a_recorded_error_does_not_hide_the_agent_blackout() {
+    let mut monitor = blacked_out_monitor();
+    scan_issue_monitor_candidates(&mut monitor, &[], "2026-08-17T00:00:00Z");
+    monitor.record_scan_error("2026-08-17T00:01:00Z", "issue #2338: generation exists");
+
+    let status = monitor.agent_status_at("2026-08-17T00:02:00Z");
+
+    assert_eq!(
+        status.last_error.as_deref(),
+        Some("issue #2338: generation exists"),
+        "the recorded error keeps its own surface"
+    );
+    assert!(
+        status.agent_blackout.is_some(),
+        "the blackout must have a field an existing error cannot occupy"
+    );
 }
