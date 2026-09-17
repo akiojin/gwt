@@ -12,7 +12,10 @@
 //! mirrors are rendered from [`SKILL_BODY_EN`], and drift is guarded by the
 //! phrase-presence tests below.
 
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use crate::settings_local::write_text_atomically;
 
@@ -1190,8 +1193,13 @@ pub fn generate_pm_guidance_for_codex(worktree: &Path) -> io::Result<()> {
     write_skill_md(&worktree.join(".codex").join("skills"))
 }
 
+/// Path of the generated guidance within a provider's skills root.
+pub fn skill_path(skills_root: &Path) -> PathBuf {
+    skills_root.join(SKILL_NAME).join("SKILL.md")
+}
+
 fn write_skill_md(skills_root: &Path) -> io::Result<()> {
-    let path = skills_root.join(SKILL_NAME).join("SKILL.md");
+    let path = skill_path(skills_root);
     write_text_atomically(&path, &render_skill_md())
 }
 
