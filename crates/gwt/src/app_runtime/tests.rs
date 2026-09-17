@@ -61852,16 +61852,25 @@ fn pm_ensure_respects_auto_start_opt_out() {
 
 #[test]
 fn pm_ensure_spawns_fresh_pm_when_unregistered() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_pm_ensure_spawns_from_default_branch("develop", true);
 }
 
 #[test]
 fn pm_ensure_spawns_from_main_without_valid_cached_origin_head() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_pm_ensure_spawns_from_default_branch("main", false);
 }
 
 #[test]
 fn pm_ensure_spawns_from_master_with_cached_origin_head() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_pm_ensure_spawns_from_default_branch("master", true);
 }
 
@@ -61869,9 +61878,7 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
     let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
     // FR-001/FR-002: no registration + auto_start default ON => silent spawn
     // with a pending PM marker so launch completion can register the session.
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Each test caller owns the process environment lock for this fixture.
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
