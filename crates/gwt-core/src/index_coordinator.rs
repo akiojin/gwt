@@ -364,10 +364,11 @@ pub struct HeavyLeaseStatus {
     pub queue: Vec<HeavyQueueEntry>,
     /// Issue #4086 AC-4: what kind of job holds the lease.
     pub holder_kind: Option<HeavyHolderKind>,
-    /// Index holders only: batches left according to the runner's progress.
+    /// Units left according to the holder's published progress: batches for
+    /// an index job, commands for a `verify.run` (Issue #4280 AC-2).
     pub remaining_batches: Option<u64>,
-    /// Best-effort wait estimate: the TTL remainder for a verification
-    /// holder, `remaining_batches × batch_ms` for an index holder.
+    /// Best-effort wait estimate: `remaining_batches × batch_ms`, or the TTL
+    /// remainder for a verification holder that has not finished a command.
     pub estimated_remaining_ms: Option<u64>,
 }
 
@@ -822,14 +823,24 @@ impl IndexCoordinator {
         let remaining_ms = ticket.expires_at_ms.map(|at| at.saturating_sub(now));
         let holder_kind = HeavyHolderKind::of_target(&ticket.target);
         let progress = match holder_kind {
-            HeavyHolderKind::Index => self.read_heavy_progress().filter(|progress| {
+            HeavyHolderKind::Other => None,
+            _ => self.read_heavy_progress().filter(|progress| {
                 progress.target == ticket.target && progress.updated_at_ms >= ticket.acquired_at_ms
             }),
-            _ => None,
         };
         let remaining_batches = progress.as_ref().map(HeavyProgress::remaining_batches);
         let estimated_remaining_ms = match holder_kind {
-            HeavyHolderKind::Verification => remaining_ms,
+            // Issue #4280 AC-2: once a command has finished its pace prices
+            // the rest; before that only the TTL bounds the wait.
+            HeavyHolderKind::Verification => progress
+                .as_ref()
+                .filter(|progress| progress.done > 0)
+                .map(|progress| {
+                    progress
+                        .remaining_batches()
+                        .saturating_mul(progress.batch_ms)
+                })
+                .or(remaining_ms),
             HeavyHolderKind::Index => progress.as_ref().map(|progress| {
                 progress
                     .remaining_batches()
@@ -1304,6 +1315,30 @@ impl HeavyLease {
 
     pub fn is_expired(&self) -> bool {
         self.ticket.expires_at_ms.is_some_and(|at| now_ms() >= at)
+    }
+
+    /// Publish this holder's progress, `done` of `total` units finished at
+    /// `unit_ms` each (Issue #4280 AC-2). A `verify.run` holder reports its
+    /// command matrix this way, so a refused claimant sees how many commands
+    /// are left and a paced estimate instead of only the TTL remainder.
+    pub fn publish_progress(
+        &self,
+        done: u64,
+        total: u64,
+        unit_ms: u64,
+    ) -> Result<(), CoordinatorError> {
+        write_json_atomic(
+            &self.root.join(HEAVY_PROGRESS_FILE),
+            &HeavyProgress {
+                target: self.ticket.target.clone(),
+                done,
+                total,
+                batch_size: 1,
+                batch_ms: unit_ms,
+                updated_at_ms: now_ms(),
+            },
+        )?;
+        Ok(())
     }
 
     /// Push the TTL deadline out by `ttl` from now (FR-2). The republished
@@ -2915,5 +2950,88 @@ mod tests {
         assert_eq!(HeavyHolderKind::Index.as_str(), "index");
         assert_eq!(HeavyHolderKind::Verification.as_str(), "verification");
         assert_eq!(HeavyHolderKind::Other.as_str(), "other");
+    }
+
+    /// Issue #4280 AC-2: a verification holder publishes how many commands its
+    /// run has left and how long each takes, so a waiter reads a real ETA and
+    /// whether another command follows, instead of only the TTL remainder.
+    #[test]
+    fn heavy_lease_status_reports_a_verification_runs_remaining_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let guard = own(
+            &coordinator,
+            &verification_key(),
+            JobPriority::ManualRebuild,
+        );
+        let heavy = guard
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(2_700))
+            .unwrap();
+
+        // Nothing has finished yet: the commands still to run are known, their
+        // pace is not, so the TTL remainder stays the estimate.
+        heavy.publish_progress(0, 3, 0).unwrap();
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(status.remaining_batches, Some(3));
+        assert_eq!(status.estimated_remaining_ms, status.remaining_ms);
+
+        // One command took 40 s and two are left.
+        heavy.publish_progress(1, 3, 40_000).unwrap();
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(status.remaining_batches, Some(2));
+        assert_eq!(status.estimated_remaining_ms, Some(80_000));
+
+        drop(heavy);
+        guard.complete(JobOutcome::Completed).unwrap();
+    }
+
+    /// Issue #4280 AC-1: a holder that finishes one run and immediately starts
+    /// the next rejoins the queue behind the claimant that waited through the
+    /// first one. Granting consumed its earlier place, so the second run is a
+    /// newcomer and never chains batches past a waiter.
+    #[test]
+    fn a_holder_that_comes_straight_back_queues_behind_the_waiter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let holder_key = TargetKey::verification("repo", "holder");
+        let waiter_key = TargetKey::verification("repo", "waiter");
+        let holder = own(&coordinator, &holder_key, JobPriority::ManualRebuild);
+        let first_batch = holder
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+            .unwrap();
+
+        // The waiter is refused while the first batch runs and leaves its
+        // reserved turn behind, exactly as a deferred `verify.run` does.
+        let waiter = own(&coordinator, &waiter_key, JobPriority::ManualRebuild);
+        assert!(matches!(
+            waiter.acquire_heavy_with_ttl(Duration::from_millis(100), Duration::from_secs(60)),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+
+        // Batch boundary: the holder releases and asks again at once.
+        drop(first_batch);
+        let second_batch =
+            holder.acquire_heavy_with_ttl(Duration::from_millis(300), Duration::from_secs(60));
+        assert!(
+            matches!(second_batch, Err(CoordinatorError::Timeout { .. })),
+            "the returning holder must queue behind the reserved waiter"
+        );
+        let status = coordinator.heavy_lease_status().unwrap();
+        assert_eq!(
+            status
+                .queue
+                .iter()
+                .map(|entry| entry.target.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec![waiter_key.file_stem(), holder_key.file_stem()],
+            "service order after the boundary: waiter first, returning holder last"
+        );
+
+        let turn = waiter
+            .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+            .expect("the waiter takes the lease the holder handed back");
+        drop(turn);
+        waiter.complete(JobOutcome::Completed).unwrap();
+        holder.complete(JobOutcome::Completed).unwrap();
     }
 }
