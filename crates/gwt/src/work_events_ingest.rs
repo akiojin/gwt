@@ -6,28 +6,33 @@
 //! local worktree filesystems (the base/main checkout included) and fetched
 //! `origin/*` refs (checkout-free blob reads) — and funnels each through the
 //! idempotent gwt-core intake into the home works projection. A fingerprint
-//! cache (`work-events-intake.json`) skips unchanged sources; deleting it is
+//! cache (`work-events-intake/`) skips unchanged sources; deleting it is
 //! always safe (dedup is event-id based, SC-260). After first validation,
 //! immutable local shards and the frozen legacy logs use size/mtime/container
 //! metadata to avoid payload I/O on the 30-second unchanged poll; metadata
-//! changes force revalidation.
+//! changes force revalidation. The cache is kept per source group — one per
+//! worktree, one per origin ref — so a group whose snapshot (worktree
+//! metadata digest, ref commit) is unchanged is neither re-derived nor
+//! rewritten (#4397).
 //!
 //! Git blob contents are OID-deduplicated and read in one `cat-file --batch`;
 //! tree enumeration is checkout-free and unique-commit deduplicated. Callers
 //! run this off the UI thread.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-#[cfg(test)]
-use gwt_core::work_events_intake::ingest_work_events_content;
 use gwt_core::work_events_intake::{
     content_fingerprint, ingest_work_event_sources_with_local_path, ingest_work_events_sources,
-    load_work_events_intake_state, rebuild_work_events_with_shared_loader,
-    save_work_events_intake_state, SharedWorkEventsSource,
+    rebuild_work_events_with_shared_loader, work_events_intake_group_of, SharedWorkEventsSource,
+    WorkEventsIntakeStore,
+};
+#[cfg(test)]
+use gwt_core::work_events_intake::{
+    ingest_work_events_content, load_work_events_intake_state, save_work_events_intake_state,
 };
 use gwt_core::workspace_projection::WorkspaceExecutionContainerRef;
 use sha2::{Digest, Sha256};
@@ -62,6 +67,15 @@ pub struct WorkEventsIngestSummary {
     pub events_applied: usize,
     /// The projection was rebuilt with the current fold semantics.
     pub projection_rebuilt: bool,
+    /// Source fingerprints derived this pass: only groups whose snapshot
+    /// changed, every group on a rebuild or a migration (#4397).
+    pub sources_rederived: usize,
+    /// Fingerprints the intake state holds after this pass.
+    pub state_sources: usize,
+    /// Bytes the intake state occupies on disk after this pass.
+    pub state_bytes: u64,
+    /// Bytes this pass wrote to the intake state.
+    pub state_bytes_written: u64,
 }
 
 impl WorkEventsIngestSummary {
@@ -77,13 +91,6 @@ struct PendingWorkEventsSource {
     content: Arc<str>,
     container: Option<WorkspaceExecutionContainerRef>,
     reload_from_worktree: bool,
-}
-
-#[derive(Debug)]
-struct LocalImmutableSource {
-    source: WorkEventsSource,
-    key: String,
-    fingerprint: String,
 }
 
 type SourceFingerprints = Vec<(String, String)>;
@@ -282,18 +289,12 @@ fn load_pending_sources_for_rebuild(
     // the initial source scan and intake without paying for a second
     // `git worktree list` process.
     for source in worktree_event_sources(worktree_entries)? {
-        match source.events_path.try_exists() {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => return Err(error.into()),
-        }
-        // Metadata before content: a write racing this read leaves the older
-        // fingerprint behind, so the next pass reads the source again.
-        let fingerprint =
-            local_immutable_source_fingerprint(&source.events_path, source.container.as_ref())?;
+        // The scan took metadata before this content read: a write racing
+        // the read leaves the older fingerprint behind, so the next pass
+        // reads the source again.
+        let fingerprint = source_fingerprint(&source.metadata, source.container.as_ref());
         let content = read_work_event_source(&source.events_path, source.kind)?;
-        let key = format!("{SOURCE_WORKTREE}{}", source.events_path.display());
-        fingerprints.push((key, fingerprint));
+        fingerprints.push((source.key(), fingerprint));
         contents.push(SharedWorkEventsSource::new(content, source.container));
     }
     Ok((contents, fingerprints))
@@ -320,14 +321,44 @@ pub fn ingest_project_work_events_paths_with_inventory(
     state_path: &Path,
     inventory: Option<&[gwt::worktree_inventory::WorktreeEntry]>,
 ) -> WorkEventsIngestSummary {
-    ingest_project_work_events_paths_inner(
+    let started = std::time::Instant::now();
+    let summary = ingest_project_work_events_paths_inner(
         project_root,
         work_items_path,
         state_path,
         inventory,
         || {},
         |_| {},
-    )
+    );
+    record_ingest_perf(&summary, started.elapsed());
+    summary
+}
+
+/// Issue #4397 AC-4: the route total plus what the pass cost the intake state.
+fn record_ingest_perf(summary: &WorkEventsIngestSummary, elapsed: std::time::Duration) {
+    use gwt::perf::{global, PerfRoute, PerfUnit};
+
+    global::record_route(PerfRoute::WorkEventsIngest, elapsed);
+    for (metric, value, unit) in [
+        (
+            "state_sources",
+            summary.state_sources as f64,
+            PerfUnit::Count,
+        ),
+        ("state_bytes", summary.state_bytes as f64, PerfUnit::Bytes),
+        (
+            "sources_rederived",
+            summary.sources_rederived as f64,
+            PerfUnit::Count,
+        ),
+        (
+            "state_bytes_written",
+            summary.state_bytes_written as f64,
+            PerfUnit::Bytes,
+        ),
+    ] {
+        global::record_route_metric(PerfRoute::WorkEventsIngest, metric, value, unit);
+    }
 }
 
 #[cfg(test)]
@@ -382,8 +413,13 @@ where
     F: FnOnce(),
     R: FnMut(&Path),
 {
+    let mut phases =
+        gwt::perf::global::RoutePhaseClock::start(gwt::perf::PerfRoute::WorkEventsIngest);
     let mut summary = WorkEventsIngestSummary::default();
-    let mut state = load_work_events_intake_state(state_path);
+    let mut store = WorkEventsIntakeStore::open(state_path);
+    summary.state_sources = store.source_count();
+    summary.state_bytes = store.stored_bytes();
+    phases.mark("state_load");
     let projection_requires_rebuild =
         match gwt_core::workspace_projection::load_workspace_work_items_from_path(work_items_path) {
             Ok(Some(_)) => false,
@@ -410,11 +446,16 @@ where
             }
         };
     let mut rebuild_required = projection_requires_rebuild
-        || !state.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION);
+        || !store.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION);
     let mut pending_sources = Vec::new();
-    let mut current_sources = Vec::new();
-    let mut local_immutable_sources = Vec::new();
     let mut source_discovery_failed = false;
+    // Issue #4397: the state is kept per source group (one per worktree, one
+    // per origin ref). A group whose snapshot matches the stored one is
+    // skipped whole; only the others are derived source by source.
+    let mut scanned_groups = BTreeMap::<String, ScannedGroup>::new();
+    // Every discovered group: its snapshot, and whether it holds a source.
+    let mut discovered_groups = BTreeMap::<String, (String, bool)>::new();
+    let mut vanished_groups = Vec::new();
 
     // 1) Local worktree filesystems (base/main checkout included): committed
     //    or not, the working copy is the freshest view of each branch's log.
@@ -433,136 +474,177 @@ where
             &listed
         }
     };
-    let worktree_sources = match worktree_event_sources(worktree_entries) {
-        Ok(sources) => sources,
+    phases.mark("worktree_list");
+    let local_groups = match worktree_event_sources(worktree_entries) {
+        Ok(sources) => local_group_scans(sources),
         Err(error) => {
             tracing::warn!(%error, "work events ingest: worktree event source discovery failed");
             source_discovery_failed = true;
             Vec::new()
         }
     };
-    for source in worktree_sources {
-        let events_path = source.events_path.clone();
-        match events_path.try_exists() {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => {
-                tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source discovery failed");
-                source_discovery_failed = true;
-                continue;
-            }
-        }
-        let key = format!("{SOURCE_WORKTREE}{}", events_path.display());
-        // Issue #4371: the frozen legacy log is judged by metadata like a
-        // shard. Reading all 239 of them (398.5 MB) on every trigger only to
-        // hash them was the largest cost of an unchanged pass.
-        match local_immutable_source_fingerprint(&events_path, source.container.as_ref()) {
-            Ok(fingerprint) => local_immutable_sources.push(LocalImmutableSource {
-                source,
-                key,
-                fingerprint,
-            }),
-            Err(error) => {
-                tracing::warn!(%error, path = %events_path.display(), "work events ingest: worktree source metadata read failed");
-                source_discovery_failed = true;
-            }
-        }
+    phases.mark("worktree_scan");
+    for group in &local_groups {
+        discovered_groups.insert(group.name.clone(), (group.snapshot.clone(), true));
+    }
+    let vanished_local = store
+        .group_names()
+        .filter(|name| name.starts_with(SOURCE_WORKTREE) && !discovered_groups.contains_key(*name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for name in vanished_local {
+        rebuild_required |= store.group(&name).is_some_and(|group| group.sources > 0);
+        vanished_groups.push(name);
     }
 
-    let local_sources_by_key = local_immutable_sources
-        .iter()
-        .map(|source| (source.key.as_str(), source.fingerprint.as_str()))
-        .collect::<HashMap<_, _>>();
-    if state.sources.iter().any(|(key, fingerprint)| {
-        key.starts_with(SOURCE_WORKTREE)
-            && local_sources_by_key.get(key.as_str()).copied() != Some(fingerprint.as_str())
-    }) {
-        rebuild_required = true;
-    }
-
-    for source in local_immutable_sources {
-        if !rebuild_required && state.is_current(&source.key, &source.fingerprint) {
-            current_sources.push((source.key, source.fingerprint));
-            summary.sources_skipped += 1;
+    let mut new_local_keys = HashSet::new();
+    for group in &local_groups {
+        let verified = store
+            .group(&group.name)
+            .and_then(|stored| stored.snapshot.as_deref())
+            == Some(group.snapshot.as_str());
+        if verified && !rebuild_required {
+            summary.sources_skipped += group.sources.len();
             continue;
         }
-        before_source_read(&source.source.events_path);
-        let content = match read_work_event_source(&source.source.events_path, source.source.kind) {
-            Ok(content) => content,
-            Err(error) => {
-                tracing::warn!(%error, path = %source.source.events_path.display(), "work events ingest: worktree shard read failed");
-                source_discovery_failed = true;
+        let discovered = group
+            .sources
+            .iter()
+            .map(|(source, key)| {
+                (
+                    key.clone(),
+                    source_fingerprint_in_context(&source.metadata, &group.context),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        summary.sources_rederived += discovered.len();
+        if !rebuild_required {
+            match group_additions(&mut store, &group.name, &discovered) {
+                Some(keys) => {
+                    summary.sources_skipped += discovered.len() - keys.len();
+                    new_local_keys.extend(keys.into_iter().map(str::to_owned));
+                }
+                None => rebuild_required = true,
+            }
+        }
+        scanned_groups.insert(
+            group.name.clone(),
+            ScannedGroup {
+                snapshot: group.snapshot.clone(),
+                discovered,
+            },
+        );
+    }
+
+    for group in &local_groups {
+        let scanned = scanned_groups.get(&group.name);
+        for (source, key) in &group.sources {
+            if !rebuild_required && !new_local_keys.contains(key) {
                 continue;
             }
-        };
-        pending_sources.push(PendingWorkEventsSource {
-            key: source.key,
-            fingerprint: source.fingerprint,
-            content,
-            container: source.source.container,
-            reload_from_worktree: true,
-        });
+            let fingerprint = scanned
+                .and_then(|scanned| scanned.discovered.get(key).cloned())
+                .unwrap_or_else(|| source_fingerprint_in_context(&source.metadata, &group.context));
+            before_source_read(&source.events_path);
+            let content = match read_work_event_source(&source.events_path, source.kind) {
+                Ok(content) => content,
+                Err(error) => {
+                    tracing::warn!(%error, path = %source.events_path.display(), "work events ingest: worktree shard read failed");
+                    source_discovery_failed = true;
+                    continue;
+                }
+            };
+            pending_sources.push(PendingWorkEventsSource {
+                key: key.clone(),
+                fingerprint,
+                content,
+                container: source.container.clone(),
+                reload_from_worktree: true,
+            });
+        }
     }
+    phases.mark("worktree_read");
 
     // 2) Fetched origin/* refs — checkout-free blob reads. Close-kind
     //    filtering inside the intake keeps foreign close state out (FR-384)
-    //    and lenient parsing guards against contaminated logs (#3023).
-    let mut unread_current_sources = current_sources;
+    //    and lenient parsing guards against contaminated logs (#3023). A ref
+    //    whose commit is unchanged is not read at all.
     match gwt_git::refs::list_origin_refs_with_commit(project_root) {
-        Ok(refs) if !refs.is_empty() => {
-            let commits: Vec<String> = refs.iter().map(|(_, sha)| sha.clone()).collect();
-            let mut ref_requires_rebuild = false;
-            match gwt_git::blob::work_event_blobs_batch(
-                project_root,
-                &commits,
-                EVENTS_TREE_PATH,
-                EVENTS_TREE_DIR,
-                |descriptors_by_ref| {
-                    let mut discovered = HashMap::new();
-                    for ((refname, _), descriptors) in refs.iter().zip(descriptors_by_ref) {
-                        let container = origin_ref_execution_container(refname);
-                        for descriptor in descriptors {
-                            if is_work_event_writer_temp_residue(Path::new(&descriptor.path)) {
-                                continue;
-                            }
-                            let key = format!("{SOURCE_REF}{refname}:{}", descriptor.path);
-                            discovered.insert(
-                                key,
-                                source_fingerprint(&descriptor.oid, container.as_ref()),
-                            );
-                        }
+        Ok(refs) => {
+            let ref_scans = refs
+                .iter()
+                .map(|(refname, commit)| RefScan::new(refname, commit))
+                .collect::<Vec<_>>();
+            for scan in &ref_scans {
+                let holds_sources = store
+                    .group(&scan.group)
+                    .is_some_and(|group| group.sources > 0);
+                discovered_groups
+                    .insert(scan.group.clone(), (scan.snapshot.clone(), holds_sources));
+            }
+            let vanished_refs = store
+                .group_names()
+                .filter(|name| {
+                    name.starts_with(SOURCE_REF) && !discovered_groups.contains_key(*name)
+                })
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            for name in vanished_refs {
+                rebuild_required |= store.group(&name).is_some_and(|group| group.sources > 0);
+                vanished_groups.push(name);
+            }
+
+            let mut batch = ref_scans
+                .iter()
+                .filter(|scan| {
+                    rebuild_required
+                        || store
+                            .group(&scan.group)
+                            .and_then(|group| group.snapshot.as_deref())
+                            != Some(scan.snapshot.as_str())
+                })
+                .collect::<Vec<_>>();
+            let mut result = (!batch.is_empty())
+                .then(|| read_ref_batch(project_root, &batch, &mut store, rebuild_required));
+            if let Some(Ok(read)) = &result {
+                if read.requires_rebuild {
+                    rebuild_required = true;
+                    if batch.len() < ref_scans.len() {
+                        // The unchanged refs' payloads are needed as well.
+                        batch = ref_scans.iter().collect();
+                        result = Some(read_ref_batch(project_root, &batch, &mut store, true));
                     }
-                    ref_requires_rebuild = state.sources.iter().any(|(key, fingerprint)| {
-                        key.starts_with(SOURCE_REF)
-                            && discovered.get(key).map(String::as_str) != Some(fingerprint.as_str())
-                    });
-                    let mut selected = HashSet::new();
-                    for (descriptors, (refname, _)) in descriptors_by_ref.iter().zip(&refs) {
-                        let container = origin_ref_execution_container(refname);
-                        for descriptor in descriptors {
-                            if is_work_event_writer_temp_residue(Path::new(&descriptor.path)) {
-                                continue;
-                            }
-                            let key = format!("{SOURCE_REF}{refname}:{}", descriptor.path);
-                            let fingerprint =
-                                source_fingerprint(&descriptor.oid, container.as_ref());
-                            if rebuild_required
-                                || ref_requires_rebuild
-                                || !state.is_current(&key, &fingerprint)
-                            {
-                                selected.insert(descriptor.oid.clone());
-                            }
-                        }
-                    }
-                    selected
-                },
-            ) {
-                Ok(blobs_by_ref) => {
-                    rebuild_required |= ref_requires_rebuild;
+                }
+            }
+            let batched = batch
+                .iter()
+                .map(|scan| scan.group.as_str())
+                .collect::<HashSet<_>>();
+            for scan in &ref_scans {
+                if !batched.contains(scan.group.as_str()) {
+                    summary.sources_skipped +=
+                        store.group(&scan.group).map_or(0, |group| group.sources);
+                }
+            }
+
+            match result {
+                None => {}
+                Some(Ok(RefBatch {
+                    blobs_by_ref,
+                    discovered: discovered_by_ref,
+                    new_keys,
+                    ..
+                })) => {
                     let mut shared_content_by_oid_path =
                         HashMap::<(String, String), Result<Arc<str>, String>>::new();
-                    for ((refname, _), blobs) in refs.iter().zip(blobs_by_ref) {
-                        let container = origin_ref_execution_container(refname);
+                    for ((scan, blobs), discovered) in
+                        batch.iter().zip(blobs_by_ref).zip(discovered_by_ref)
+                    {
+                        summary.sources_rederived += discovered.len();
+                        discovered_groups.insert(
+                            scan.group.clone(),
+                            (scan.snapshot.clone(), !discovered.is_empty()),
+                        );
                         for blob in blobs {
                             if is_work_event_writer_temp_residue(Path::new(&blob.path)) {
                                 continue;
@@ -575,12 +657,16 @@ where
                                     continue;
                                 }
                             };
-                            let key = format!("{SOURCE_REF}{refname}:{}", blob.path);
-                            let fingerprint = source_fingerprint(&blob.oid, container.as_ref());
-                            let Some(bytes) = blob.content else {
-                                unread_current_sources.push((key, fingerprint));
-                                summary.sources_skipped += 1;
+                            let key = format!("{SOURCE_REF}{}:{}", scan.refname, blob.path);
+                            let Some(fingerprint) = discovered.get(&key).cloned() else {
                                 continue;
+                            };
+                            let bytes = match blob.content {
+                                Some(bytes) if rebuild_required || new_keys.contains(&key) => bytes,
+                                _ => {
+                                    summary.sources_skipped += 1;
+                                    continue;
+                                }
                             };
                             let content = match shared_ref_source_content(
                                 &mut shared_content_by_oid_path,
@@ -601,24 +687,31 @@ where
                                 key,
                                 fingerprint,
                                 content,
-                                container: container.clone(),
+                                container: scan.container.clone(),
                                 reload_from_worktree: false,
                             });
                         }
+                        scanned_groups.insert(
+                            scan.group.clone(),
+                            ScannedGroup {
+                                snapshot: scan.snapshot.clone(),
+                                discovered,
+                            },
+                        );
                     }
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     tracing::warn!(%error, "work events ingest: ref event batch discovery failed");
                     source_discovery_failed = true;
                 }
             }
         }
-        Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "work events ingest: origin ref listing failed");
             source_discovery_failed = true;
         }
     }
+    phases.mark("ref_scan");
 
     let close_path = work_items_path
         .parent()
@@ -640,42 +733,17 @@ where
         }
     };
 
-    let discovered_sources = pending_sources
-        .iter()
-        .map(|source| (source.key.clone(), source.fingerprint.clone()))
-        .chain(unread_current_sources)
-        .collect::<Vec<_>>();
-    let discovered_source_list_fingerprint = source_list_fingerprint(&discovered_sources);
-    let had_source_list_fingerprint = state.sources.contains_key(SOURCE_LIST);
-    let source_list_changed = !state.is_current(SOURCE_LIST, &discovered_source_list_fingerprint);
-    let discovered_by_key = discovered_sources
-        .iter()
-        .map(|(key, fingerprint)| (key.as_str(), fingerprint.as_str()))
-        .collect::<HashMap<_, _>>();
-    let existing_source_changed_or_deleted = state.sources.iter().any(|(key, fingerprint)| {
-        (key.starts_with(SOURCE_WORKTREE) || key.starts_with(SOURCE_REF))
-            && discovered_by_key.get(key.as_str()).copied() != Some(fingerprint.as_str())
-    });
-    if existing_source_changed_or_deleted {
-        rebuild_required = true;
-    }
+    let discovered_source_list_fingerprint = group_list_fingerprint(&discovered_groups);
+    let had_source_list_fingerprint = store.contains(SOURCE_LIST);
+    let source_list_changed = !store.is_current(SOURCE_LIST, &discovered_source_list_fingerprint);
 
-    if !rebuild_required {
-        pending_sources.retain(|source| {
-            if state.is_current(&source.key, &source.fingerprint) {
-                summary.sources_skipped += 1;
-                false
-            } else {
-                true
-            }
-        });
-        if pending_local_lifecycle
+    if !rebuild_required
+        && pending_local_lifecycle
             .as_ref()
-            .is_some_and(|(key, fingerprint)| state.is_current(key, fingerprint))
-        {
-            summary.sources_skipped += 1;
-            pending_local_lifecycle = None;
-        }
+            .is_some_and(|(key, fingerprint)| store.is_current(key, fingerprint))
+    {
+        summary.sources_skipped += 1;
+        pending_local_lifecycle = None;
     }
 
     if rebuild_required && source_discovery_failed {
@@ -695,6 +763,14 @@ where
             return summary;
         }
         if !authoritative_empty_source_deletion {
+            // Nothing to ingest, but the snapshots this pass verified (and a
+            // migrated legacy state) still spare the next pass the work.
+            record_scanned_groups(&mut store, &scanned_groups, &[]);
+            for name in &vanished_groups {
+                store.remove_group(name);
+            }
+            save_intake_store(&mut store, &mut summary);
+            phases.mark("state_save");
             return summary;
         }
     }
@@ -740,40 +816,40 @@ where
             )
         })
     };
+    phases.mark("intake");
     match intake {
         Ok((report, shared_fingerprints, local_fingerprint)) => {
             summary.sources_ingested =
                 shared_fingerprints.len() + usize::from(local_fingerprint.is_some());
             summary.events_applied = report.applied;
             summary.projection_rebuilt = rebuild_required;
-            let applied_source_list_fingerprint = if rebuild_required {
-                source_list_fingerprint(&shared_fingerprints)
-            } else {
-                discovered_source_list_fingerprint.clone()
-            };
             if rebuild_required {
                 // A semantics rebuild establishes a new source snapshot. A
                 // fingerprint retained for a source that was not actually
                 // folded would make a later-restored source look current and
                 // permanently skip its events.
-                state.sources.clear();
-            }
-            for (key, fingerprint) in shared_fingerprints {
-                state.record(key, fingerprint);
+                record_rebuilt_groups(
+                    &mut store,
+                    &discovered_groups,
+                    &scanned_groups,
+                    shared_fingerprints,
+                );
+                store.record_projection_version(SOURCE_CONTEXT_FINGERPRINT_VERSION);
+            } else {
+                record_scanned_groups(&mut store, &scanned_groups, &shared_fingerprints);
+                for name in &vanished_groups {
+                    store.remove_group(name);
+                }
             }
             if let (Some(path), Some(fingerprint)) = (close_path.as_ref(), local_fingerprint) {
-                state.record(
+                store.record(
                     format!("{SOURCE_LOCAL_LIFECYCLE}{}", path.display()),
                     fingerprint,
                 );
             }
-            if rebuild_required {
-                state.record_projection_version(SOURCE_CONTEXT_FINGERPRINT_VERSION);
-            }
-            state.record(SOURCE_LIST, applied_source_list_fingerprint);
-            if let Err(error) = save_work_events_intake_state(state_path, &state) {
-                tracing::warn!(%error, "work events ingest: state save failed");
-            }
+            store.record(SOURCE_LIST, discovered_source_list_fingerprint);
+            save_intake_store(&mut store, &mut summary);
+            phases.mark("state_save");
         }
         Err(error) => {
             tracing::warn!(%error, "work events ingest: globally ordered intake failed");
@@ -782,7 +858,253 @@ where
     summary
 }
 
-/// The legacy log and every canonical event shard in each local worktree.
+/// One group this pass derived source by source.
+struct ScannedGroup {
+    snapshot: String,
+    /// Source key → fingerprint, exactly as this scan discovered them.
+    discovered: BTreeMap<String, String>,
+}
+
+/// The fingerprints `discovered` adds to `group`, or `None` when a source
+/// the store holds changed or disappeared, or the group's history is
+/// unreadable. Either way a rebuild is required.
+fn group_additions<'a>(
+    store: &mut WorkEventsIntakeStore,
+    group: &str,
+    discovered: &'a BTreeMap<String, String>,
+) -> Option<Vec<&'a str>> {
+    let previous = store.group_sources(group)?;
+    if previous
+        .iter()
+        .any(|(key, fingerprint)| discovered.get(key) != Some(fingerprint))
+    {
+        return None;
+    }
+    Some(
+        discovered
+            .keys()
+            .filter(|key| !previous.contains_key(*key))
+            .map(String::as_str)
+            .collect(),
+    )
+}
+
+/// After an incremental pass: add what was ingested to each derived group.
+/// A snapshot is recorded only when the group now holds exactly what that
+/// scan discovered, so a source that failed to read is retried next pass.
+fn record_scanned_groups(
+    store: &mut WorkEventsIntakeStore,
+    scanned_groups: &BTreeMap<String, ScannedGroup>,
+    ingested: &[(String, String)],
+) {
+    let mut ingested_by_group = HashMap::<&str, Vec<&(String, String)>>::new();
+    for source in ingested {
+        ingested_by_group
+            .entry(source_group(&source.0))
+            .or_default()
+            .push(source);
+    }
+    for (group, scanned) in scanned_groups {
+        let Some(previous) = store.group_sources(group).cloned() else {
+            continue;
+        };
+        let mut sources = previous.clone();
+        for (key, fingerprint) in ingested_by_group.remove(group.as_str()).unwrap_or_default() {
+            sources.insert(key.clone(), fingerprint.clone());
+        }
+        let snapshot = (sources == scanned.discovered).then(|| scanned.snapshot.clone());
+        if store.group(group).is_none() && sources.is_empty() && snapshot.is_none() {
+            // Nothing held and nothing verified: there is no information to
+            // record, and a pass that failed to read must not mutate state.
+            continue;
+        }
+        if store.group(group).is_none() || sources != previous {
+            store.set_group(group, snapshot, sources);
+        } else {
+            store.set_group_snapshot(group, snapshot);
+        }
+    }
+}
+
+/// After a rebuild: the folded sources become the whole state.
+fn record_rebuilt_groups(
+    store: &mut WorkEventsIntakeStore,
+    discovered_groups: &BTreeMap<String, (String, bool)>,
+    scanned_groups: &BTreeMap<String, ScannedGroup>,
+    ingested: Vec<(String, String)>,
+) {
+    store.clear();
+    let mut groups = BTreeMap::<String, BTreeMap<String, String>>::new();
+    for (key, fingerprint) in ingested {
+        let group = source_group(&key).to_owned();
+        groups.entry(group).or_default().insert(key, fingerprint);
+    }
+    for name in discovered_groups.keys() {
+        groups.entry(name.clone()).or_default();
+    }
+    for (name, sources) in groups {
+        let snapshot = scanned_groups
+            .get(&name)
+            .filter(|scanned| scanned.discovered == sources)
+            .map(|scanned| scanned.snapshot.clone());
+        store.set_group(&name, snapshot, sources);
+    }
+}
+
+fn save_intake_store(store: &mut WorkEventsIntakeStore, summary: &mut WorkEventsIngestSummary) {
+    match store.save() {
+        Ok(report) => summary.state_bytes_written = report.bytes_written,
+        Err(error) => tracing::warn!(%error, "work events ingest: state save failed"),
+    }
+    summary.state_sources = store.source_count();
+    summary.state_bytes = store.stored_bytes();
+}
+
+/// One fetched origin ref and the snapshot of its event trees.
+struct RefScan {
+    refname: String,
+    commit: String,
+    group: String,
+    container: Option<WorkspaceExecutionContainerRef>,
+    context: String,
+    snapshot: String,
+}
+
+impl RefScan {
+    fn new(refname: &str, commit: &str) -> Self {
+        let container = origin_ref_execution_container(refname);
+        let context = container_context(container.as_ref());
+        // A commit pins its whole tree, so an unchanged commit is an
+        // unchanged set of event sources.
+        let snapshot = group_snapshot("ref-commit-v1", &context, [("commit", commit)]);
+        Self {
+            refname: refname.to_string(),
+            commit: commit.to_string(),
+            group: format!("{SOURCE_REF}{refname}"),
+            container,
+            context,
+            snapshot,
+        }
+    }
+}
+
+struct RefBatch {
+    blobs_by_ref: Vec<Vec<gwt_git::blob::WorkEventBlob>>,
+    /// Per batched ref: source key → fingerprint.
+    discovered: Vec<BTreeMap<String, String>>,
+    /// Sources the store did not hold yet.
+    new_keys: HashSet<String>,
+    requires_rebuild: bool,
+}
+
+/// Read the event trees of `batch` in one `cat-file --batch` pass and select
+/// payloads: all of them when `select_all`, otherwise only the sources the
+/// store does not hold yet. A held source that changed or disappeared marks
+/// the batch as requiring a rebuild and selects everything.
+fn read_ref_batch(
+    project_root: &Path,
+    batch: &[&RefScan],
+    store: &mut WorkEventsIntakeStore,
+    select_all: bool,
+) -> gwt_core::Result<RefBatch> {
+    let commits = batch
+        .iter()
+        .map(|scan| scan.commit.clone())
+        .collect::<Vec<_>>();
+    let mut discovered = Vec::with_capacity(batch.len());
+    let mut new_keys = HashSet::new();
+    let mut requires_rebuild = false;
+    let blobs_by_ref = gwt_git::blob::work_event_blobs_batch(
+        project_root,
+        &commits,
+        EVENTS_TREE_PATH,
+        EVENTS_TREE_DIR,
+        |descriptors_by_ref| {
+            let mut all_oids = HashSet::new();
+            let mut new_oids = HashSet::new();
+            for (scan, descriptors) in batch.iter().zip(descriptors_by_ref) {
+                let mut sources = BTreeMap::new();
+                let mut oid_by_key = HashMap::new();
+                for descriptor in descriptors {
+                    if is_work_event_writer_temp_residue(Path::new(&descriptor.path)) {
+                        continue;
+                    }
+                    let key = format!("{SOURCE_REF}{}:{}", scan.refname, descriptor.path);
+                    sources.insert(
+                        key.clone(),
+                        source_fingerprint_in_context(&descriptor.oid, &scan.context),
+                    );
+                    oid_by_key.insert(key, descriptor.oid.as_str());
+                    all_oids.insert(descriptor.oid.clone());
+                }
+                if !select_all && !requires_rebuild {
+                    match group_additions(store, &scan.group, &sources) {
+                        Some(keys) => {
+                            for key in keys {
+                                new_oids.insert(oid_by_key[key].to_string());
+                                new_keys.insert(key.to_string());
+                            }
+                        }
+                        None => requires_rebuild = true,
+                    }
+                }
+                discovered.push(sources);
+            }
+            if select_all || requires_rebuild {
+                all_oids
+            } else {
+                new_oids
+            }
+        },
+    )?;
+    Ok(RefBatch {
+        blobs_by_ref,
+        discovered,
+        new_keys,
+        requires_rebuild,
+    })
+}
+
+/// One local worktree's event sources and the snapshot of their metadata.
+struct LocalGroupScan {
+    name: String,
+    context: String,
+    snapshot: String,
+    /// Each source with its intake key, in scan order.
+    sources: Vec<(WorkEventsSource, String)>,
+}
+
+fn local_group_scans(sources: Vec<WorkEventsSource>) -> Vec<LocalGroupScan> {
+    let mut groups = BTreeMap::<String, LocalGroupScan>::new();
+    for source in sources {
+        let key = source.key();
+        let name = source_group(&key).to_owned();
+        let group = groups
+            .entry(name.clone())
+            .or_insert_with(|| LocalGroupScan {
+                name,
+                context: container_context(source.container.as_ref()),
+                snapshot: String::new(),
+                sources: Vec::new(),
+            });
+        group.sources.push((source, key));
+    }
+    groups
+        .into_values()
+        .map(|mut group| {
+            group.snapshot = group_snapshot(
+                "local-metadata-v1",
+                &group.context,
+                group
+                    .sources
+                    .iter()
+                    .map(|(source, key)| (key.as_str(), source.metadata.as_str())),
+            );
+            group
+        })
+        .collect()
+}
+
 fn validate_work_event_store_path(events_dir: &Path) -> gwt_core::Result<bool> {
     let mut managed_paths = events_dir.ancestors().take(3).collect::<Vec<_>>();
     managed_paths.reverse();
@@ -802,6 +1124,10 @@ fn validate_work_event_store_path(events_dir: &Path) -> gwt_core::Result<bool> {
     Ok(true)
 }
 
+/// The legacy log and every canonical event shard in each local worktree,
+/// with the size/mtime identity the directory listing already returned. On
+/// Windows `DirEntry::metadata` costs no extra system call; stat-ing every
+/// file again was most of a scan over a few hundred worktrees (#4397).
 fn worktree_event_sources(
     entries: &[gwt::worktree_inventory::WorktreeEntry],
 ) -> gwt_core::Result<Vec<WorkEventsSource>> {
@@ -817,11 +1143,17 @@ fn worktree_event_sources(
                 pr_url: None,
                 pr_state: None,
             });
-        sources.push(WorkEventsSource {
-            events_path: entry.path.join(EVENTS_TREE_PATH),
-            kind: WorkEventsSourceKind::Legacy,
-            container: container.clone(),
-        });
+        let legacy_path = entry.path.join(EVENTS_TREE_PATH);
+        match std::fs::symlink_metadata(&legacy_path) {
+            Ok(metadata) => sources.push(WorkEventsSource {
+                metadata: immutable_metadata_fingerprint(&legacy_path, &metadata)?,
+                events_path: legacy_path,
+                kind: WorkEventsSourceKind::Legacy,
+                container: container.clone(),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let events_dir = entry.path.join(EVENTS_TREE_DIR);
         if !validate_work_event_store_path(&events_dir)? {
             continue;
@@ -834,11 +1166,7 @@ fn worktree_event_sources(
                 if is_work_event_writer_temp_residue(&store_entry.path()) {
                     continue;
                 }
-                sources.push(WorkEventsSource {
-                    events_path: store_entry.path(),
-                    kind: WorkEventsSourceKind::Shard,
-                    container: container.clone(),
-                });
+                push_scanned_shard(&mut sources, &store_entry, container.clone())?;
                 continue;
             }
             if !file_type.is_dir() || !is_work_event_bucket_name(&store_entry.file_name()) {
@@ -860,15 +1188,32 @@ fn worktree_event_sources(
                 if is_work_event_writer_temp_residue(&shard.path()) {
                     continue;
                 }
-                sources.push(WorkEventsSource {
-                    events_path: shard.path(),
-                    kind: WorkEventsSourceKind::Shard,
-                    container: container.clone(),
-                });
+                push_scanned_shard(&mut sources, &shard, container.clone())?;
             }
         }
     }
     Ok(sources)
+}
+
+fn push_scanned_shard(
+    sources: &mut Vec<WorkEventsSource>,
+    entry: &std::fs::DirEntry,
+    container: Option<WorkspaceExecutionContainerRef>,
+) -> gwt_core::Result<()> {
+    let events_path = entry.path();
+    let metadata = match entry.metadata() {
+        Ok(metadata) => metadata,
+        // Unix stats here; a shard removed since the listing is simply gone.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    sources.push(WorkEventsSource {
+        metadata: immutable_metadata_fingerprint(&events_path, &metadata)?,
+        events_path,
+        kind: WorkEventsSourceKind::Shard,
+        container,
+    });
+    Ok(())
 }
 
 fn is_work_event_bucket_name(name: &std::ffi::OsStr) -> bool {
@@ -902,6 +1247,14 @@ struct WorkEventsSource {
     events_path: PathBuf,
     kind: WorkEventsSourceKind,
     container: Option<WorkspaceExecutionContainerRef>,
+    /// Size/mtime identity from the scan (`immutable-metadata-v1:…`).
+    metadata: String,
+}
+
+impl WorkEventsSource {
+    fn key(&self) -> String {
+        format!("{SOURCE_WORKTREE}{}", self.events_path.display())
+    }
 }
 
 fn origin_ref_execution_container(refname: &str) -> Option<WorkspaceExecutionContainerRef> {
@@ -918,26 +1271,71 @@ fn origin_ref_execution_container(refname: &str) -> Option<WorkspaceExecutionCon
     })
 }
 
-fn source_fingerprint(
-    raw_fingerprint: &str,
-    container: Option<&WorkspaceExecutionContainerRef>,
-) -> String {
-    let container_fingerprint = container
+/// The intake group of a source key (see `work_events_intake_group_of`).
+fn source_group(key: &str) -> &str {
+    work_events_intake_group_of(key).unwrap_or(SOURCE_WORKTREE)
+}
+
+fn container_context(container: Option<&WorkspaceExecutionContainerRef>) -> String {
+    container
         .map(|container| {
             serde_json::to_string(container)
                 .unwrap_or_else(|_| "container-serialization-error".into())
         })
-        .unwrap_or_else(|| "no-container".to_string());
+        .unwrap_or_else(|| "no-container".to_string())
+}
+
+fn source_fingerprint(
+    raw_fingerprint: &str,
+    container: Option<&WorkspaceExecutionContainerRef>,
+) -> String {
+    source_fingerprint_in_context(raw_fingerprint, &container_context(container))
+}
+
+fn source_fingerprint_in_context(raw_fingerprint: &str, context: &str) -> String {
     content_fingerprint(&format!(
-        "{SOURCE_CONTEXT_FINGERPRINT_VERSION}\n{raw_fingerprint}\n{container_fingerprint}"
+        "{SOURCE_CONTEXT_FINGERPRINT_VERSION}\n{raw_fingerprint}\n{context}"
     ))
 }
 
-fn local_immutable_source_fingerprint(
+/// Identity of one group's scan: equal snapshots mean the group's sources
+/// and their fingerprints are unchanged, so none of them is derived again.
+fn group_snapshot<'a>(
+    kind: &str,
+    context: &str,
+    parts: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    let mut hasher = Sha256::new();
+    for field in [SOURCE_CONTEXT_FINGERPRINT_VERSION, kind, context] {
+        hasher.update(field.as_bytes());
+        hasher.update(b"\n");
+    }
+    for (key, raw_fingerprint) in parts {
+        hasher.update(key.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(raw_fingerprint.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Identity of the set of groups holding sources. Only "was anything held
+/// before" is read from it, when a rebuild finds no source at all.
+fn group_list_fingerprint(groups: &BTreeMap<String, (String, bool)>) -> String {
+    content_fingerprint(
+        &groups
+            .iter()
+            .filter(|(_, (_, holds_sources))| *holds_sources)
+            .map(|(name, (snapshot, _))| format!("{name}\0{snapshot}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn immutable_metadata_fingerprint(
     path: &Path,
-    container: Option<&WorkspaceExecutionContainerRef>,
+    metadata: &std::fs::Metadata,
 ) -> gwt_core::Result<String> {
-    let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
         return Err(gwt_core::GwtError::Other(format!(
             "immutable Work event shard is not a regular file: {}",
@@ -953,26 +1351,11 @@ fn local_immutable_source_fingerprint(
                 path.display()
             ))
         })?;
-    Ok(source_fingerprint(
-        &format!(
-            "immutable-metadata-v1:{}:{}",
-            metadata.len(),
-            modified.as_nanos()
-        ),
-        container,
+    Ok(format!(
+        "immutable-metadata-v1:{}:{}",
+        metadata.len(),
+        modified.as_nanos()
     ))
-}
-
-fn source_list_fingerprint(sources: &[(String, String)]) -> String {
-    let mut sources = sources.to_vec();
-    sources.sort();
-    content_fingerprint(
-        &sources
-            .into_iter()
-            .map(|(key, fingerprint)| format!("{key}\0{fingerprint}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
 }
 
 #[cfg(test)]
@@ -1625,7 +2008,7 @@ mod tests {
                 .projection_rebuilt
         );
         let projection_before = std::fs::read(&work_items_path).expect("projection before");
-        let state_before = std::fs::read(&state_path).expect("state before");
+        let state_before = intake_state_files(&state_path);
 
         let external_parent = temp
             .path()
@@ -1639,7 +2022,7 @@ mod tests {
 
         assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
         assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
-        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(intake_state_files(&state_path), state_before);
     }
 
     #[cfg(unix)]
@@ -1737,7 +2120,7 @@ mod tests {
                 .projection_rebuilt
         );
         let projection_before = std::fs::read(&work_items_path).expect("projection before");
-        let state_before = std::fs::read(&state_path).expect("state before");
+        let state_before = intake_state_files(&state_path);
 
         let external = temp.path().join("external-events");
         std::fs::create_dir_all(&external).expect("external event store");
@@ -1763,7 +2146,7 @@ mod tests {
 
         assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
         assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
-        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(intake_state_files(&state_path), state_before);
     }
 
     #[cfg(unix)]
@@ -1796,7 +2179,7 @@ mod tests {
                 .projection_rebuilt
         );
         let projection_before = std::fs::read(&work_items_path).expect("projection before");
-        let state_before = std::fs::read(&state_path).expect("state before");
+        let state_before = intake_state_files(&state_path);
 
         let id = "evt-outside-symlink-entry";
         let target = temp.path().join("outside-event.jsonl");
@@ -1823,7 +2206,7 @@ mod tests {
 
         assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
         assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
-        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(intake_state_files(&state_path), state_before);
     }
 
     #[test]
@@ -1855,7 +2238,7 @@ mod tests {
                 .projection_rebuilt
         );
         let projection_before = std::fs::read(&work_items_path).expect("projection before");
-        let state_before = std::fs::read(&state_path).expect("state before");
+        let state_before = intake_state_files(&state_path);
 
         run(gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/nested-ref-shard"])
@@ -1901,7 +2284,7 @@ mod tests {
 
         assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
         assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
-        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(intake_state_files(&state_path), state_before);
     }
 
     #[cfg(unix)]
@@ -1934,7 +2317,7 @@ mod tests {
                 .projection_rebuilt
         );
         let projection_before = std::fs::read(&work_items_path).expect("projection before");
-        let state_before = std::fs::read(&state_path).expect("state before");
+        let state_before = intake_state_files(&state_path);
 
         run(gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/symlink-ref-shard"])
@@ -1972,7 +2355,7 @@ mod tests {
 
         assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
         assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
-        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(intake_state_files(&state_path), state_before);
     }
 
     #[test]
@@ -2300,6 +2683,174 @@ mod tests {
             .any(|item| item.id == "work-bucketed-local"));
     }
 
+    /// Every byte the intake state holds on disk: the legacy file and the
+    /// grouped store beside it (#4397).
+    fn intake_state_files(state_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        if let Ok(bytes) = std::fs::read(state_path) {
+            files.insert(state_path.to_path_buf(), bytes);
+        }
+        let mut pending = vec![state_path.with_extension("")];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).expect("read intake state file");
+                    files.insert(path, bytes);
+                }
+            }
+        }
+        assert!(
+            !files.is_empty(),
+            "intake state exists: {}",
+            state_path.display()
+        );
+        files
+    }
+
+    fn write_shard(worktree: &Path, id: &str, work_id: &str) -> PathBuf {
+        let event = event_line(id, work_id, "Grouped intake work", "2026-09-15T01:00:00Z");
+        let digest = format!("{:x}", sha2::Sha256::digest(id.as_bytes()));
+        let shard = worktree
+            .join(EVENTS_TREE_DIR)
+            .join(&digest[..2])
+            .join(format!("{digest}.jsonl"));
+        std::fs::create_dir_all(shard.parent().expect("bucket")).expect("event bucket");
+        std::fs::write(&shard, format!("{event}\n")).expect("event shard");
+        shard
+    }
+
+    /// Two worktrees with one shard each: two intake groups (#4397).
+    fn two_worktree_fixture(temp: &Path) -> (PathBuf, PathBuf) {
+        let repo = temp.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let linked = temp.join("linked");
+        run(gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-b", "linked"])
+            .arg(&linked)
+            .current_dir(&repo));
+        write_shard(&repo, "evt-group-main", "work-group-main");
+        write_shard(&linked, "evt-group-linked", "work-group-linked");
+        (repo, linked)
+    }
+
+    /// Issue #4397 AC-1: a pass re-derives and rewrites only the groups whose
+    /// sources changed.
+    #[test]
+    fn unchanged_groups_are_neither_rederived_nor_rewritten() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (repo, linked) = two_worktree_fixture(temp.path());
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+
+        let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(first.projection_rebuilt, "{first:?}");
+        assert!(first.state_sources >= 2, "{first:?}");
+
+        let unchanged = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(unchanged.sources_rederived, 0, "{unchanged:?}");
+        assert_eq!(unchanged.state_bytes_written, 0, "{unchanged:?}");
+        assert_eq!(unchanged.sources_skipped, 2, "{unchanged:?}");
+
+        write_shard(&linked, "evt-group-linked-2", "work-group-linked-2");
+        let added = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(!added.projection_rebuilt, "{added:?}");
+        assert_eq!(added.sources_ingested, 1, "{added:?}");
+        assert_eq!(
+            added.sources_rederived, 2,
+            "only the linked worktree group is re-derived: {added:?}"
+        );
+        assert_eq!(added.state_sources, first.state_sources + 1, "{added:?}");
+        assert!(
+            added.state_bytes_written > 0 && added.state_bytes_written < added.state_bytes,
+            "the unchanged group is not rewritten: {added:?}"
+        );
+    }
+
+    /// Issue #4397 AC-3: after an addition, a deletion and a change, the
+    /// incrementally maintained state equals a from-scratch derivation.
+    #[test]
+    fn incremental_state_matches_a_full_rederivation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (repo, linked) = two_worktree_fixture(temp.path());
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        let assert_matches_fresh = |label: &str| {
+            let fresh_dir = temp.path().join(format!("fresh-{label}"));
+            let fresh_state = fresh_dir.join("work-events-intake.json");
+            let fresh = ingest_project_work_events_paths(
+                &repo,
+                &fresh_dir.join("works.json"),
+                &fresh_state,
+            );
+            assert!(fresh.projection_rebuilt, "{label}: {fresh:?}");
+            assert_eq!(
+                load_work_events_intake_state(&state_path),
+                load_work_events_intake_state(&fresh_state),
+                "{label}"
+            );
+        };
+
+        let added = write_shard(&linked, "evt-group-added", "work-group-added");
+        let addition = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(!addition.projection_rebuilt, "{addition:?}");
+        assert_matches_fresh("addition");
+
+        std::fs::remove_file(&added).expect("delete shard");
+        let deletion = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(deletion.projection_rebuilt, "{deletion:?}");
+        assert_matches_fresh("deletion");
+
+        let main_shard = write_shard(&repo, "evt-group-main", "work-group-main");
+        std::fs::File::options()
+            .write(true)
+            .open(&main_shard)
+            .expect("open shard")
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .expect("touch shard");
+        let change = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(change.projection_rebuilt, "{change:?}");
+        assert_matches_fresh("change");
+    }
+
+    /// Issue #4397 AC-5: a legacy flat `work-events-intake.json` migrates in
+    /// place — no rebuild, no fingerprint lost — and the next pass is gated.
+    #[test]
+    fn legacy_flat_intake_state_migrates_without_rebuild() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (repo, _linked) = two_worktree_fixture(temp.path());
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        let migrated = load_work_events_intake_state(&state_path);
+        std::fs::remove_dir_all(temp.path().join("state/work-events-intake"))
+            .expect("drop grouped store");
+        std::fs::write(&state_path, serde_json::to_vec_pretty(&migrated).unwrap())
+            .expect("legacy state");
+
+        let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(!first.projection_rebuilt, "{first:?}");
+        assert_eq!(first.sources_ingested, 0, "{first:?}");
+        assert_eq!(first.sources_rederived, 2, "{first:?}");
+        assert!(!state_path.exists(), "legacy file retired after migration");
+        assert_eq!(load_work_events_intake_state(&state_path), migrated);
+
+        let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(second.sources_rederived, 0, "{second:?}");
+        assert_eq!(second.state_bytes_written, 0, "{second:?}");
+    }
+
     #[test]
     fn shard_validation_rejects_digest_in_wrong_bucket() {
         let event = event_line(
@@ -2343,13 +2894,13 @@ mod tests {
         let projection_before = std::fs::read(&work_items_path).expect("projection before");
         let state = WorkEventsIntakeState::default();
         save_work_events_intake_state(&state_path, &state).expect("seed state without source list");
-        let state_before = std::fs::read(&state_path).expect("state before");
+        let state_before = intake_state_files(&state_path);
 
         let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
 
         assert!(!summary.projection_rebuilt, "must defer: {summary:?}");
         assert_eq!(std::fs::read(&work_items_path).unwrap(), projection_before);
-        assert_eq!(std::fs::read(&state_path).unwrap(), state_before);
+        assert_eq!(intake_state_files(&state_path), state_before);
     }
 
     #[test]
@@ -2569,7 +3120,7 @@ mod tests {
             serde_json::to_vec_pretty(&incompatible).expect("incompatible json");
         std::fs::write(&work_items_path, &original_projection)
             .expect("write incompatible projection");
-        let original_state = std::fs::read(&state_path).expect("read intake state");
+        let original_state = intake_state_files(&state_path);
         let initial_source = std::fs::read_to_string(&events_path).expect("read initial source");
         std::fs::write(
             &events_path,
@@ -2595,10 +3146,7 @@ mod tests {
             std::fs::read(&work_items_path).expect("read preserved projection"),
             original_projection
         );
-        assert_eq!(
-            std::fs::read(&state_path).expect("read preserved intake state"),
-            original_state
-        );
+        assert_eq!(intake_state_files(&state_path), original_state);
     }
 
     #[test]
