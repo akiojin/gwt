@@ -28,6 +28,9 @@ export function createUpdateCtaController({
   // Issue #3906 AC-12: the version whose draining CTA the user dismissed, so
   // the periodic issue_monitor_status ticks do not resurrect it.
   let dismissedDrainVersion = null;
+  // Issue #4376 AC-5: what the drain is waiting for, as last reported by
+  // issue_monitor_status, so the CTA title and the draining modal can name it.
+  let drainBlockers = [];
 
   function removeLegacyUpdateSurfaces() {
     document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
@@ -173,22 +176,47 @@ export function createUpdateCtaController({
     return Math.max(0, Math.floor((now() - started) / 60000));
   }
 
+  // Issue #4376 AC-5: one `update_drain.blocking[]` entry as the user reads
+  // it — the agent's work name and state, or the Issue a claim is pending for.
+  function describeBlocker(blocker) {
+    switch (blocker?.kind) {
+      case "active_pane":
+        return `${blocker.label} (${blocker.state})`;
+      case "pending_acquire_claim":
+        return `claim for #${blocker.issue_number}`;
+      case "active_execution":
+        return `execution in ${blocker.worktree}`;
+      case "held_verification_lease":
+        return `verification lease ${blocker.lease_id}`;
+      default:
+        return null;
+    }
+  }
+
+  function waitingForText() {
+    const names = drainBlockers.map(describeBlocker).filter(Boolean);
+    return names.length ? `Waiting for: ${names.join(", ")}.` : "Waiting for the host to go quiet.";
+  }
+
   function showDraining(drain) {
     const version = drain?.version;
     if (!version) return null;
     removeLegacyUpdateSurfaces();
     pendingVersion = version;
-    const blocking = Array.isArray(drain.blocking) ? drain.blocking.length : 0;
+    drainBlockers = Array.isArray(drain.blocking) ? drain.blocking : [];
+    const blocking = drainBlockers.length;
     const minutes = drainMinutes(drain.since);
     const entering = status !== "draining";
     // A manual drain (#4037 operator control) carries the running gwt
     // version, not a staged one, so it is named as what it is.
     const subject =
       drain.reason === "manual" ? "Manual update drain" : `Update v${version} pending`;
-    const cta = renderCta(
-      "draining",
-      `${subject} — draining ${blocking} agents (${minutes} min)`,
-    );
+    const text = `${subject} — draining ${blocking} agents (${minutes} min)`;
+    const cta = renderCta("draining", text);
+    // Issue #4376 AC-5: the CTA itself tells what the wait is for and how to
+    // end it, so a manual Update click that landed on running agents is
+    // never a silent hang.
+    cta.title = `${text}. ${waitingForText()} New launches are held; agents are never stopped. Click to apply now anyway or stop waiting.`;
     // issue_monitor_status ticks every scan; only the transition into the
     // draining state is worth a sidebar peek.
     if (entering) announceUpdateAvailable();
@@ -500,13 +528,24 @@ export function createUpdateCtaController({
     modal.dataset.variant = variant;
     clearChildren(modal);
 
-    const later = el("button", {
-      type: "button",
-      className: "update-modal__btn update-modal__btn--secondary",
-      text: "Later",
-      data: { updateModalLater: "true" },
-      onClick: onApplyLater,
-    });
+    // Issue #4376 AC-5 / AC-6: while draining, the secondary action is Stop
+    // waiting (release the drain, keep the update staged) rather than Later,
+    // which would leave the drain running behind a closed modal.
+    const later = anyway
+      ? el("button", {
+          type: "button",
+          className: "update-modal__btn update-modal__btn--secondary",
+          text: "Stop waiting",
+          data: { updateModalStopWaiting: "true" },
+          onClick: onStopWaiting,
+        })
+      : el("button", {
+          type: "button",
+          className: "update-modal__btn update-modal__btn--secondary",
+          text: "Later",
+          data: { updateModalLater: "true" },
+          onClick: onApplyLater,
+        });
     const restartNow = el("button", {
       type: "button",
       className: "update-modal__btn update-modal__btn--primary",
@@ -536,7 +575,7 @@ export function createUpdateCtaController({
       el("p", {
         className: "update-modal__hint",
         text: anyway
-          ? "The Issue Monitor is draining agents and will apply it automatically once the host is quiet. Apply now anyway restarts gwt immediately through the same graceful path."
+          ? `The Issue Monitor is draining agents and will apply it automatically once the host is quiet. ${waitingForText()} Apply now anyway restarts gwt immediately through the same graceful path; Stop waiting releases the drain and keeps the update staged.`
           : "Restart now to launch the new version.",
       }),
       releaseNotesLink,
@@ -659,6 +698,17 @@ export function createUpdateCtaController({
   function onApplyRestartNow() {
     send({ kind: "apply_update_restart_now" });
     // Modal is intentionally left in place; the parent process will exit.
+  }
+
+  // Issue #4376 AC-5 / AC-6: stop waiting for the agents. The backend
+  // releases the drain (launches resume, the update stays staged) and
+  // answers with `update_auto_apply` cancelled, which returns the CTA to
+  // the ready state.
+  function onStopWaiting() {
+    send({ kind: "cancel_update_auto_apply" });
+    closeModal();
+    const cta = document.getElementById("update-cta");
+    if (cta) cta.textContent = "Stopping the wait…";
   }
 
   function onRetryFailed() {

@@ -52,6 +52,7 @@ pub mod protocol;
 pub mod pty_start_gate;
 pub mod recovery_delivery;
 pub mod runtime_daemon_events;
+pub mod session_inventory;
 pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
@@ -60,6 +61,7 @@ pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
 pub mod work_notes;
+pub mod worktree;
 pub mod worktree_form;
 pub mod worktree_inventory;
 
@@ -95,7 +97,8 @@ pub use agent_project_state::{
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
-    cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,
+    cleanup_selected_branches_with_progress, BranchCleanupOperationSnapshot,
+    BranchCleanupOperationStore, BranchCleanupOptions, BranchCleanupProgressEntry,
     BranchCleanupProgressPhase, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
 pub use branch_list::{
@@ -179,10 +182,11 @@ pub use issue_monitor::{
     IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
     IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
     IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, IssueMonitorWindowObservation,
-    IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
-    MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
+    IssueMonitorWindowSnapshot, IssueReadinessFailure, LaunchProfileSelection, LaunchProfileSkip,
+    MergedIssueDelivery, MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState,
+    NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    STRANDED_LAUNCHED_ROW_GRACE_SECS,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,

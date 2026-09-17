@@ -15,9 +15,37 @@ use serde::{Deserialize, Serialize};
 /// Warn while a volume has less than this many bytes free (20 GiB): about
 /// one cold workspace rebuild, the amount a single blocked agent needs to
 /// recover on its own.
-pub const WARN_BELOW_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+pub const WARN_BELOW_BYTES: u64 = gwt_config::build_artifact_gc_config::DEFAULT_BELOW_BYTES;
 /// Warn while a volume has less than this percentage free.
-pub const WARN_BELOW_PERCENT: u64 = 5;
+pub const WARN_BELOW_PERCENT: u64 = gwt_config::build_artifact_gc_config::DEFAULT_BELOW_PERCENT;
+
+/// The two floors a volume is judged against. The defaults are the constants
+/// above; `[build_artifact_gc]` in `~/.gwt/config.toml` overrides them for
+/// both the warning and the automatic reclaim, so the two stay one judgment
+/// (Issue #4391 AC-1 / AC-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskThresholds {
+    pub below_bytes: u64,
+    pub below_percent: u64,
+}
+
+impl Default for DiskThresholds {
+    fn default() -> Self {
+        Self {
+            below_bytes: WARN_BELOW_BYTES,
+            below_percent: WARN_BELOW_PERCENT,
+        }
+    }
+}
+
+impl From<&gwt_config::BuildArtifactGcConfig> for DiskThresholds {
+    fn from(config: &gwt_config::BuildArtifactGcConfig) -> Self {
+        Self {
+            below_bytes: config.below_bytes,
+            below_percent: config.below_percent,
+        }
+    }
+}
 
 /// One volume as seen from a path that lives on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +74,11 @@ pub struct DiskSpaceStatus {
 /// (Windows resolves the volume of a missing path from its prefix, so the
 /// existence check is what keeps the two platforms answering alike.)
 pub fn probe(paths: &[&Path]) -> DiskSpaceStatus {
+    probe_with(paths, DiskThresholds::default())
+}
+
+/// [`probe`] against explicit thresholds.
+pub fn probe_with(paths: &[&Path], thresholds: DiskThresholds) -> DiskSpaceStatus {
     let mut volumes = Vec::new();
     for path in paths {
         if !path.exists() {
@@ -65,14 +98,19 @@ pub fn probe(paths: &[&Path]) -> DiskSpaceStatus {
             volumes.push(volume);
         }
     }
-    evaluate(volumes)
+    evaluate_with(volumes, thresholds)
 }
 
 /// Apply the thresholds to already-measured volumes.
 pub fn evaluate(volumes: Vec<DiskVolume>) -> DiskSpaceStatus {
+    evaluate_with(volumes, DiskThresholds::default())
+}
+
+/// [`evaluate`] against explicit thresholds.
+pub fn evaluate_with(volumes: Vec<DiskVolume>, thresholds: DiskThresholds) -> DiskSpaceStatus {
     let low: Vec<String> = volumes
         .iter()
-        .filter(|volume| is_low(volume))
+        .filter(|volume| is_low(volume, thresholds))
         .map(|volume| {
             format!(
                 "{} has {} free of {} ({:.2}%)",
@@ -93,16 +131,17 @@ pub fn evaluate(volumes: Vec<DiskVolume>) -> DiskSpaceStatus {
     });
     DiskSpaceStatus {
         volumes,
-        warn_below_bytes: WARN_BELOW_BYTES,
-        warn_below_percent: WARN_BELOW_PERCENT,
+        warn_below_bytes: thresholds.below_bytes,
+        warn_below_percent: thresholds.below_percent,
         warning,
     }
 }
 
-fn is_low(volume: &DiskVolume) -> bool {
-    volume.free_bytes < WARN_BELOW_BYTES
+fn is_low(volume: &DiskVolume, thresholds: DiskThresholds) -> bool {
+    volume.free_bytes < thresholds.below_bytes
         || volume.total_bytes > 0
-            && volume.free_bytes.saturating_mul(100) < volume.total_bytes * WARN_BELOW_PERCENT
+            && volume.free_bytes.saturating_mul(100)
+                < volume.total_bytes.saturating_mul(thresholds.below_percent)
 }
 
 fn free_percent(volume: &DiskVolume) -> f64 {

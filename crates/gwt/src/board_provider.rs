@@ -21,7 +21,8 @@ use chrono::{DateTime, Utc};
 use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
     BoardAudienceScope, BoardDeterministicOutcome, BoardEntry, BoardEntryKind, BoardHistoryPage,
-    BoardPostOutcome, BoardProvider, CoordinationSnapshot, LocalProvider,
+    BoardPostOutcome, BoardProvider, CoordinationSnapshot, LocalProvider, PromptBoardRead,
+    PromptBoardReadRequest,
 };
 use gwt_core::paths::gwt_repo_local_work_dir;
 use gwt_core::recovery::RecoveryProvider;
@@ -61,10 +62,16 @@ pub fn current_kind() -> BoardProviderKind {
 #[cfg(test)]
 pub(crate) mod test_provider_override {
     use super::BoardProviderKind;
-    use std::cell::Cell;
+    use gwt_core::coordination::{BoardProvider, PromptBoardRead, PromptBoardReadRequest};
+    use std::{
+        cell::{Cell, RefCell},
+        path::Path,
+        rc::Rc,
+    };
 
     thread_local! {
         static KIND: Cell<BoardProviderKind> = const { Cell::new(BoardProviderKind::Local) };
+        static PROMPT_PROVIDER: RefCell<Option<Rc<dyn BoardProvider>>> = const { RefCell::new(None) };
     }
 
     /// Current override for this thread (defaults to `Local`).
@@ -78,12 +85,53 @@ pub(crate) mod test_provider_override {
         Guard(previous)
     }
 
+    pub(crate) fn force_prompt_provider(provider: Rc<dyn BoardProvider>) -> PromptProviderGuard {
+        let previous = PROMPT_PROVIDER.with(|cell| cell.replace(Some(provider)));
+        PromptProviderGuard(previous)
+    }
+
+    pub(crate) fn has_forced_prompt_provider() -> bool {
+        PROMPT_PROVIDER.with(|cell| cell.borrow().is_some())
+    }
+
+    pub(crate) fn load_prompt_reminder_for_repo_hash(
+        worktree_root: &Path,
+        repo_hash: Option<&str>,
+        request: &PromptBoardReadRequest<'_>,
+    ) -> Option<gwt_core::Result<PromptBoardRead>> {
+        PROMPT_PROVIDER.with(|cell| {
+            cell.borrow().as_ref().map(|provider| {
+                provider.load_prompt_reminder_for_repo_hash(
+                    worktree_root,
+                    repo_hash,
+                    PromptBoardReadRequest {
+                        diff_since: request.diff_since,
+                        scope: request.scope,
+                        status_author: request.status_author,
+                        status_kind: request.status_kind,
+                        status_since: request.status_since,
+                    },
+                )
+            })
+        })
+    }
+
     /// RAII guard restoring the previous override on drop.
     pub(crate) struct Guard(BoardProviderKind);
 
     impl Drop for Guard {
         fn drop(&mut self) {
             KIND.with(|cell| cell.set(self.0));
+        }
+    }
+
+    pub(crate) struct PromptProviderGuard(Option<Rc<dyn BoardProvider>>);
+
+    impl Drop for PromptProviderGuard {
+        fn drop(&mut self) {
+            PROMPT_PROVIDER.with(|cell| {
+                cell.replace(self.0.take());
+            });
         }
     }
 }
@@ -282,7 +330,7 @@ fn build_remote_for(
             None => format!("{provider} is not signed in"),
         }
     })?;
-    let http = Box::new(ReqwestHttpClient::new());
+    let http = Box::new(ReqwestHttpClient::new_with_operation_deadline()?);
     Ok(match provider {
         "teams" => Box::new(TeamsProvider::new(
             token.access_token,
@@ -502,6 +550,18 @@ pub fn load_snapshot_for_scope(
     provider_for(worktree_root).load_snapshot_for_scope(worktree_root, scope)
 }
 
+/// Refresh a scoped Board view through the active provider (Issue #4406).
+pub fn refresh_scoped_board_view(
+    worktree_root: &Path,
+    scope: &BoardAudienceScope,
+    previous: Option<gwt_core::coordination::ScopedBoardView>,
+) -> Result<(
+    gwt_core::coordination::ScopedBoardView,
+    gwt_core::coordination::ScopedBoardRefresh,
+)> {
+    provider_for(worktree_root).refresh_scoped_board_view(worktree_root, scope, previous)
+}
+
 /// Load entries updated strictly after `since`.
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
     provider_for(worktree_root).load_entries_since(worktree_root, since)
@@ -524,6 +584,29 @@ pub fn has_recent_post_by(
     within: chrono::Duration,
 ) -> Result<bool> {
     provider_for(worktree_root).has_recent_post_by(worktree_root, author, kind, within)
+}
+
+/// Load the prompt diff and own-status redundancy decision through one
+/// provider instance and one underlying history materialization.
+pub fn load_prompt_reminder_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    request: PromptBoardReadRequest<'_>,
+) -> Result<PromptBoardRead> {
+    crate::cli::hook::diagnostics::record_prompt_board_read();
+    #[cfg(test)]
+    if let Some(result) = test_provider_override::load_prompt_reminder_for_repo_hash(
+        worktree_root,
+        repo_hash,
+        &request,
+    ) {
+        return result;
+    }
+    provider_for(worktree_root).load_prompt_reminder_for_repo_hash(
+        worktree_root,
+        repo_hash,
+        request,
+    )
 }
 
 /// Whether an entry with `entry_id` exists.

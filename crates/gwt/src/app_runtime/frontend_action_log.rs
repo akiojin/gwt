@@ -230,6 +230,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CloseWindow { id, .. } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }
+        FrontendEvent::RecoverRestoredWindow { id, .. } => {
+            FrontendUserActionLog::new("recover_restored_window", "window").window(id)
+        }
         FrontendEvent::StopWindow { id } => {
             FrontendUserActionLog::new("stop_window", "window").window(id)
         }
@@ -275,6 +278,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             branches,
             delete_remote,
             force_filesystem_delete,
+            ..
         } => FrontendUserActionLog::new("run_branch_cleanup", "branches")
             .window(id)
             .target(summarize_ui_action_values(
@@ -291,6 +295,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             branch,
             delete_remote,
             force_filesystem_delete,
+            ..
         } => FrontendUserActionLog::new("run_workspace_cleanup", "workspace")
             .target(branch)
             .count(1)
@@ -300,6 +305,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 "local_only"
             })
             .force(*force_filesystem_delete),
+        FrontendEvent::SyncBranchCleanup { id, .. } => {
+            FrontendUserActionLog::new("sync_branch_cleanup", "branches").window(id)
+        }
+        FrontendEvent::ClearBranchCleanupStatus { id, .. } => {
+            FrontendUserActionLog::new("clear_branch_cleanup_status", "branches").window(id)
+        }
         FrontendEvent::LoadBoard { id, all } => FrontendUserActionLog::new("load_board", "board")
             .window(id)
             .mode(if *all { "all" } else { "workspace" }),

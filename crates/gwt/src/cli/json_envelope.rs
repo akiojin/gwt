@@ -75,7 +75,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "output": output,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{}", payload);
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
                 (0, None) => {}
@@ -99,7 +101,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "error": message,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{payload}");
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
             // Issue #3655 AC-2: a governance refusal reaches the PM without
             // depending on the agent noticing it is stuck. Answering the caller
@@ -110,6 +114,32 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+/// Exit code for an operation whose response never reached the caller.
+///
+/// Issue #4435 AC-1: swallowing the write turns a delivery failure into a
+/// zero-byte, exit-0 answer that reads exactly like silent success. Distinct
+/// from the ordinary failure code so a caller can tell the two apart.
+const RESPONSE_NOT_DELIVERED_EXIT: i32 = 3;
+
+/// Write the response envelope. The envelope is the operation's only answer,
+/// so a failed write is reported, never dropped.
+fn write_response(stdout: &mut dyn std::io::Write, payload: &Value) -> Result<(), String> {
+    writeln!(stdout, "{payload}").map_err(|err| err.to_string())
+}
+
+fn report_undelivered_response<E: CliEnv>(
+    env: &mut E,
+    prog: &str,
+    operation: &str,
+    error: &str,
+) -> i32 {
+    let _ = writeln!(
+        env.stderr(),
+        "{prog} {operation}: response envelope was not delivered: {error}"
+    );
+    RESPONSE_NOT_DELIVERED_EXIT
 }
 
 /// Issue #3606: name the project store the operation acted on.
@@ -194,8 +224,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "workspace.work_prune" | "workspace.work-prune" => {
+            // Issue #4465 AC-4'': this operation closes, discards and detaches
+            // durable Work state across every Work in the project, so a scope
+            // parameter it does not implement is a refusal. `params.work` was
+            // silently dropped and the call then applied machine-wide.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "ids"],
+                "workspace.work_prune",
+            )?;
             CliCommand::Workspace(WorkspaceCommand::WorkPrune {
-                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+                // Issue #4465 AC-8: an unqualified call reports candidates
+                // only; applying requires an explicit opt-out.
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
                 ids: optional_string_vec(params, "ids")?,
                 project_root: optional_string(params, "project_root")?,
             })
@@ -323,6 +364,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .filter(|value| !value.is_null())
                 .map(|_| optional_string_vec(params, "labels"))
                 .transpose()?,
+        }),
+        "issue.close" => CliCommand::Issue(IssueCommand::Close {
+            number: required_u64(params, "number")?,
+            reason: issue_close_reason(params)?,
+            comment: optional_string(params, "comment")?,
+        }),
+        "issue.reopen" => CliCommand::Issue(IssueCommand::Reopen {
+            number: required_u64(params, "number")?,
+            comment: optional_string(params, "comment")?,
         }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
@@ -633,10 +683,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "index recovery supports only the issues scope".to_string(),
                 ));
             }
+            let wait = optional_bool(params, "wait")?.unwrap_or(false);
+            if envelope.operation == "index.cancel" && wait {
+                return Err(CliParseError::InvalidJson(
+                    "index.cancel does not take wait".to_string(),
+                ));
+            }
             CliCommand::Index(if envelope.operation == "index.cancel" {
                 IndexCommand::Cancel
             } else {
-                IndexCommand::Repair
+                // Issue #4435: `index.repair` submits and answers; `wait`
+                // blocks until the coordinated job settles.
+                IndexCommand::Repair { wait }
             })
         }
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
@@ -925,6 +983,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.close" | "pane.stop" => CliCommand::Pane(PaneCommand::Close {
             id: required_string(params, "id")?,
         }),
+        "pane.recover" => {
+            reject_unknown_params(
+                params,
+                &["started_after", "started_before", "apply"],
+                "pane.recover",
+            )?;
+            let started_after = required_string(params, "started_after")?;
+            let started_before = required_string(params, "started_before")?;
+            super::pane::parse_recovery_bounds(&started_after, &started_before)
+                .map_err(CliParseError::InvalidJson)?;
+            CliCommand::Pane(PaneCommand::Recover {
+                started_after,
+                started_before,
+                apply: optional_bool(params, "apply")?.unwrap_or(false),
+            })
+        }
         "pane.send" => CliCommand::Pane(PaneCommand::Send {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
@@ -1665,6 +1739,25 @@ fn issue_monitor_priority_position(
     }
 }
 
+/// SPEC #4249 FR-001: `reason` is the optional GitHub `state_reason` of a
+/// close. An unrecognised spelling is refused rather than silently dropped,
+/// because a dropped reason closes the Issue with the wrong rationale.
+fn issue_close_reason(
+    params: &Map<String, Value>,
+) -> Result<Option<gwt_github::client::IssueCloseReason>, CliParseError> {
+    let Some(raw) = optional_string(params, "reason")? else {
+        return Ok(None);
+    };
+    gwt_github::client::IssueCloseReason::parse(&raw)
+        .map(Some)
+        .ok_or_else(|| {
+            CliParseError::InvalidJson(format!(
+                "reason must be one of {:?}",
+                gwt_github::client::IssueCloseReason::ACCEPTED
+            ))
+        })
+}
+
 /// Issue #4037 AC-5 / #3906 AC-3: `update_drain` is the operator bool or the
 /// auto-drain object `{reason, version}`.
 fn optional_update_drain_control(
@@ -1812,9 +1905,10 @@ fn verification_quarantine_requests(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
-        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand,
-        SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
+        parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
+        CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
+        IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
+        WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::TestEnv;
@@ -2167,6 +2261,7 @@ mod tests {
                 review_status: "APPROVED".to_string(),
                 body: String::new(),
                 closing_issues: Vec::new(),
+                fallback_owner_closed: false,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
@@ -2976,6 +3071,40 @@ mod tests {
         ));
     }
 
+    /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
+    /// an unqualified call only reports candidates. The first call used to be
+    /// an immediate `APPLIED` across every Work on the machine (1100 rows,
+    /// other projects included).
+    #[test]
+    fn workspace_work_prune_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok("workspace.work-prune", json!({"dry_run": false})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    /// Issue #4465 AC-4'': a scope parameter this operation does not implement
+    /// must be refused, never dropped. `params.work` was silently ignored and
+    /// the call then applied to the whole machine — the first specimen of the
+    /// #4444 dropped-params family that changes state.
+    #[test]
+    fn workspace_work_prune_rejects_an_unknown_scope_param() {
+        match err(
+            "workspace.work_prune",
+            json!({"work": "work-work-issue-4029-124040a6"}),
+        ) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("work"), "{message}");
+                assert!(message.contains("ids"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[test]
     fn workspace_join_requires_workspace_id() {
         match err("workspace.join", json!({"agent_session": "s"})) {
@@ -3727,6 +3856,72 @@ mod tests {
         ));
     }
 
+    /// SPEC #4249 FR-001: `issue.close` / `issue.reopen` need only `number`;
+    /// `reason` accepts the GitHub spellings and is refused — never silently
+    /// dropped — when it is not one of them, because a dropped reason closes the
+    /// Issue with the wrong rationale.
+    #[test]
+    fn issue_close_and_reopen_parse_their_optional_params() {
+        assert!(matches!(
+            ok("issue.close", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.close",
+                json!({"number": 7, "reason": "not-planned", "comment": "why"})
+            ),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                ..
+            })
+        ));
+        for reason in ["completed", "not_planned"] {
+            assert!(
+                matches!(
+                    ok("issue.close", json!({"number": 7, "reason": reason})),
+                    CliCommand::Issue(IssueCommand::Close {
+                        reason: Some(_),
+                        ..
+                    })
+                ),
+                "{reason}"
+            );
+        }
+        // Duplicate closure needs a canonical issue ID; tracked in #4489.
+        assert!(matches!(
+            err("issue.close", json!({"number": 7, "reason": "duplicate"})),
+            CliParseError::InvalidJson(_)
+        ));
+        match err("issue.close", json!({"number": 7, "reason": "wontfix"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("not_planned"), "{message}")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("issue.close", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert!(matches!(
+            ok("issue.reopen", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            })
+        ));
+        match err("issue.reopen", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,
     /// while an explicit empty array clears them.
     #[test]
@@ -3887,6 +4082,75 @@ mod tests {
                 CliParseError::InvalidJson(_)
             ));
         }
+    }
+
+    /// Issue #4435: `index.repair` submits by default; `wait` is the blocking
+    /// form the detached worker runs. `index.cancel` never blocks.
+    #[test]
+    fn index_repair_wait_selects_the_blocking_form() {
+        assert!(matches!(
+            ok("index.repair", json!({})),
+            CliCommand::Index(IndexCommand::Repair { wait: false })
+        ));
+        assert!(matches!(
+            ok("index.repair", json!({"scope": "issues", "wait": true})),
+            CliCommand::Index(IndexCommand::Repair { wait: true })
+        ));
+        match err("index.cancel", json!({"wait": true})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(
+                    message.contains("index.cancel does not take wait"),
+                    "{message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("index.repair", json!({"wait": "yes"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("wait must be a bool"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Issue #4435 AC-1: the envelope is the operation's only answer, so a
+    /// failed write must surface instead of leaving the caller with zero
+    /// bytes on both streams and an exit code that reads as success.
+    #[test]
+    fn an_undelivered_response_is_reported_rather_than_dropped() {
+        struct ClosedPipe;
+        impl std::io::Write for ClosedPipe {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the pipe has been ended",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let payload = json!({"ok": true, "operation": "index.repair"});
+
+        let mut delivered = Vec::new();
+        write_response(&mut delivered, &payload).expect("a writable stdout accepts the envelope");
+        assert!(!delivered.is_empty());
+        assert!(delivered.ends_with(b"\n"));
+
+        let error = write_response(&mut ClosedPipe, &payload)
+            .expect_err("a broken stdout must not be reported as delivered");
+        assert!(error.contains("pipe"), "{error}");
+
+        let mut env = crate::cli::env::TestEnv::new(std::path::PathBuf::from("cache"));
+        let code = report_undelivered_response(&mut env, "gwtd", "index.repair", &error);
+        assert_eq!(code, RESPONSE_NOT_DELIVERED_EXIT);
+        assert_ne!(code, 0, "an undelivered answer must not exit as success");
+        let reported = String::from_utf8(env.stderr.clone()).expect("stderr is utf-8");
+        assert!(
+            reported.contains("index.repair: response envelope was not delivered"),
+            "{reported}"
+        );
     }
 
     #[test]
@@ -4819,6 +5083,20 @@ mod tests {
         assert!(matches!(
             ok("build.start", json!({"spec": 1})),
             CliCommand::Build(SkillStateAction::Start { spec: 1 })
+        ));
+    }
+
+    #[test]
+    fn pane_recover_accepts_a_bounded_restore_burst() {
+        assert!(matches!(
+            ok(
+                "pane.recover",
+                json!({
+                    "started_after": "2026-09-14T05:00:00Z",
+                    "started_before": "2026-09-14T05:05:00Z"
+                })
+            ),
+            CliCommand::Pane(_)
         ));
     }
 

@@ -19,6 +19,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -52,6 +53,8 @@ thread_local! {
     static FAIL_NEXT_EVENT_MANIFEST_WRITE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static PROMPT_BOARD_READ_TEST_COUNTERS: std::cell::RefCell<PromptBoardReadTestCounters> =
+        const { std::cell::RefCell::new(PromptBoardReadTestCounters::new()) };
     static FAIL_NEXT_EXACT_LEGACY_CLEANUP: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
@@ -69,6 +72,51 @@ thread_local! {
 #[cfg(test)]
 fn fail_next_event_manifest_write() {
     FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptBoardReadTestCounters {
+    coordination_root_resolutions: usize,
+    legacy_discovery_processes: usize,
+    history_materializations: usize,
+    event_decodes: usize,
+}
+
+#[cfg(test)]
+impl PromptBoardReadTestCounters {
+    const fn new() -> Self {
+        Self {
+            coordination_root_resolutions: 0,
+            legacy_discovery_processes: 0,
+            history_materializations: 0,
+            event_decodes: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+fn reset_prompt_board_read_test_counters() {
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        *counters.borrow_mut() = PromptBoardReadTestCounters::new();
+    });
+}
+
+#[cfg(test)]
+fn prompt_board_read_test_counters() -> PromptBoardReadTestCounters {
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| *counters.borrow())
+}
+
+#[cfg(test)]
+thread_local! {
+    static COORDINATION_GIT_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Issue #4406: count the Git processes a Board read starts, so tests can pin
+/// that a steady-state read starts none.
+fn note_coordination_git_spawn() {
+    #[cfg(test)]
+    COORDINATION_GIT_SPAWNS.with(|count| count.set(count.get() + 1));
 }
 
 #[cfg(test)]
@@ -1036,6 +1084,86 @@ pub struct BoardHistoryPage {
     pub has_more_before: bool,
 }
 
+/// One immutable Board materialization for the prompt reminder hot path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptBoardRead {
+    pub recent_entries: Vec<BoardEntry>,
+    pub has_recent_own_status: bool,
+    pub latest_own_status_at: Option<DateTime<Utc>>,
+}
+
+pub struct PromptBoardReadRequest<'a> {
+    pub diff_since: DateTime<Utc>,
+    pub scope: &'a BoardAudienceScope,
+    pub status_author: &'a str,
+    pub status_kind: &'a BoardEntryKind,
+    pub status_since: DateTime<Utc>,
+}
+
+impl PromptBoardRead {
+    pub fn from_scoped_history(
+        history: Vec<BoardEntry>,
+        diff_since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Self {
+        Self::from_history(
+            history,
+            diff_since,
+            Some(scope),
+            status_author,
+            status_kind,
+            status_since,
+        )
+    }
+
+    pub fn from_channel_history(
+        history: Vec<BoardEntry>,
+        diff_since: DateTime<Utc>,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Self {
+        Self::from_history(
+            history,
+            diff_since,
+            None,
+            status_author,
+            status_kind,
+            status_since,
+        )
+    }
+
+    fn from_history(
+        history: Vec<BoardEntry>,
+        diff_since: DateTime<Utc>,
+        scope: Option<&BoardAudienceScope>,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Self {
+        let latest_own_status_at = history
+            .iter()
+            .filter(|entry| entry.author == status_author && entry.kind == *status_kind)
+            .map(|entry| entry.updated_at)
+            .max();
+        Self {
+            has_recent_own_status: latest_own_status_at
+                .is_some_and(|updated_at| updated_at > status_since),
+            recent_entries: history
+                .into_iter()
+                .filter(|entry| entry.updated_at > diff_since)
+                .filter(|entry| {
+                    scope.is_none_or(|scope| board_entry_visible_for_scope(entry, scope))
+                })
+                .collect(),
+            latest_own_status_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct EventSegmentManifest {
     version: u32,
@@ -1043,6 +1171,11 @@ struct EventSegmentManifest {
     #[serde(default)]
     segments: Vec<EventSegmentMeta>,
     updated_at: DateTime<Utc>,
+}
+
+struct PreparedCoordinationRoot {
+    path: PathBuf,
+    manifest: EventSegmentManifest,
 }
 
 impl EventSegmentManifest {
@@ -1198,8 +1331,12 @@ fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
 
 pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
     if let Some(project_dir) = coordination_project_dir(worktree_root) {
-        let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
-        migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        // Issue #4406: discovery runs `git worktree list`, which scales with
+        // the worktree count; once migrated there is nothing left to find.
+        if !coordination_migration_marker_path(&project_dir).exists() {
+            let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
+            migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        }
     }
 
     let dir = coordination_dir(worktree_root);
@@ -1868,6 +2005,118 @@ pub fn load_snapshot_for_scope(
     })
 }
 
+/// Issue #4406: a Board view filtered to one audience scope, together with the
+/// hot-projection position it was derived from, so the next refresh can apply
+/// only what was posted since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedBoardView {
+    pub scope: BoardAudienceScope,
+    pub board: BoardProjection,
+    source_total_entries: usize,
+    source_newest_entry_id: Option<String>,
+}
+
+/// How [`refresh_scoped_board_view`] produced its view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedBoardRefresh {
+    /// Nothing was posted since the previous view.
+    Unchanged,
+    /// Only the posts since the previous view were applied.
+    Appended,
+    /// The view was rebuilt from the full history.
+    Rebuilt,
+}
+
+impl ScopedBoardView {
+    fn derived_from(
+        scope: &BoardAudienceScope,
+        board: BoardProjection,
+        hot: &BoardProjection,
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            board,
+            source_total_entries: hot.total_entries,
+            source_newest_entry_id: hot.newest_entry_id.clone(),
+        }
+    }
+}
+
+/// Refresh a scoped Board view (Issue #4406).
+///
+/// A scoped view is the newest [`HOT_PROJECTION_ENTRY_LIMIT`] entries visible
+/// to the scope, which can reach past the hot projection, so building one
+/// reads the whole history. Posts only append, though: when the hot projection
+/// holds exactly the entries posted since `previous`, those are applied to it
+/// and the history is not read again. Anything else — a first load, another
+/// scope, a backdated entry, more posts than the hot projection keeps — is
+/// rebuilt from the history.
+pub fn refresh_scoped_board_view(
+    worktree_root: &Path,
+    scope: &BoardAudienceScope,
+    previous: Option<ScopedBoardView>,
+) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+    let hot = load_snapshot(worktree_root)?.board;
+    if let Some(previous) = previous.filter(|previous| previous.scope == *scope) {
+        if let Some(appended) = entries_posted_since(
+            &hot,
+            previous.source_total_entries,
+            previous.source_newest_entry_id.as_deref(),
+        ) {
+            if appended.is_empty() {
+                return Ok((previous, ScopedBoardRefresh::Unchanged));
+            }
+            let mut board = previous.board;
+            // A rebuild reads the history after the hot projection, so it can
+            // already hold a post that the hot projection now reports as new.
+            let visible = appended
+                .iter()
+                .filter(|entry| board_entry_visible_for_scope(entry, scope))
+                .filter(|entry| !board.entries.iter().any(|known| known.id == entry.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            board.total_entries += visible.len();
+            board.entries.extend(visible);
+            let excess = board
+                .entries
+                .len()
+                .saturating_sub(HOT_PROJECTION_ENTRY_LIMIT);
+            board.entries.drain(..excess);
+            board.has_more_before = board.total_entries > board.entries.len();
+            board.oldest_entry_id = board.entries.first().map(|entry| entry.id.clone());
+            board.newest_entry_id = board.entries.last().map(|entry| entry.id.clone());
+            board.updated_at = hot.updated_at;
+            let view = ScopedBoardView::derived_from(scope, board, &hot);
+            return Ok((view, ScopedBoardRefresh::Appended));
+        }
+    }
+    let board = if *scope == BoardAudienceScope::All {
+        hot.clone()
+    } else {
+        load_snapshot_for_scope(worktree_root, scope)?.board
+    };
+    let view = ScopedBoardView::derived_from(scope, board, &hot);
+    Ok((view, ScopedBoardRefresh::Rebuilt))
+}
+
+/// The hot-projection entries posted after the entry `previous_newest`, or
+/// `None` when they are not exactly the `hot.total_entries - previous_total`
+/// posts made since (a backdated entry, or more posts than the hot projection
+/// keeps).
+fn entries_posted_since<'a>(
+    hot: &'a BoardProjection,
+    previous_total: usize,
+    previous_newest: Option<&str>,
+) -> Option<&'a [BoardEntry]> {
+    let posted = hot.total_entries.checked_sub(previous_total)?;
+    let start = match previous_newest {
+        Some(id) => hot.entries.iter().position(|entry| entry.id == id)? + 1,
+        None => 0,
+    };
+    let since = &hot.entries[start..];
+    (since.len() == posted).then_some(since)
+}
+
 fn load_json_or_default<T>(path: &Path) -> Result<T>
 where
     T: serde::de::DeserializeOwned + Default,
@@ -1891,13 +2140,44 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
     Some(gwt_project_dir_for_repo_path(&repo_root).join("coordination"))
 }
 
+/// Issue #4406: every coordination path helper resolves the repository root,
+/// and each resolution used to start `git rev-parse`. A worktree path keeps
+/// its repository, so a successful resolution is cached for the process; a
+/// failed one is not, so a directory that becomes a repository later is seen.
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    // Issue #3777 AC-1: counted per call, not per cache miss — the property
+    // under test is that the prompt hot path asks for the root once.
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        counters.borrow_mut().coordination_root_resolutions += 1;
+    });
+
+    static RESOLVED: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, PathBuf>>> =
+        std::sync::OnceLock::new();
+    let cache = RESOLVED.get_or_init(Default::default);
+    if let Some(repo_root) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(worktree_root)
+    {
+        return Some(repo_root.clone());
+    }
+    let repo_root = resolve_coordination_repo_root(worktree_root)?;
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(worktree_root.to_path_buf(), repo_root.clone());
+    Some(repo_root)
+}
+
+fn resolve_coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
     // Issue #3629 AC-1/AC-2: a workspace-home layout root cannot resolve
     // through git — skip the guaranteed exit-128 spawn and use the child
     // bare repository directly.
     if !crate::paths::git_repository_discovery_possible(worktree_root) {
         return coordination_child_bare_repo(worktree_root);
     }
+    note_coordination_git_spawn();
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree_root);
@@ -2096,7 +2376,20 @@ fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<Even
 
 fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     let repo_root = coordination_repo_root(worktree_root);
-    let list_root = repo_root.as_deref().unwrap_or(worktree_root);
+    discover_legacy_coordination_dirs_with_repo_root(worktree_root, repo_root.as_deref())
+}
+
+fn discover_legacy_coordination_dirs_with_repo_root(
+    worktree_root: &Path,
+    repo_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        counters.borrow_mut().legacy_discovery_processes += 1;
+    });
+
+    let list_root = repo_root.unwrap_or(worktree_root);
+    note_coordination_git_spawn();
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["worktree", "list", "--porcelain"])
         .current_dir(list_root);
@@ -2116,7 +2409,6 @@ fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     };
     dirs.push(legacy_coordination_dir(worktree_root));
     if let Some(repo_root) = repo_root
-        .as_deref()
         .filter(|root| is_bare_git_dir(root))
         .and_then(Path::parent)
     {
@@ -2129,6 +2421,29 @@ fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     dirs.sort();
     dirs.dedup();
     dirs
+}
+
+fn prepare_coordination_read_root(worktree_root: &Path) -> Result<PreparedCoordinationRoot> {
+    let repo_root = coordination_repo_root(worktree_root);
+    let path = if let Some(repo_root) = repo_root.as_deref() {
+        let project_dir = gwt_project_dir_for_repo_path(repo_root).join("coordination");
+        if !coordination_migration_marker_path(&project_dir).exists() {
+            let legacy_dirs =
+                discover_legacy_coordination_dirs_with_repo_root(worktree_root, Some(repo_root));
+            migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        }
+        project_dir
+    } else {
+        legacy_coordination_dir(worktree_root)
+    };
+    prepare_coordination_read_root_at(path)
+}
+
+fn prepare_coordination_read_root_at(path: PathBuf) -> Result<PreparedCoordinationRoot> {
+    std::fs::create_dir_all(&path)?;
+    ensure_segment_storage(&path)?;
+    let manifest = load_event_manifest_from_dir(&path)?;
+    Ok(PreparedCoordinationRoot { path, manifest })
 }
 
 fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf]) -> Result<()> {
@@ -2869,15 +3184,47 @@ fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
         return Ok(Vec::new());
     }
     let file = OpenOptions::new().read(true).open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut events = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        loop {
+            crate::operation_deadline::ensure_remaining("Board event read")?;
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+            let consumed = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            line.extend_from_slice(&available[..consumed]);
+            reader.consume(consumed);
+            if line.last() == Some(&b'\n') {
+                break;
+            }
+        }
+        if line.is_empty() {
+            break;
+        }
+        crate::operation_deadline::ensure_remaining("Board event decode")?;
+        let line = std::str::from_utf8(&line).map_err(|error| {
+            GwtError::Other(format!(
+                "invalid UTF-8 in Board event log {}: {error}",
+                path.display()
+            ))
+        })?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         let mut event: CoordinationEvent = serde_json::from_str(trimmed).map_err(json_error)?;
+        crate::operation_deadline::ensure_remaining("Board event decode")?;
+        #[cfg(test)]
+        PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+            counters.borrow_mut().event_decodes += 1;
+        });
         normalize_coordination_event(&mut event);
         events.push(event);
     }
@@ -2962,10 +3309,31 @@ fn coordination_event_entry_id(event: &CoordinationEvent) -> &str {
 
 fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(json_error)?;
-    write_atomic(path, &bytes)
+    write_atomic_with_durability(path, &bytes, CoordinationDurability::FlushToDevice)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Like [`write_atomic_json`] but without waiting for the storage device.
+///
+/// Issue #3777: `sync_all` is the only device-blocking call in the write, and
+/// every ballooning stage in the Windows p95 failures was a durable write while
+/// no read or pure-compute stage ever was. Reserve this for state the next
+/// event rewrites anyway; the rename still publishes the file whole.
+fn write_atomic_json_unflushed<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(json_error)?;
+    write_atomic_with_durability(path, &bytes, CoordinationDurability::RenameOnly)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinationDurability {
+    FlushToDevice,
+    RenameOnly,
+}
+
+fn write_atomic_with_durability(
+    path: &Path,
+    bytes: &[u8],
+    durability: CoordinationDurability,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| GwtError::Other(format!("path has no parent: {}", path.display())))?;
@@ -2982,31 +3350,76 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut file = File::create(&tmp_path)?;
         file.write_all(bytes)?;
         file.write_all(b"\n")?;
-        file.sync_all()?;
+        if durability == CoordinationDurability::FlushToDevice {
+            file.sync_all()?;
+        }
     }
     replace_path_with_temp(path, &tmp_path)
+}
+
+// The retry schedule only runs on Windows; the unit tests below keep it
+// honest on every platform, so the non-Windows build keeps the definitions
+// without complaining that nothing calls them.
+/// Longest a single atomic-replace retry may sleep.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPLACE_RETRY_MAX_DELAY: Duration = Duration::from_millis(25);
+/// Longest the whole retry schedule may sleep when no ambient deadline applies.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPLACE_RETRY_MAX_TOTAL: Duration = Duration::from_millis(500);
+
+/// Backoff delays for retrying an atomic replace, newest-first and never
+/// summing past `budget`.
+///
+/// Issue #3777: this used to be a flat 25ms repeated 20 times. A sharing
+/// violation that cleared in a few milliseconds still cost a full 25ms, and a
+/// contended `reminders` write measured 111.8ms on Windows against 5-6ms for
+/// the sibling atomic writes that have no retry loop at all — four sleeps'
+/// worth. UserPromptSubmit runs its whole hook under a 200ms deadline, so the
+/// schedule starts at 1ms and stops at whatever budget the caller has left.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn replace_retry_delays(budget: Duration) -> impl Iterator<Item = Duration> {
+    let mut remaining = budget;
+    let mut delay = Duration::from_millis(1);
+    std::iter::from_fn(move || {
+        if remaining.is_zero() {
+            return None;
+        }
+        let next = delay.min(remaining);
+        remaining -= next;
+        delay = (delay * 2).min(REPLACE_RETRY_MAX_DELAY);
+        Some(next)
+    })
+}
+
+/// The retry budget for one atomic replace: whatever the ambient operation
+/// deadline leaves, capped so a caller without a deadline still gives up.
+#[cfg_attr(any(not(windows), test), allow(dead_code))]
+fn replace_retry_budget() -> Duration {
+    let ceiling = REPLACE_RETRY_MAX_TOTAL;
+    match crate::operation_deadline::current() {
+        Some(deadline) => deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(ceiling),
+        None => ceiling,
+    }
 }
 
 fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
-        const MAX_RETRIES: usize = 20;
-        const SLEEP_MS: u64 = 25;
-
-        for attempt in 0..MAX_RETRIES {
+        let mut delays = replace_retry_delays(replace_retry_budget());
+        loop {
             match try_replace_path_with_temp(path, tmp_path) {
                 Ok(()) => return Ok(()),
-                Err(err)
-                    if err.kind() == std::io::ErrorKind::PermissionDenied
-                        && attempt + 1 < MAX_RETRIES =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err.into());
+                    };
+                    std::thread::sleep(delay);
                 }
                 Err(err) => return Err(err.into()),
             }
         }
-
-        unreachable!("Windows retry loop should always return or error");
     }
 
     #[cfg(not(windows))]
@@ -3016,16 +3429,16 @@ fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
     }
 }
 
+/// Replace `path` with `tmp_path`.
+///
+/// Issue #3777: this used to unlink `path` first on Windows. That is both
+/// unnecessary — `fs::rename` maps to `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING`, and the sibling atomic writers in
+/// `gwt_github::cache` and `gwt-agent` overwrite the same way on Windows all
+/// day — and harmful: it opened a window where the file did not exist at all,
+/// and the extra unlink is what kept losing the race with a concurrent reader
+/// and driving the retry loop above.
 fn try_replace_path_with_temp(path: &Path, tmp_path: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    if path.exists() {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-    }
-
     std::fs::rename(tmp_path, path)
 }
 
@@ -3043,6 +3456,10 @@ fn json_error(err: serde_json::Error) -> GwtError {
 pub struct RemindersState {
     #[serde(default)]
     pub last_injected_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_own_status_checked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_own_status_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_reminded_kind: HashMap<String, DateTime<Utc>>,
     /// SPEC-2359 Phase U-9 (FR-178): the `title_summary` value observed
@@ -3095,6 +3512,43 @@ fn reminders_path(worktree_root: &Path, agent_session_id: &str) -> PathBuf {
     reminders_dir(worktree_root).join(format!("{agent_session_id}.json"))
 }
 
+fn migrated_project_coordination_root(
+    worktree_root: &Path,
+    _repo_hash: Option<&str>,
+) -> Option<PathBuf> {
+    // A persisted Session hash can predate an origin change. Resolve the
+    // current common repository from local files for both Board and sidecar
+    // reads, without the git subprocess used by coordination_repo_root.
+    let repository_path = worktree_root
+        .ancestors()
+        .find(|path| {
+            path.join(".git").exists()
+                || (path.join("HEAD").is_file() && path.join("config").is_file())
+        })
+        .unwrap_or(worktree_root);
+    let common_dir = crate::repo_hash::repository_common_dir(repository_path)?;
+    let repo_root = if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+        common_dir.parent()?
+    } else {
+        &common_dir
+    };
+    let root = gwt_project_dir_for_repo_path(repo_root).join("coordination");
+    coordination_migration_marker_path(&root)
+        .is_file()
+        .then_some(root)
+}
+
+fn reminders_path_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+) -> PathBuf {
+    migrated_project_coordination_root(worktree_root, repo_hash)
+        .unwrap_or_else(|| coordination_dir(worktree_root))
+        .join("reminders")
+        .join(format!("{agent_session_id}.json"))
+}
+
 /// Load reminder state for the given agent session. Returns a default state
 /// when no sidecar file exists yet.
 pub fn load_reminders_state(
@@ -3102,6 +3556,18 @@ pub fn load_reminders_state(
     agent_session_id: &str,
 ) -> Result<RemindersState> {
     load_json_or_default(&reminders_path(worktree_root, agent_session_id))
+}
+
+pub fn load_reminders_state_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+) -> Result<RemindersState> {
+    load_json_or_default(&reminders_path_for_repo_hash(
+        worktree_root,
+        repo_hash,
+        agent_session_id,
+    ))
 }
 
 /// Atomically persist reminder state for the given agent session.
@@ -3117,22 +3583,56 @@ pub fn write_reminders_state(
     write_atomic_json(&path, state)
 }
 
+pub fn write_reminders_state_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+    state: &RemindersState,
+) -> Result<()> {
+    let path = reminders_path_for_repo_hash(worktree_root, repo_hash, agent_session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Issue #3777: this sidecar only throttles how often a reminder repeats and
+    // the next intent boundary rewrites it, so it must not make the prompt wait
+    // for the storage device.
+    write_atomic_json_unflushed(&path, state)
+}
+
 /// Return Board entries whose `updated_at` is strictly later than `since`,
 /// sorted chronologically (same ordering as the projection).
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
     ensure_repo_local_files(worktree_root)?;
     let coordination_root = coordination_dir(worktree_root);
     let manifest = load_event_manifest_from_dir(&coordination_root)?;
-    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    load_entries_since_from_prepared(
+        &PreparedCoordinationRoot {
+            path: coordination_root,
+            manifest,
+        },
+        since,
+    )
+}
+
+fn load_entries_since_from_prepared(
+    prepared: &PreparedCoordinationRoot,
+    since: DateTime<Utc>,
+) -> Result<Vec<BoardEntry>> {
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        counters.borrow_mut().history_materializations += 1;
+    });
+
+    let segments_dir = coordination_events_segments_dir_from_root(&prepared.path);
     let mut entries = Vec::new();
-    for segment in manifest.segments {
+    for segment in &prepared.manifest.segments {
         if segment
             .max_updated_at
             .is_some_and(|max_updated_at| max_updated_at <= since)
         {
             continue;
         }
-        let path = segments_dir.join(segment.file);
+        let path = segments_dir.join(&segment.file);
         for event in load_events_from_path(&path)? {
             let CoordinationEvent::MessageAppended { entry } = event;
             if entry.updated_at > since {
@@ -3166,6 +3666,77 @@ pub fn has_recent_post_by(
     Ok(load_entries_since(worktree_root, threshold)?
         .iter()
         .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
+}
+
+pub fn load_prompt_reminder(
+    worktree_root: &Path,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let prepared = prepare_coordination_read_root(worktree_root)?;
+    load_prompt_reminder_from_prepared(
+        &prepared,
+        diff_since,
+        scope,
+        status_author,
+        status_kind,
+        status_since,
+    )
+}
+
+pub fn load_prompt_reminder_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let prepared = migrated_project_coordination_root(worktree_root, repo_hash)
+        .map(prepare_coordination_read_root_at)
+        .transpose()?;
+    let Some(prepared) = prepared else {
+        return load_prompt_reminder(
+            worktree_root,
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        );
+    };
+    load_prompt_reminder_from_prepared(
+        &prepared,
+        diff_since,
+        scope,
+        status_author,
+        status_kind,
+        status_since,
+    )
+}
+
+fn load_prompt_reminder_from_prepared(
+    prepared: &PreparedCoordinationRoot,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let history_since = diff_since.min(status_since);
+    let history = load_entries_since_from_prepared(prepared, history_since)?;
+    Ok(PromptBoardRead::from_scoped_history(
+        history,
+        diff_since,
+        scope,
+        status_author,
+        status_kind,
+        status_since,
+    ))
 }
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
@@ -3363,6 +3934,41 @@ pub trait BoardProvider {
         kind: &BoardEntryKind,
         within: chrono::Duration,
     ) -> Result<bool>;
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        diff_since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Result<PromptBoardRead> {
+        let history_since = diff_since.min(status_since);
+        let history = self.load_entries_since(worktree_root, history_since)?;
+        Ok(PromptBoardRead::from_scoped_history(
+            history,
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        ))
+    }
+    fn load_prompt_reminder_for_repo_hash(
+        &self,
+        worktree_root: &Path,
+        _repo_hash: Option<&str>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        self.load_prompt_reminder(
+            worktree_root,
+            request.diff_since,
+            request.scope,
+            request.status_author,
+            request.status_kind,
+            request.status_since,
+        )
+    }
     /// Whether an entry with `entry_id` exists.
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool>;
     /// Load a page of older entries before `before_entry_id`.
@@ -3380,6 +3986,19 @@ pub trait BoardProvider {
         limit: usize,
         scope: &BoardAudienceScope,
     ) -> Result<BoardHistoryPage>;
+    /// Refresh a scoped view after a Board change (Issue #4406). Providers
+    /// without an append-only local history rebuild it every time.
+    fn refresh_scoped_board_view(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+        _previous: Option<ScopedBoardView>,
+    ) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+        let hot = self.load_snapshot(worktree_root)?.board;
+        let board = self.load_snapshot_for_scope(worktree_root, scope)?.board;
+        let view = ScopedBoardView::derived_from(scope, board, &hot);
+        Ok((view, ScopedBoardRefresh::Rebuilt))
+    }
 }
 
 /// Filesystem-backed Board provider (offline, default).
@@ -3432,6 +4051,15 @@ impl BoardProvider for LocalProvider {
         load_snapshot(worktree_root)
     }
 
+    fn refresh_scoped_board_view(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+        previous: Option<ScopedBoardView>,
+    ) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+        refresh_scoped_board_view(worktree_root, scope, previous)
+    }
+
     fn load_snapshot_for_scope(
         &self,
         worktree_root: &Path,
@@ -3467,6 +4095,42 @@ impl BoardProvider for LocalProvider {
         has_recent_post_by(worktree_root, author, kind, within)
     }
 
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        diff_since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Result<PromptBoardRead> {
+        load_prompt_reminder(
+            worktree_root,
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        )
+    }
+
+    fn load_prompt_reminder_for_repo_hash(
+        &self,
+        worktree_root: &Path,
+        repo_hash: Option<&str>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        load_prompt_reminder_for_repo_hash(
+            worktree_root,
+            repo_hash,
+            request.diff_since,
+            request.scope,
+            request.status_author,
+            request.status_kind,
+            request.status_since,
+        )
+    }
+
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
         board_entry_exists(worktree_root, entry_id)
     }
@@ -3500,6 +4164,58 @@ mod tests {
     use super::*;
     use crate::paths::gwt_project_dir_for_repo_path;
     use crate::test_support::{env_lock, ScopedEnvVar};
+
+    /// Issue #3777: on Windows the atomic-replace retry slept a flat 25ms up to
+    /// 20 times, so one contended `reminders` write could spend 500ms while
+    /// UserPromptSubmit runs under a 200ms budget — it measured 111.8ms against
+    /// 5-6ms for the sibling writes that have no retry loop. The schedule now
+    /// starts small and never outlives the ambient deadline.
+    #[test]
+    fn replace_retry_schedule_starts_small_and_grows() {
+        let delays = replace_retry_delays(Duration::from_millis(500)).collect::<Vec<_>>();
+        assert_eq!(
+            delays.first().copied(),
+            Some(Duration::from_millis(1)),
+            "the first retry must not cost more than the operation it retries"
+        );
+        // The final delay is truncated to whatever budget is left, so growth is
+        // monotonic over every delay that was not cut short.
+        let grown = &delays[..delays.len() - 1];
+        assert!(
+            grown.windows(2).all(|pair| pair[1] >= pair[0]),
+            "delays must grow monotonically: {delays:?}"
+        );
+        assert!(
+            delays.last().copied().unwrap_or_default() <= REPLACE_RETRY_MAX_DELAY,
+            "the truncated final delay must still respect the cap: {delays:?}"
+        );
+        assert!(
+            delays.iter().all(|delay| *delay <= REPLACE_RETRY_MAX_DELAY),
+            "no single delay may exceed the cap: {delays:?}"
+        );
+        assert!(
+            delays.iter().sum::<Duration>() <= Duration::from_millis(500),
+            "the schedule must fit the budget it was given: {delays:?}"
+        );
+    }
+
+    #[test]
+    fn replace_retry_schedule_is_empty_without_budget() {
+        assert_eq!(replace_retry_delays(Duration::ZERO).count(), 0);
+    }
+
+    #[test]
+    fn replace_retry_schedule_fits_a_prompt_sized_budget() {
+        // The UserPromptSubmit deadline leaves far less than 500ms by the time
+        // the reminder sidecar is written; the schedule must not overrun it.
+        let budget = Duration::from_millis(40);
+        let delays = replace_retry_delays(budget).collect::<Vec<_>>();
+        assert!(!delays.is_empty(), "a 40ms budget still allows retries");
+        assert!(
+            delays.iter().sum::<Duration>() <= budget,
+            "schedule {delays:?} overran the {budget:?} budget"
+        );
+    }
 
     fn recovery_entry() -> BoardEntry {
         let mut entry = BoardEntry::new(
@@ -6176,6 +6892,573 @@ mod tests {
             serde_json::to_writer(&mut file, event).unwrap();
             file.write_all(b"\n").unwrap();
         }
+    }
+
+    fn write_prompt_board_fixture(coordination_root: &Path, events: &[CoordinationEvent]) -> u64 {
+        let segment_file = initial_segment_file_name();
+        let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+        std::fs::create_dir_all(&segments_dir).unwrap();
+        let segment_path = segments_dir.join(&segment_file);
+        let mut file = std::fs::File::create(&segment_path).unwrap();
+        let mut segment = EventSegmentMeta {
+            file: segment_file.clone(),
+            entries: 0,
+            bytes: 0,
+            first_created_at: None,
+            last_created_at: None,
+            max_updated_at: None,
+            first_entry_id: None,
+            last_entry_id: None,
+        };
+        for event in events {
+            let bytes = serialized_event_line(event).unwrap();
+            file.write_all(&bytes).unwrap();
+            update_segment_meta(&mut segment, event, bytes.len() as u64);
+        }
+        file.flush().unwrap();
+        let stored_bytes = segment.bytes;
+        write_event_manifest(
+            coordination_root,
+            &EventSegmentManifest {
+                version: EVENT_MANIFEST_VERSION,
+                active_segment: segment_file,
+                segments: vec![segment],
+                updated_at: Utc::now(),
+            },
+        )
+        .unwrap();
+        stored_bytes
+    }
+
+    #[test]
+    fn prompt_board_read_materializes_large_history_once_for_every_local_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination_root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 7, 24, 0, 0, 0).unwrap();
+        let status_since = base;
+        let diff_since = base + chrono::Duration::seconds(400);
+        let large_payload = "x".repeat(9 * 1024);
+        let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
+
+        let mut target = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            format!("recent status outside hot projection {large_payload}"),
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["workspace-other"]);
+        target.id = "target-status".to_string();
+        target.created_at = base + chrono::Duration::seconds(1);
+        target.updated_at = target.created_at;
+        events.push(CoordinationEvent::MessageAppended { entry: target });
+
+        for index in 1..=HOT_PROJECTION_ENTRY_LIMIT {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Claude",
+                BoardEntryKind::Status,
+                format!("filler-{index:04} {large_payload}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{index:04}");
+            entry.created_at = base + chrono::Duration::seconds(index as i64);
+            entry.updated_at = entry.created_at;
+            entry.audience = match index % 3 {
+                0 => Vec::new(),
+                1 => vec!["workspace-current".to_string()],
+                _ => vec!["workspace-other".to_string()],
+            };
+            events.push(CoordinationEvent::MessageAppended { entry });
+        }
+
+        let stored_bytes = write_prompt_board_fixture(&coordination_root, &events);
+        assert!(
+            stored_bytes > 4 * 1024 * 1024,
+            "fixture must exceed the production-size threshold"
+        );
+
+        let cases = [
+            (BoardAudienceScope::All, 100),
+            (BoardAudienceScope::Broadcast, 33),
+            (
+                BoardAudienceScope::Workspace("workspace-current".to_string()),
+                66,
+            ),
+        ];
+        for (scope, expected_entries) in cases {
+            reset_prompt_board_read_test_counters();
+            let read = load_prompt_reminder(
+                dir.path(),
+                diff_since,
+                &scope,
+                "Codex",
+                &BoardEntryKind::Status,
+                status_since,
+            )
+            .unwrap();
+
+            assert_eq!(read.recent_entries.len(), expected_entries);
+            assert!(read.has_recent_own_status);
+            assert!(read
+                .recent_entries
+                .iter()
+                .all(|entry| entry.updated_at > diff_since));
+            assert!(!read
+                .recent_entries
+                .iter()
+                .any(|entry| entry.id == "entry-0400"));
+            let counters = prompt_board_read_test_counters();
+            assert_eq!(
+                (counters.history_materializations, counters.event_decodes),
+                (1, events.len()),
+                "one prompt read must materialize and decode history exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_board_read_checks_the_operation_deadline_while_decoding_a_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination_root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 8, 29, 0, 0, 0).unwrap();
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "deadline fixture",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = base;
+        entry.updated_at = base;
+        write_prompt_board_fixture(
+            &coordination_root,
+            &[CoordinationEvent::MessageAppended { entry }],
+        );
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+
+        let error = load_prompt_reminder(
+            dir.path(),
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        )
+        .expect_err("an expired Board deadline must stop segment decoding");
+
+        assert!(error.to_string().contains("deadline expired"), "{error}");
+    }
+
+    #[test]
+    fn prompt_board_read_uses_one_segment_snapshot_even_when_hot_projection_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination_root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 7, 24, 0, 0, 0).unwrap();
+        let mut entries = Vec::new();
+        for index in 1..=3 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                if index == 3 { "Codex" } else { "Claude" },
+                BoardEntryKind::Status,
+                format!("status-{index}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{index}");
+            entry.created_at = base + chrono::Duration::seconds(index);
+            entry.updated_at = entry.created_at;
+            entries.push(entry);
+        }
+        let events = entries
+            .iter()
+            .cloned()
+            .map(|entry| CoordinationEvent::MessageAppended { entry })
+            .collect::<Vec<_>>();
+        write_prompt_board_fixture(&coordination_root, &events);
+        write_atomic_json(
+            &coordination_root.join(BOARD_PROJECTION_FILE_NAME),
+            &build_hot_projection(entries, base + chrono::Duration::seconds(4)),
+        )
+        .unwrap();
+        reset_prompt_board_read_test_counters();
+
+        let read = load_prompt_reminder(
+            dir.path(),
+            base + chrono::Duration::seconds(10),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            base,
+        )
+        .unwrap();
+
+        assert!(read.recent_entries.is_empty());
+        assert!(read.has_recent_own_status);
+        assert_eq!(
+            read.latest_own_status_at,
+            Some(base + chrono::Duration::seconds(3))
+        );
+        let counters = prompt_board_read_test_counters();
+        assert_eq!(counters.history_materializations, 1);
+        assert_eq!(counters.event_decodes, events.len());
+    }
+
+    #[test]
+    fn prompt_board_read_uses_one_prepared_root_and_skips_migrated_git_discovery() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        ensure_repo_local_files(&repo).unwrap();
+        let project_dir = gwt_project_dir_for_repo_path(&repo).join("coordination");
+        assert!(coordination_migration_marker_path(&project_dir).exists());
+        reset_prompt_board_read_test_counters();
+
+        let _ = load_prompt_reminder(
+            &repo,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        )
+        .unwrap();
+
+        let counters = prompt_board_read_test_counters();
+        assert_eq!(
+            (
+                counters.coordination_root_resolutions,
+                counters.legacy_discovery_processes,
+                counters.history_materializations,
+            ),
+            (1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn prompt_board_read_uses_session_repo_hash_without_git_root_resolution() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        ensure_repo_local_files(&repo).unwrap();
+        let project_dir = gwt_project_dir_for_repo_path(&repo);
+        let repo_hash = project_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        reset_prompt_board_read_test_counters();
+
+        let _ = load_prompt_reminder_for_repo_hash(
+            &repo,
+            Some(repo_hash),
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        )
+        .unwrap();
+
+        let counters = prompt_board_read_test_counters();
+        assert_eq!(
+            (
+                counters.coordination_root_resolutions,
+                counters.legacy_discovery_processes,
+                counters.history_materializations,
+            ),
+            (0, 0, 1)
+        );
+    }
+
+    #[test]
+    fn prompt_reminder_state_uses_session_repo_hash_without_git_root_resolution() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        ensure_repo_local_files(&repo).unwrap();
+        let project_dir = gwt_project_dir_for_repo_path(&repo);
+        let repo_hash = project_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        let expected = RemindersState {
+            last_injected_at: DateTime::<Utc>::from_timestamp(42, 0),
+            ..RemindersState::default()
+        };
+        reset_prompt_board_read_test_counters();
+
+        write_reminders_state_for_repo_hash(&repo, Some(repo_hash), "session-1", &expected)
+            .unwrap();
+        let actual =
+            load_reminders_state_for_repo_hash(&repo, Some(repo_hash), "session-1").unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            prompt_board_read_test_counters().coordination_root_resolutions,
+            0
+        );
+    }
+
+    #[test]
+    fn prompt_reminder_stale_repo_hash_keeps_board_and_sidecar_in_current_scope() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/old/repo.git",
+            ],
+        );
+        ensure_repo_local_files(&repo).unwrap();
+        let stale_hash = crate::paths::project_scope_hash(&repo);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.com/current/repo.git",
+            ],
+        );
+        ensure_repo_local_files(&repo).unwrap();
+        let expected = RemindersState {
+            last_injected_at: DateTime::<Utc>::from_timestamp(42, 0),
+            ..RemindersState::default()
+        };
+        write_reminders_state(&repo, "session-1", &expected).unwrap();
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "current scope",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        post_entry(&repo, entry.clone()).unwrap();
+        let since = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let board = load_prompt_reminder_for_repo_hash(
+            &repo,
+            Some(stale_hash.as_str()),
+            since,
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            since,
+        )
+        .unwrap();
+        assert_eq!(board.recent_entries, vec![entry]);
+        assert!(board.has_recent_own_status);
+        assert_eq!(
+            load_reminders_state_for_repo_hash(&repo, Some(stale_hash.as_str()), "session-1",)
+                .unwrap(),
+            expected
+        );
+        let nested = repo.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            migrated_project_coordination_root(&nested, Some(stale_hash.as_str())),
+            migrated_project_coordination_root(&repo, Some(stale_hash.as_str())),
+            "nested cwd must use the same read-only resolver, without git fallback",
+        );
+        let bare = repo.join("cache/repo.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        run_git(&bare, &["init", "--bare", "--quiet"]);
+        ensure_repo_local_files(&bare).unwrap();
+        assert_eq!(
+            migrated_project_coordination_root(&bare, Some(stale_hash.as_str())),
+            Some(coordination_dir(&bare)),
+            "a nested bare repository must not inherit the outer repository scope",
+        );
+        let updated = RemindersState {
+            last_injected_at: Some(Utc::now()),
+            ..expected
+        };
+        write_reminders_state_for_repo_hash(
+            &repo,
+            Some(stale_hash.as_str()),
+            "session-1",
+            &updated,
+        )
+        .unwrap();
+        assert_eq!(load_reminders_state(&repo, "session-1").unwrap(), updated);
+    }
+
+    #[test]
+    fn steady_state_board_reads_start_no_git_process() {
+        // Issue #4406: every GUI Board refresh used to run `git rev-parse`
+        // per path helper plus `git worktree list` over every worktree, even
+        // after the legacy migration had completed.
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        load_snapshot(&repo).unwrap();
+        assert!(coordination_migration_marker_path(&coordination_dir(&repo)).exists());
+
+        COORDINATION_GIT_SPAWNS.with(|count| count.set(0));
+        for _ in 0..3 {
+            load_snapshot(&repo).unwrap();
+        }
+        load_snapshot_for_scope(&repo, &BoardAudienceScope::Workspace("w".to_string())).unwrap();
+
+        assert_eq!(COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get), 0);
+    }
+
+    fn scoped_seed_entry(body: String, audience: &str) -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec![audience])
+    }
+
+    fn entry_ids(board: &BoardProjection) -> Vec<&str> {
+        board
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn scoped_board_refresh_after_a_post_never_rescans_history_at_any_board_size() {
+        // Issue #4406 AC-2: the per-post cost of a scoped Board refresh must
+        // not grow with the Board size. A refresh after a post is served from
+        // the bounded hot projection; only a cold start rescans the history.
+        let scope = BoardAudienceScope::Workspace("workspace-a".to_string());
+        for total in [500_usize, 2_000, 5_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = Utc::now() - chrono::Duration::hours(2);
+            let events = (0..total)
+                .map(|idx| {
+                    let audience = if idx % 2 == 0 {
+                        "workspace-a"
+                    } else {
+                        "workspace-b"
+                    };
+                    let mut entry = scoped_seed_entry(format!("seed {idx}"), audience);
+                    entry.created_at = base + chrono::Duration::milliseconds(idx as i64);
+                    entry.updated_at = entry.created_at;
+                    CoordinationEvent::MessageAppended { entry }
+                })
+                .collect::<Vec<_>>();
+            write_events(&coordination_events_path(dir.path()), &events);
+
+            let (view, refresh) = refresh_scoped_board_view(dir.path(), &scope, None).unwrap();
+            assert_eq!(refresh, ScopedBoardRefresh::Rebuilt, "board size {total}");
+            let (mut view, refresh) =
+                refresh_scoped_board_view(dir.path(), &scope, Some(view)).unwrap();
+            assert_eq!(refresh, ScopedBoardRefresh::Unchanged, "board size {total}");
+
+            for post in 0..4 {
+                let audience = if post % 2 == 0 {
+                    "workspace-a"
+                } else {
+                    "workspace-b"
+                };
+                post_entry(
+                    dir.path(),
+                    scoped_seed_entry(format!("live {post}"), audience),
+                )
+                .unwrap();
+                let (next, refresh) =
+                    refresh_scoped_board_view(dir.path(), &scope, Some(view)).unwrap();
+                assert_eq!(
+                    refresh,
+                    ScopedBoardRefresh::Appended,
+                    "board size {total}, post {post}"
+                );
+                let full = load_snapshot_for_scope(dir.path(), &scope).unwrap().board;
+                assert_eq!(
+                    entry_ids(&next.board),
+                    entry_ids(&full),
+                    "board size {total}"
+                );
+                assert_eq!(next.board.total_entries, full.total_entries);
+                assert_eq!(next.board.has_more_before, full.has_more_before);
+                view = next;
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_board_refresh_rebuilds_when_the_scope_changes_or_history_is_backdated() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            scoped_seed_entry("a".to_string(), "workspace-a"),
+        )
+        .unwrap();
+        let scope_a = BoardAudienceScope::Workspace("workspace-a".to_string());
+        let scope_b = BoardAudienceScope::Workspace("workspace-b".to_string());
+        let (view, _) = refresh_scoped_board_view(dir.path(), &scope_a, None).unwrap();
+
+        let (_, refresh) =
+            refresh_scoped_board_view(dir.path(), &scope_b, Some(view.clone())).unwrap();
+        assert_eq!(refresh, ScopedBoardRefresh::Rebuilt);
+
+        let mut backdated = scoped_seed_entry("backdated".to_string(), "workspace-a");
+        backdated.created_at = Utc::now() - chrono::Duration::days(30);
+        backdated.updated_at = backdated.created_at;
+        post_entry(dir.path(), backdated).unwrap();
+        let (next, refresh) = refresh_scoped_board_view(dir.path(), &scope_a, Some(view)).unwrap();
+        assert_eq!(refresh, ScopedBoardRefresh::Rebuilt);
+        let full = load_snapshot_for_scope(dir.path(), &scope_a).unwrap().board;
+        assert_eq!(entry_ids(&next.board), entry_ids(&full));
     }
 
     #[test]

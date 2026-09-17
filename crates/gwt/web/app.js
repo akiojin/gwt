@@ -1188,14 +1188,12 @@
         if (!connected) {
           for (const [windowId, state] of branchListStateMap.entries()) {
             let shouldRenderBranches = false;
-            if (
-              failRunningBranchCleanup(
-                windowId,
-                "Connection lost while cleaning up branches",
-              )
-            ) {
-              shouldRenderBranches = true;
-            }
+            // Issue #4433: the cleanup keeps running on the backend, so a
+            // dropped socket must not be painted as a cleanup failure. Mark
+            // the status feed interrupted and re-sync on reconnect instead.
+            // The surface repaints the cleanup owner itself, because a
+            // Workspace-hosted cleanup is not a Branches list render.
+            markRunningBranchCleanupConnectionInterrupted(windowId);
             if (failLoadingBranchesOnConnectionLoss(windowId, state)) {
               shouldRenderBranches = true;
             }
@@ -1253,6 +1251,10 @@
         while (pendingMessages.length > 0) {
           socket.send(JSON.stringify(pendingMessages.shift()));
         }
+        // Issue #4433 AC-2: this client has a new client_id, so it missed
+        // every cleanup event emitted while it was away. Re-subscribe to the
+        // operations it still shows as running.
+        syncRunningBranchCleanups();
       }
 
       function handleSocketMessage(event) {
@@ -4870,6 +4872,8 @@
         renderBranchCleanupModal,
         updateBranchCleanupProgress,
         failRunningBranchCleanup,
+        markRunningBranchCleanupConnectionInterrupted,
+        syncRunningBranchCleanups,
         failLoadingBranchesOnConnectionLoss,
         openWorkspaceCleanup,
         mountBranchesWindow,
