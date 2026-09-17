@@ -31,6 +31,7 @@ mod json_envelope;
 pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
+pub mod operation_catalog;
 mod pane;
 pub(crate) mod perf;
 mod plan;
@@ -339,7 +340,15 @@ impl std::fmt::Display for CliParseError {
             CliParseError::InvalidValue { flag, reason } => {
                 write!(f, "invalid value for {flag}: {reason}")
             }
-            CliParseError::UnknownSubcommand(s) => write!(f, "unknown subcommand: {s}"),
+            // Issue #4449 AC-4: a mistyped operation answers with the names it
+            // could have meant. The bare wording stays the first line, so log
+            // greps still match; the candidates follow it. `workspace.prune`
+            // is a real refusal message's recommendation that does not exist,
+            // and three agents lost over an hour to it before anyone found
+            // `workspace.projection_prune` by reading the dispatch source.
+            CliParseError::UnknownSubcommand(s) => {
+                write!(f, "{}", operation_catalog::unknown_subcommand_message(s))
+            }
         }
     }
 }
