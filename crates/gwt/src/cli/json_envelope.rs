@@ -75,7 +75,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "output": output,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{}", payload);
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
                 (0, None) => {}
@@ -99,7 +101,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "error": message,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{payload}");
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
             // Issue #3655 AC-2: a governance refusal reaches the PM without
             // depending on the agent noticing it is stuck. Answering the caller
@@ -110,6 +114,32 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+/// Exit code for an operation whose response never reached the caller.
+///
+/// Issue #4435 AC-1: swallowing the write turns a delivery failure into a
+/// zero-byte, exit-0 answer that reads exactly like silent success. Distinct
+/// from the ordinary failure code so a caller can tell the two apart.
+const RESPONSE_NOT_DELIVERED_EXIT: i32 = 3;
+
+/// Write the response envelope. The envelope is the operation's only answer,
+/// so a failed write is reported, never dropped.
+fn write_response(stdout: &mut dyn std::io::Write, payload: &Value) -> Result<(), String> {
+    writeln!(stdout, "{payload}").map_err(|err| err.to_string())
+}
+
+fn report_undelivered_response<E: CliEnv>(
+    env: &mut E,
+    prog: &str,
+    operation: &str,
+    error: &str,
+) -> i32 {
+    let _ = writeln!(
+        env.stderr(),
+        "{prog} {operation}: response envelope was not delivered: {error}"
+    );
+    RESPONSE_NOT_DELIVERED_EXIT
 }
 
 /// Issue #3606: name the project store the operation acted on.
@@ -171,6 +201,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     }
     let params = params_object(&envelope.params)?;
     let command = match envelope.operation.as_str() {
+        "concern.create" | "concern.update" | "concern.list" | "concern.measure"
+        | "concern.resolve" => CliCommand::Concern(Box::new(super::concern::parse(
+            &envelope.operation,
+            params,
+        )?)),
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
@@ -189,8 +224,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "workspace.work_prune" | "workspace.work-prune" => {
+            // Issue #4465 AC-4'': this operation closes, discards and detaches
+            // durable Work state across every Work in the project, so a scope
+            // parameter it does not implement is a refusal. `params.work` was
+            // silently dropped and the call then applied machine-wide.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "ids"],
+                "workspace.work_prune",
+            )?;
             CliCommand::Workspace(WorkspaceCommand::WorkPrune {
-                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+                // Issue #4465 AC-8: an unqualified call reports candidates
+                // only; applying requires an explicit opt-out.
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
                 ids: optional_string_vec(params, "ids")?,
                 project_root: optional_string(params, "project_root")?,
             })
@@ -319,6 +365,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .map(|_| optional_string_vec(params, "labels"))
                 .transpose()?,
         }),
+        "issue.close" => CliCommand::Issue(IssueCommand::Close {
+            number: required_u64(params, "number")?,
+            reason: issue_close_reason(params)?,
+            comment: optional_string(params, "comment")?,
+        }),
+        "issue.reopen" => CliCommand::Issue(IssueCommand::Reopen {
+            number: required_u64(params, "number")?,
+            comment: optional_string(params, "comment")?,
+        }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -425,6 +480,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason,
                 resume_condition,
                 clear,
+            })
+        }
+        "issue.monitor.wait.invalidate" | "issue.monitor.wait-invalidate" => {
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                // An unexplained invalidation is exactly the record AC-2 needs.
+                reason: required_string(params, "reason")?,
+                by: optional_string(params, "by")?,
             })
         }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
@@ -619,10 +683,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "index recovery supports only the issues scope".to_string(),
                 ));
             }
+            let wait = optional_bool(params, "wait")?.unwrap_or(false);
+            if envelope.operation == "index.cancel" && wait {
+                return Err(CliParseError::InvalidJson(
+                    "index.cancel does not take wait".to_string(),
+                ));
+            }
             CliCommand::Index(if envelope.operation == "index.cancel" {
                 IndexCommand::Cancel
             } else {
-                IndexCommand::Repair
+                // Issue #4435: `index.repair` submits and answers; `wait`
+                // blocks until the coordinated job settles.
+                IndexCommand::Repair { wait }
             })
         }
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
@@ -664,12 +736,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
+            let headed_e2e_commands = optional_string_vec(params, "headed_e2e_commands")?;
+            if headed_e2e_commands
+                .iter()
+                .any(|command| !commands.contains(command))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "headed_e2e_commands must name exact entries in commands".to_string(),
+                ));
+            }
             // Issue #3913: bound on the host admission wait.
             let max_wait_secs = optional_u64(params, "max_wait_secs")?;
             CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                 commands,
                 max_wait_secs,
                 user_verification_result: optional_string(params, "user_verification_result")?,
+                headed_e2e_commands,
             })
         }
         "verify.adjudicate" => {
@@ -823,6 +905,54 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.release_prepared" => {
+            // Issue #4161: owner-addressed like `execution.status`, because the
+            // Session that left the Prepared fence behind is gone and the
+            // operator clearing it is somewhere else in the same repository.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            let reason = required_string(params, "reason")?;
+            let operation_id = optional_string(params, "operation_id")?;
+            reject_unknown_params(
+                params,
+                &["issue", "spec", "reason", "operation_id"],
+                "execution.release_prepared",
+            )?;
+            let owner = match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (None, None) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared requires params.issue or params.spec"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared owner number must be greater than zero"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                },
+                (None, Some(number)) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number,
+                },
+            };
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id,
+                    reason,
+                },
+            )
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -853,6 +983,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.close" | "pane.stop" => CliCommand::Pane(PaneCommand::Close {
             id: required_string(params, "id")?,
         }),
+        "pane.recover" => {
+            reject_unknown_params(
+                params,
+                &["started_after", "started_before", "apply"],
+                "pane.recover",
+            )?;
+            let started_after = required_string(params, "started_after")?;
+            let started_before = required_string(params, "started_before")?;
+            super::pane::parse_recovery_bounds(&started_after, &started_before)
+                .map_err(CliParseError::InvalidJson)?;
+            CliCommand::Pane(PaneCommand::Recover {
+                started_after,
+                started_before,
+                apply: optional_bool(params, "apply")?.unwrap_or(false),
+            })
+        }
         "pane.send" => CliCommand::Pane(PaneCommand::Send {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
@@ -880,6 +1026,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
         "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.startup" => {
+            reject_unknown_params(params, &[], "perf.startup")?;
+            CliCommand::Perf(PerfCommand::Startup)
+        }
         "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
@@ -1572,6 +1722,25 @@ fn issue_monitor_priority_position(
     }
 }
 
+/// SPEC #4249 FR-001: `reason` is the optional GitHub `state_reason` of a
+/// close. An unrecognised spelling is refused rather than silently dropped,
+/// because a dropped reason closes the Issue with the wrong rationale.
+fn issue_close_reason(
+    params: &Map<String, Value>,
+) -> Result<Option<gwt_github::client::IssueCloseReason>, CliParseError> {
+    let Some(raw) = optional_string(params, "reason")? else {
+        return Ok(None);
+    };
+    gwt_github::client::IssueCloseReason::parse(&raw)
+        .map(Some)
+        .ok_or_else(|| {
+            CliParseError::InvalidJson(format!(
+                "reason must be one of {:?}",
+                gwt_github::client::IssueCloseReason::ACCEPTED
+            ))
+        })
+}
+
 /// Issue #4037 AC-5 / #3906 AC-3: `update_drain` is the operator bool or the
 /// auto-drain object `{reason, version}`.
 fn optional_update_drain_control(
@@ -1719,9 +1888,10 @@ fn verification_quarantine_requests(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
-        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand,
-        SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
+        parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
+        CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
+        IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
+        WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
@@ -1753,6 +1923,272 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    fn concern_call(env: &mut TestEnv, operation: &str, params: Value) -> Value {
+        env.stdout.clear();
+        env.stderr.clear();
+        env.stdin = envelope(operation, params);
+        let code = super::dispatch(env, "gwtd");
+        assert_eq!(
+            code,
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&env.stdout),
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+        serde_json::from_str(response["output"].as_str().unwrap()).unwrap()
+    }
+
+    fn concern_create_params() -> Value {
+        json!({
+            "summary": "Unnecessary windows are restored",
+            "symptom_measurement": {"kind": "shell_command", "command": "printf '{\"count\":3}'"},
+            "baseline": {"count": 3},
+            "verification_predicate": {"pointer": "/count", "op": "eq", "expected": 0},
+            "owner_issues": [4059]
+        })
+    }
+
+    #[test]
+    fn concern_list_is_read_only_but_measurements_and_resolutions_are_mutations() {
+        use crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation;
+        assert!(is_read_only_json_envelope_operation("concern.list"));
+        for operation in [
+            "concern.create",
+            "concern.update",
+            "concern.measure",
+            "concern.resolve",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+    }
+
+    fn concern_owner_progress(state: &str) -> Value {
+        json!([{"number":4059,"state":state,"queue_position":3,"status":"queued","pull_requests":[]}])
+    }
+
+    #[test]
+    fn concern_roundtrip_requires_measurement_evidence_despite_closed_owners() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        assert_eq!(created["concern"]["state"], "open");
+        assert!(created["concern"]["raised_at"].is_string());
+        assert!(gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
+            .join("project-state/concerns.json")
+            .is_file());
+
+        // A new environment reads the record from disk, not process-local state.
+        let mut env = TestEnv::new(repo);
+        let listed = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(listed["concerns"][0]["id"], id);
+        assert_eq!(listed["summary"]["open_count"], 1);
+        assert_eq!(
+            listed["summary"]["oldest_raised_at"],
+            created["concern"]["raised_at"]
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({"id":id,"summary":"Restoration regression"}),
+        );
+        assert_eq!(updated["concern"]["summary"], "Restoration regression");
+
+        let measured = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":2},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(measured["concern"]["state"], "fix_landed");
+        assert_eq!(
+            measured["concern"]["previous_measurement"],
+            json!({"count":3})
+        );
+        assert_eq!(measured["concern"]["last_measurement"], json!({"count":2}));
+        assert_eq!(measured["concern"]["measurement_changed"], true);
+        let unresolved = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(unresolved["summary"]["unresolved_count"], 1);
+
+        let failed = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(failed["predicate_passed"], false);
+        assert_eq!(failed["concern"]["state"], "open");
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-2","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        let verified = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(verified["predicate_passed"], true);
+        assert_eq!(verified["concern"]["state"], "verified");
+        let recurrence = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-3","measurement":{"count":1},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(recurrence["concern"]["state"], "open");
+        let withdrawn = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"withdrawn"}),
+        );
+        assert_eq!(withdrawn["concern"]["state"], "withdrawn");
+    }
+
+    #[test]
+    fn concern_duplicate_report_returns_remeasurement_and_preserves_baseline() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let mut report = concern_create_params();
+        report["baseline"] = json!({"count":1});
+        let repeated = concern_call(&mut env, "concern.create", report.clone());
+        assert_eq!(repeated["reused"], true);
+        assert_eq!(repeated["concern"]["id"], created["concern"]["id"]);
+        assert_eq!(repeated["concern"]["baseline"], json!({"count":3}));
+        assert_eq!(repeated["concern"]["last_measurement"], json!({"count":1}));
+        let listed = concern_call(
+            &mut env,
+            "concern.list",
+            json!({"symptom_measurement":report["symptom_measurement"]}),
+        );
+        assert_eq!(listed["concerns"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concern_escalates_after_ten_cycles_without_owner_progress() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        for cycle in 1..=10 {
+            let result = concern_call(
+                &mut env,
+                "concern.measure",
+                json!({
+                    "id":id,"cycle_id":format!("cycle-{cycle}"),"measurement":{"count":cycle},
+                    "owner_progress":concern_owner_progress("open")
+                }),
+            );
+            assert_eq!(result["concern"]["stagnant_cycles"], cycle);
+            assert_eq!(result["concern"]["escalation_due"], cycle == 10);
+        }
+        let repeated = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-10","measurement":{"count":10},
+                "owner_progress":concern_owner_progress("open")
+            }),
+        );
+        assert_eq!(repeated["concern"]["stagnant_cycles"], 10);
+        assert_eq!(
+            repeated["concern"]["previous_measurement"],
+            json!({"count":9})
+        );
+        assert_eq!(repeated["concern"]["measurement_changed"], true);
+        let mut progress = concern_owner_progress("open");
+        progress[0]["status"] = json!("active");
+        let advanced = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(advanced["concern"]["stagnant_cycles"], 0);
+        assert_eq!(advanced["concern"]["escalation_due"], false);
+        assert_eq!(advanced["concern"]["owner_progress_changed"], true);
+        let retried = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(retried, advanced);
+    }
+
+    #[test]
+    fn concern_definition_update_cannot_reuse_previous_verification() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({
+                "id":id,"symptom_measurement":{"kind":"gwtd_operation","operation":"workspace.projection_list","params":{}}
+            }),
+        );
+        assert_eq!(updated["concern"]["state"], "open");
+        env.stdout.clear();
+        env.stdin = envelope("concern.resolve", json!({"id":id,"state":"verified"}));
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(String::from_utf8_lossy(&env.stdout).contains("measurement"));
+        assert!(matches!(
+            err("concern.update", json!({"id":id,"state":"verified"})),
+            CliParseError::InvalidJson(_)
+        ));
     }
 
     /// SPEC #3835 AC-15: the operation behind the `update-branch` default
@@ -1808,6 +2244,7 @@ mod tests {
                 review_status: "APPROVED".to_string(),
                 body: String::new(),
                 closing_issues: Vec::new(),
+                fallback_owner_closed: false,
             };
             let decision = classify_pr_lifecycle(&fields, now);
             let Some(operation) = decision.default_action_operation else {
@@ -1839,6 +2276,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: Some(2),
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -1847,6 +2285,7 @@ mod tests {
             CliCommand::Verify(VerifyCommand::Run {
                 commands: vec!["git --version".to_string()],
                 max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
                 user_verification_result: None,
             })
         );
@@ -1856,6 +2295,20 @@ mod tests {
                 json!({"commands": ["git --version"], "max_wait_secs": "soon"})
             ),
             CliParseError::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn verify_run_rejects_unlisted_headed_command() {
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({
+                    "commands": ["cargo test"],
+                    "headed_e2e_commands": ["npx playwright test"]
+                })
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 
@@ -1892,6 +2345,84 @@ mod tests {
         serialized["user_verification_result"] = json!("confirmed");
         let tampered = serde_json::from_value(serialized).unwrap();
         assert!(!verification_record::integrity_ok(&tampered));
+    }
+
+    #[test]
+    fn verify_run_rejects_autonomous_confirmation_and_allows_correction() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
+        let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut session = gwt_agent::Session::new(&repo, "test", gwt_agent::AgentId::Codex);
+        session.id = "session-4237".to_string();
+        session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git --version"], "user_verification_result": "n/a"}),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let original = verification_record::load(&repo).unwrap().unwrap();
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git init must-not-run"],
+                "user_verification_result": "**Confirmed** (launch instructions)"
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        let output = String::from_utf8_lossy(&env.stdout);
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("autonomous"), "{output}");
+        assert!(output.contains("n/a (autonomous)"), "{output}");
+        assert!(output.contains("verify.run"), "{output}");
+        assert!(!repo.join("must-not-run").exists());
+        assert_eq!(
+            verification_record::load(&repo).unwrap().unwrap().record_id,
+            original.record_id,
+            "a rejected result must preserve the preceding record"
+        );
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": "n/a (autonomous)"
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert_eq!(
+            verification_record::load(&repo)
+                .unwrap()
+                .unwrap()
+                .user_verification_result
+                .as_deref(),
+            Some("n/a (autonomous)")
+        );
+
+        let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _unknown = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "legacy-4237");
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git init legacy-must-not-run"], "user_verification_result": "confirmed"}),
+        );
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!repo.join("legacy-must-not-run").exists());
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report
@@ -2523,6 +3054,40 @@ mod tests {
         ));
     }
 
+    /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
+    /// an unqualified call only reports candidates. The first call used to be
+    /// an immediate `APPLIED` across every Work on the machine (1100 rows,
+    /// other projects included).
+    #[test]
+    fn workspace_work_prune_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok("workspace.work-prune", json!({"dry_run": false})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    /// Issue #4465 AC-4'': a scope parameter this operation does not implement
+    /// must be refused, never dropped. `params.work` was silently ignored and
+    /// the call then applied to the whole machine — the first specimen of the
+    /// #4444 dropped-params family that changes state.
+    #[test]
+    fn workspace_work_prune_rejects_an_unknown_scope_param() {
+        match err(
+            "workspace.work_prune",
+            json!({"work": "work-work-issue-4029-124040a6"}),
+        ) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("work"), "{message}");
+                assert!(message.contains("ids"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[test]
     fn workspace_join_requires_workspace_id() {
         match err("workspace.join", json!({"agent_session": "s"})) {
@@ -2941,6 +3506,50 @@ mod tests {
         ));
     }
 
+    /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
+    /// target and the reason are mandatory because an unexplained
+    /// invalidation is exactly the record AC-2 says must exist.
+    #[test]
+    fn issue_monitor_wait_invalidate_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({ "number": 42, "reason": "bootstrap build needs no lease" })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: None,
+                number: 42,
+                reason: "bootstrap build needs no lease".to_string(),
+                by: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 42,
+                    "reason": "ruled out",
+                    "by": "session:pm",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 42,
+                reason: "ruled out".to_string(),
+                by: Some("session:pm".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+    }
+
     /// Issue #3883 AC-6: the PM's recovery for launches that are still running
     /// but no longer tracked. It takes no target and no reason because it
     /// revokes nothing — it only re-adopts what the canvas already shows.
@@ -3230,6 +3839,72 @@ mod tests {
         ));
     }
 
+    /// SPEC #4249 FR-001: `issue.close` / `issue.reopen` need only `number`;
+    /// `reason` accepts the GitHub spellings and is refused — never silently
+    /// dropped — when it is not one of them, because a dropped reason closes the
+    /// Issue with the wrong rationale.
+    #[test]
+    fn issue_close_and_reopen_parse_their_optional_params() {
+        assert!(matches!(
+            ok("issue.close", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.close",
+                json!({"number": 7, "reason": "not-planned", "comment": "why"})
+            ),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                ..
+            })
+        ));
+        for reason in ["completed", "not_planned"] {
+            assert!(
+                matches!(
+                    ok("issue.close", json!({"number": 7, "reason": reason})),
+                    CliCommand::Issue(IssueCommand::Close {
+                        reason: Some(_),
+                        ..
+                    })
+                ),
+                "{reason}"
+            );
+        }
+        // Duplicate closure needs a canonical issue ID; tracked in #4489.
+        assert!(matches!(
+            err("issue.close", json!({"number": 7, "reason": "duplicate"})),
+            CliParseError::InvalidJson(_)
+        ));
+        match err("issue.close", json!({"number": 7, "reason": "wontfix"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("not_planned"), "{message}")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("issue.close", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert!(matches!(
+            ok("issue.reopen", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            })
+        ));
+        match err("issue.reopen", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,
     /// while an explicit empty array clears them.
     #[test]
@@ -3338,6 +4013,75 @@ mod tests {
                 CliParseError::InvalidJson(_)
             ));
         }
+    }
+
+    /// Issue #4435: `index.repair` submits by default; `wait` is the blocking
+    /// form the detached worker runs. `index.cancel` never blocks.
+    #[test]
+    fn index_repair_wait_selects_the_blocking_form() {
+        assert!(matches!(
+            ok("index.repair", json!({})),
+            CliCommand::Index(IndexCommand::Repair { wait: false })
+        ));
+        assert!(matches!(
+            ok("index.repair", json!({"scope": "issues", "wait": true})),
+            CliCommand::Index(IndexCommand::Repair { wait: true })
+        ));
+        match err("index.cancel", json!({"wait": true})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(
+                    message.contains("index.cancel does not take wait"),
+                    "{message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("index.repair", json!({"wait": "yes"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("wait must be a bool"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Issue #4435 AC-1: the envelope is the operation's only answer, so a
+    /// failed write must surface instead of leaving the caller with zero
+    /// bytes on both streams and an exit code that reads as success.
+    #[test]
+    fn an_undelivered_response_is_reported_rather_than_dropped() {
+        struct ClosedPipe;
+        impl std::io::Write for ClosedPipe {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the pipe has been ended",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let payload = json!({"ok": true, "operation": "index.repair"});
+
+        let mut delivered = Vec::new();
+        write_response(&mut delivered, &payload).expect("a writable stdout accepts the envelope");
+        assert!(!delivered.is_empty());
+        assert!(delivered.ends_with(b"\n"));
+
+        let error = write_response(&mut ClosedPipe, &payload)
+            .expect_err("a broken stdout must not be reported as delivered");
+        assert!(error.contains("pipe"), "{error}");
+
+        let mut env = crate::cli::env::TestEnv::new(std::path::PathBuf::from("cache"));
+        let code = report_undelivered_response(&mut env, "gwtd", "index.repair", &error);
+        assert_eq!(code, RESPONSE_NOT_DELIVERED_EXIT);
+        assert_ne!(code, 0, "an undelivered answer must not exit as success");
+        let reported = String::from_utf8(env.stderr.clone()).expect("stderr is utf-8");
+        assert!(
+            reported.contains("index.repair: response envelope was not delivered"),
+            "{reported}"
+        );
     }
 
     #[test]
@@ -3505,6 +4249,61 @@ mod tests {
             ),
             CliParseError::InvalidJson(message)
                 if message.contains("only accepts params.operation_id")
+        ));
+        // Issue #4161: the release is owner-addressed, so the owner is
+        // required rather than inferred from the caller's own record.
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "the launch that prepared it is gone"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id: None,
+                    ..
+                }
+            ) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 4161,
+                }
+        ));
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"spec": 4161, "reason": "stale fence", "operation_id": "fresh-launch-7"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    operation_id: Some(operation_id),
+                    ..
+                }
+            ) if operation_id == "fresh-launch-7"
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"reason": "stale fence"})),
+            CliParseError::InvalidJson(message)
+                if message.contains("requires params.issue or params.spec")
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"issue": 4161})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "spec": 4161, "reason": "stale fence"})
+            ),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "stale fence", "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("does not accept the parameter unexpected")
         ));
     }
 
@@ -4215,6 +5014,20 @@ mod tests {
         assert!(matches!(
             ok("build.start", json!({"spec": 1})),
             CliCommand::Build(SkillStateAction::Start { spec: 1 })
+        ));
+    }
+
+    #[test]
+    fn pane_recover_accepts_a_bounded_restore_burst() {
+        assert!(matches!(
+            ok(
+                "pane.recover",
+                json!({
+                    "started_after": "2026-09-14T05:00:00Z",
+                    "started_before": "2026-09-14T05:05:00Z"
+                })
+            ),
+            CliCommand::Pane(_)
         ));
     }
 

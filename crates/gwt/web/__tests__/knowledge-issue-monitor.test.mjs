@@ -177,6 +177,25 @@ test("Issue Monitor panel presents and clears the quota-hold provider and reset"
   assert.match(quotaHoldText, /Reset 2026-09-04T09:30:00Z/i);
 });
 
+test("Issue Monitor renders the JSON gui_status contract and follows updated limits", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const response = {
+    queue: [42, 43], active_launches: [44], max_active: 4,
+    gui_status: {
+      enabled: true, state: "active", queue_len: 2, active_count: 1,
+      max_active_agents: 4, auto_apply_updates: true, last_error: null,
+    },
+  };
+  surface.applyIssueMonitorStatus(response.gui_status);
+  assert.match(body.querySelector(".knowledge-monitor-summary").textContent,
+    new RegExp(`Queue ${response.queue.length} \\| Active ${response.active_launches.length}/${response.max_active}`));
+  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "4");
+  assert.equal(body.querySelector('[data-action="monitor-auto-apply"]').dataset.enabled, "true");
+  surface.applyIssueMonitorStatus({ ...response.gui_status, max_active_agents: 5 });
+  assert.equal(body.querySelector(".knowledge-monitor-max-active input").value, "5");
+});
+
 test("Issue Monitor panel preserves higher-priority states around quota-hold metadata", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -197,6 +216,7 @@ test("Issue Monitor panel preserves higher-priority states around quota-hold met
   });
 
   assert.equal(summary.textContent, "Error | Queue 3 | Active 0/2");
+  assert.equal(summary.title, "issue #3785: failed");
   // FR-017: the red monitor banner is gone and nothing replaces it in the
   // surface — the error is read in the notification center.
   assert.equal(body.querySelector(".knowledge-monitor-error"), null);
@@ -213,6 +233,7 @@ test("Issue Monitor panel preserves higher-priority states around quota-hold met
   });
 
   assert.equal(summary.textContent, "Stopped | Queue 3 | Active 0/2");
+  assert.equal(summary.title, "");
   assert.doesNotMatch(summary.textContent, /Quota hold|Provider|Reset/);
 
   for (const state of ["active", "launching"]) {
@@ -532,4 +553,110 @@ test("FR-017: Issue window load errors report to the center without a red status
     refresh_enabled: true,
   });
   assert.ok(spies.resolved.includes("issue-window:win-1:load"));
+});
+
+// Issue #3628 AC-5: on 2026-08-17 nine issues sat in `agent_failed`, nothing
+// ran at all, and the monitor panel still read healthy. `last_error` was
+// already occupied by one of those per-issue failures, so the outage needs its
+// own surface or it stays invisible exactly when it matters.
+test("A fleet outage is shown even while a per-issue error occupies the error line", async (t) => {
+  const spies = errorSpies();
+  const { body, surface } = await makeFixture(spies.options);
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+
+  const healthy = body.querySelector(".knowledge-monitor-blackout");
+  assert.ok(healthy, "the panel must reserve a surface for the outage");
+  assert.equal(healthy.hidden, true, "a healthy fleet shows nothing");
+
+  surface.applyIssueMonitorStatus({
+    enabled: true,
+    state: "error",
+    queue_len: 9,
+    active_count: 0,
+    max_active_agents: 3,
+    total_candidates: 9,
+    autonomous_mode: false,
+    launch_profile_source: "saved",
+    launch_profile_summary: "codex / host",
+    last_error: "issue #2338: an execution generation already exists",
+    agent_blackout:
+      "No implementation agent has been running for 1800s while 9 issue(s) were runnable; the fleet has been down since 2026-08-17T00:00:00Z",
+  });
+
+  const blackout = body.querySelector(".knowledge-monitor-blackout");
+  assert.equal(blackout.hidden, false);
+  assert.match(blackout.textContent, /the fleet has been down since/);
+  assert.equal(
+    blackout.getAttribute("role"),
+    "alert",
+    "an outage the operator must act on is announced, not merely painted",
+  );
+  // FR-017 (user ruling 2026-09-04): the per-issue error is read in the
+  // notification center, never in this window. The outage still has to reach
+  // the operator, which is why it renders here instead of competing for the
+  // single `last_error` slot the center already holds.
+  assert.deepEqual(
+    spies.reported.map((entry) => entry.message),
+    ["issue #2338: an execution generation already exists"],
+    "the per-issue error keeps its own channel rather than being overwritten",
+  );
+});
+
+// Issue #3628 AC-3: a row whose launch died had no GUI recovery at all. The
+// existing Launch Now only opens the wizard, so an operator who wanted the row
+// back in the queue without starting an agent had to hand-edit the state file.
+test("A failed row offers a requeue that returns it to the queue without launching", async (t) => {
+  const { body, sent, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_entries",
+    id: "win-1",
+    knowledge_kind: "issue",
+    request_id: load.request_id,
+    entries: [
+      knowledgeEntry(3628, "agent_failed"),
+      knowledgeEntry(3629, "launch_failed"),
+      knowledgeEntry(3630, "queued", 1),
+      knowledgeEntry(3631, "launched"),
+      knowledgeEntry(3632, "needs_human"),
+    ],
+    selected_number: 3628,
+    empty_message: "",
+    refresh_enabled: true,
+  });
+
+  const failedRow = body.querySelector('[data-issue-number="3628"]');
+  const requeue = failedRow.querySelector('[data-action="requeue-issue"]');
+  assert.ok(requeue, "an agent_failed row must offer the recovery");
+  assert.equal(
+    requeue.getAttribute("aria-label"),
+    "Return to the queue Issue #3628",
+    "the control must say it requeues rather than launches",
+  );
+  requeue.click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "issue_monitor_requeue",
+    issue_number: 3628,
+  });
+
+  body
+    .querySelector('[data-issue-number="3629"]')
+    .querySelector('[data-action="requeue-issue"]')
+    .click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "issue_monitor_requeue",
+    issue_number: 3629,
+  });
+
+  // The recovery releases a failure hold. Offering it where no hold exists
+  // would promise a state change that cannot happen.
+  for (const number of [3630, 3631, 3632]) {
+    assert.equal(
+      body
+        .querySelector(`[data-issue-number="${number}"]`)
+        .querySelector('[data-action="requeue-issue"]'),
+      null,
+      `#${number} holds no failure and must not offer the recovery`,
+    );
+  }
 });

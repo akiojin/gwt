@@ -1387,7 +1387,7 @@ fn load_issue_monitor_state_for_daemon(
     config: crate::IssueMonitorConfig,
 ) -> LoadedDaemonIssueMonitorState {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + issue_monitor_prefs_timeout(),
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
     let authority_fence = crate::IssueMonitorAuthorityFence::current_process();
     match crate::establish_issue_monitor_authority_fence(
@@ -1558,7 +1558,7 @@ fn revoke_issue_monitor_effect_authority_for_shutdown(
     monitor: &mut crate::IssueMonitorState,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + issue_monitor_prefs_timeout(),
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
     let mut candidate = monitor.clone();
     match crate::mutate_issue_monitor_prefs(prefs_path, |disk| {
@@ -1674,6 +1674,14 @@ enum IssueMonitorControl {
         issue_number: u64,
         at: String,
     },
+    /// Issue #4286 AC-1/AC-2: the PM ruled the wait condition void; record
+    /// who / when / why and hand the row back to ordinary stuck detection.
+    WaitInvalidated {
+        issue_number: u64,
+        by: String,
+        reason: String,
+        at: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
@@ -1771,11 +1779,22 @@ enum IssueMonitorControl {
     TerminalDelivered {
         target: crate::IssueMonitorStopTarget,
     },
+    /// Issue #3628 (AC-3): release the failure holding one issue out of the
+    /// queue. Deliberately identity-free — the rows this exists for have no
+    /// launch left to name — and refused by the driver for any row a launch
+    /// still owns.
+    Requeue {
+        issue_number: u64,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AcceptedIssueMonitorControl {
     control_id: String,
+    // Keep the first admission's time across pending clones and receipt
+    // recovery; recomputing it changes persisted failure/backoff state.
+    processed_at: String,
     control: IssueMonitorControl,
 }
 
@@ -1783,6 +1802,7 @@ impl AcceptedIssueMonitorControl {
     fn new(control: IssueMonitorControl) -> Self {
         Self {
             control_id: uuid::Uuid::new_v4().to_string(),
+            processed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             control,
         }
     }
@@ -2044,6 +2064,7 @@ fn reconcile_deferred_grant_after_authority_commit(
 fn try_apply_issue_monitor_control(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
+    now: &str,
 ) -> Option<bool> {
     match control {
         IssueMonitorControl::Enabled(enabled) => monitor
@@ -2128,8 +2149,8 @@ fn try_apply_issue_monitor_control(
         }
         | IssueMonitorControl::AgentFailed {
             failure: Some(_), ..
-        }) => try_apply_typed_issue_monitor_failure(monitor, control),
-        control => Some(apply_routine_issue_monitor_control(monitor, control)),
+        }) => try_apply_typed_issue_monitor_failure(monitor, control, now),
+        control => Some(apply_routine_issue_monitor_control(monitor, control, now)),
     }
 }
 
@@ -2144,6 +2165,7 @@ fn typed_failure_outcome(outcome: crate::IssueMonitorResumeWriterConflictOutcome
 fn try_apply_typed_issue_monitor_failure(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
+    now: &str,
 ) -> Option<bool> {
     match control {
         IssueMonitorControl::LaunchFailed {
@@ -2218,7 +2240,6 @@ fn try_apply_typed_issue_monitor_failure(
             let Some(issue_number) = issue_number else {
                 return Some(false);
             };
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             Some(
                 monitor.try_hold_provider_usage_limit(
                     issue_number,
@@ -2226,8 +2247,8 @@ fn try_apply_typed_issue_monitor_failure(
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
-                    &now,
+                    evidence.map(|evidence| *evidence),
+                    now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held,
             )
         }
@@ -2254,12 +2275,14 @@ fn apply_issue_monitor_control(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
 ) -> bool {
-    try_apply_issue_monitor_control(monitor, control).unwrap_or(false)
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    try_apply_issue_monitor_control(monitor, control, &now).unwrap_or(false)
 }
 
 fn apply_routine_issue_monitor_control(
     monitor: &mut crate::IssueMonitorState,
     control: IssueMonitorControl,
+    now: &str,
 ) -> bool {
     match control {
         IssueMonitorControl::Enabled(_)
@@ -2341,6 +2364,17 @@ fn apply_routine_issue_monitor_control(
             let _ = monitor.clear_autonomous_wait(issue_number, &at);
             false
         }
+        IssueMonitorControl::WaitInvalidated {
+            issue_number,
+            by,
+            reason,
+            at,
+        } => {
+            // Not agent liveness: the next scan applies the ordinary rule
+            // from the agent's own last heartbeat.
+            let _ = monitor.invalidate_autonomous_wait(issue_number, &by, &reason, &at);
+            false
+        }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents(max_active_agents);
             true
@@ -2381,11 +2415,12 @@ fn apply_routine_issue_monitor_control(
             // the agent has to be running to be refused.
             Some(crate::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
             Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt) => false,
-            None => monitor.record_launch_failed_delivery(
+            None => monitor.record_launch_failed_delivery_at(
                 issue_number,
                 message,
                 delivery_id.as_deref(),
                 materializer_id.as_deref(),
+                now,
             ),
         },
         IssueMonitorControl::AgentFailed {
@@ -2422,15 +2457,14 @@ fn apply_routine_issue_monitor_control(
                 let Some(issue_number) = issue_number else {
                     return false;
                 };
-                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 monitor.try_hold_provider_usage_limit(
                     issue_number,
                     &window_id,
                     &provider,
                     message,
                     resets_at.as_deref(),
-                    evidence,
-                    &now,
+                    evidence.map(|evidence| *evidence),
+                    now,
                 ) == crate::IssueMonitorProviderUsageLimitOutcome::Held
             }
             Some(crate::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
@@ -2443,9 +2477,9 @@ fn apply_routine_issue_monitor_control(
             }
             None => {
                 if let Some(issue_number) = issue_number {
-                    monitor.record_agent_issue_failed(issue_number, message);
+                    monitor.record_agent_issue_failed_at(issue_number, message, now);
                 } else {
-                    monitor.record_agent_window_failed(&window_id, message);
+                    monitor.record_agent_window_failed_at(&window_id, message, now);
                 }
                 true
             }
@@ -2481,6 +2515,18 @@ fn apply_routine_issue_monitor_control(
         IssueMonitorControl::IdleRelease { number, reason } => {
             monitor.request_idle_release(number, reason);
             true
+        }
+        IssueMonitorControl::Requeue {
+            issue_number,
+            reason,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            // A refusal asks for no scan: nothing changed, and claiming
+            // otherwise is how a caller learns to trust a no-op.
+            matches!(
+                monitor.requeue_failed_issue(issue_number, &reason, &now),
+                crate::IssueMonitorRequeueOutcome::Requeued { .. }
+            )
         }
         IssueMonitorControl::TerminalDelivered { target } => {
             monitor.settle_exact_terminal_delivery(&target).is_ok()
@@ -2571,7 +2617,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
     on_first_contention: impl FnMut(),
 ) -> IssueMonitorControlCommit {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + prefs_timeout,
+        gwt_core::operation_deadline::now() + prefs_timeout,
     );
     let mut applied = None;
     let mut authority_changed = false;
@@ -2611,8 +2657,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         );
                     }
                     let authority_epoch_before = converged.effect_authority_epoch();
-                    let converged_result =
-                        try_apply_issue_monitor_control(&mut converged, accepted.control.clone());
+                    let converged_result = try_apply_issue_monitor_control(
+                        &mut converged,
+                        accepted.control.clone(),
+                        &accepted.processed_at,
+                    );
                     let converged_authority_changed =
                         converged.effect_authority_epoch() != authority_epoch_before;
                     if typed_failure {
@@ -2640,6 +2689,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             applied = Some(try_apply_issue_monitor_control(
                 &mut candidate,
                 accepted.control.clone(),
+                &accepted.processed_at,
             ));
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
             if typed_failure && applied == Some(Some(false)) {
@@ -2867,6 +2917,22 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .get("reason")
                     .and_then(serde_json::Value::as_str)?
                     .to_string();
+                if wait
+                    .get("invalidate")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    let by = wait
+                        .get("by")
+                        .and_then(serde_json::Value::as_str)?
+                        .to_string();
+                    return Some(IssueMonitorControl::WaitInvalidated {
+                        issue_number,
+                        by,
+                        reason,
+                        at,
+                    });
+                }
                 let resume_condition = wait
                     .get("resume_condition")
                     .and_then(serde_json::Value::as_str)?
@@ -3075,6 +3141,18 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                 };
                 return Some(IssueMonitorControl::TerminalDelivered { target });
             }
+            if let Some(requeue) = payload.get("requeue") {
+                let issue_number = requeue.get("issue_number")?.as_u64()?;
+                let reason = requeue
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("operator requeue")
+                    .to_string();
+                return Some(IssueMonitorControl::Requeue {
+                    issue_number,
+                    reason,
+                });
+            }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers
                 .iter()
@@ -3160,6 +3238,13 @@ fn spawn_issue_monitor_scan_with_deadline(
         #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        // Issue #4391 AC-1: once free space crosses the threshold the
+        // `disk_space` warning reports, reclaim merged, idle worktrees'
+        // build caches. The sweep runs on its own thread and never holds the
+        // scan. Unit tests drive this worker against scratch repositories and
+        // must not start a host-wide sweep on a CI runner that is low on disk.
+        #[cfg(not(test))]
+        crate::worktree::gc::maybe_spawn(&scope.project_root);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
     })
 }
@@ -3228,7 +3313,7 @@ fn persist_daemon_issue_monitor_state_observed(
     on_first_contention: impl FnMut(),
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + prefs_timeout,
+        gwt_core::operation_deadline::now() + prefs_timeout,
     );
     let recovery_baseline = monitor.prefs();
     match crate::issue_monitor::mutate_issue_monitor_prefs_recovering_observed(
@@ -3289,7 +3374,7 @@ fn commit_issue_monitor_scan_if_current(
     captured_authority_epoch: u64,
 ) -> bool {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + issue_monitor_prefs_timeout(),
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
     if monitor.effect_authority_epoch() != captured_authority_epoch {
         return false;
@@ -3354,7 +3439,9 @@ fn accept_completed_issue_monitor_scan(
     // let a result that was ready just before the watchdog boundary commit
     // after that boundary.
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(captured_deadline);
-    if Instant::now() >= captured_deadline || captured_revision != current_revision {
+    if gwt_core::operation_deadline::now() >= captured_deadline
+        || captured_revision != current_revision
+    {
         return false;
     }
     commit_issue_monitor_scan_if_current(prefs_path, monitor, scanned, captured_authority_epoch)
@@ -3382,7 +3469,7 @@ fn fence_next_issue_monitor_effect_with_permit(
     permit: &IssueMonitorEffectPermitToken,
 ) -> Option<crate::PendingIssueMonitorEffect> {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + issue_monitor_prefs_timeout(),
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
@@ -3730,6 +3817,7 @@ fn execute_issue_monitor_effect(
                         crate::issue_monitor_settlement::settle_merged_issue(
                             &client,
                             &repository,
+                            &scope.project_root,
                             *issue_number,
                             *pr_number,
                             merge_sha.as_deref(),
@@ -3830,7 +3918,7 @@ fn try_commit_issue_monitor_effect_result(
     use gwt_github::issue_auto_claim::ClaimAcquireOutcome;
 
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + issue_monitor_prefs_timeout(),
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
 
     let key = completed.effect.attempt_key();
@@ -5156,6 +5244,7 @@ mod tests {
         ClientFrame, DaemonEndpoint, DaemonFrame, HookEnvelope, IpcHandshakeRequest, RuntimeScope,
         RuntimeTarget, DAEMON_PROTOCOL_VERSION,
     };
+    use gwt_core::operation_deadline::ScopedOperationClock;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use tempfile::TempDir;
     use tokio::{
@@ -5423,6 +5512,9 @@ mod tests {
             &fake_gh,
             r###"#!/bin/sh
 case "$*" in
+  *" --include") printf 'HTTP/2.0 200 OK\n\r\n' ;;
+esac
+case "$*" in
   *"--method POST"*|*"--method PATCH"*|*"-X POST"*|*"-X PATCH"*|*"pr merge"*)
     if [ -n "$GWT_FAKE_GH_MUTATION_MARKER" ]; then
       : > "$GWT_FAKE_GH_MUTATION_MARKER"
@@ -5593,7 +5685,7 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   # The REST list is paged: only the first page carries rows, like GitHub
   # (a fixture larger than per_page would otherwise page forever).
   case "$*" in
-    *"issue list"* | *"/issues?"*"&page=1")
+    *"issue list"* | *"/issues?"*"&page=1 --include")
       cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
       exit 0
       ;;
@@ -5723,15 +5815,15 @@ exit 0
     /// must. Each test owns its `prefs_path`, but the production 250 ms prefs
     /// budget still decided their verdict on a loaded runner: a durable write
     /// that took longer than the budget failed the transaction and surfaced as
-    /// a bare `false`. Pin the hang-guard budget so a saturated runner may
-    /// delay the transaction but never decide it (Issue #3641 / #4033), and
+    /// a bare `false`. Hold operation time fixed during this synchronous
+    /// success case so fsync latency cannot decide it (Issue #4227), and
     /// name the transaction failure instead of hiding it behind `false`.
     fn commit_effect_result_for_test(
         prefs_path: &Path,
         monitor: &mut crate::IssueMonitorState,
         completed: super::CompletedIssueMonitorEffect,
     ) -> bool {
-        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
+        let _clock = ScopedOperationClock::set(Instant::now());
         super::try_commit_issue_monitor_effect_result(prefs_path, monitor, completed)
             .unwrap_or_else(|error| {
                 panic!(
@@ -5741,7 +5833,7 @@ exit 0
             })
     }
 
-    /// Issue #4096: the control CAS counterpart of
+    /// Issue #4227: the control CAS counterpart of
     /// [`commit_effect_result_for_test`]. A `RetryableFailure` here means the
     /// prefs transaction itself failed — no test in this module races a second
     /// writer through this helper — so it is reported with the reason the
@@ -5751,8 +5843,20 @@ exit 0
         monitor: &mut crate::IssueMonitorState,
         control: IssueMonitorControl,
     ) -> super::IssueMonitorControlCommit {
-        let _budget = super::ScopedIssueMonitorPrefsTimeout::set(HANG_GUARD);
-        let commit = super::try_apply_issue_monitor_control_with_disk_migration(
+        apply_accepted_control_for_test(
+            prefs_path,
+            monitor,
+            super::AcceptedIssueMonitorControl::new(control),
+        )
+    }
+
+    fn apply_accepted_control_for_test(
+        prefs_path: &Path,
+        monitor: &mut crate::IssueMonitorState,
+        control: super::AcceptedIssueMonitorControl,
+    ) -> super::IssueMonitorControlCommit {
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let commit = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
             prefs_path, monitor, control,
         );
         assert!(
@@ -6942,7 +7046,7 @@ exit 0
             version: None,
             session_mode: Default::default(),
             skip_permissions: false,
-            codex_fast_mode: false,
+            fast_mode: false,
             runtime_target: Default::default(),
             docker_service: None,
             docker_lifecycle_intent: Default::default(),
@@ -6989,15 +7093,18 @@ exit 0
         let mut effect_permit = super::IssueMonitorEffectPermit::new();
         let mut pending = None;
 
-        let should_scan = super::apply_or_queue_issue_monitor_control(
-            &hub,
-            prefs_path,
-            monitor,
-            control,
-            &mut effect_permit,
-            &mut pending,
-            Some(completion),
-        );
+        let should_scan = {
+            let _clock = ScopedOperationClock::set(Instant::now());
+            super::apply_or_queue_issue_monitor_control(
+                &hub,
+                prefs_path,
+                monitor,
+                control,
+                &mut effect_permit,
+                &mut pending,
+                Some(completion),
+            )
+        };
 
         assert!(
             pending.is_none(),
@@ -7151,6 +7258,10 @@ exit 0
         );
         let mut reconciled = monitor.agent_status();
         reconciled.scan_stall = projected.scan_stall.clone();
+        // Issue #3628 AC-5: the fleet-outage check is clock-bound for the same
+        // reason, and is reconciled here rather than compared, so this test
+        // keeps asserting what it was written to assert.
+        reconciled.agent_blackout = projected.agent_blackout.clone();
         assert_eq!(
             projected, reconciled,
             "retry ACK follows the reconciled agent projection"
@@ -7299,6 +7410,56 @@ exit 0
     }
 
     #[test]
+    fn receipt_retry_reuses_the_first_processing_timestamp() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        monitor.complete_active_launch(42, "tab-1::agent-42");
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.begin_review(42, 99, "abc123");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
+        let mut stale = monitor.clone();
+        let accepted = super::AcceptedIssueMonitorControl {
+            control_id: "processing-time-replay".to_string(),
+            // Deliberately different from wall time, without sleeping.
+            processed_at: "2000-01-01T00:00:00Z".to_string(),
+            control: IssueMonitorControl::LaunchFailed {
+                issue_number: 42,
+                message: "review launch failed".to_string(),
+                delivery_id: None,
+                materializer_id: None,
+                failure: None,
+            },
+        };
+        assert!(matches!(
+            apply_accepted_control_for_test(&prefs_path, &mut monitor, accepted.clone()),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .retry_not_before
+                .as_deref(),
+            Some("2000-01-01T00:01:00Z")
+        );
+        assert!(matches!(
+            apply_accepted_control_for_test(&prefs_path, &mut stale, accepted),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert_eq!(stale.prefs(), monitor.prefs());
+        assert_eq!(stale.attempt_count(42), 1);
+    }
+
+    #[test]
     fn durable_receipt_converges_stale_volatile_state_before_commit_result() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -7360,16 +7521,18 @@ exit 0
         // pre-control snapshot. The receipt branch must converge it before
         // returning Committed.
         monitor = stale_before_control;
-        assert!(matches!(
-            super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
-                &prefs_path,
-                &mut monitor,
-                accepted,
-                Duration::from_secs(30),
-                || {},
-            ),
-            super::IssueMonitorControlCommit::Committed { .. }
-        ));
+        let retry = super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
+            &prefs_path,
+            &mut monitor,
+            accepted,
+            Duration::from_secs(30),
+            || {},
+        );
+        assert!(
+            matches!(retry, super::IssueMonitorControlCommit::Committed { .. }),
+            "retry={retry:?}, last_error={:?}",
+            monitor.status_view().last_error
+        );
         assert_eq!(monitor.active_count(), 0);
         assert_eq!(
             monitor.autonomous_record(42).map(|record| record.phase),
@@ -7639,6 +7802,86 @@ exit 0
         );
     }
 
+    /// Issue #3628 AC-3/AC-6: the GUI recovery reaches the canonical driver,
+    /// and the exact-identity safety the CLI operation enforces survives the
+    /// trip through the control plane.
+    ///
+    /// Seeded in the 2026-08-17 shape: a persisted `agent_failed` hold with no
+    /// launch left to name, next to an unrelated live launch that must not be
+    /// touched.
+    #[test]
+    fn issue_monitor_requeue_control_releases_a_dead_hold_and_spares_a_live_launch() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 43,
+                    window_id: "tab-1::agent-live".to_string(),
+                }],
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 42,
+                    message: "an execution generation already exists for issue #42".to_string(),
+                    window_id: Some("tab-1::agent-dead".to_string()),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        let live =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "requeue": { "issue_number": 43, "reason": "operator recovery" }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("requeue decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, live),
+            "a row a launch still owns must not be recovered by this control"
+        );
+        assert_eq!(
+            monitor.launched_window_issue("tab-1::agent-live"),
+            Some(43),
+            "the live launch must be untouched"
+        );
+
+        let dead =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({
+                    "requeue": { "issue_number": 42, "reason": "operator recovery" }
+                }),
+                std::process::id() + 1,
+            ))
+            .expect("requeue decodes");
+        assert!(
+            apply_issue_monitor_control(&mut monitor, dead),
+            "releasing a dead hold must request a scan so the row runs now"
+        );
+        let prefs = monitor.prefs();
+        assert!(
+            prefs.failed_issues.is_empty(),
+            "the persisted hold must be gone: {:?}",
+            prefs.failed_issues
+        );
+        assert_eq!(
+            prefs
+                .released_failures
+                .iter()
+                .map(|release| release.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42],
+            "the release must be published so other processes converge on it"
+        );
+        assert_eq!(
+            prefs.launched_issues.len(),
+            1,
+            "the unrelated live launch must survive the recovery"
+        );
+    }
+
     #[test]
     fn issue_monitor_wait_control_declares_and_clears_the_wait() {
         // Issue #3844 AC-1/AC-2: the `wait` control carries the agent's
@@ -7701,6 +7944,62 @@ exit 0
             monitor.stuck_autonomous_issues("2026-06-29T02:31:00Z"),
             vec![42],
             "ordinary detection resumes from the clearing heartbeat"
+        );
+    }
+
+    #[test]
+    fn issue_monitor_wait_control_invalidates_the_wait() {
+        // Issue #4286 AC-1/AC-2: `wait.invalidate:true` from the PM records
+        // who / when / why on the declaration and hands the row back to
+        // ordinary stuck detection without counting as agent liveness.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+        monitor.declare_autonomous_wait(
+            42,
+            "host lease 待ち",
+            "verify.lease.acquire が granted を返す",
+            "2026-06-29T00:10:00Z",
+        );
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "wait": {
+                    "issue_number": 42,
+                    "invalidate": true,
+                    "by": "session:pm",
+                    "reason": "bootstrap build needs no lease",
+                    "at": "2026-06-29T00:20:00Z",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("invalidate decodes");
+        assert!(
+            !apply_issue_monitor_control(&mut monitor, control),
+            "an invalidation does not request a scan"
+        );
+        let waiting = monitor.autonomous_wait(42).expect("declaration kept");
+        let invalidated = waiting.invalidated.as_ref().expect("invalidation recorded");
+        assert_eq!(invalidated.by, "session:pm");
+        assert_eq!(invalidated.reason, "bootstrap build needs no lease");
+        assert_eq!(invalidated.at, "2026-06-29T00:20:00Z");
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T00:41:00Z"),
+            vec![42],
+            "ordinary detection resumes from the agent's last heartbeat"
         );
     }
 
@@ -7955,6 +8254,7 @@ exit 0
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -8062,6 +8362,7 @@ exit 0
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -8613,6 +8914,7 @@ exit 0
         let mut stale_volatile_monitor = monitor.clone();
         let accepted = super::AcceptedIssueMonitorControl {
             control_id: "typed-receipt-replay".to_string(),
+            processed_at: "2026-08-13T00:00:00Z".to_string(),
             control: IssueMonitorControl::AgentFailed {
                 issue_number: Some(42),
                 window_id: "tab-1::agent-replay".to_string(),
@@ -8621,11 +8923,7 @@ exit 0
             },
         };
         assert!(matches!(
-            super::try_apply_accepted_issue_monitor_control_with_disk_migration(
-                &prefs_path,
-                &mut monitor,
-                accepted.clone(),
-            ),
+            apply_accepted_control_for_test(&prefs_path, &mut monitor, accepted.clone(),),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
         let committed = monitor.prefs();
@@ -8642,11 +8940,8 @@ exit 0
             .await
             .expect("receive replay completion")
             .into_parts();
-        let replay = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
-            &prefs_path,
-            &mut stale_volatile_monitor,
-            accepted,
-        );
+        let replay =
+            apply_accepted_control_for_test(&prefs_path, &mut stale_volatile_monitor, accepted);
         assert!(matches!(
             replay,
             super::IssueMonitorControlCommit::Committed { .. }
@@ -8961,6 +9256,7 @@ exit 0
                     evidence: None,
                 }),
             },
+            "2026-08-22T03:00:00Z",
         ));
         assert_eq!(
             monitor.prefs().provider_quota_holds.get("codex"),
@@ -9676,7 +9972,7 @@ exit 0
                 version: None,
                 session_mode: Default::default(),
                 skip_permissions: false,
-                codex_fast_mode: true,
+                fast_mode: true,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -9730,6 +10026,7 @@ exit 0
     /// held queue moves without waiting for the interval tick.
     #[test]
     fn quota_hold_clear_control_releases_the_hold_in_the_authoritative_state_and_prefs() {
+        let _clock = ScopedOperationClock::set(Instant::now());
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let reset_at = "2026-09-07T03:58:00Z";
@@ -12039,6 +12336,7 @@ exit 0
                     needs_human_kind: None,
                     steering: None,
                     review_dispatch_hold: None,
+                    last_failure_message: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -12528,6 +12826,7 @@ exit 1
                     needs_human_kind: None,
                     steering: None,
                     review_dispatch_hold: None,
+                    last_failure_message: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -14049,6 +14348,7 @@ exit 1
             .as_deref()
             .is_some_and(|error| error.contains("outer watchdog stage")));
 
+        let _clock = ScopedOperationClock::set(Instant::now());
         let mut coalesced_retry = canonical.clone();
         crate::scan_issue_monitor_candidates(
             &mut coalesced_retry,
@@ -14715,6 +15015,7 @@ exit 1
 
     #[test]
     fn stale_scan_fresh_marker_cannot_revive_newer_autonomous_disable() {
+        let _clock = ScopedOperationClock::set(Instant::now());
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let initial = crate::IssueMonitorPrefs {
@@ -14841,6 +15142,7 @@ exit 1
 
     #[test]
     fn scan_commit_adopts_newer_disk_authority_before_retrying() {
+        let _clock = ScopedOperationClock::set(Instant::now());
         // A launch-profile save is intentionally a direct prefs transaction.
         // The daemon must absorb its newer authority generation after rejecting
         // the stale scan; otherwise every retry captures the same old epoch and
@@ -15153,6 +15455,7 @@ exit 1
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15218,6 +15521,7 @@ exit 1
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15336,6 +15640,7 @@ exit 1
                     needs_human_kind: None,
                     steering: None,
                     review_dispatch_hold: None,
+                    last_failure_message: None,
                 },
                 crate::AutonomousIssueRecord {
                     issue_number: 8,
@@ -15354,6 +15659,7 @@ exit 1
                     needs_human_kind: None,
                     steering: None,
                     review_dispatch_hold: None,
+                    last_failure_message: None,
                 },
             ],
             ..crate::IssueMonitorPrefs::default()
@@ -15422,6 +15728,7 @@ exit 1
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -16035,6 +16342,7 @@ exit 1
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -16175,6 +16483,7 @@ exit 1
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -16310,6 +16619,7 @@ exit 1
                 needs_human_kind: None,
                 steering: None,
                 review_dispatch_hold: None,
+                last_failure_message: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -16601,7 +16911,7 @@ exit 1
                 version: None,
                 session_mode: Default::default(),
                 skip_permissions: false,
-                codex_fast_mode: false,
+                fast_mode: false,
                 runtime_target: Default::default(),
                 docker_service: None,
                 docker_lifecycle_intent: Default::default(),
@@ -16664,6 +16974,7 @@ exit 1
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
+            last_failure_message: None,
         };
         let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
         let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
@@ -16899,6 +17210,7 @@ exit 1
                     needs_human_kind: None,
                     steering: None,
                     review_dispatch_hold: None,
+                    last_failure_message: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -17108,15 +17420,17 @@ exit 1
         );
 
         FileExt::unlock(&lock).expect("release prefs lock");
+        let _clock = ScopedOperationClock::set(Instant::now());
         let retry = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut stale_local,
             pending.front_accepted().expect("pending OFF").clone(),
         );
-        assert!(matches!(
-            retry,
-            super::IssueMonitorControlCommit::Committed { .. }
-        ));
+        assert!(
+            matches!(retry, super::IssueMonitorControlCommit::Committed { .. }),
+            "retry={retry:?}, last_error={:?}",
+            stale_local.status_view().last_error
+        );
         let committed = crate::load_issue_monitor_prefs(&prefs_path).expect("reload durable OFF");
         assert!(!committed.enabled);
         assert_eq!(committed.effect_authority_epoch, 8);
@@ -17913,6 +18227,7 @@ exit 1
                     needs_human_kind: None,
                     steering: None,
                     review_dispatch_hold: None,
+                    last_failure_message: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -18203,6 +18518,7 @@ exit 1
             needs_human_kind: None,
             steering: None,
             review_dispatch_hold: None,
+            last_failure_message: None,
         };
         crate::save_issue_monitor_prefs(
             &prefs_path,
@@ -18264,6 +18580,7 @@ exit 1
 
     #[test]
     fn persist_daemon_state_keeps_equal_marker_new_failure_and_never_decreases_marker() {
+        let _clock = ScopedOperationClock::set(Instant::now());
         let temp = TempDir::new().expect("tempdir");
         let equal_path = temp.path().join("equal.json");
         crate::save_issue_monitor_prefs(&equal_path, &crate::IssueMonitorPrefs::default())

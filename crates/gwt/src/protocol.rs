@@ -304,6 +304,14 @@ pub enum FrontendEvent {
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
+    /// Initial workspace has had a browser rendering opportunity (#3808).
+    StartupFirstFrame {
+        navigation_ms: f64,
+    },
+    /// xterm can accept input; the backend also requires a live PTY writer.
+    StartupTerminalReady {
+        id: String,
+    },
     /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
     /// resident PM pane if it is not running, then frames it in the viewport.
     OpenPmAgent {
@@ -423,6 +431,12 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         request_id: Option<String>,
+    },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
     },
     /// SPEC-2356 安心 Addendum (FR-041): stop the window's agent runtime (kill
     /// the PTY through the existing stop path) but KEEP the window and its
@@ -631,12 +645,35 @@ pub enum FrontendEvent {
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: frontend-generated id for this cleanup run, so a
+        /// client that reconnects mid-cleanup can re-sync the operation it
+        /// started. `None` only for clients predating the field.
+        #[serde(default)]
+        operation_id: Option<String>,
     },
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: see [`FrontendEvent::RunBranchCleanup::operation_id`].
+        #[serde(default)]
+        operation_id: Option<String>,
+    },
+    /// Issue #4433: a reconnected client asks for the current state of the
+    /// cleanup operation it is still showing as running. The backend replies
+    /// with the latest [`BackendEvent::BranchCleanupProgress`] or
+    /// [`BackendEvent::BranchCleanupResult`], or with nothing when the
+    /// operation is unknown.
+    SyncBranchCleanup {
+        id: String,
+        operation_id: String,
+    },
+    /// Issue #4433: the client consumed the operation's result, so the backend
+    /// can drop the snapshot instead of replaying it into the next cleanup.
+    ClearBranchCleanupStatus {
+        id: String,
+        operation_id: String,
     },
     /// SPEC-1939 US-5: trigger a per-cell index rebuild for
     /// `(project_root, scope, worktree_hash?)`. The backend funnels this
@@ -812,6 +849,17 @@ pub enum FrontendEvent {
         issue_number: u64,
         #[serde(default)]
         linked_issue_kind: Option<crate::LinkedIssueKind>,
+    },
+    /// Issue #3628 (AC-3): return an issue whose launch is gone to the queue,
+    /// without launching anything.
+    ///
+    /// Carries no launch identity on purpose. `stop` and `failover` resolve an
+    /// exact live launch, which is right for them and impossible here — a row
+    /// that reached `agent_failed` has already lost the launch those operations
+    /// would name, and hand-editing `issue-monitor.json` was the only remaining
+    /// recovery. The driver still refuses any row a launch does own.
+    IssueMonitorRequeue {
+        issue_number: u64,
     },
     IssueMonitorConfigureIssue {
         issue_number: u64,
@@ -2054,10 +2102,17 @@ pub enum BackendEvent {
     },
     BranchCleanupResult {
         id: String,
+        /// Issue #4433: identifies the cleanup run this result belongs to so a
+        /// reconnected client can drop a result from a superseded run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchCleanupProgress {
         id: String,
+        /// Issue #4433: see [`BackendEvent::BranchCleanupResult::operation_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         branch: String,
         execution_branch: Option<String>,
         index: usize,
@@ -3362,6 +3417,25 @@ mod tests {
         assert_eq!(
             policy.backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn recover_restored_window_request_preserves_expected_session() {
+        let value = serde_json::json!({
+            "kind": "recover_restored_window",
+            "id": "tab-1::agent-1",
+            "session_id": "restored-session",
+            "child_pid": 123,
+            "child_started_at": 456
+        });
+        serde_json::from_value::<FrontendEvent>(value).expect("restored-window recovery request");
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": "tab-1::agent-1"
+            }))
+            .is_err(),
+            "recovery requires an expected Session identity"
         );
     }
 

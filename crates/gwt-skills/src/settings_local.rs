@@ -44,7 +44,8 @@ const MANAGED_EVENT_ORDER: &[&str] = &[
     "PostToolUse",
     "Stop",
 ];
-const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
+pub const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
+pub const CLAUDE_SETTINGS_PATH: &str = ".claude/settings.local.json";
 static ATOMIC_WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +89,7 @@ enum ManagedHookTarget {
 impl ManagedHookTarget {
     fn config_path(self, worktree: &Path) -> PathBuf {
         match self {
-            Self::Claude => worktree.join(".claude/settings.local.json"),
+            Self::Claude => worktree.join(CLAUDE_SETTINGS_PATH),
             Self::Codex => worktree.join(CODEX_HOOKS_PATH),
         }
     }
@@ -274,34 +275,35 @@ fn read_existing_settings(path: &Path) -> io::Result<Map<String, Value>> {
 }
 
 pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
-    let tmp_path = atomic_staging_path(path, "settings.local.json")?;
     let json = serde_json::to_string_pretty(value)
         .map_err(|err| io::Error::other(format!("settings.local.json serialize failed: {err}")))?;
-
-    {
-        let mut tmp = fs::File::create(&tmp_path)?;
-        tmp.write_all(json.as_bytes())?;
-        tmp.write_all(b"\n")?;
-        tmp.sync_all()?;
-    }
-
-    commit_staged_file(&tmp_path, path)?;
-    Ok(())
+    write_text_atomically(path, &json)
 }
 
 pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()> {
     let tmp_path = atomic_staging_path(path, "gwt-managed")?;
-
-    {
-        let mut tmp = fs::File::create(&tmp_path)?;
+    // Only clean up a staging file this invocation successfully created.
+    let mut tmp = fs::File::create(&tmp_path)?;
+    let result = (|| {
         tmp.write_all(content.as_bytes())?;
         if !content.ends_with('\n') {
             tmp.write_all(b"\n")?;
         }
-        tmp.sync_all()?;
+        tmp.sync_all()
+    })();
+    drop(tmp);
+    let result = result.and_then(|()| commit_staged_file(&tmp_path, path));
+    if let Err(error) = result {
+        if let Err(cleanup) = fs::remove_file(&tmp_path) {
+            if cleanup.kind() != io::ErrorKind::NotFound {
+                return Err(io::Error::other(format!(
+                    "{error}; remove staging file {}: {cleanup}",
+                    tmp_path.display()
+                )));
+            }
+        }
+        return Err(error);
     }
-
-    commit_staged_file(&tmp_path, path)?;
     Ok(())
 }
 
@@ -861,10 +863,11 @@ fn posix_coordination_hook_command(event: &str) -> String {
     format!("{bin} hook coordination-event {event}")
 }
 
-/// Emit the PowerShell form of the runtime-state hook. Windows Claude
-/// Code runs the hook through `powershell -NoProfile -Command`, so we
-/// keep that wrapper, then invoke the gwtd binary via `& '...'` call
-/// operator.
+/// Emit the PowerShell form of the event hook. This is the Codex form only:
+/// Codex's own hook runner is host-native, so on Windows the command must be
+/// a PowerShell wrapper that invokes the gwtd binary via the `& '...'` call
+/// operator. Claude Code takes the POSIX form on every platform — see
+/// `managed_hook_shell` (Issue #3966).
 fn powershell_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
     let bin = powershell_quote(bin);
     format!(
@@ -898,6 +901,19 @@ fn powershell_coordination_hook_command(event: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn atomic_writers_remove_their_staging_file_on_publish_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("blocked.json");
+        std::fs::create_dir(&destination).unwrap();
+        let unrelated = temp.path().join(".blocked.json.tmp-existing");
+        std::fs::write(&unrelated, "keep").unwrap();
+        assert!(super::write_settings_atomically(&destination, &serde_json::json!({})).is_err());
+        assert!(super::write_text_atomically(&destination, "text").is_err());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep");
+    }
+
     use std::sync::{Arc, Barrier};
 
     use gwt_core::process::hidden_command;

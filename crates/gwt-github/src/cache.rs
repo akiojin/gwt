@@ -91,6 +91,10 @@ impl CacheMeta {
 pub struct CacheEntry {
     pub snapshot: IssueSnapshot,
     pub spec_body: SpecBody,
+    /// Set when the body carries a gwt-spec header but the SPEC structure
+    /// cannot be parsed. `spec_body` is then empty and must not drive a
+    /// section write (Issue #4392).
+    pub spec_parse_error: Option<String>,
 }
 
 /// Proof that a complete Issue snapshot was validated against GitHub.
@@ -494,40 +498,36 @@ impl Cache {
                 body: c.body.clone(),
             })
             .collect();
-        let spec_body = match SpecBody::parse(&snapshot.body, &parsed_comments) {
-            Ok(spec_body) => spec_body,
-            Err(ParseError::MissingHeader) => SpecBody {
-                // Plain Issue (no `<!-- gwt-spec id=... -->` header at all):
-                // synthesize an empty SpecBody so the entry still surfaces
-                // to UI consumers as a regular Issue. This mirrors the
-                // existing `write_snapshot` path for plain Issues.
-                meta: SpecMeta {
-                    id: meta.number.to_string(),
-                    version: 1,
-                },
-                sections_index: crate::body::SectionsIndex::default(),
-                sections: std::collections::BTreeMap::new(),
-            },
-            Err(_) => {
-                // Body carries a SPEC header but the structural parse fails
-                // (malformed sections index, missing referenced comment,
-                // etc.). We intentionally do NOT downgrade these to an
-                // empty SpecBody: a subsequent `SpecOps::write_section`
-                // would recompute the routing from the empty section map
-                // and rewrite the body's index, orphaning content stored in
-                // comments referenced only by the original (malformed)
-                // index. Returning `None` keeps such entries out of UI
-                // lists until the next refresh either repairs the body or
-                // proves it is truly a plain Issue. The on-disk cache is
-                // still populated (write_snapshot is lenient), so the
-                // body / meta survive in `~/.gwt/cache/issues/<n>/` for
-                // diagnostics.
-                return None;
+        // Plain Issue (no `<!-- gwt-spec id=... -->` header at all) and a
+        // body whose SPEC structure cannot be parsed (malformed sections
+        // index, missing referenced comment, a header quoted in prose) both
+        // surface with an empty SpecBody. The malformed case also carries
+        // the parse error: hiding it made every validated read fail forever
+        // (Issue #4392), and `SpecOps::write_section` refuses it so the empty
+        // section map never rewrites the index and orphans comment content.
+        let (spec_body, spec_parse_error) = match SpecBody::parse(&snapshot.body, &parsed_comments)
+        {
+            Ok(spec_body) => (spec_body, None),
+            Err(error) => {
+                let spec_parse_error = match error {
+                    ParseError::MissingHeader => None,
+                    error => Some(error.to_string()),
+                };
+                let empty = SpecBody {
+                    meta: SpecMeta {
+                        id: meta.number.to_string(),
+                        version: 1,
+                    },
+                    sections_index: crate::body::SectionsIndex::default(),
+                    sections: std::collections::BTreeMap::new(),
+                };
+                (empty, spec_parse_error)
             }
         };
         Some(CacheEntry {
             snapshot,
             spec_body,
+            spec_parse_error,
         })
     }
 
@@ -639,6 +639,33 @@ fn persisted_snapshots_match(left: &IssueSnapshot, right: &IssueSnapshot) -> boo
 /// generated docs but `pub` is required so the hook code can link against it.
 #[doc(hidden)]
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_durability(path, bytes, Durability::FlushToDevice)
+}
+
+/// Whether an atomic write waits for the storage device before returning.
+///
+/// Issue #3777: `sync_all` is the only call in this helper that blocks on the
+/// device, and on a contended Windows runner it measured 522ms for a
+/// half-kilobyte file. A UserPromptSubmit hook performs several such writes
+/// under a 200ms budget, so state that the next hook event rewrites anyway
+/// asks for [`Durability::RenameOnly`]: the rename still publishes the file
+/// whole, only the "survives an OS crash" guarantee is dropped.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Wait for the device. For data that must survive an OS crash.
+    FlushToDevice,
+    /// Publish atomically without waiting for the device. For transient state
+    /// that is rewritten on the next event.
+    RenameOnly,
+}
+
+#[doc(hidden)]
+pub fn write_atomic_with_durability(
+    path: &Path,
+    bytes: &[u8],
+    durability: Durability,
+) -> std::io::Result<()> {
     let parent = path.parent().expect("path must have a parent");
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(
@@ -653,7 +680,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        if durability == Durability::FlushToDevice {
+            f.sync_all()?;
+        }
     }
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
