@@ -63346,8 +63346,13 @@ fn pm_refresh_resolves_managed_asset_collisions_from_old_head() {
         ".codex/hooks.json",
     ] {
         assert!(
-            pm_worktree.join(relative).is_file(),
-            "missing regenerated {relative}"
+            pm_worktree
+                .parent()
+                .unwrap()
+                .join("runtime")
+                .join(relative)
+                .is_file(),
+            "missing regenerated runtime asset {relative}"
         );
     }
 
@@ -63408,8 +63413,10 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
         fs::write(seed.join("UPSTREAM.md"), "incoming upstream bytes\n").unwrap();
         fs::write(pm_worktree.join("UPSTREAM.md"), "untracked PM bytes\n").unwrap();
     } else {
+        let runtime_skills = pm_worktree.parent().unwrap().join("runtime/.claude/skills");
+        fs::create_dir_all(&runtime_skills).unwrap();
         fs::write(
-            seed.join(".claude/skills/gwt-pm"),
+            runtime_skills.join("gwt-pm"),
             "file obstructing skill directory\n",
         )
         .unwrap();
@@ -65195,6 +65202,142 @@ fn explicit_pm_actions_start_the_pm_even_when_auto_start_is_opted_out() {
         1,
         "an explicit PM launcher click must start the PM"
     );
+}
+
+#[test]
+fn pm_codex_hook_trust_uses_runtime_paths_and_relative_codex_home() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&temp.path().join("repo"));
+    fs::create_dir_all(&worktree).unwrap();
+    let runtime = worktree.parent().unwrap().join("runtime");
+    let codex_home = runtime.join("codex-state");
+    fs::create_dir_all(&codex_home).unwrap();
+    gwt_skills::generate_codex_hooks(&runtime).unwrap();
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&worktree)
+        .build();
+    config
+        .env_vars
+        .insert("CODEX_HOME".into(), "codex-state".into());
+    let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+        &temp.path().join("missing-config.toml"),
+        &worktree,
+        &config,
+        None,
+        gwt_skills::CodexHookDiscoveryMode::Both,
+        None,
+    )
+    .unwrap()
+    .expect("PM hook trust resolves CODEX_HOME relative to the provider cwd");
+    assert!(!report.trusted_entries.is_empty());
+    let trusted: toml::Value =
+        toml::from_str(&fs::read_to_string(codex_home.join("config.toml")).unwrap()).unwrap();
+    assert_every_codex_hook_is_trusted(&trusted, &runtime.join(".codex/hooks.json"));
+    assert!(!worktree.join("codex-state").exists());
+}
+
+/// SPEC-4486 AC-5a: provider discovery is isolated while project data and
+/// canonical Session identity remain available on fresh and resumed launches.
+#[test]
+fn pm_process_launch_isolates_discovery_and_keeps_project_data_readable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let fake_codex = write_fake_codex(temp.path());
+    let _path = prepend_tool_parent_to_path(&fake_codex);
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = create_detached_pm_worktree_fixture(&repo);
+    fs::write(worktree.join("AGENTS.md"), "PROJECT_POLICY_DATA").unwrap();
+    fs::write(worktree.join("source.rs"), "PROJECT_SOURCE_DATA").unwrap();
+    fs::create_dir_all(worktree.join(".codex")).unwrap();
+    fs::write(worktree.join(".codex/config.toml"), "project_marker = true").unwrap();
+    let runtime_dir = worktree.parent().unwrap().join("runtime");
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let mut previous = None;
+    for resumed in [false, true] {
+        let mut config = if let Some(session) = previous.as_ref() {
+            super::launch_config_from_persisted_session(session)
+        } else {
+            AppRuntime::pm_launch_config(
+                &worktree,
+                &gwt::pm_registry::PmLaunchProfile {
+                    agent_id: "codex".into(),
+                    model: None,
+                    reasoning: None,
+                    version: None,
+                },
+            )
+        };
+        assert_eq!(config.working_dir.as_deref(), Some(worktree.as_path()));
+        config.command = fake_codex.display().to_string();
+        let codex_home = temp.path().join("codex-state");
+        fs::create_dir_all(&codex_home).unwrap();
+        config
+            .env_vars
+            .insert("CODEX_HOME".into(), codex_home.display().to_string());
+        let (proxy, events) = AppEventProxy::stub();
+        AppRuntime::spawn_agent_window_async(
+            proxy,
+            sessions.clone(),
+            repo.display().to_string(),
+            "tab-1::pm-isolation".into(),
+            config,
+            temp.path().join("missing-config.toml"),
+            None,
+        );
+        let recorded = events.lock().unwrap();
+        let result = recorded
+            .iter()
+            .find_map(|event| match event {
+                UserEvent::LaunchComplete { result, .. } => Some(result.as_ref()),
+                _ => None,
+            })
+            .expect("LaunchComplete");
+        let completion = result.as_ref().expect("successful PM process preparation");
+        assert_eq!(
+            completion.0.cwd.as_deref(),
+            Some(runtime_dir.as_path()),
+            "resume={resumed}"
+        );
+        assert_eq!(completion.4, worktree);
+        assert_eq!(
+            completion.0.env.get("GWT_PROJECT_ROOT"),
+            Some(&worktree.display().to_string())
+        );
+        let mut session =
+            gwt_agent::Session::load(&sessions.join(format!("{}.toml", completion.1))).unwrap();
+        assert_eq!(session.worktree_path, worktree);
+        assert_eq!(session.project_state_root.as_deref(), Some(repo.as_path()));
+        assert_eq!(
+            session.session_mode,
+            if resumed {
+                gwt_agent::SessionMode::Resume
+            } else {
+                gwt_agent::SessionMode::Normal
+            }
+        );
+        assert!(!runtime_dir.join("AGENTS.md").exists());
+        assert!(!runtime_dir.join(".codex/config.toml").exists());
+        let project = PathBuf::from(&completion.0.env["GWT_PROJECT_ROOT"]);
+        assert_eq!(
+            fs::read_to_string(project.join("AGENTS.md")).unwrap(),
+            "PROJECT_POLICY_DATA"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("source.rs")).unwrap(),
+            "PROJECT_SOURCE_DATA"
+        );
+        session.agent_session_id = Some("pm-isolation-resume".into());
+        session.save(&sessions).unwrap();
+        previous = Some(session);
+    }
 }
 
 /// SPEC-3431 FR-026: a fresh project has no profile and must still start, and

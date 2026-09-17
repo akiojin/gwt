@@ -1486,6 +1486,7 @@ fn index_scope(value: &str) -> Result<IndexScope, CliParseError> {
         "memory" => Ok(IndexScope::Memory),
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
+        "works" => Ok(IndexScope::Works),
         "files" => Ok(IndexScope::Files),
         "files_docs" | "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::InvalidJson(format!(
@@ -4885,6 +4886,7 @@ mod tests {
             "memory",
             "discussions",
             "board",
+            "works",
             "files",
             "files-docs",
         ] {

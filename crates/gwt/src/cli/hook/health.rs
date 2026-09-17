@@ -591,6 +591,8 @@ fn cached_surface_audit(
 
 /// Every path whose presence or content decides the surface audit.
 fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree);
+    let worktree = runtime.as_deref().unwrap_or(worktree);
     let mut paths = vec![
         worktree.join(".claude"),
         worktree.join(".claude/settings.local.json"),
@@ -651,7 +653,10 @@ fn audit_managed_hook_configs(
     health: &mut ManagedHookHealth,
     dependencies: &mut Vec<PathBuf>,
 ) {
-    let worktree = &input.worktree_root;
+    // Provider configuration follows PM runtime discovery. Session identity
+    // and Git hook dependencies remain rooted in the canonical checkout.
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(&input.worktree_root);
+    let worktree = runtime.as_deref().unwrap_or(&input.worktree_root);
     let claude_dir = worktree.join(".claude");
     let claude_settings = worktree.join(".claude/settings.local.json");
     // #3474: audit every `.codex/hooks.json` the self-heal writer owns, not
@@ -725,7 +730,7 @@ fn audit_managed_hook_configs(
         }
     }
 
-    audit_managed_git_hooks(worktree, health, dependencies);
+    audit_managed_git_hooks(&input.worktree_root, health, dependencies);
 }
 
 /// Issue #4339: a `core.hooksPath` aimed at a directory with no hook in it
@@ -1159,13 +1164,14 @@ fn read_runtime_state(path: &Path) -> Result<RuntimeStateReadModel, String> {
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {
-    let claude_surface = worktree_root.join(".claude").exists()
-        || worktree_root.join(".claude/settings.local.json").exists();
-    let codex_surface =
-        worktree_root.join(".codex").exists() || worktree_root.join(".codex/hooks.json").exists();
-    let provider_surface = worktree_root.join(".gwt/opencode").exists()
-        || worktree_root.join(".gwt/openclaw").exists()
-        || worktree_root.join(".gwt/hermes").exists();
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
+    let assets = runtime.as_deref().unwrap_or(worktree_root);
+    let claude_surface =
+        assets.join(".claude").exists() || assets.join(".claude/settings.local.json").exists();
+    let codex_surface = assets.join(".codex").exists() || assets.join(".codex/hooks.json").exists();
+    let provider_surface = assets.join(".gwt/opencode").exists()
+        || assets.join(".gwt/openclaw").exists()
+        || assets.join(".gwt/hermes").exists();
     // #4339: the Git hook directory belongs to the repository, not to any agent
     // provider, so repair it even in a worktree with no agent surface at all.
     let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();

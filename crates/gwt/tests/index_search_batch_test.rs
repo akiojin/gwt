@@ -561,6 +561,57 @@ fn missing_scope_returns_typed_not_ready_instead_of_silent_empty_success() {
     assert_eq!(INDEX_NOT_READY_EXIT_CODE, 75);
 }
 
+/// Issue #4455 AC-3: while a scope is being rebuilt, a blocking search must
+/// answer that the rebuild is in flight instead of holding the caller for the
+/// full repair wait. `gwt-search` uses this as a mandatory preflight, so a
+/// silent stall — or a bare "missing" — is not a usable answer.
+#[test]
+fn scope_under_rebuild_reports_the_rebuild_instead_of_holding_the_caller() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture =
+        setup_search_fixture(r#"{"ok": true, "scopes": {"specs": {"state": "missing"}}}"#);
+    gwt_core::runtime::ensure_project_index_runtime()
+        .expect("prime the managed runtime outside the measured window");
+
+    // No `GWT_INDEX_SEARCH_REPAIR_WAIT_MS` override: this measures the
+    // production join window, which used to be the full 30 seconds.
+    let started = Instant::now();
+    let error = gwt::search_project_index(
+        &fixture.repo,
+        "specs scope under rebuild",
+        &[IndexSearchScope::Specs],
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    )
+    .expect_err("a scope under rebuild must not degrade into a silent empty success");
+    let elapsed = started.elapsed();
+
+    let IndexSearchError::NotReady(not_ready) = error else {
+        panic!("expected typed INDEX_NOT_READY while the rebuild is in flight, got {error:?}");
+    };
+    assert!(
+        not_ready.rebuild_in_progress,
+        "the caller must be told a rebuild is running: {not_ready:?}"
+    );
+    assert_eq!(
+        not_ready.rebuilding_scopes,
+        vec!["specs".to_string()],
+        "the scopes being rebuilt must be named: {not_ready:?}"
+    );
+    assert!(
+        not_ready.retry_after_ms > 0,
+        "retry information is mandatory: {not_ready:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the caller was held for the whole repair wait instead of being told \
+         the rebuild is in flight (waited {elapsed:?})"
+    );
+}
+
 #[test]
 fn typed_v2_not_ready_canonicalizes_file_pair_repair_and_retries_fallback() {
     let _env_lock = env_lock()
