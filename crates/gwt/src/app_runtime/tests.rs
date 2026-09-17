@@ -47554,11 +47554,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         done_tx.send(events).expect("return GUI events");
     });
 
-    let marker_deadline = Instant::now() + Duration::from_secs(2);
-    while !gh_marker.exists() && Instant::now() < marker_deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(gh_marker.exists(), "GUI reached the fake live fetch");
+    wait_for_path("GUI reached the fake live fetch", &gh_marker);
     assert!(
         done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
         "GUI writer must not complete while the transaction lock remains held"
