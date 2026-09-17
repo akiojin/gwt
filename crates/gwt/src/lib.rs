@@ -50,6 +50,7 @@ pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
+pub mod recovery_delivery;
 pub mod runtime_daemon_events;
 pub mod session_inventory;
 pub mod spec_tasks;
@@ -66,6 +67,9 @@ pub mod worktree_inventory;
 
 #[cfg(any(test, feature = "test-gh-guard"))]
 mod test_guard;
+
+#[cfg(test)]
+mod recovery_delivery_tests;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
@@ -178,10 +182,11 @@ pub use issue_monitor::{
     IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
     IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
     IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, IssueMonitorWindowObservation,
-    IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
-    MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
+    IssueMonitorWindowSnapshot, IssueReadinessFailure, LaunchProfileSelection, LaunchProfileSkip,
+    MergedIssueDelivery, MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState,
+    NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    STRANDED_LAUNCHED_ROW_GRACE_SECS,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
@@ -236,7 +241,8 @@ pub use protocol::{
     IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
     ManagedHookHealthView, ManagedHookPendingDiscussionView, ManagedHookPendingGoalView,
     ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView, ProfileEnvEntryView,
-    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RecoveryCenterItemState,
+    RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary, UiTraceEntry,
     UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
     WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
     WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
