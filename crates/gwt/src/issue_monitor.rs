@@ -2076,6 +2076,22 @@ pub enum IssueMonitorCandidateSource {
     Cache,
 }
 
+/// Issue #4436 AC-1/AC-2: one Issue whose readiness could not be refreshed,
+/// kept with the Issue number it belongs to.
+///
+/// These failures used to be joined into a single string and published as the
+/// monitor-wide `last_error`, so `issue.monitor.status` reported the whole
+/// readiness refresh as failed while every other Issue in the same pass had in
+/// fact been refreshed. Keeping the number lets the reason reach the row it
+/// describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueReadinessFailure {
+    pub number: u64,
+    /// Why this Issue was skipped, without an `issue #N` prefix — the reader
+    /// already knows which row it is on.
+    pub reason: String,
+}
+
 /// Match only the exact pre-#3272 launch failure for the current project.
 /// Windows provider/verbatim prefixes are normalized on both sides, but the
 /// remaining path must otherwise be equal — substrings, suffixes and nearby
@@ -10608,6 +10624,36 @@ impl IssueMonitorState {
             item.state = MonitorInboxState::NotReady;
             item.exclusion_reason = Some(reason);
             item.error_message = None;
+        }
+    }
+
+    /// Issue #4436 AC-2: put each readiness-refresh failure on the row it
+    /// happened to, so a reader can tell which Issue was skipped and why
+    /// without decoding one joined `last_error` line.
+    ///
+    /// Only rows the scan is free to re-evaluate are touched. A launching,
+    /// launched, or terminal row keeps its own state: a skipped readiness read
+    /// says nothing about work that is already under way.
+    pub fn record_readiness_refresh_failures(&mut self, failures: &[IssueReadinessFailure]) {
+        for failure in failures {
+            let Some(item) = self
+                .inbox
+                .iter_mut()
+                .find(|item| item.issue.number == failure.number)
+            else {
+                continue;
+            };
+            if !matches!(
+                item.state,
+                MonitorInboxState::Queued
+                    | MonitorInboxState::NotReady
+                    | MonitorInboxState::Skipped
+            ) {
+                continue;
+            }
+            item.state = MonitorInboxState::NotReady;
+            item.exclusion_reason = Some(format!("readiness refresh skipped: {}", failure.reason));
+            self.queue.retain(|queued| *queued != failure.number);
         }
     }
 

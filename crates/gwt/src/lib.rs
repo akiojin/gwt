@@ -178,10 +178,11 @@ pub use issue_monitor::{
     IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
     IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
     IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, IssueMonitorWindowObservation,
-    IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
-    MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
-    PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
-    LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
+    IssueMonitorWindowSnapshot, IssueReadinessFailure, LaunchProfileSelection, LaunchProfileSkip,
+    MergedIssueDelivery, MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState,
+    NeedsHumanKind, PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS,
+    IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS, LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+    STRANDED_LAUNCHED_ROW_GRACE_SECS,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, load_knowledge_bridge_detail, refresh_knowledge_bridge_cache,
