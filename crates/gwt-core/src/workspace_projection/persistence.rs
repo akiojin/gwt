@@ -693,6 +693,73 @@ pub fn heal_same_container_duplicate_claim_attachments_for_work_event_root(
     )
 }
 
+/// Issue #4465: physically detach refs to `container` from every Work other
+/// than `canonical_id`, under the split-root state lock. Pure projection
+/// repair — no events are appended, and no Work is terminalized. Idempotent,
+/// so `workspace.ensure` can run it before every transaction. Returns the
+/// healed Work ids.
+pub fn detach_foreign_container_refs_for_work_event_root<F>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    canonical_id: &str,
+    restrict_to: &[String],
+    matches_container: F,
+) -> Result<Vec<String>>
+where
+    F: Fn(&WorkspaceExecutionContainerRef) -> bool,
+{
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    with_split_root_workspace_state_lock(
+        project_state_root,
+        work_event_root,
+        &current_path,
+        &work_items_path,
+        |_| {
+            let Some(mut work_items) = load_workspace_work_items_from_path(&work_items_path)?
+            else {
+                return Ok(Vec::new());
+            };
+            let healed = work_items.detach_foreign_container_refs(
+                canonical_id,
+                restrict_to,
+                &matches_container,
+            );
+            if !healed.is_empty() {
+                save_workspace_work_items_projection_to_path(&work_items_path, &work_items)?;
+            }
+            Ok(healed)
+        },
+    )
+}
+
+/// Repo-path variant of
+/// [`detach_foreign_container_refs_for_work_event_root`] for callers that
+/// operate on the project-global WorkItems projection (Issue #4465).
+pub fn detach_foreign_container_refs<F>(
+    repo_path: &Path,
+    canonical_id: &str,
+    restrict_to: &[String],
+    matches_container: F,
+) -> Result<Vec<String>>
+where
+    F: Fn(&WorkspaceExecutionContainerRef) -> bool,
+{
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
+        let Some(mut work_items) = load_workspace_work_items_from_path(&work_items_path)? else {
+            return Ok(Vec::new());
+        };
+        let healed =
+            work_items.detach_foreign_container_refs(canonical_id, restrict_to, &matches_container);
+        if !healed.is_empty() {
+            save_workspace_work_items_projection_to_path(&work_items_path, &work_items)?;
+        }
+        Ok(healed)
+    })
+}
+
 /// Recover an interrupted Workspace state transaction without synthesizing or
 /// mutating Workspace state when no transaction is pending.
 pub fn recover_pending_workspace_state_transaction(repo_path: &Path) -> Result<()> {

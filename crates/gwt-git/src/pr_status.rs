@@ -267,6 +267,7 @@ pub struct PrInventoryFields {
     pub review_status: String,
     pub body: String,
     pub closing_issues: Vec<PrClosingIssue>,
+    pub fallback_owner_closed: bool,
 }
 
 /// Result of classifying one open PR for the PM inventory.
@@ -473,6 +474,7 @@ impl PrInventoryItem {
             review_status: self.review_status.clone(),
             body: self.body.clone(),
             closing_issues: self.closing_issues.clone(),
+            fallback_owner_closed: self.owner_issue_closed,
         }
     }
 
@@ -549,7 +551,8 @@ pub fn classify_pr_lifecycle_with(
     now: DateTime<Utc>,
     options: &PrInventoryOptions,
 ) -> PrLifecycleDecision {
-    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues);
+    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues)
+        || (fields.closing_issues.is_empty() && fields.fallback_owner_closed);
     let class = if looks_superseded(&fields.title, &fields.body) || owner_issue_closed {
         PrLifecycleClass::Superseded
     } else if mergeability_unknown(fields) {
@@ -585,7 +588,8 @@ pub fn classify_pr_lifecycle_with(
 /// Default action and executability for an already-decided class. `stale`
 /// and `dwell_hours` are filled by the caller, which owns the clock.
 fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLifecycleDecision {
-    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues);
+    let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues)
+        || (fields.closing_issues.is_empty() && fields.fallback_owner_closed);
     let default_action = match (class, fields.is_draft) {
         (PrLifecycleClass::MergeCandidate, true) => "mark ready".to_string(),
         (PrLifecycleClass::MergeCandidate, false) => "propose merge".to_string(),
@@ -761,6 +765,10 @@ fn inventory_item_from_value(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string(),
+        fallback_owner_closed: value
+            .get("fallbackOwnerState")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|state| state.eq_ignore_ascii_case("CLOSED")),
         closing_issues: value
             .get("closingIssuesReferences")
             .map(parse_closing_issues)
@@ -1154,9 +1162,14 @@ where
         )));
     }
 
-    let (rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
+    let (mut rows, mut github_calls) = fetch_light_inventory_rows_with(repo_path, &mut run_gh)?;
+    let owner_calls = hydrate_fallback_owners(repo_path, &mut rows, ledger, now, &mut run_gh)?;
+    github_calls += owner_calls as u32;
     let mut heavy = BTreeMap::new();
-    let mut hydrated = 0usize;
+    // The fallback owner-state batch is a hydration too: it spends one of the
+    // shared PR_INVENTORY_HYDRATION_CAP slots instead of adding a new burst
+    // allowance (#4141 AC-6 over the #3891 budget ledger).
+    let mut hydrated = owner_calls;
     let mut skipped_unchanged = 0usize;
     let mut pending = Vec::new();
     for row in &rows {
@@ -1170,7 +1183,7 @@ where
         if let Some(fields) =
             hydration_needed(previous.as_ref(), updated_at, head_ref_oid, options, now)
         {
-            if pending.len() < PR_INVENTORY_HYDRATION_CAP {
+            if pending.len() + owner_calls < PR_INVENTORY_HYDRATION_CAP {
                 pending.push((number, updated_at, head_ref_oid, fields));
             }
         } else if previous.is_some() && !options.include.is_empty() {
@@ -1238,6 +1251,113 @@ where
         skipped_unchanged,
         unlanded_branches: Vec::new(),
     })
+}
+
+/// Resolve head-derived owners once per inventory TTL, independently of PR
+/// updatedAt. The batch consumes one of the existing hydration call slots.
+fn hydrate_fallback_owners<F>(
+    repo_path: &Path,
+    rows: &mut [serde_json::Value],
+    ledger: &BudgetLedger,
+    now: DateTime<Utc>,
+    run_gh: &mut F,
+) -> Result<usize>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let owners: std::collections::BTreeSet<_> = rows
+        .iter()
+        .filter_map(|row| {
+            if row
+                .get("closingIssuesReferences")
+                .map(parse_closing_issues)
+                .is_some_and(|v| !v.is_empty())
+            {
+                return None;
+            }
+            row.get("headRefName")
+                .and_then(serde_json::Value::as_str)
+                .and_then(launch_ref_issue)
+        })
+        .collect();
+    if owners.is_empty() {
+        return Ok(0);
+    }
+    let fields = owners
+        .iter()
+        .map(|n| format!("owner_{n}:issue(number:{n}){{state}}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rate_limit = github_budget::GRAPHQL_RATE_LIMIT_SELECTION;
+    let query = format!("query=query($owner:String!,$repo:String!){{{rate_limit} repository(owner:$owner,name:$repo){{{fields}}}}}");
+    let output = run_gh(
+        repo_path,
+        &[
+            "api",
+            "graphql",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "repo={repo}",
+            "-f",
+            &query,
+        ],
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|e| GwtError::Other(format!("owner issue states JSON: {e}")))?;
+    if let Some(rate_limit) = github_budget::parse_graphql_rate_limit(&value) {
+        ledger.record_graphql_response(
+            &github_budget::spawn_source(&["api", "graphql"]),
+            &rate_limit,
+            now,
+        );
+    }
+    // gh exits nonzero for partial GraphQL responses too. Only a NOT_FOUND
+    // attached to a requested issue alias is a recoverable per-owner failure.
+    let mut missing = std::collections::BTreeSet::new();
+    for error in value["errors"].as_array().into_iter().flatten() {
+        let path = error["path"].as_array();
+        let owner = path
+            .filter(|p| p.len() == 2 && p[0] == "repository")
+            .and_then(|p| p[1].as_str())
+            .and_then(|alias| alias.strip_prefix("owner_"))
+            .and_then(|n| n.parse::<u64>().ok())
+            .filter(|n| owners.contains(n));
+        if error["type"] != "NOT_FOUND" || owner.is_none() {
+            return Err(GwtError::Git(format!("owner issue states: {error}")));
+        }
+        missing.insert(owner.expect("validated owner alias"));
+    }
+    if !output.success && missing.is_empty() {
+        return Err(GwtError::Git(format!(
+            "gh owner issue states: {}",
+            output.stderr
+        )));
+    }
+    for row in rows {
+        let Some(owner) = row["headRefName"]
+            .as_str()
+            .and_then(launch_ref_issue)
+            .filter(|n| owners.contains(n))
+        else {
+            continue;
+        };
+        let state = &value["data"]["repository"][format!("owner_{owner}")]["state"];
+        if missing.contains(&owner) {
+            row["fallbackOwnerState"] = serde_json::json!("UNKNOWN");
+            continue;
+        }
+        if !state.as_str().is_some_and(|s| s == "OPEN" || s == "CLOSED") {
+            return Err(GwtError::Git(format!(
+                "owner issue #{owner} state unavailable"
+            )));
+        }
+        row["fallbackOwnerState"] = state.clone();
+    }
+    if !missing.is_empty() {
+        eprintln!("warning: owner issue state unavailable (NOT_FOUND): {missing:?}");
+    }
+    Ok(1)
 }
 
 /// Issue #3891 AC-4: the reason a periodic read must not spend right now.
@@ -1490,30 +1610,48 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
 
 /// Determine CI status from a `statusCheckRollup` array.
 fn ci_status_from_rollup(rollup: Option<&serde_json::Value>) -> String {
-    rollup
+    match ci_from_rollup(rollup) {
+        CiStatus::Passing => "SUCCESS",
+        CiStatus::Failing => "FAILURE",
+        CiStatus::Pending => "PENDING",
+        CiStatus::Unknown => "UNKNOWN",
+    }
+    .to_string()
+}
+
+fn ci_from_rollup(rollup: Option<&serde_json::Value>) -> CiStatus {
+    let Some(checks) = rollup
         .and_then(serde_json::Value::as_array)
-        .map(|checks| {
-            if checks.is_empty() {
-                return "UNKNOWN".to_string();
+        .filter(|c| !c.is_empty())
+    else {
+        return CiStatus::Unknown;
+    };
+    let mut pending = false;
+    for check in checks {
+        let state = if let Some(state) = check["state"].as_str() {
+            state
+        } else {
+            if check["status"]
+                .as_str()
+                .is_some_and(|s| !s.eq_ignore_ascii_case("COMPLETED"))
+            {
+                pending = true;
+                continue;
             }
-            let any_failure = checks.iter().any(|c| {
-                c["conclusion"].as_str() == Some("FAILURE")
-                    || c["conclusion"].as_str() == Some("failure")
-            });
-            let any_pending = checks.iter().any(|c| {
-                c["status"].as_str() == Some("IN_PROGRESS")
-                    || c["status"].as_str() == Some("QUEUED")
-                    || c["conclusion"].is_null()
-            });
-            if any_failure {
-                "FAILURE".to_string()
-            } else if any_pending {
-                "PENDING".to_string()
-            } else {
-                "SUCCESS".to_string()
-            }
-        })
-        .unwrap_or_else(|| "UNKNOWN".to_string())
+            check["conclusion"].as_str().unwrap_or("")
+        };
+        match state.to_ascii_uppercase().as_str() {
+            "SUCCESS" | "SKIPPED" | "NEUTRAL" => {}
+            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" | "STALE" => return CiStatus::Failing,
+            _ => pending = true,
+        }
+    }
+    if pending {
+        CiStatus::Pending
+    } else {
+        CiStatus::Passing
+    }
 }
 
 fn parse_github_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
@@ -2066,30 +2204,7 @@ pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
     let json: serde_json::Value =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr view JSON: {e}")))?;
 
-    let ci = match json.get("statusCheckRollup") {
-        Some(serde_json::Value::Array(checks)) => {
-            let all_pass = checks.iter().all(|c| {
-                c.get("conclusion")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s == "SUCCESS" || s == "NEUTRAL" || s == "SKIPPED")
-            });
-            let any_fail = checks.iter().any(|c| {
-                c.get("conclusion")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s == "FAILURE" || s == "CANCELLED" || s == "TIMED_OUT")
-            });
-            if checks.is_empty() {
-                CiStatus::Pending
-            } else if any_fail {
-                CiStatus::Failing
-            } else if all_pass {
-                CiStatus::Passing
-            } else {
-                CiStatus::Pending
-            }
-        }
-        _ => CiStatus::Unknown,
-    };
+    let ci = ci_from_rollup(json.get("statusCheckRollup"));
 
     let mergeable = json
         .get("mergeable")
@@ -3040,6 +3155,61 @@ mod tests {
     }
 
     #[test]
+    fn completed_success_and_skipped_checks_are_not_false_failure_or_pending() {
+        // PM observations: #4144 had 13 SUCCESS + 2 SKIPPED; #4246 had
+        // 17 SUCCESS + 2 SKIPPED and was incorrectly treated as CI pending.
+        for (number, successes) in [(4144, 13), (4246, 17)] {
+            let mut checks = vec![
+                serde_json::json!({
+                    "status":"COMPLETED", "conclusion":"SUCCESS"
+                });
+                successes
+            ];
+            for name in ["Enable auto-merge", "Test (e5 e2e, optional)"] {
+                checks.push(serde_json::json!({"name":name,
+                    "status":"COMPLETED","conclusion":"SKIPPED"}));
+            }
+            let json = serde_json::json!({"number":number,"isDraft":true,
+                "statusCheckRollup":checks});
+            let inventory =
+                parse_pr_inventory_json(&serde_json::json!([json]).to_string(), Utc::now())
+                    .unwrap();
+            assert_eq!(inventory[0].ci_status, "SUCCESS", "PR #{number}");
+            assert_eq!(
+                parse_pr_check_report_json(&json.to_string()).unwrap().ci,
+                CiStatus::Passing
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_rollup_is_consistent_across_inventory_and_check_report() {
+        let mut checks = serde_json::json!([
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"},
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"NEUTRAL"},
+            {"__typename":"StatusContext","context":"CodeRabbit","state":"SUCCESS"}
+        ]);
+        let assert_ci = |checks: &serde_json::Value, label, ci| {
+            let json = serde_json::json!({"statusCheckRollup":checks}).to_string();
+            assert_eq!(parse_pr_status_json(&json).unwrap().ci_status, label);
+            assert_eq!(parse_pr_check_report_json(&json).unwrap().ci, ci);
+        };
+        assert_ci(&checks, "SUCCESS", CiStatus::Passing);
+        checks
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"status":"QUEUED","conclusion":null}));
+        assert_ci(&checks, "PENDING", CiStatus::Pending);
+        checks
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"state":"FAILURE"}));
+        assert_ci(&checks, "FAILURE", CiStatus::Failing);
+        assert_ci(&serde_json::json!([]), "UNKNOWN", CiStatus::Unknown);
+    }
+
+    #[test]
     fn parse_pr_status_open() {
         let json = r#"{
             "number": 123,
@@ -3221,12 +3391,12 @@ mod tests {
 
         let report = parse_pr_check_report_json(json).unwrap();
 
-        assert_eq!(report.ci, CiStatus::Pending);
+        assert_eq!(report.ci, CiStatus::Unknown);
         assert_eq!(report.merge, MergeStatus::Behind);
         assert_eq!(report.review, ReviewStatus::Pending);
         assert_eq!(
             report.summary,
-            "PR: Update branch required | CI: Pending | Merge: Behind | Review: Pending"
+            "PR: Update branch required | CI: Unknown | Merge: Behind | Review: Pending"
         );
     }
 
@@ -3242,12 +3412,12 @@ mod tests {
 
         let report = parse_pr_check_report_json(json).unwrap();
 
-        assert_eq!(report.ci, CiStatus::Pending);
+        assert_eq!(report.ci, CiStatus::Unknown);
         assert_eq!(report.merge, MergeStatus::Conflicts);
         assert_eq!(report.review, ReviewStatus::Pending);
         assert_eq!(
             report.summary,
-            "PR: Waiting on CI | CI: Pending | Merge: Conflicts | Review: Pending"
+            "PR: Waiting on CI | CI: Unknown | Merge: Conflicts | Review: Pending"
         );
     }
 
@@ -3972,6 +4142,7 @@ mod tests {
             ci_status: "SUCCESS".to_string(),
             review_status: "APPROVED".to_string(),
             body: "Closes #10".to_string(),
+            fallback_owner_closed: false,
             closing_issues: vec![],
         }
     }
@@ -4744,6 +4915,7 @@ mod tests {
             "url": format!("https://github.com/o/r/pull/{number}"),
             "isDraft": false,
             "headRefName": format!("work/issue-{number}"),
+            "closingIssuesReferences": [{"number":number,"state":"OPEN"}],
             "updatedAt": updated_at,
             "mergeable": "MERGEABLE",
             "mergeStateStatus": merge_state,
@@ -4832,6 +5004,121 @@ mod tests {
 
     fn light_list_call() -> String {
         format!("pr list --state open --limit 100 --json {INVENTORY_LIGHT_JSON_FIELDS}")
+    }
+
+    #[test]
+    fn missing_fallback_owner_does_not_hide_other_closed_owners() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::at(tmp.path());
+        let mut rows = vec![
+            serde_json::json!({"headRefName":"work/issue-3972"}),
+            serde_json::json!({"headRefName":"work/issue-999999"}),
+        ];
+        hydrate_fallback_owners(Path::new("/tmp/repo"), &mut rows, &ledger, now_3891(), &mut |_, _| Ok(GhCliOutput {
+            success: false, stderr: "Could not resolve to an Issue".into(),
+            stdout: serde_json::json!({"data":{"repository":{"owner_3972":{"state":"CLOSED"},"owner_999999":null}},
+                "errors":[{"type":"NOT_FOUND","path":["repository","owner_999999"]}]}).to_string()
+        })).unwrap();
+        assert_eq!(rows[0]["fallbackOwnerState"], "CLOSED");
+        assert_eq!(rows[1]["fallbackOwnerState"], "UNKNOWN");
+    }
+
+    #[test]
+    fn inventory_resolves_fallback_owner_state_within_call_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::at(&tmp.path().join("budget"));
+        let mut rows: Vec<_> = (1..=35)
+            .map(|n| light_row(n, "2026-09-01T00:00:00Z", "CLEAN"))
+            .collect();
+        for row in &mut rows {
+            row["headRefName"] = serde_json::json!("work/issue-3972");
+            row["closingIssuesReferences"] = serde_json::json!([]);
+        }
+        let mut gh = FakeGh::new(rows);
+        let mut owner_closed = false;
+        for offset in [0, PR_INVENTORY_CACHE_TTL_SECS + 1] {
+            // The hydration loop fans out across threads, so `run_gh` is a
+            // `Fn + Sync`: the call counter and the fake CLI need interior
+            // mutability rather than a captured `&mut`.
+            let owner_calls = std::sync::atomic::AtomicUsize::new(0);
+            let calls_before = gh.calls.len();
+            let now = now_3891() + chrono::Duration::seconds(offset);
+            let read = {
+                let gh = std::sync::Mutex::new(&mut gh);
+                fetch_pr_inventory_cached_with(
+                    Path::new("/tmp/repo"),
+                    &tmp.path().join(PR_INVENTORY_CACHE_FILE),
+                    &ledger,
+                    now,
+                    &PrInventoryOptions::default(),
+                    |_, args| {
+                        if args.starts_with(&["api", "graphql"]) {
+                            owner_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let query = args.join(" ");
+                            assert_eq!(query.matches("issue(number:3972)").count(), 1);
+                            assert!(query.contains(github_budget::GRAPHQL_RATE_LIMIT_SELECTION));
+                            ledger.record_spawn_from(
+                                GitHubQuota::GraphQl,
+                                &github_budget::spawn_source(args),
+                                now,
+                            );
+                            Ok(GhCliOutput {
+                                success: true,
+                                stderr: String::new(),
+                                stdout: serde_json::json!({"data":{
+                                    "rateLimit":{"cost":3,"remaining":4700,"resetAt":"2026-09-02T01:00:00Z","nodeCount":1},
+                                    "repository":{"owner_3972":{"state":
+                                    if owner_closed {"CLOSED"} else {"OPEN"}
+                                }}}})
+                                .to_string(),
+                            })
+                        } else {
+                            gh.lock().unwrap().run(args)
+                        }
+                    },
+                )
+                .unwrap()
+            };
+            let owner_calls = owner_calls.into_inner();
+            assert_eq!(owner_calls, 1);
+            let budget = ledger.snapshot(now);
+            assert_eq!(
+                budget.local["graphql"].points_last_hour,
+                if offset == 0 { 3 } else { 6 }
+            );
+            assert_eq!(budget.probe.unwrap().resources["graphql"].remaining, 4700);
+            let actual_calls = owner_calls
+                + gh.calls[calls_before..]
+                    .iter()
+                    .filter(|call| call.as_str() != "api rate_limit")
+                    .count();
+            assert_eq!(read.github_calls as usize, actual_calls);
+            if offset == 0 {
+                assert_eq!(actual_calls, 31);
+                assert_eq!(
+                    gh.calls[calls_before..]
+                        .iter()
+                        .filter(|call| call.starts_with("pr view "))
+                        .count(),
+                    29
+                );
+            }
+            assert!(read.github_calls <= 31);
+            assert!(read.items.iter().all(|item| item.owner_issue == Some(3972)
+                && item.owner_issue_closed == owner_closed
+                && item.closing_issues.is_empty()));
+            owner_closed = true;
+        }
+        let cached = cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 2),
+            &PrInventoryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(cached.github_calls, 0);
+        assert!(cached.items.iter().all(|item| item.owner_issue_closed));
     }
 
     #[test]
