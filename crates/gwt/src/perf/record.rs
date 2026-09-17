@@ -33,6 +33,7 @@ pub enum PerfUnit {
     Milliseconds,
     Percent,
     Bytes,
+    Count,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
