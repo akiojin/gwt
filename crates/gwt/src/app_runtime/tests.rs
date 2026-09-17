@@ -3726,6 +3726,7 @@ fn sample_runtime_with_events(
         pm_wake_seen: HashMap::new(),
         pending_pm_wakes: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
+        deferred_issue_monitor_launches: None,
         startup_worktree_inventories: HashMap::new(),
         pending_pm_worktree_preparations: HashSet::new(),
         pending_launch_feedback_contexts: HashMap::new(),
@@ -3768,12 +3769,12 @@ fn sample_runtime_with_events(
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
         work_ai_summaries: HashMap::new(),
-        session_ledger_cache: std::cell::RefCell::new(
+        session_ledger_cache: Arc::new(Mutex::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
-        ),
-        work_items_cache: std::cell::RefCell::new(
+        )),
+        work_items_cache: Arc::new(Mutex::new(
             gwt_core::workspace_projection::WorkItemsCache::new(),
-        ),
+        )),
         active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
         last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
@@ -3801,6 +3802,7 @@ fn sample_runtime_with_events(
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
         persist_dispatcher,
         file_tree_worktree_roots: HashMap::new(),
+        branch_cleanup_operations: std::sync::Arc::new(gwt::BranchCleanupOperationStore::new()),
         server_url: None,
         usage_refresh: None,
         image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -24533,11 +24535,22 @@ fn startup_repairs_activated_fresh_execution_without_process_local_pending_state
         &[],
     );
     let mut restarted = sample_runtime(&runtime_root, vec![tab], Some("tab-restarted"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    restarted.blocking_tasks = spawner;
     assert!(restarted.pending_fresh_execution_launches.is_empty());
     assert!(restarted.active_agent_sessions.is_empty());
     assert!(restarted.agent_capability_tokens.is_empty());
 
     restarted.bootstrap();
+    // Issue #4378 AC-2: the generation reaper runs on the blocking worker.
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
 
     let restart_binding =
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
@@ -28185,7 +28198,21 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         .agents
         .iter()
         .all(gwt_core::workspace_projection::WorkspaceAgentSummary::is_unassigned));
-    assert!(second_events.iter().any(|event| matches!(
+    // Issue #4406 AC-6: the launch acknowledgement no longer rebuilds the rail
+    // on the GUI event loop, so the full projection arrives with the drained
+    // off-loop refresh. The same membership is asserted, not a weaker one.
+    assert!(
+        second_events.iter().all(|event| !matches!(
+            event,
+            OutboundEvent {
+                event: BackendEvent::ActiveWorkProjection { .. },
+                ..
+            }
+        )),
+        "launch completion must not rebuild the projection inline"
+    );
+    let refreshed = drain_active_work_projection_refresh(&mut runtime, &repo);
+    assert!(refreshed.iter().any(|event| matches!(
         event,
         OutboundEvent {
             target: DispatchTarget::Broadcast,
@@ -34194,13 +34221,22 @@ fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_ta
 }
 
 #[test]
-fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age() {
-    // Issue #2942: a session whose status drifted to Stopped (idle timeout)
-    // AND is older than the 24h freshness window must STILL resume on
-    // startup when its agent window is still present in the workspace (the
-    // user did not explicitly close it). Both the status-candidate gate and
-    // the freshness gate would exclude this session on the orphan path; only
-    // the "unclosed placeholder" path can restore it.
+fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
+    // Issue #2942: a session whose status drifted to Stopped (an idle timeout)
+    // must STILL resume on startup when its agent window is still present in
+    // the workspace — the user did not explicitly close it. The
+    // status-candidate gate would exclude this session on the orphan path;
+    // only the "unclosed placeholder" path can restore it.
+    //
+    // Issue #4441 supersedes the *age* half of that contract, which this test
+    // used to assert at 30 hours. #2942 read a surviving placeholder as proof
+    // that the user had left the window open, because closing a window removes
+    // it from the workspace. Agent panes never close themselves, so in practice
+    // the placeholder set became every launch the machine ever performed: 72
+    // windows, 55 of them stuck in `starting`, one Issue restored eight times
+    // over. "Not explicitly closed" is not the same fact as "open at the last
+    // exit", so the 24-hour bound now applies to this path too, and the case is
+    // asserted at both ends below.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -34249,13 +34285,16 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age(
     session.agent_session_id = Some("native-unclosed".to_string());
     session.record_hook_event("Stop");
     session.record_completed_stop();
-    // Status drifted to Stopped (would fail the candidate gate)...
+    // A launch marks the window as one to restore; this is what separates a
+    // window the user left open from one whose agent settled (Issue #4441).
+    session.restore_window_on_startup = true;
+    // Status drifted to Stopped (would fail the candidate gate on the orphan
+    // path) but the window is recent.
     session.update_status(gwt_agent::AgentStatus::Stopped);
-    // ...and the session is older than the 24h freshness window.
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(2);
     session
         .save(&runtime.sessions_dir)
-        .expect("save stale stopped session");
+        .expect("save stopped session");
 
     runtime.bootstrap();
     runtime.handle_frontend_event(
@@ -34276,12 +34315,89 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age(
         .count();
     assert_eq!(
         agent_windows, 1,
-        "an unclosed agent window must resume despite Stopped status and >24h age"
+        "an unclosed agent window must resume despite Stopped status"
     );
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),
         1,
         "the resumed unclosed window must track its source session"
+    );
+}
+
+/// Issue #4441: the other end of the case above — the same unclosed window,
+/// aged past the freshness bound, does not come back.
+///
+/// This is the half of Issue #2942 that #4441 supersedes. Keeping the two
+/// assertions adjacent is deliberate: the difference between them is the entire
+/// behavioural change, and reading one without the other makes it look like
+/// either #2942 or #4441 was simply dropped.
+#[test]
+fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_bound() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("stale-unclosed");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/stale-unclosed",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("sess-stale".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-stale".to_string(),
+        title: "Stale".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-stale"));
+
+    let mut session = gwt_agent::Session::new(
+        &worktree,
+        "work/stale-unclosed",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "sess-stale".to_string();
+    session.agent_session_id = Some("native-stale".to_string());
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session.restore_window_on_startup = true;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save stale stopped session");
+
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "a placeholder older than the freshness bound is relaunch history, not the last-open set"
     );
 }
 
@@ -34829,6 +34945,211 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
     );
 }
 
+/// Issue #4378 AC-1: bootstrap lists each project's worktrees once and hands
+/// that inventory to the startup ingest, which carries it back for the
+/// reconcile. Neither later step lists the worktrees again.
+#[test]
+fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.bootstrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let inventory = loop {
+        let carried = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find_map(|event| match event {
+                UserEvent::WorkEventsIngested {
+                    worktree_inventory, ..
+                } => Some(worktree_inventory.clone()),
+                _ => None,
+            });
+        if let Some(carried) = carried {
+            break carried;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the startup ingest never completed"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let inventory = inventory.expect("the startup ingest must carry the bootstrap inventory");
+    assert!(
+        inventory
+            .iter()
+            .any(|entry| same_worktree_path(&entry.path, &repo)),
+        "the carried inventory is the one bootstrap listed: {inventory:?}"
+    );
+}
+
+thread_local! {
+    static WORKTREE_LISTINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_worktree_listing(_started: Instant) {
+    WORKTREE_LISTINGS.with(|count| count.set(count.get() + 1));
+}
+
+/// `git worktree list` runs made on the calling thread (Issue #4378 AC-1).
+/// The observer is per process; counting per thread keeps parallel tests
+/// from seeing each other's listings.
+fn worktree_listings_on_this_thread() -> u64 {
+    gwt_git::worktree::set_worktree_list_observer(count_worktree_listing);
+    WORKTREE_LISTINGS.with(std::cell::Cell::get)
+}
+
+/// Issue #4378 AC-1: bootstrap lists each project's worktrees once on the
+/// startup path. The orphan intake prune plan used to list them a second time
+/// on the GUI thread; the ingest and reconcile reuse is pinned above.
+#[test]
+fn bootstrap_lists_the_worktrees_once_on_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let before = worktree_listings_on_this_thread();
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        worktree_listings_on_this_thread() - before,
+        1,
+        "bootstrap must list the worktrees exactly once"
+    );
+}
+
+/// Issue #4378 AC-2: bootstrap no longer runs the generation reaper on the
+/// startup path. It runs on the blocking worker and reports back with an
+/// event. Issue Monitor launch deliveries that arrive first wait for that
+/// event, so a launch never races a generation the reaper is about to reap.
+#[test]
+fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("defunct-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/defunct-owner",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 4378,
+    };
+    seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/defunct-owner",
+        owner,
+        "startup-off-loop-holder",
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let effective_status = || {
+        gwt::cli::execution_state::load_generation_ledger(&worktree, owner)
+            .expect("load ledger")
+            .expect("ledger")
+            .current_effective_status()
+    };
+
+    runtime.bootstrap();
+
+    assert_eq!(
+        effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
+        "the reaper must not run synchronously inside bootstrap"
+    );
+    let delivery_id = "launch:startup-reaper-gate";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message: "seeded so the replay settles without a launch".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+        },
+    );
+    let early = runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &repo,
+        owner.number,
+        gwt::LinkedIssueKind::Issue,
+        Some(delivery_id.to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    assert!(
+        early.is_empty(),
+        "a launch delivery must wait for the startup reaper"
+    );
+    assert_eq!(
+        runtime
+            .deferred_issue_monitor_launches
+            .as_ref()
+            .map(Vec::len),
+        Some(1)
+    );
+
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+
+    assert_eq!(
+        effective_status(),
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        "the deferred reaper must still reap the defunct holder"
+    );
+    assert!(events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|event| matches!(event, UserEvent::StartupGenerationReaperCompleted)));
+    runtime.handle_startup_generation_reaper_completed();
+    assert!(
+        runtime.deferred_issue_monitor_launches.is_none(),
+        "the reaper completion releases the held deliveries"
+    );
+}
+
 #[test]
 fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() {
     let source = include_str!("startup.rs");
@@ -34846,7 +35167,7 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         .find("self.queue_startup_auto_resume_sessions")
         .expect("restore selection");
     let generation_reaper = bootstrap
-        .find("self.reap_startup_defunct_active_generations")
+        .find("self.spawn_startup_generation_reaper")
         .expect("generation reaper");
     let pm_queue = bootstrap
         .find("self.pending_startup_pm_tabs")
@@ -36775,7 +37096,8 @@ fn workspace_cleanup_failure_does_not_emit_done_work_item() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let immediate_events = runtime.run_workspace_cleanup_events("client-1", branch, false, false);
+    let immediate_events =
+        runtime.run_workspace_cleanup_events("client-1", branch, false, false, None);
 
     assert!(immediate_events.is_empty());
     wait_for_recorded_event("workspace cleanup failure", &events, |events| {
@@ -53099,9 +53421,16 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
     );
     let mut runtime = sample_runtime(temp.path(), vec![matching_tab, other_tab], Some("tab-1"));
 
+    super::workspace_views::reset_full_active_work_projection_builds();
     let events = runtime.handle_board_projection_changed_events(&repo);
 
-    assert_eq!(events.len(), 3);
+    // Issue #4406: a post that is no Work milestone changes no Work row, so the
+    // refresh emits only the two Board windows and rebuilds no Active Work.
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0
+    );
     for expected_id in [
         combined_window_id("tab-1", "board-1"),
         combined_window_id("tab-1", "board-2"),
@@ -53124,6 +53453,309 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
             ..
         } if *id == combined_window_id("tab-2", "board-3")
     )));
+}
+
+#[test]
+fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_work() {
+    // Issue #4406 AC-1: applying a Board refresh is the only part of a Board
+    // change on the GUI event loop; a full Active Work rebuild there cost
+    // seconds per post.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let projection = apply_title_sync_sample_projection(
+        &repo,
+        &window_id,
+        Some("Board milestone title"),
+        Some("posted a decision"),
+    );
+    super::workspace_views::reset_full_active_work_projection_builds();
+
+    let events = runtime.apply_board_projection_refresh(super::BoardProjectionRefreshed {
+        events: Vec::new(),
+        milestone: Some((repo.clone(), projection)),
+    });
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "the milestone must still refresh the pane heading: {events:?}"
+    );
+    let tab = runtime.tab("tab-1").expect("tab");
+    assert_eq!(
+        tab.workspace
+            .window("agent-1")
+            .expect("agent window")
+            .dynamic_title
+            .as_deref(),
+        Some("Board milestone title")
+    );
+}
+
+/// Issue #4406 AC-3/AC-4: a project whose Workspace rail has one recorded Work
+/// row, plus the event sink the off-loop refresh requests travel through.
+fn active_work_off_loop_setup(
+    temp_root: &Path,
+    repo: &Path,
+) -> (AppRuntime, Arc<Mutex<Vec<UserEvent>>>, String) {
+    fs::create_dir_all(repo).expect("create repo");
+    init_repo(repo);
+    gwt_core::workspace_projection::record_workspace_work_event(repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            // A Work-item id shaped title is not a purpose, so the row has no
+            // recorded summary and the tip-subject fallback — the AC-3 path —
+            // is the only thing that can fill it.
+            "work-offloop-a1b2c3",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/off-loop".to_string()),
+                worktree_path: None,
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+
+    let mut tab_workspace = empty_workspace_state();
+    let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+    agent.title = "Codex".to_string();
+    tab_workspace.windows.push(agent);
+    tab_workspace.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.to_path_buf(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (mut runtime, events) = sample_runtime_with_events(temp_root, vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id: window_id.clone(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/off-loop".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.to_path_buf(),
+            agent_project_root: repo.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+    (runtime, events, window_id)
+}
+
+/// The off-loop refresh requests recorded for `project_root` so far.
+fn active_work_refresh_requests(events: &Arc<Mutex<Vec<UserEvent>>>, project_root: &Path) -> usize {
+    events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                UserEvent::ActiveWorkProjectionChanged { project_root: root }
+                    if root == project_root
+            )
+        })
+        .count()
+}
+
+/// Issue #4406 AC-6: run the refresh the runtime just asked for and apply it,
+/// the way the GUI event loop does. Tests that used to read the rail straight
+/// out of a handler's return value drain it through here instead of weakening
+/// what they assert.
+fn drain_active_work_projection_refresh(
+    runtime: &mut AppRuntime,
+    project_root: &Path,
+) -> Vec<OutboundEvent> {
+    let Some(job) = runtime.active_work_projection_refresh_job(project_root) else {
+        return Vec::new();
+    };
+    let refreshed = super::run_active_work_projection_refresh(job);
+    runtime.apply_active_work_projection_refresh(refreshed)
+}
+
+#[test]
+fn background_work_scan_results_refresh_active_work_off_the_gui_event_loop() {
+    // Issue #4406 AC-3: `WorkTipSubjects` and `WorkMergeStatus` are background
+    // scan completions, and each rebuilt the disk-backed Active Work projection
+    // on the GUI event loop — 930,665ms and 796,705ms of stall over one 20
+    // minute window. They must only cache the result and ask for an off-loop
+    // refresh.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (mut runtime, events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let tip_events = runtime.apply_work_tip_subjects(
+        &repo,
+        [("work/off-loop".to_string(), "tip subject".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "WorkTipSubjects must not enter the disk-backed projection builder"
+    );
+    assert!(
+        tip_events.is_empty(),
+        "the rail update rides the off-loop refresh, not the handler return: {tip_events:?}"
+    );
+    assert_eq!(active_work_refresh_requests(&events, &repo), 1);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let merge_events = runtime.apply_work_merge_status(
+        &repo,
+        [("work/off-loop".to_string(), chrono::Utc::now())]
+            .into_iter()
+            .collect(),
+        HashMap::new(),
+        HashSet::new(),
+        HashSet::new(),
+        None,
+    );
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "WorkMergeStatus must not enter the disk-backed projection builder"
+    );
+    assert!(merge_events.is_empty());
+    assert_eq!(active_work_refresh_requests(&events, &repo), 2);
+
+    // AC-6: the drained refresh still carries both scan results, so nothing the
+    // rail showed before is lost by moving the build off the loop.
+    let applied = drain_active_work_projection_refresh(&mut runtime, &repo);
+    let projection = applied
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection.clone()),
+            _ => None,
+        })
+        .expect("the off-loop refresh broadcasts the rebuilt rail");
+    let row = projection
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/off-loop"))
+        .expect("row");
+    assert!(
+        row.merged_into_base,
+        "the merge scan result reached the row"
+    );
+    assert_eq!(row.work_summary.as_deref(), Some("tip subject"));
+}
+
+#[test]
+fn active_work_projection_refresh_off_the_loop_matches_the_on_loop_build() {
+    // Issue #4406 AC-6: the off-loop build is the same build. Applying its
+    // result on the event loop must install the cache and broadcast without
+    // rebuilding anything.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (mut runtime, _events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+
+    let expected = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("on-loop projection");
+
+    let job = runtime
+        .active_work_projection_refresh_job(&repo)
+        .expect("refresh job");
+    let refreshed = super::run_active_work_projection_refresh(job);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let applied = runtime.apply_active_work_projection_refresh(refreshed);
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "applying an off-loop refresh must not rebuild on the event loop"
+    );
+    let projection = applied
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection.clone()),
+            _ => None,
+        })
+        .expect("broadcast");
+    assert_eq!(
+        projection
+            .active_works
+            .iter()
+            .map(|work| work.id.clone())
+            .collect::<Vec<_>>(),
+        expected
+            .active_works
+            .iter()
+            .map(|work| work.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(projection.active_agents, expected.active_agents);
+}
+
+#[test]
+fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
+    // Issue #4406 AC-4: a `RuntimeHook` arrival that ends a pane rebuilt the
+    // whole disk-backed rail on the event loop, holding it for up to 35,982ms.
+    // The acknowledgement is served from the cache and the rebuild is requested.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (mut runtime, events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+    // Seed the cache the cache-only acknowledgement reads from.
+    let _ = runtime.active_work_projection_for_tab("tab-1", &runtime.tabs[0]);
+
+    super::workspace_views::reset_full_active_work_projection_builds();
+    let hook_events = runtime.handle_runtime_hook_event(runtime_hook_state("Error", "session-1"));
+
+    assert_eq!(
+        super::workspace_views::full_active_work_projection_builds(),
+        0,
+        "a runtime hook must not enter the disk-backed projection builder"
+    );
+    assert!(
+        hook_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
+        "the hook still acknowledges the rail from cache: {hook_events:?}"
+    );
+    assert_eq!(active_work_refresh_requests(&events, &repo), 1);
 }
 
 fn migration_pending_tab(tab_id: &str, project_root: PathBuf) -> ProjectTabRuntime {
@@ -56293,6 +56925,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
             open_obligations: vec!["user_verification".to_string()],
             recovery_probes: Vec::new(),
             available_recoveries: vec!["verify.run".to_string(), "execution.reopen".to_string()],
+            recovery_hint: None,
             warnings: vec!["Host status is temporarily unavailable".to_string()],
             launch_route: Some("manual".to_string()),
         },
@@ -58524,7 +59157,8 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
         ProjectKind::Git,
         &[WindowPreset::Shell],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     // Seed one Work record so the projection broadcast has content.
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
@@ -58537,18 +59171,70 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
     gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
         .expect("seed work record");
 
-    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false);
+    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false, None);
     assert!(
         unchanged.is_empty(),
         "no-op ingest must not rebroadcast the projection"
     );
+    assert_eq!(
+        active_work_refresh_requests(&user_events, &repo),
+        0,
+        "a no-op ingest must not even ask for a rebuild"
+    );
 
-    let changed = runtime.handle_work_events_ingested(repo, true);
+    let changed = runtime.handle_work_events_ingested(repo.clone(), true, None);
     assert!(
         changed
             .iter()
+            .all(|outbound| !matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
+        // Issue #4406 AC-3: the rebuild left the GUI event loop, so the
+        // rebroadcast arrives with the refresh instead of the handler return.
+        "the ingest handler must not rebuild the projection inline"
+    );
+    assert_eq!(active_work_refresh_requests(&user_events, &repo), 1);
+    let refreshed = drain_active_work_projection_refresh(&mut runtime, &repo);
+    assert!(
+        refreshed
+            .iter()
             .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
         "changed ingest rebroadcasts the projection"
+    );
+}
+
+/// Issue #4378 AC-1: the startup ingest hands back the worktree inventory the
+/// bootstrap already listed, so the reconcile reads it instead of running
+/// `git worktree list` again. The project root is not a repository, so a
+/// listing of its own would fail and record no local branches.
+#[test]
+fn handle_work_events_ingested_reconciles_from_the_startup_inventory() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("not-a-repo");
+    fs::create_dir_all(&repo).expect("project root");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let inventory = Arc::new(vec![gwt::worktree_inventory::WorktreeEntry {
+        id: "shared".to_string(),
+        kind: gwt::worktree_inventory::WorktreeEntryKind::Workspace,
+        path: temp.path().join("worktrees").join("shared"),
+        label: "work/shared".to_string(),
+        branch: Some("work/shared".to_string()),
+        is_active: false,
+    }]);
+
+    runtime.handle_work_events_ingested(repo.clone(), false, Some(inventory));
+
+    assert!(
+        runtime
+            .local_worktree_branches
+            .borrow()
+            .get(&repo)
+            .is_some_and(|branches| branches.contains("work/shared")),
+        "the reconcile must use the inventory the startup ingest carried back"
     );
 }
 
@@ -58605,6 +59291,13 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
     assert!(
         events.is_empty(),
         "an inactive project cache refresh must not broadcast into the active tab"
+    );
+    // Issue #4406 AC-6: the rebuild now runs off the GUI event loop, so the
+    // inactive project's cache is refreshed by draining it.
+    let refreshed = drain_active_work_projection_refresh(&mut runtime, &repo_b);
+    assert!(
+        refreshed.is_empty(),
+        "an inactive project rebuild must not broadcast into the active tab"
     );
 
     runtime.active_tab_id = Some("tab-b".to_string());
@@ -60693,8 +61386,8 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
     );
     assert_eq!(
         git_stdout(&linked_pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the local fallback must still materialize a detached PM worktree"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the local fallback must still materialize the resident PM branch"
     );
     let freshness = gwt::pm_registry::load_pm_prefs(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo.linked),
@@ -61405,8 +62098,8 @@ fn pm_ensure_refreshes_existing_unregistered_pm_worktree_to_latest_origin_develo
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the refreshed PM worktree must remain detached"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the refreshed PM worktree must run on its resident branch"
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
@@ -61501,9 +62194,11 @@ fn pm_refresh_restores_old_checkout_and_assets_when_regeneration_fails() {
     assert_pm_refresh_failure_restores_old_checkout_and_assets(temp.path(), false);
 }
 
-#[cfg(unix)]
+/// Issue #4448: the advance is now a fast-forward merge of the resident
+/// branch, so the tree transition is blocked by an untracked file the incoming
+/// commit would overwrite rather than by a `post-checkout` hook.
 #[test]
-fn pm_refresh_restores_old_checkout_when_post_checkout_hook_fails() {
+fn pm_refresh_restores_old_checkout_when_the_fast_forward_is_blocked() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -61516,7 +62211,7 @@ fn pm_refresh_restores_old_checkout_when_post_checkout_hook_fails() {
 
 fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
     temp: &Path,
-    fail_checkout_hook: bool,
+    fail_tree_transition: bool,
 ) {
     let repo = temp.join("repo");
     let origin = init_git_clone_with_origin(&repo);
@@ -61529,7 +62224,12 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
     }
     fs::write(pm_worktree.join(relative), "original generated bytes\n").unwrap();
     fs::write(seed.join(relative), "incoming tracked bytes\n").unwrap();
-    if !fail_checkout_hook {
+    if fail_tree_transition {
+        // Not a managed asset, so the refresh transaction does not displace it:
+        // the fast-forward aborts on the collision with HEAD still in place.
+        fs::write(seed.join("UPSTREAM.md"), "incoming upstream bytes\n").unwrap();
+        fs::write(pm_worktree.join("UPSTREAM.md"), "untracked PM bytes\n").unwrap();
+    } else {
         fs::write(
             seed.join(".claude/skills/gwt-pm"),
             "file obstructing skill directory\n",
@@ -61537,18 +62237,14 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
         .unwrap();
     }
     run_git(&seed, &["add", "--force", "--", ".claude"]);
+    if fail_tree_transition {
+        run_git(&seed, &["add", "--", "UPSTREAM.md"]);
+    }
     run_git(
         &seed,
         &["commit", "-qm", "track managed asset and failure fixture"],
     );
     run_git(&seed, &["push", origin.to_str().unwrap(), "develop"]);
-    #[cfg(unix)]
-    if fail_checkout_hook {
-        use std::os::unix::fs::PermissionsExt;
-        let hook = repo.join(".git/hooks/post-checkout");
-        fs::write(&hook, format!("#!/bin/sh\n[ \"$2\" = \"{old_head}\" ]\n")).unwrap();
-        fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
 
     let refresh = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo);
 
@@ -61568,7 +62264,7 @@ fn assert_pm_refresh_failure_restores_old_checkout_and_assets(
             .unwrap();
     assert_eq!(
         freshness.failure_stage,
-        Some(if fail_checkout_hook {
+        Some(if fail_tree_transition {
             gwt::pm_registry::PmWorktreeRefreshFailureStage::Repoint
         } else {
             gwt::pm_registry::PmWorktreeRefreshFailureStage::ManagedAssets
@@ -62224,7 +62920,7 @@ fn bare_layout_remote_unavailable_materializes_bare_head_for_fresh_spawn() {
     );
     assert_eq!(
         git_stdout(&outcome.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD"
+        gwt::pm_registry::PM_WORKTREE_BRANCH
     );
     assert_eq!(
         outcome.freshness.state,
@@ -62282,8 +62978,8 @@ fn pm_ensure_migrates_legacy_notes_before_refreshing_existing_unregistered_pm_wo
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "HEAD",
-        "the refreshed PM worktree must remain detached"
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the refreshed PM worktree must run on its resident branch"
     );
     assert_eq!(
         git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
@@ -62440,6 +63136,199 @@ fn pm_ensure_preserves_tracked_local_work_and_records_local_work_stage() {
     let reason = freshness.failure_reason.expect("local-work diagnosis");
     assert!(reason.contains("user-owned changes"), "{reason}");
     assert!(reason.contains("README.md"), "{reason}");
+}
+
+/// Commit one PM change in `worktree` and return its SHA.
+fn commit_pm_worktree_change(worktree: &Path, file: &str, contents: &str, message: &str) -> String {
+    fs::write(worktree.join(file), contents).expect("write PM change");
+    run_git(worktree, &["add", file]);
+    run_git(worktree, &["commit", "-qm", message]);
+    git_stdout(worktree, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn pm_ensure_materializes_the_resident_branch_instead_of_a_detached_head() {
+    // Issue #4448 AC-1: a detached PM worktree lets refresh move HEAD off the
+    // PM's own commits. The canonical materialization must check out the
+    // resident branch so Git itself refuses to rewind it.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the PM worktree must run on its resident branch, not a detached HEAD"
+    );
+}
+
+#[test]
+fn pm_refresh_keeps_a_pushed_but_unmerged_pm_commit_on_the_resident_branch() {
+    // Issue #4448 AC-2/AC-5: the PM pushes each commit to its own remote ref
+    // before opening a PR, which made the commit reachable from
+    // `--remotes` and therefore invisible to the detached-only-commit guard.
+    // The next refresh then repointed HEAD to origin/develop and the commit
+    // silently left the worktree.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    let pm_commit = commit_pm_worktree_change(
+        &pm_worktree,
+        "AGENTS.md",
+        "PM ruling applied\n",
+        "docs(agents): PM ruling",
+    );
+    run_git(
+        &pm_worktree,
+        &["push", "-q", "origin", "HEAD:refs/heads/pm/ruling"],
+    );
+    let target = advance_origin_develop_by_one_commit(&repo, &origin);
+    assert_ne!(pm_commit, target);
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        pm_commit,
+        "refresh must not move HEAD off a PM commit origin/develop does not contain"
+    );
+    assert_eq!(
+        fs::read_to_string(pm_worktree.join("AGENTS.md")).expect("read PM commit bytes"),
+        "PM ruling applied\n"
+    );
+    let freshness =
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .expect("PM prefs")
+            .worktree_freshness
+            .expect("retained-commit freshness");
+    assert_eq!(
+        freshness.failure_stage,
+        Some(gwt::pm_registry::PmWorktreeRefreshFailureStage::LocalWork),
+        "the retained commit must be reported, not silently dropped"
+    );
+    assert_eq!(freshness.target_sha.as_deref(), Some(target.as_str()));
+}
+
+#[test]
+fn pm_refresh_fast_forwards_the_resident_branch_when_it_has_no_local_commits() {
+    // Issue #4448 AC-2: keeping PM commits must not stop an ordinary refresh.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    let target = advance_origin_develop_by_one_commit(&repo, &origin);
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        target,
+        "a PM worktree without local commits must still fast-forward"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        gwt::pm_registry::PM_WORKTREE_BRANCH
+    );
+    let freshness =
+        gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+            .expect("PM prefs")
+            .worktree_freshness
+            .expect("fresh freshness");
+    assert_eq!(freshness.failure_stage, None, "{freshness:?}");
+    assert_eq!(freshness.behind, Some(0));
+}
+
+#[test]
+fn pm_refresh_adopts_a_legacy_detached_worktree_onto_the_resident_branch() {
+    // Issue #4448 AC-1/AC-3: PM worktrees already materialized detached must
+    // migrate onto the resident branch without losing the commit they hold.
+    let _pm_gate = super::pm::test_gate::PmEnsureTestGuard::enable();
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    let origin = init_git_clone_with_origin(&repo);
+    let pm_worktree = create_detached_pm_worktree_fixture(&repo);
+    run_git(&pm_worktree, &["config", "user.name", "Codex"]);
+    run_git(&pm_worktree, &["config", "user.email", "codex@example.com"]);
+    let pm_commit = commit_pm_worktree_change(
+        &pm_worktree,
+        "AGENTS.md",
+        "legacy detached PM commit\n",
+        "docs(agents): legacy detached PM commit",
+    );
+    run_git(
+        &pm_worktree,
+        &["push", "-q", "origin", "HEAD:refs/heads/pm/legacy"],
+    );
+    advance_origin_develop_by_one_commit(&repo, &origin);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        gwt::pm_registry::PM_WORKTREE_BRANCH,
+        "the legacy detached worktree must be adopted onto the resident branch"
+    );
+    assert_eq!(
+        git_stdout(&pm_worktree, &["rev-parse", "HEAD"]),
+        pm_commit,
+        "adoption must preserve the commit the detached HEAD held"
+    );
 }
 
 #[test]
@@ -70300,6 +71189,409 @@ fn startup_restore_limits_a_large_history_to_unterminated_windows() {
     assert_eq!(
         summary.fields.get("suppressed").map(String::as_str),
         Some(TERMINAL.to_string().as_str())
+    );
+}
+
+/// Issue #4441: backdate a restore fixture Session so it reads as history
+/// rather than as a window that was open at the last exit.
+fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: chrono::Duration) {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = gwt_agent::Session::load(&path).expect("load restore fixture session");
+    session.last_activity_at = chrono::Utc::now() - age;
+    session
+        .save(sessions_dir)
+        .expect("save aged fixture session");
+}
+
+/// Issue #4441 AC-1 / AC-5 / AC-6: the canvas comes back with the windows that
+/// were open at the last exit, not with one window per relaunch this machine
+/// ever performed.
+///
+/// A `Stopped` agent placeholder used to be unconditional permission to restore
+/// (Issue #2942), and agent panes never close themselves, so every launch that
+/// ever opened a window left one behind forever — 55 of them on the fleet that
+/// reported this.
+#[test]
+fn startup_restore_limits_windows_to_the_last_open_set() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    const HISTORY: usize = 10;
+
+    let mut placeholders = vec![
+        ("agent-open-0".to_string(), "session-open-0".to_string()),
+        ("agent-open-1".to_string(), "session-open-1".to_string()),
+    ];
+    for index in 0..HISTORY {
+        placeholders.push((
+            format!("agent-history-{index}"),
+            format!("session-history-{index}"),
+        ));
+    }
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    for index in 0..2 {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &format!("session-open-{index}"),
+            &temp.path().join(format!("wt-open-{index}")),
+            Some(&format!("native-open-{index}")),
+            Some(4_441_000 + index as u64),
+        );
+    }
+    for index in 0..HISTORY {
+        let session_id = format!("session-history-{index}");
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            &temp.path().join(format!("wt-history-{index}")),
+            Some(&format!("native-history-{index}")),
+            Some(4_442_000 + index as u64),
+        );
+        // Every one of these kept its placeholder: nobody closed the window by
+        // hand, which is exactly why they accumulated.
+        age_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            chrono::Duration::hours(48),
+        );
+    }
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let mut restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.clone())
+        .collect::<Vec<_>>();
+    restored.sort();
+    assert_eq!(
+        restored,
+        vec!["session-open-0".to_string(), "session-open-1".to_string()],
+        "AC-1 requires only the last-open set to restore"
+    );
+
+    let refusals = restore_admission_refusals(&logs);
+    for index in 0..HISTORY {
+        assert_eq!(
+            refusals
+                .get(&format!("session-history-{index}"))
+                .map(String::as_str),
+            Some("stale"),
+            "AC-1: a placeholder must not exempt history from the freshness bound: {refusals:?}"
+        );
+    }
+
+    // AC-5: the restored count and the time the selection took are both on the
+    // one summary line, so "restore is slow" is measurable next time.
+    let summary = restore_admission_summary(&logs);
+    assert_eq!(
+        summary.fields.get("restored").map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        summary.fields.get("suppressed").map(String::as_str),
+        Some(HISTORY.to_string().as_str())
+    );
+    assert!(
+        summary.fields.contains_key("elapsed_ms"),
+        "AC-5 requires the selection duration on the summary line, got {:?}",
+        summary.fields
+    );
+}
+
+/// Issue #4441 AC-2: one owner Issue restores one window.
+///
+/// Each relaunch mints a fresh conversation handle, so the existing
+/// native-session dedupe never collapsed them — the reporting fleet restored
+/// `#4257` eight times.
+#[test]
+fn startup_restore_collapses_duplicate_owner_issue_windows() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+
+    let placeholders = (0..3)
+        .map(|index| {
+            (
+                format!("agent-relaunch-{index}"),
+                format!("session-relaunch-{index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for index in 0..3 {
+        let session_id = format!("session-relaunch-{index}");
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            &temp.path().join(format!("wt-relaunch-{index}")),
+            Some(&format!("native-relaunch-{index}")),
+            Some(4257),
+        );
+        // The newest relaunch is the one that should come back.
+        age_restore_fixture_session(
+            &runtime.sessions_dir,
+            &session_id,
+            chrono::Duration::minutes(10 * (2 - index as i64)),
+        );
+    }
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored,
+        vec!["session-relaunch-2"],
+        "AC-2 requires one window per owner Issue, newest first"
+    );
+    let refusals = restore_admission_refusals(&logs);
+    for index in 0..2 {
+        assert_eq!(
+            refusals
+                .get(&format!("session-relaunch-{index}"))
+                .map(String::as_str),
+            Some("duplicate_owner_issue"),
+            "{refusals:?}"
+        );
+    }
+}
+
+/// Issue #4441 AC-3: a row the operator stopped with `issue.monitor.stop` does
+/// not come back as a restored window on the next startup.
+///
+/// This is the case that silently defeated the operator's only lever. The stop
+/// parks the row for a human and records a failure hold; the close predicate
+/// reports both as "do not close"; restore read that as "do spawn". So every
+/// row the PM stopped was recreated at the next launch, and the refill looked
+/// like volume rather than like the stop itself.
+///
+/// The fixture drives the Monitor through the same call `stop_only` makes, then
+/// persists the prefs, so the test asserts over the durable product of the
+/// operator's action rather than over a hand-written flag.
+#[test]
+fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![
+        ("agent-stopped".to_string(), "session-stopped".to_string()),
+        ("agent-live".to_string(), "session-live".to_string()),
+    ];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (session_id, worktree, issue) in [
+        ("session-stopped", "wt-stopped", 4286u64),
+        ("session-live", "wt-live", 4288),
+    ] {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            session_id,
+            &temp.path().join(worktree),
+            Some(&format!("native-{session_id}")),
+            Some(issue),
+        );
+    }
+
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    // The exact park `IssueMonitorState::stop_only` performs: it is what turns
+    // an operator stop into a durable `failed_issues` entry.
+    monitor.escalate_to_needs_human(
+        4286,
+        gwt::NeedsHumanKind::UserChoiceRequired,
+        "stopped: PM held this row while adjudicating",
+    );
+    let prefs = monitor.prefs();
+    assert!(
+        prefs
+            .failed_issues
+            .iter()
+            .any(|failed| failed.issue_number == 4286),
+        "the stop must be durable for this test to mean anything"
+    );
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed monitor prefs");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored,
+        vec!["session-live"],
+        "a stopped row must not be recreated by the next startup"
+    );
+    let refusal = restore_admission_refusals(&logs)
+        .get("session-stopped")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        refusal.starts_with("monitor_hold:"),
+        "the refusal must name the hold, got {refusal:?}"
+    );
+
+    // The stop is reversible: releasing the row must bring the window back, so
+    // neither the placeholder nor the restore flag is discarded.
+    assert!(runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .any(|window| window.session_id.as_deref() == Some("session-stopped")));
+    let session = gwt_agent::Session::load(&runtime.sessions_dir.join("session-stopped.toml"))
+        .expect("load stopped session");
+    assert!(session.restore_window_on_startup);
+}
+
+/// Issue #4441 AC-3: a window whose Monitor row the operator is holding does
+/// not respawn.
+///
+/// `classify_terminal_window` was written for the *close* side, where an
+/// unproven fact must never close a window. Restore reused it and read every
+/// such `Ineligible` — `failure_hold` from `issue.monitor.stop` included — as
+/// permission to spawn.
+#[test]
+fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![
+        ("agent-held".to_string(), "session-held".to_string()),
+        ("agent-parked".to_string(), "session-parked".to_string()),
+        ("agent-live".to_string(), "session-live".to_string()),
+    ];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for (session_id, worktree, issue) in [
+        ("session-held", "wt-held", 4286u64),
+        ("session-parked", "wt-parked", 4287),
+        ("session-live", "wt-live", 4288),
+    ] {
+        save_restore_fixture_session(
+            &runtime.sessions_dir,
+            session_id,
+            &temp.path().join(worktree),
+            Some(&format!("native-{session_id}")),
+            Some(issue),
+        );
+    }
+    let prefs = gwt::IssueMonitorPrefs {
+        failed_issues: vec![gwt::IssueMonitorFailedIssue {
+            issue_number: 4286,
+            message: "operator stop hold".to_string(),
+            window_id: None,
+        }],
+        autonomous_records: vec![gwt::AutonomousIssueRecord {
+            phase: gwt::AutonomousPhase::NeedsHuman,
+            ..gwt::AutonomousIssueRecord::new(4287)
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed monitor prefs");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    let restored = runtime
+        .pending_startup_auto_resume_sessions
+        .iter()
+        .map(|pending| pending.session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(restored, vec!["session-live"]);
+    let refusals = restore_admission_refusals(&logs);
+    assert_eq!(
+        refusals.get("session-held").map(String::as_str),
+        Some("monitor_hold:failure_hold"),
+        "{refusals:?}"
+    );
+    assert_eq!(
+        refusals.get("session-parked").map(String::as_str),
+        Some("monitor_hold:needs_human"),
+        "{refusals:?}"
+    );
+
+    // A hold is not terminal: the window comes back once the operator releases
+    // the row, so neither the placeholder nor the restore flag is discarded.
+    for session_id in ["session-held", "session-parked"] {
+        assert!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .any(|window| window.session_id.as_deref() == Some(session_id)),
+            "{session_id} placeholder must survive a Monitor hold"
+        );
+        let session =
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
+                .expect("load held session");
+        assert!(session.restore_window_on_startup);
+    }
+}
+
+/// Issue #4441 AC-1: the restore flag is honored on the placeholder path too.
+///
+/// A settled agent whose window nobody closed by hand keeps its placeholder;
+/// the flag is the only durable record that the window is finished.
+#[test]
+fn startup_restore_honors_a_cleared_restore_flag_on_a_surviving_placeholder() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let placeholders = vec![("agent-settled".to_string(), "session-settled".to_string())];
+    let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-settled",
+        &temp.path().join("wt-settled"),
+        Some("native-settled"),
+        Some(4_441_777),
+    );
+    let path = runtime.sessions_dir.join("session-settled.toml");
+    let mut session = gwt_agent::Session::load(&path).expect("load settled session");
+    session.restore_window_on_startup = false;
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save settled session");
+
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    assert_eq!(
+        restore_admission_refusals(&logs)
+            .get("session-settled")
+            .map(String::as_str),
+        Some("window_not_open")
     );
 }
 
