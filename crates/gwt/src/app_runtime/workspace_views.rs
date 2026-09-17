@@ -505,7 +505,11 @@ fn attach_managed_hook_health_to_active_works(
             hook_failures,
         );
     }
-    log_work_hook_health_timing(started.elapsed().as_millis() as u64, work_count);
+    let elapsed = started.elapsed();
+    // Issue #4370 AC-4: report the aggregation as a budgeted route so an
+    // overrun reaches `perf.summary` as telemetry, not as a stalled GUI.
+    gwt::perf::record_route(gwt::perf::PerfRoute::WorkHookHealth, elapsed);
+    log_work_hook_health_timing(elapsed.as_millis() as u64, work_count);
 }
 
 fn log_work_hook_health_timing(elapsed_ms: u64, work_count: usize) {
