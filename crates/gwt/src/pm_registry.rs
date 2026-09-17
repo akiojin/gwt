@@ -2355,8 +2355,6 @@ pub fn migrate_legacy_pm_scratch_preserving_project_content(worktree: &Path) -> 
     Ok(migrated)
 }
 
-pub const PM_WORKTREE_BASE_REF: &str = "origin/develop";
-
 /// Resident branch the PM worktree is checked out on (Issue #4448).
 ///
 /// The PM worktree used to run detached, so a refresh could repoint HEAD past
@@ -2474,21 +2472,61 @@ fn pm_worktree_head_sha(worktree: &Path) -> io::Result<Option<String>> {
     ))
 }
 
-fn fetch_pm_worktree_base(git_root: &Path) -> io::Result<()> {
+fn resolve_pm_worktree_base(git_root: &Path) -> io::Result<String> {
+    let cached = gwt_core::process::run_git_logged(
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+        Some(git_root),
+    )?;
+    if cached.status.success() {
+        if let Some(branch) = String::from_utf8_lossy(&cached.stdout)
+            .trim()
+            .strip_prefix("refs/remotes/origin/")
+            .filter(|branch| !branch.is_empty())
+        {
+            let base_ref = format!("origin/{branch}");
+            if git_sha(git_root, &base_ref)?.is_some() {
+                return Ok(base_ref);
+            }
+        }
+    }
+    let remote = gwt_core::process::run_git_logged(
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        Some(git_root),
+    )?;
+    if !remote.status.success() {
+        return Err(io::Error::other(format!(
+            "resolve PM remote default branch: {}",
+            String::from_utf8_lossy(&remote.stderr).trim()
+        )));
+    }
+    for line in String::from_utf8_lossy(&remote.stdout).lines() {
+        if let Some(branch) = line
+            .strip_prefix("ref: refs/heads/")
+            .and_then(|line| line.strip_suffix("\tHEAD"))
+            .filter(|branch| !branch.is_empty())
+        {
+            return Ok(format!("origin/{branch}"));
+        }
+    }
+    Err(io::Error::other(
+        "origin does not advertise a default branch",
+    ))
+}
+
+fn fetch_pm_worktree_base(git_root: &Path, base_ref: &str) -> io::Result<()> {
+    let branch = base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| io::Error::other(format!("PM base {base_ref} is not a remote branch")))?;
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
     let output = gwt_core::process::run_git_logged(
-        &[
-            "fetch",
-            "origin",
-            "--prune",
-            "+refs/heads/develop:refs/remotes/origin/develop",
-        ],
+        &["fetch", "origin", "--prune", &refspec],
         Some(git_root),
     )?;
     if output.status.success() {
         Ok(())
     } else {
         Err(io::Error::other(format!(
-            "fetch PM base {PM_WORKTREE_BASE_REF}: {}",
+            "fetch PM base {base_ref}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
@@ -2510,6 +2548,7 @@ fn git_behind(repo: &Path, head: Option<&str>, target: Option<&str>) -> Option<u
 fn pm_refresh_failure(
     git_root: &Path,
     worktree: &Path,
+    base_ref: &str,
     target_sha: Option<String>,
     target_observation: PmWorktreeTargetObservation,
     stage: PmWorktreeRefreshFailureStage,
@@ -2523,7 +2562,7 @@ fn pm_refresh_failure(
     };
     PmWorktreeFreshness {
         state,
-        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        base_ref: base_ref.to_owned(),
         head_sha,
         target_sha,
         behind,
@@ -2545,6 +2584,23 @@ fn persist_pm_worktree_freshness(
     Ok(())
 }
 
+fn last_pm_worktree_base_ref(project_dir: &Path) -> String {
+    load_pm_prefs(&project_dir.join("project-state/pm.json"))
+        .ok()
+        .and_then(|prefs| prefs.worktree_freshness)
+        .map(|freshness| freshness.base_ref)
+        .unwrap_or_default()
+}
+
+fn pm_base_sha_observation(git_root: &Path, base_ref: &str) -> (Option<String>, Option<String>) {
+    // Local HEAD is a startup fallback, not evidence of a remote target.
+    if base_ref == "HEAD" || base_ref.is_empty() {
+        (None, None)
+    } else {
+        git_sha_observation(git_root, base_ref)
+    }
+}
+
 fn persist_unknown_pm_worktree_failure(
     project_dir: &Path,
     worktree: &Path,
@@ -2553,7 +2609,7 @@ fn persist_unknown_pm_worktree_failure(
 ) -> io::Result<PmWorktreeFreshness> {
     let freshness = PmWorktreeFreshness {
         state: PmWorktreeFreshnessState::Unknown,
-        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        base_ref: last_pm_worktree_base_ref(project_dir),
         head_sha: pm_worktree_head_sha(worktree).ok().flatten(),
         target_sha: None,
         behind: None,
@@ -2573,7 +2629,7 @@ fn persist_untrusted_pm_worktree_failure(
 ) -> io::Result<PmWorktreeFreshness> {
     let freshness = PmWorktreeFreshness {
         state: PmWorktreeFreshnessState::Unknown,
-        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        base_ref: last_pm_worktree_base_ref(project_dir),
         head_sha: None,
         target_sha: None,
         behind: None,
@@ -2596,7 +2652,7 @@ fn append_pm_worktree_refresh_failure_reason(
             .worktree_freshness
             .get_or_insert_with(|| PmWorktreeFreshness {
                 state: PmWorktreeFreshnessState::Unknown,
-                base_ref: PM_WORKTREE_BASE_REF.to_string(),
+                base_ref: String::new(),
                 head_sha: None,
                 target_sha: None,
                 behind: None,
@@ -2932,6 +2988,7 @@ fn finish_degraded_pm_refresh(
         let asset_failure = pm_refresh_failure(
             git_root,
             worktree,
+            &freshness.base_ref,
             freshness.target_sha.clone(),
             freshness.target_observation,
             PmWorktreeRefreshFailureStage::ManagedAssets,
@@ -3225,6 +3282,7 @@ fn pm_resident_branch_advance_failure(
     manager: &gwt_git::WorktreeManager,
     worktree: &Path,
     target_sha: &str,
+    base_ref: &str,
 ) -> Option<(PmWorktreeRefreshFailureStage, String)> {
     use gwt_git::worktree::{ResidentBranchAdoption, ResidentBranchAdvanceSafety};
 
@@ -3254,7 +3312,7 @@ fn pm_resident_branch_advance_failure(
                     PmWorktreeRefreshFailureStage::LocalWork,
                     format!(
                         "PM worktree branch {PM_WORKTREE_BRANCH} holds commit {head}, which \
-                         {PM_WORKTREE_BASE_REF} does not contain; refresh keeps it instead of \
+                         {base_ref} does not contain; refresh keeps it instead of \
                          rewinding the branch"
                     ),
                 ));
@@ -3364,9 +3422,13 @@ fn refresh_pm_worktree_at_locked(
     worktree: &Path,
 ) -> io::Result<PmWorktreeRefreshOutcome> {
     let manager = gwt_git::WorktreeManager::new(git_root);
+    let (base_ref, resolution_error) = match resolve_pm_worktree_base(git_root) {
+        Ok(base_ref) => (base_ref, None),
+        Err(error) => ("HEAD".to_owned(), Some(error)),
+    };
     let existed = worktree.join(".git").exists();
     if worktree.exists() && !existed {
-        let (cached_target, inspect_error) = git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
         let observation = if cached_target.is_some() {
             PmWorktreeTargetObservation::Cached
         } else {
@@ -3382,6 +3444,7 @@ fn refresh_pm_worktree_at_locked(
         let freshness = pm_refresh_failure(
             git_root,
             worktree,
+            &base_ref,
             cached_target,
             observation,
             PmWorktreeRefreshFailureStage::Inspect,
@@ -3397,12 +3460,16 @@ fn refresh_pm_worktree_at_locked(
         match PmGeneratedHookConfigSnapshot::capture(worktree) {
             Ok(snapshot) => Some(snapshot),
             Err(error) => {
-                persist_unknown_pm_worktree_failure(
-                    project_dir,
+                let freshness = pm_refresh_failure(
+                    git_root,
                     worktree,
+                    &base_ref,
+                    None,
+                    PmWorktreeTargetObservation::Unavailable,
                     PmWorktreeRefreshFailureStage::Inspect,
                     error.to_string(),
-                )?;
+                );
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
                 return Err(error);
             }
         }
@@ -3416,8 +3483,7 @@ fn refresh_pm_worktree_at_locked(
                 worktree,
                 generated_hook_snapshot.as_mut(),
             ) {
-                let (cached_target, inspect_error) =
-                    git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+                let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
                 let observation = if cached_target.is_some() {
                     PmWorktreeTargetObservation::Cached
                 } else {
@@ -3430,6 +3496,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     cached_target,
                     observation,
                     PmWorktreeRefreshFailureStage::Inspect,
@@ -3442,8 +3509,7 @@ fn refresh_pm_worktree_at_locked(
                 return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
             }
             if let Err(error) = migrate_legacy_pm_scratch_preserving_project_content(worktree) {
-                let (cached_target, inspect_error) =
-                    git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+                let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
                 let observation = if cached_target.is_some() {
                     PmWorktreeTargetObservation::Cached
                 } else {
@@ -3456,6 +3522,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     cached_target,
                     observation,
                     PmWorktreeRefreshFailureStage::ScratchMigration,
@@ -3465,9 +3532,12 @@ fn refresh_pm_worktree_at_locked(
             }
         }
 
-        if let Err(error) = fetch_pm_worktree_base(git_root) {
-            let (cached_target, inspect_error) =
-                git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let fetch_result = match resolution_error {
+            Some(error) => Err(error),
+            None => fetch_pm_worktree_base(git_root, &base_ref),
+        };
+        if let Err(error) = fetch_result {
+            let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
             let observation = if cached_target.is_some() {
                 PmWorktreeTargetObservation::Cached
             } else {
@@ -3503,6 +3573,7 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         None,
                         observation,
                         PmWorktreeRefreshFailureStage::Fetch,
@@ -3523,6 +3594,7 @@ fn refresh_pm_worktree_at_locked(
                         let freshness = pm_refresh_failure(
                             git_root,
                             worktree,
+                            &base_ref,
                             cached_target,
                             observation,
                             PmWorktreeRefreshFailureStage::Repoint,
@@ -3540,6 +3612,7 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         cached_target,
                         observation,
                         PmWorktreeRefreshFailureStage::Repoint,
@@ -3552,6 +3625,7 @@ fn refresh_pm_worktree_at_locked(
             let freshness = pm_refresh_failure(
                 git_root,
                 worktree,
+                &base_ref,
                 cached_target,
                 observation,
                 PmWorktreeRefreshFailureStage::Fetch,
@@ -3560,14 +3634,14 @@ fn refresh_pm_worktree_at_locked(
             return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
         }
 
-        let (target_sha, target_inspect_error) =
-            git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let (target_sha, target_inspect_error) = pm_base_sha_observation(git_root, &base_ref);
         let Some(target_sha) = target_sha else {
             let reason = target_inspect_error
-                .unwrap_or_else(|| format!("{} is unavailable after fetch", PM_WORKTREE_BASE_REF));
+                .unwrap_or_else(|| format!("{base_ref} is unavailable after fetch"));
             let freshness = pm_refresh_failure(
                 git_root,
                 worktree,
+                &base_ref,
                 None,
                 PmWorktreeTargetObservation::Unavailable,
                 PmWorktreeRefreshFailureStage::Inspect,
@@ -3589,6 +3663,7 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         Some(target_sha),
                         PmWorktreeTargetObservation::Fresh,
                         PmWorktreeRefreshFailureStage::Inspect,
@@ -3601,11 +3676,13 @@ fn refresh_pm_worktree_at_locked(
             None
         };
         if existed {
-            let failure = pm_resident_branch_advance_failure(&manager, worktree, &target_sha);
+            let failure =
+                pm_resident_branch_advance_failure(&manager, worktree, &target_sha, &base_ref);
             if let Some((stage, reason)) = failure {
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     stage,
@@ -3622,6 +3699,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     stage,
@@ -3653,6 +3731,7 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         Some(target_sha),
                         PmWorktreeTargetObservation::Fresh,
                         PmWorktreeRefreshFailureStage::Repoint,
@@ -3665,7 +3744,7 @@ fn refresh_pm_worktree_at_locked(
             match manager.create_on_resident_branch(PM_WORKTREE_BRANCH, &target_sha, worktree) {
                 Ok(gwt_git::worktree::ResidentBranchMaterialization::AtBase) => {}
                 // A resident branch left behind by an earlier PM worktree may
-                // still carry commits develop has not taken. Adopting it where
+                // still carry commits the base has not taken. Adopting it where
                 // it stands keeps them; the caller only learns it is behind.
                 Ok(gwt_git::worktree::ResidentBranchMaterialization::RetainedBranchHead {
                     head,
@@ -3673,12 +3752,13 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         Some(target_sha),
                         PmWorktreeTargetObservation::Fresh,
                         PmWorktreeRefreshFailureStage::LocalWork,
                         format!(
                             "PM worktree branch {PM_WORKTREE_BRANCH} holds commit {head}, which \
-                             {PM_WORKTREE_BASE_REF} does not contain; the worktree adopted the \
+                             {base_ref} does not contain; the worktree adopted the \
                              branch instead of rewinding it"
                         ),
                     );
@@ -3688,6 +3768,7 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         Some(target_sha),
                         PmWorktreeTargetObservation::Fresh,
                         PmWorktreeRefreshFailureStage::Repoint,
@@ -3706,6 +3787,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     PmWorktreeRefreshFailureStage::ManagedAssets,
@@ -3722,6 +3804,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     PmWorktreeRefreshFailureStage::Inspect,
@@ -3738,6 +3821,7 @@ fn refresh_pm_worktree_at_locked(
             let freshness = pm_refresh_failure(
                 git_root,
                 worktree,
+                &base_ref,
                 Some(target_sha),
                 PmWorktreeTargetObservation::Fresh,
                 PmWorktreeRefreshFailureStage::Inspect,
@@ -3752,7 +3836,7 @@ fn refresh_pm_worktree_at_locked(
 
         let freshness = PmWorktreeFreshness {
             state: PmWorktreeFreshnessState::Fresh,
-            base_ref: PM_WORKTREE_BASE_REF.to_string(),
+            base_ref,
             head_sha: Some(target_sha.clone()),
             target_sha: Some(target_sha),
             behind: Some(0),
@@ -4014,7 +4098,8 @@ where
             return Ok(PmWorktreeCleanupOutcome::Absent);
         }
         if let Err(error) = migrate_legacy_pm_scratch_preserving_project_content(&worktree) {
-            let (target_sha, inspect_error) = git_sha_observation(&git_root, PM_WORKTREE_BASE_REF);
+            let base_ref = last_pm_worktree_base_ref(&project_dir);
+            let (target_sha, inspect_error) = pm_base_sha_observation(&git_root, &base_ref);
             let observation = if target_sha.is_some() {
                 PmWorktreeTargetObservation::Cached
             } else {
@@ -4027,6 +4112,7 @@ where
             let freshness = pm_refresh_failure(
                 &git_root,
                 &worktree,
+                &base_ref,
                 target_sha,
                 observation,
                 PmWorktreeRefreshFailureStage::ScratchMigration,
@@ -5077,7 +5163,7 @@ mod tests {
         mutate_pm_prefs(&prefs_path, |prefs| {
             prefs.worktree_freshness = Some(PmWorktreeFreshness {
                 state: PmWorktreeFreshnessState::Unknown,
-                base_ref: PM_WORKTREE_BASE_REF.to_string(),
+                base_ref: "origin/develop".to_string(),
                 head_sha: None,
                 target_sha: Some("target".to_string()),
                 behind: None,
