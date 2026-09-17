@@ -153,6 +153,11 @@ fn session_scoped_to_hook_cwd(mut session: Session, hook_event: Option<&HookEven
     let Some(cwd) = hook_event.and_then(|event| hook_cwd_path(event.cwd.as_deref())) else {
         return session;
     };
+    if crate::pm_registry::pm_worktree_for_runtime_dir(&cwd).is_some() {
+        // Runtime discovery must not replace the persisted project's identity.
+        // A payload naming another PM's runtime does not transfer authority.
+        return session;
+    }
     session.worktree_path = cwd;
     session.repo_hash =
         gwt_core::repo_hash::detect_repo_hash(&session.worktree_path).map(|hash| hash.to_string());
@@ -909,6 +914,29 @@ mod tests {
         let mut session = Session::new(dir, branch, AgentId::Codex);
         session.display_name = display_name.to_string();
         session
+    }
+
+    #[test]
+    fn pm_runtime_hook_cwd_preserves_canonical_session_project() {
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        let runtime = worktree.parent().unwrap().join("runtime");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let session = make_session(&worktree, "", "PM");
+        let input = serde_json::json!({ "cwd": runtime }).to_string();
+        let event = HookEvent::read_from_str(&input).unwrap();
+        let resolved = session_scoped_to_hook_cwd(session, event.as_ref());
+        assert_eq!(resolved.worktree_path, worktree);
+        let other = home.path().join("ordinary-project");
+        std::fs::create_dir_all(&other).unwrap();
+        let ordinary = make_session(&other, "main", "Other");
+        assert_eq!(
+            session_scoped_to_hook_cwd(ordinary, event.as_ref()).worktree_path,
+            other,
+            "a foreign PM runtime payload must not transfer project identity"
+        );
     }
 
     fn workspace_agent(

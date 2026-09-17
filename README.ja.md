@@ -702,6 +702,21 @@ Teams でチャンネル → **チャンネルへのリンクを取得**し、�
 対象 team/channel に**参加している**必要があります（未参加だと Graph が `403` を返し、
 gwt が対処メッセージを表示）。
 
+## PM のプロジェクト設定
+
+常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
+hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には
+読み込まれません。実装 agent は従来どおり project 設定を使います。既存の PM 会話は
+自動移行せず、次回の PM セッション起動時から分離されたディレクトリを使います。
+
+project 固有の規約を明示的に渡すには、
+`~/.gwt/projects/<project-hash>/project-state/pm.json` の他のフィールドを保持したまま、
+`settings.project_policy_files` を設定してください。
+例: `"project_policy_files": ["docs/pm-policy.md"]`。パスは PM の project checkout からの
+相対パスで、既定は空リストです。選択した内容は managed asset の再生成時に既存の
+`gwt-pm` skill へコピーされ、runtime に project への symlink は作りません。
+指定を外した内容は次回の再生成で除去されます。
+
 ## キャンバス操作
 
 - 画面上の zoom ボタンでキャンバスを拡大・縮小

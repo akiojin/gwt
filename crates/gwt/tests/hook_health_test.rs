@@ -1696,3 +1696,59 @@ fn shared_snapshot_resolves_each_bare_hook_binary_once() {
         "10 bare `gwtd` commands across two worktrees must resolve once"
     );
 }
+
+#[test]
+fn pm_runtime_hook_health_and_repair_follow_runtime_assets() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let _bin = stable_hook_bin_guard();
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&home.path().join("repo"));
+    fs::create_dir_all(worktree.join(".claude/skills/project")).unwrap();
+    gwt::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(&worktree).unwrap();
+    let runtime = gwt::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+    assert_eq!(
+        gwt::managed_assets::managed_codex_hook_paths(&worktree),
+        vec![runtime.join(".codex/hooks.json")],
+        "the Codex health reader must follow the PM materialization root"
+    );
+    let mut input = ManagedHookHealthInput::new(&worktree);
+    input.runtime_state_path = None;
+    let healthy = read_managed_hook_health(&input);
+    let false_missing = healthy
+        .issues
+        .iter()
+        .any(|issue| issue.contains("managed hook config missing"));
+    fs::remove_dir_all(worktree.join(".claude")).unwrap();
+    let runtime_hooks = runtime.join(".claude/settings.local.json");
+    fs::write(&runtime_hooks, "{invalid-json").unwrap();
+    let damaged = read_managed_hook_health(&input);
+    let outcome = repair_managed_hook_configs(&worktree).unwrap();
+    let repaired_json =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(runtime_hooks).unwrap())
+            .is_ok();
+    assert_eq!(
+        (
+            false_missing,
+            damaged.issues.is_empty(),
+            outcome.repaired,
+            repaired_json
+        ),
+        (false, false, true, true),
+        "healthy={:?}; damaged={:?}",
+        healthy.issues,
+        damaged.issues
+    );
+    init_git_repo(&worktree);
+    run_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+    fs::create_dir_all(worktree.join(".husky")).unwrap();
+    fs::write(worktree.join(".husky/commit-msg"), "#!/bin/sh\nexit 0\n").unwrap();
+    gwt::managed_assets::regenerate_existing_managed_hook_configs(&worktree).unwrap();
+    assert!(
+        worktree.join(".husky/_/commit-msg").is_file(),
+        "startup self-heal must restore Git hooks in the canonical checkout"
+    );
+    assert!(!runtime.join(".husky").exists());
+}

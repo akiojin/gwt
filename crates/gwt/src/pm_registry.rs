@@ -169,6 +169,10 @@ pub fn pm_agent_is_supported(agent_id: &str) -> bool {
 /// Project-scoped PM settings that survive deregistration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmSettings {
+    /// Explicit project-relative policy files copied into gwt-owned PM guidance.
+    /// Mere presence of a repository instruction file never opts it in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_policy_files: Vec<PathBuf>,
     /// FR-002: opt-out flag. Missing field must read as `true` so prefs
     /// written before this field existed keep auto-starting.
     #[serde(default = "default_auto_start")]
@@ -254,6 +258,7 @@ impl PmLaunchProfile {
 impl Default for PmSettings {
     fn default() -> Self {
         Self {
+            project_policy_files: Vec::new(),
             auto_start: true,
             launch_profile: None,
             loop_interval_secs: default_loop_interval_secs(),
@@ -722,6 +727,51 @@ pub fn pm_identity_exempt_session_for_worktree(worktree: &Path) -> bool {
 /// Canonical worktree for the project's resident PM session.
 pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
+}
+
+/// Instruction discovery directory, separate from the PM's project checkout.
+pub fn pm_runtime_dir_for_pm_worktree(worktree: &Path) -> Option<PathBuf> {
+    is_canonical_pm_worktree(worktree)
+        .then(|| worktree.parent().map(|pm| pm.join("runtime")))
+        .flatten()
+}
+
+/// Create only the runtime node beneath an existing, real PM project store.
+pub fn ensure_pm_runtime_dir_for_pm_worktree(worktree: &Path) -> io::Result<PathBuf> {
+    let runtime = pm_runtime_dir_for_pm_worktree(worktree).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "not a canonical PM worktree")
+    })?;
+    require_pm_runtime_parents(worktree)?;
+    ensure_real_pm_scratch_directory(&runtime, "PM runtime directory")?;
+    Ok(runtime)
+}
+
+fn require_pm_runtime_parents(worktree: &Path) -> io::Result<()> {
+    let pm = worktree
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "PM worktree has no parent"))?;
+    let project = pm.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "PM directory has no project")
+    })?;
+    require_real_pm_scratch_directory(project, "project directory")?;
+    require_real_pm_scratch_directory(pm, "PM directory")?;
+    require_real_pm_scratch_directory(worktree, "PM worktree")
+}
+
+/// Recover project identity from the actual runtime cwd, never from ambient
+/// project environment variables. This changes path resolution, not Session
+/// authority; callers still enforce their existing capability/Session gates.
+pub fn pm_worktree_for_runtime_dir(runtime: &Path) -> Option<PathBuf> {
+    if runtime.file_name()? != std::ffi::OsStr::new("runtime") {
+        return None;
+    }
+    let worktree = runtime.parent()?.join("worktree");
+    if !is_canonical_pm_worktree(&worktree) {
+        return None;
+    }
+    require_pm_runtime_parents(&worktree).ok()?;
+    require_real_pm_scratch_directory(runtime, "PM runtime directory").ok()?;
+    Some(worktree)
 }
 
 /// Project-state directory for PM-authored scratch notes.
@@ -5855,6 +5905,62 @@ mod tests {
             !is_pm_worktree(Path::new("/tmp/elsewhere/pm/worktree")),
             "a branch named pm/worktree outside ~/.gwt/projects must not match"
         );
+    }
+
+    #[test]
+    fn pm_runtime_paths_separate_discovery_from_project_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        let runtime = worktree.parent().unwrap().join("runtime");
+        assert_eq!(
+            pm_runtime_dir_for_pm_worktree(&worktree),
+            Some(runtime.clone())
+        );
+        assert_eq!(pm_worktree_for_runtime_dir(&runtime), None);
+        fs::create_dir_all(&worktree).unwrap();
+        assert_eq!(
+            ensure_pm_runtime_dir_for_pm_worktree(&worktree).unwrap(),
+            runtime
+        );
+        assert_eq!(
+            pm_worktree_for_runtime_dir(&runtime),
+            Some(worktree.clone())
+        );
+        assert_eq!(pm_worktree_for_runtime_dir(&worktree), None);
+        assert_eq!(
+            pm_runtime_dir_for_pm_worktree(&home.path().join("pm/worktree")),
+            None
+        );
+        let canonical_runtime = dunce::canonicalize(&runtime).unwrap();
+        assert_eq!(
+            pm_worktree_for_runtime_dir(&canonical_runtime),
+            Some(dunce::canonicalize(&worktree).unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_runtime_paths_reject_symlinked_runtime_and_project() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        fs::create_dir_all(&worktree).unwrap();
+        let runtime = worktree.parent().unwrap().join("runtime");
+        let external = home.path().join("external");
+        fs::create_dir_all(&external).unwrap();
+        symlink(&external, &runtime).unwrap();
+        assert!(ensure_pm_runtime_dir_for_pm_worktree(&worktree).is_err());
+        assert_eq!(pm_worktree_for_runtime_dir(&runtime), None);
+        fs::remove_file(&runtime).unwrap();
+        let project = worktree.parent().unwrap().parent().unwrap();
+        fs::remove_dir_all(project).unwrap();
+        fs::create_dir_all(external.join("pm/worktree")).unwrap();
+        fs::create_dir_all(external.join("pm/runtime")).unwrap();
+        symlink(&external, project).unwrap();
+        assert!(ensure_pm_runtime_dir_for_pm_worktree(&worktree).is_err());
+        assert_eq!(pm_worktree_for_runtime_dir(&runtime), None);
     }
 
     #[test]

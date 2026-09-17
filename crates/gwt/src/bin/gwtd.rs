@@ -60,6 +60,19 @@ fn main() -> ExitCode {
     // every later `record_*` call a no-op.
     gwt::perf::install_appending_to_established_log_from_settings();
 
+    // PM agent instruction discovery remains in runtime; this short-lived
+    // gateway resolves all operations and legacy cwd-based hooks in its
+    // canonical project checkout. No environment variable can redirect it.
+    if let Some(worktree) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| gwt::pm_registry::pm_worktree_for_runtime_dir(&cwd))
+    {
+        if let Err(error) = std::env::set_current_dir(&worktree) {
+            eprintln!("cannot resolve PM project directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let code = match argv.get(1).map(String::as_str) {
         None => run_json_envelope_cli(&argv),
         Some(_) if is_allowed_argv_exception(&argv) => {
@@ -815,7 +828,7 @@ fn format_update_help() -> String {
 
 fn run_json_envelope_cli(argv: &[String]) -> i32 {
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Some((owner, repo)) = resolve_repo_coordinates() {
+    if let Some((owner, repo)) = resolve_repo_coordinates(&repo_path) {
         let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
         return gwt::cli::dispatch(&mut env, argv);
     }
@@ -868,7 +881,7 @@ fn json_only_argv_message(argv: &[String]) -> String {
     message
 }
 
-fn resolve_repo_coordinates() -> Option<(String, String)> {
+fn resolve_repo_coordinates(repo_path: &std::path::Path) -> Option<(String, String)> {
     // Issue #2054: scan every remote (not just `origin`) and honour
     // `GWT_GITHUB_REPO` / `GWT_REMOTE` overrides so multi-remote repos
     // (local mirror + GitHub under a non-origin name) can still resolve.
@@ -881,7 +894,7 @@ fn resolve_repo_coordinates() -> Option<(String, String)> {
         }
     }
 
-    let remotes = load_remote_pairs();
+    let remotes = load_remote_pairs(repo_path);
 
     if let Some(name) = std::env::var("GWT_REMOTE").ok().filter(|v| !v.is_empty()) {
         if let Some((_, url)) = remotes.iter().find(|(remote_name, _)| remote_name == &name) {
@@ -902,9 +915,10 @@ fn resolve_repo_coordinates() -> Option<(String, String)> {
         .find_map(|(_, url)| parse_github_remote_url(url))
 }
 
-fn load_remote_pairs() -> Vec<(String, String)> {
+fn load_remote_pairs(repo_path: &std::path::Path) -> Vec<(String, String)> {
     let Ok(output) = gwt_core::process::hidden_command("git")
         .args(["remote", "-v"])
+        .current_dir(repo_path)
         .output()
     else {
         return Vec::new();
@@ -952,6 +966,37 @@ fn parse_owner_repo(value: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pm_runtime_remote_discovery_uses_explicit_project_directory() {
+        let project = tempfile::tempdir().unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .arg("init")
+            .arg(project.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fixture/pm-runtime.git"
+            ])
+            .current_dir(project.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert_eq!(
+            load_remote_pairs(project.path()),
+            vec![(
+                "origin".into(),
+                "https://github.com/fixture/pm-runtime.git".into()
+            )]
+        );
+    }
 
     #[test]
     fn did_you_mean_suggests_search_for_typo() {
