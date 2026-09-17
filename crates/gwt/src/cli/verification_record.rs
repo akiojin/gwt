@@ -2672,6 +2672,7 @@ pub fn run_verification(
 struct RunOptions<'a> {
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
+    on_progress: Option<&'a mut dyn FnMut(usize, usize, std::time::Duration)>,
 }
 
 fn run_verification_for_caller(
@@ -2699,7 +2700,7 @@ fn run_verification_inner<F>(
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    options: RunOptions<'_>,
+    mut options: RunOptions<'_>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
@@ -2758,6 +2759,10 @@ where
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
         );
     }
+    let commands_started = std::time::Instant::now();
+    if let Some(on_progress) = options.on_progress.as_mut() {
+        on_progress(0, commands.len(), std::time::Duration::ZERO);
+    }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
         let capture = options
@@ -2788,6 +2793,9 @@ where
             output_tail: persisted_failure_output(exit_code, &tail),
             headed_e2e,
         });
+        if let Some(on_progress) = options.on_progress.as_mut() {
+            on_progress(results.len(), commands.len(), commands_started.elapsed());
+        }
     }
     after_commands();
     let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
@@ -4147,6 +4155,9 @@ pub(super) fn run<E: CliEnv>(
                         user_verification_result.as_deref()
                     },
                     headed_e2e_commands: &headed_e2e_commands,
+                    on_progress: Some(&mut |done, total, elapsed| {
+                        admission.publish_progress(done, total, elapsed)
+                    }),
                 },
             );
             // Release the in-process lease before the (lease-free) evidence
@@ -4653,6 +4664,7 @@ pub(crate) mod tests {
             RunOptions {
                 user_verification_result: None,
                 headed_e2e_commands: &commands,
+                ..RunOptions::default()
             },
             || {},
         )
