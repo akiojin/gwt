@@ -800,8 +800,8 @@ fn verification_head(worktree: &Path, head: &str) -> String {
             break;
         };
         let fields: Vec<_> = bytes.split(|byte| *byte == 0).collect();
-        let mut entries = fields.chunks_exact(2);
-        let additions_only = entries.by_ref().all(|entry| {
+        let (entries, remainder) = fields.as_chunks::<2>();
+        let additions_only = entries.iter().all(|entry| {
             let metadata: Vec<_> = entry[0].split(|byte| *byte == b' ').collect();
             metadata.len() == 5
                 && metadata[0] == b":000000"
@@ -809,7 +809,7 @@ fn verification_head(worktree: &Path, head: &str) -> String {
                 && metadata[4] == b"A"
                 && is_canonical_bucketed_work_event_shard(entry[1])
         });
-        if !additions_only || !entries.remainder().is_empty() {
+        if !additions_only || !remainder.is_empty() {
             break;
         }
         anchor = parents[1].to_string();
