@@ -8116,6 +8116,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn workspace_ensure_discarded_issue_3165_names_successor_work_requirement() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3165");
+        let session_id = "session-3165-fresh";
+        write_bound_projectionless_session_for_owner(
+            session_id,
+            &worktree,
+            &project_root,
+            crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            3165,
+        );
+        let work_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            "session-3165-predecessor",
+            Some("SPEC-3165"),
+            "codex",
+        );
+        // Real #3165 Work work-work-issue-3165-72a0e454 remains Discarded/Idle
+        // despite Resume events from a fresh Session with an Active ECR.
+        let discarded_at = "2026-09-10T05:01:26.337050Z"
+            .parse::<DateTime<Utc>>()
+            .expect("real discard timestamp");
+        let mut discard = WorkEvent::new(WorkEventKind::Discard, &work_id, discarded_at);
+        discard.id = "a46c1a5f-abc8-48cd-81d6-bfba65caa4d7".to_string();
+        discard.agent_session_id = Some("session-3165-predecessor".to_string());
+        record_recovery_work_event(&project_root, &worktree, discard);
+        let mut resume = WorkEvent::new(WorkEventKind::Resume, &work_id, Utc::now());
+        resume.agent_session_id = Some(session_id.to_string());
+        resume.status_category = Some(WorkspaceStatusCategory::Active);
+        record_recovery_work_event(&project_root, &worktree, resume);
+        let works = load_workspace_work_items(&project_root)
+            .expect("load Work fixture")
+            .expect("Work fixture");
+        let work = works
+            .work_items
+            .iter()
+            .find(|work| work.id == work_id)
+            .unwrap();
+        assert!(work.discarded);
+        assert_eq!(work.status_category, WorkspaceStatusCategory::Idle);
+        assert_eq!(work.discarded_at, Some(discarded_at));
+        let paths = workspace_recovery_state_paths(&project_root, &worktree);
+        let before = workspace_recovery_state_bytes(&paths);
+
+        let diagnosis = crate::cli::execution_state::diagnose(&worktree, Some(session_id));
+        assert_eq!(
+            diagnosis.ecr_status,
+            crate::cli::execution_state::ExecutionDiagnosisState::Active
+        );
+        assert_eq!(diagnosis.available_recoveries, ["gwt-execute"]);
+        let guidance = diagnosis.warnings.join("\n");
+        for required in [
+            &work_id,
+            "Discarded",
+            "successor Work materialization",
+            "#4074",
+            "Start Work",
+        ] {
+            assert!(
+                guidance.contains(required),
+                "missing {required}: {guidance}"
+            );
+        }
+        let error =
+            ensure_workspace_for_agent(&worktree, workspace_ensure_status_candidate(session_id))
+                .expect_err("Discarded Work requires successor support owned by #4074")
+                .to_string();
+        for required in ["successor Work materialization", "#4074", "Start Work"] {
+            assert!(error.contains(required), "missing {required}: {error}");
+        }
+        assert!(!error.contains("run workspace.ensure"), "{error}");
+        assert!(!error.contains("retry workspace.ensure"), "{error}");
+        assert_eq!(workspace_recovery_state_bytes(&paths), before);
+    }
+
+    #[test]
     fn workspace_ensure_terminal_binding_guides_status_recovery_without_build_abort_loop() {
         let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _guard = env_guard();
