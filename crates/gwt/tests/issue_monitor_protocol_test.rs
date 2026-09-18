@@ -177,6 +177,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             autonomous_issues: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),
+            effective_launch_profile: None,
             provider_quota_holds: Vec::new(),
             usage_threshold_percent: 80,
         }),

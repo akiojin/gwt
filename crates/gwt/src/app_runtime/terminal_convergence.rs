@@ -265,6 +265,8 @@ pub(crate) enum RestoreAdmission {
     /// The Work is provably terminal: disable restore and drop the
     /// placeholder so the window stops coming back.
     RefuseTerminal(TerminalCloseReason),
+    /// The owner is closed, but cleanup must retain its diagnostic window.
+    RefuseRetainedTerminal,
     /// Issue #4441 (AC-3): the Issue Monitor is holding this row. Do not
     /// spawn, but keep the placeholder — the hold is reversible.
     RefuseHeld(&'static str),
@@ -750,17 +752,30 @@ impl AppRuntime {
                 RestoreAdmission::Admit
             }
             TerminalCloseEligibility::Eligible(reason) => RestoreAdmission::RefuseTerminal(reason),
+            // Reopened #4143: diagnostic retention is not permission to
+            // restart a closed owner's process. Keep its placeholder, but
+            // refuse automatic spawn even for Blocked/open-obligation ECRs.
+            // This outranks the per-cause mapping below, which answers "could
+            // this cause be established", not "is this owner finished".
+            TerminalCloseEligibility::Ineligible(_)
+                if facts
+                    .monitor
+                    .as_ref()
+                    .is_some_and(|monitor| monitor.issue_closed) =>
+            {
+                RestoreAdmission::RefuseRetainedTerminal
+            }
             TerminalCloseEligibility::Ineligible(cause) => restore_admission_for_ineligible(cause),
         }
     }
 
-    /// FR-047: persist the restore refusal (Session Stopped + restore
-    /// disabled) and drop the paused placeholder so nothing spawns.
-    pub(crate) fn refuse_terminal_session_restore(
+    /// Persist a terminal/empty restore refusal and remove its placeholder.
+    pub(crate) fn remove_refused_session_restore(
         &mut self,
         tab_id: &str,
         session_id: &str,
-        reason: TerminalCloseReason,
+        window_id: Option<&str>,
+        reason: &str,
     ) {
         match gwt_agent::update_session_if_changed(&self.sessions_dir, session_id, |session| {
             session.restore_window_on_startup = false;
@@ -772,8 +787,8 @@ impl AppRuntime {
             Ok(_) => tracing::info!(
                 target: "gwt.pane.teardown",
                 session_id,
-                reason = reason.as_str(),
-                "automatic restore refused: the linked Work is terminal"
+                reason,
+                "automatic restore refused: removing the stopped placeholder"
             ),
             Err(error) => tracing::warn!(
                 target: "gwt.pane.teardown",
@@ -782,7 +797,7 @@ impl AppRuntime {
                 "automatic restore refused, but the Session could not be marked restore-disabled"
             ),
         }
-        self.remove_stale_paused_agent_window(tab_id, session_id);
+        self.remove_stale_paused_agent_window(tab_id, session_id, window_id);
         let _ = self.persist();
     }
 }
