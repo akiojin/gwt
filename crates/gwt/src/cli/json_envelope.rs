@@ -1133,10 +1133,12 @@ fn workspace_ensure(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
 }
 
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["workspace", "all", "limit"], "board.show")?;
     Ok(CliCommand::Board(BoardCommand::Show {
         json: true,
         workspace: optional_string(params, "workspace")?,
         all: optional_bool(params, "all")?.unwrap_or(false),
+        limit: optional_usize(params, "limit")?,
     }))
 }
 
@@ -4028,6 +4030,72 @@ mod tests {
             err("issue.monitor.priority.set", json!({})),
             CliParseError::MissingFlag("issue_numbers")
         ));
+    }
+
+    #[test]
+    fn board_show_rejects_unknown_params() {
+        let error = err("board.show", json!({"limti": 15})).to_string();
+        assert!(error.contains("limti"), "{error}");
+        assert!(error.contains("workspace, all, limit"), "{error}");
+    }
+
+    fn board_show_page(params: Value) -> Value {
+        use gwt_core::{
+            coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind},
+            test_support::{ScopedEnvVar, ScopedGwtHome},
+        };
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        for index in 0..25 {
+            post_entry(
+                temp.path(),
+                BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Codex",
+                    BoardEntryKind::Status,
+                    format!("entry-{index}"),
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(&mut env, ok("board.show", params)).unwrap();
+        assert_eq!(code, 0);
+        serde_json::from_str(&output).unwrap()
+    }
+
+    #[test]
+    fn board_show_explicit_limit_returns_latest_fifteen_even_with_all() {
+        let page = board_show_page(json!({"limit": 15, "all": true}));
+        let entries = page["board"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 15);
+        assert_eq!(entries[0]["body"], "entry-10");
+        assert_eq!(entries[14]["body"], "entry-24");
+        assert_eq!(page["board"]["oldest_entry_id"], entries[0]["id"]);
+        assert_eq!(page["board"]["newest_entry_id"], entries[14]["id"]);
+        assert_eq!(page["board"]["has_more_before"], true);
+        assert_eq!(page["page"]["total_entries"], 25);
+        assert_eq!(page["page"]["returned_entries"], 15);
+        assert_eq!(page["page"]["truncated"], true);
+    }
+
+    #[test]
+    fn board_show_default_cap_and_all_override() {
+        let page = board_show_page(json!({}));
+        assert_eq!(page["board"]["entries"].as_array().unwrap().len(), 20);
+        assert_eq!(page["board"]["entries"][0]["body"], "entry-5");
+        assert_eq!(page["page"]["returned_entries"], 20);
+        let all = board_show_page(json!({"all": true}));
+        assert_eq!(all["board"]["entries"].as_array().unwrap().len(), 25);
+        assert_eq!(all["page"]["truncated"], false);
     }
 
     #[test]

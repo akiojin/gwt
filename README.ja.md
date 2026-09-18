@@ -210,6 +210,18 @@ gwtd <<'JSON'
 JSON
 ```
 
+`board.show` は、選択された workspace / session から見える最新20件を時系列順で
+返します。`params.limit` に非負整数（例: `15`、`0` は空）を指定して件数を変更できます。
+`params.all: true` は全宛先を対象にして既定上限を解除しますが、明示した `limit` が
+常に優先します。provider の保持窓は残り、`all` は全履歴の読み込みを意味しません。
+未知のキーは受け付けるキー一覧を示して拒否します。既存の `board` フィールドは維持し、
+`page.total_entries` はCLI制限前の可視snapshot件数、`page.returned_entries` は
+返却件数、`page.truncated` はCLI制限による省略の有無を示します。
+
+返却サイズはおおむね「件数 × シリアライズされた1件のサイズ + metadata」です。
+1件平均2 KiBなら20件で約40 KiBです。固定バイト上限はなく、長文ほど増え、
+`all: true` では数百 KiB以上になる場合があります。
+
 managed hook と runtime 委譲は `gwtd` を使います。macOS と Linux では、
 ユーザーが JSON operation `daemon.start` を実行することでプロジェクトごとの
 runtime daemon（Unix ドメインソケット IPC）が起動します。daemon
