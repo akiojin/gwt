@@ -13290,3 +13290,70 @@ fn issue_3777_runtime_hook_shared_cache_hit_does_not_deep_clone() {
     assert!(!first_profile.cache_hit);
     assert!(second_profile.cache_hit);
 }
+
+#[test]
+fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4504),
+        pr_url: Some("https://github.com/example/repo/pull/4504".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut start = WorkEvent::new(WorkEventKind::Start, "delivery-work", now);
+    start.owner = Some("Issue #42".into());
+    start.agent_session_id = Some("delivery-session".into());
+    let mut original = container.clone();
+    original.pr_number = None;
+    original.pr_url = None;
+    original.pr_state = None;
+    start.execution_container = Some(original);
+    projection.apply_event(start);
+    projection.apply_event(WorkEvent::new(WorkEventKind::Done, "delivery-work", now));
+    let mut history = projection.work_items[0].clone();
+    history.id = "removed-worktree".into();
+    history.agents.clear();
+    history.execution_containers[0].worktree_path = Some(tmp.path().join("removed"));
+    projection.work_items.push(history);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let write = |owner: &str, session: &str| {
+        record_workspace_pr_metadata_for_execution_at(&works, &events, owner, session, &container)
+    };
+    assert!(write("Issue #99", "delivery-session").is_err());
+    assert!(write("Issue #42", "foreign-session").is_err());
+    write("Issue #42", "delivery-session").unwrap();
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = saved
+        .work_items
+        .iter()
+        .find(|item| item.id == "delivery-work")
+        .unwrap();
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+    assert_eq!(item.execution_containers, vec![container.clone()]);
+    assert_eq!(item.events.last().unwrap().kind, WorkEventKind::Pr);
+    assert_eq!(
+        item.events.last().unwrap().execution_container.as_ref(),
+        Some(&container)
+    );
+    assert!(gwt_work_event_shard_path(&events, &item.events.last().unwrap().id).is_file());
+    write("Issue #42", "delivery-session").unwrap();
+    assert_eq!(
+        load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    let mut ambiguous = saved.clone();
+    let mut duplicate = item.clone();
+    duplicate.id = "duplicate-delivery-work".into();
+    ambiguous.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
+    assert!(write("Issue #42", "delivery-session").is_err());
+}
