@@ -8,8 +8,13 @@ use std::path::PathBuf;
 /// --show-toplevel`. Falls back to the current process cwd if git is
 /// unavailable or the command fails.
 pub fn detect_worktree_root() -> PathBuf {
+    let cwd = fallback_cwd();
+    if let Some(worktree) = crate::pm_registry::pm_worktree_for_runtime_dir(&cwd) {
+        return worktree;
+    }
     let output = gwt_core::process::hidden_command("git")
         .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&cwd)
         .output();
     match output {
         Ok(out) if out.status.success() => {

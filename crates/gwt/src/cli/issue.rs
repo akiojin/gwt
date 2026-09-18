@@ -5,7 +5,7 @@ use std::{
 };
 
 use gwt_github::{
-    cache::{write_atomic, CacheGeneration, ValidatedCacheEntry},
+    cache::{write_atomic, CacheGeneration, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::ApiError,
     Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError,
 };
@@ -154,6 +154,14 @@ pub(super) fn run<E: CliEnv>(
             body,
             labels,
         } => run_issue_edit(env, number, title, body, labels, out)?,
+        IssueCommand::Close {
+            number,
+            reason,
+            comment,
+        } => run_issue_set_state(env, number, IssueState::Closed, reason, comment, out)?,
+        IssueCommand::Reopen { number, comment } => {
+            run_issue_set_state(env, number, IssueState::Open, None, comment, out)?
+        }
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
@@ -403,12 +411,23 @@ fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
 /// Issue #4009 AC-4: free space where the worktrees live and where the
 /// verification coordinator writes its lease, so a filling host warns here
 /// before `verify.run` fails with `No space left on device`.
+/// Issue #4391 AC-1: judged against the `[build_artifact_gc]` thresholds,
+/// the same probe the automatic reclaim fires on.
 fn attach_disk_space(project_root: &std::path::Path, status: &mut crate::IssueMonitorAgentStatus) {
-    let coordinator_root = gwt_core::index_coordinator::coordinator_root();
-    status.disk_space = Some(crate::disk_space::probe(&[
+    status.disk_space = Some(crate::worktree::gc::probe_disk(
         project_root,
-        coordinator_root.as_path(),
-    ]));
+        &crate::worktree::gc::current_config(),
+    ));
+}
+
+/// Issue #4391 AC-3: the last automatic build-artifact reclaim, read from
+/// the run history the daemon appends to. Read-only: no history, no field.
+fn attach_build_artifact_gc(
+    project_root: &std::path::Path,
+    status: &mut crate::IssueMonitorAgentStatus,
+) {
+    status.build_artifact_gc =
+        crate::worktree::gc::last_record(&crate::worktree::gc::record_path(project_root));
 }
 
 /// Issue #4234 AC-5: resident size of every gwt GUI process on the host,
@@ -530,6 +549,26 @@ fn merge_board_escalations_into_needs_human(
     status.needs_human.sort_unstable();
 }
 
+/// Issue #4413 AC-4: the `gui_status.state` of a projection this process
+/// rebuilt from disk. `error` used to stand here, sending every reader after a
+/// fault that had not happened.
+const DEGRADED_CACHE_STATE: &str = "degraded_cache";
+
+/// Issue #4413 AC-2: qualify an error carried by a rebuilt projection.
+///
+/// A live monitor reports a wiped candidate set as `issue monitor inbox
+/// population shrank: N -> 0` (#4184). Handing back that same sentence for
+/// "nobody answered, so this was rebuilt from preferences and the local Issue
+/// cache" makes the outage and its own absence one response — which is how a
+/// running fleet was twice reported as fully stopped, and how anyone
+/// verifying the #4184 fix reads a pass and a failure identically.
+fn degraded_projection_error(error: String) -> String {
+    format!(
+        "[{DEGRADED_CACHE_STATE}: no live Issue Monitor answered; \
+         rebuilt from preferences and the local Issue cache] {error}"
+    )
+}
+
 fn run_monitor_status<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -540,10 +579,26 @@ fn run_monitor_status<E: CliEnv>(
     merge_board_escalations_into_needs_human(&project_root, &mut status);
     attach_github_budget(&mut status);
     attach_disk_space(&project_root, &mut status);
+    attach_build_artifact_gc(&project_root, &mut status);
     attach_memory_pressure(&mut status);
     attach_issue_cache_status(&project_root, &mut status);
+    // Keep the existing owner slots and add physical observations without
+    // changing the meaning of active_launches or feeding admission.
+    let inventory = crate::session_inventory::observe_sessions(
+        &project_root,
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let mut output =
+        serde_json::to_value(&status).map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    output["active_session_count"] = serde_json::json!(inventory.sessions.len());
+    output["worktree_sessions"] = serde_json::json!(inventory.worktree_sessions());
+    output["session_observation"] = serde_json::json!({
+        "complete": inventory.uncertainties.is_empty(),
+        "uncertainties": inventory.uncertainties,
+    });
+    output["active_sessions"] = serde_json::json!(inventory.sessions);
     out.push_str(
-        &serde_json::to_string(&status)
+        &serde_json::to_string(&output)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
     );
     out.push('\n');
@@ -565,6 +620,10 @@ fn load_monitor_agent_status(
     if let Some(published) = published {
         let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(published)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        // Issue #4413 AC-1: a live monitor answered. Stamped here rather than
+        // trusted from the payload so a pre-#4413 publication — which only a
+        // live monitor could have produced — is labelled the same way.
+        status.source = crate::IssueMonitorStatusSource::Daemon;
         attach_monitor_control_identity(&authority, &mut status);
         return Ok(status);
     }
@@ -589,7 +648,32 @@ fn load_monitor_agent_status(
     // would silently disagree about what a caller can rely on.
     let mut status = monitor.agent_status_at(&now);
     attach_monitor_control_identity(&authority, &mut status);
+    mark_degraded_cache_projection(&mut status);
     Ok(status)
+}
+
+/// Issue #4413: label a projection this process rebuilt from preferences and
+/// the local Issue cache, so no reader can mistake it for a census.
+///
+/// The numbers stay as they are — they are the best this process can see — but
+/// every field a reader uses to conclude "the fleet stopped" has to be
+/// distinguishable from the same field under a live monitor. Left unlabelled,
+/// the two are one response: on 2026-09-15 this shape was reported as a total
+/// fleet outage while thirteen agent windows were committing and a PR landed.
+fn mark_degraded_cache_projection(status: &mut crate::IssueMonitorAgentStatus) {
+    status.source = crate::IssueMonitorStatusSource::DegradedCache;
+    // AC-3: preferences are what a stopped monitor stops maintaining, so an
+    // empty list here is "no launch recorded", not "no launch running".
+    status.active_launches_incomplete = true;
+    status.last_error = status.last_error.take().map(degraded_projection_error);
+    if let Some(view) = status.gui_status.as_mut() {
+        view.last_error = view.last_error.take().map(degraded_projection_error);
+        // AC-4: nothing faulted. There is simply no live monitor to ask, and
+        // `error` sends the reader hunting a failure that did not happen.
+        if view.state == "error" {
+            view.state = DEGRADED_CACHE_STATE.to_string();
+        }
+    }
 }
 
 /// Issue #3732: stop/failover load this durable state without scanning. Neither
@@ -3219,6 +3303,85 @@ fn run_issue_edit<E: CliEnv>(
     Ok(0)
 }
 
+/// SPEC #4249 FR-001: the shared body of `issue.close` and `issue.reopen`.
+///
+/// The Issue body is never touched, so neither the section-managed refusal that
+/// guards `issue.edit` on `gwt-spec` Issues nor the `auto-merge` acceptance
+/// block guard applies — both exist to protect a body rewrite.
+///
+/// An Issue already in the target state is reported with `changed: false` and
+/// nothing reaches the API, not even `comment`: replaying the same envelope
+/// after a lost response must not duplicate the rationale on the Issue.
+fn run_issue_set_state<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    target: IssueState,
+    reason: Option<gwt_github::client::IssueCloseReason>,
+    comment: Option<String>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let issue = IssueNumber(number);
+    // Authoritative, not cached: the idempotence answer below is only as good
+    // as the state it is compared against.
+    let current = refresh_issue_cache(env, issue)?.snapshot;
+    if current.state == target {
+        // `reason` describes what was written, and nothing was: echoing the
+        // requested one here would claim a rationale GitHub never recorded.
+        write_issue_state_result(out, number, target, false, None, None);
+        return Ok(0);
+    }
+
+    // The rationale lands before the state change, so a reader who finds the
+    // Issue closed already sees why it was closed.
+    let comment_id = match comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+    {
+        Some(body) => Some(env.client().create_comment(issue, body)?.id.0),
+        None => None,
+    };
+    env.client().set_state(issue, target, reason)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        match target {
+            IssueState::Closed => "issue.close",
+            IssueState::Open => "issue.reopen",
+        },
+        super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+        number,
+    );
+    // One-way flow: the cache is refreshed from the post-write server state so
+    // the UI and the Monitor never read a state this operation already changed.
+    let _ = refresh_issue_cache(env, issue)?;
+    write_issue_state_result(out, number, target, true, reason, comment_id);
+    Ok(0)
+}
+
+fn write_issue_state_result(
+    out: &mut String,
+    number: u64,
+    state: IssueState,
+    changed: bool,
+    reason: Option<gwt_github::client::IssueCloseReason>,
+    comment_id: Option<u64>,
+) {
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": match state {
+                IssueState::Closed => "closed",
+                IssueState::Open => "open",
+            },
+            "changed": changed,
+            "reason": reason.map(gwt_github::client::IssueCloseReason::as_str),
+            "comment_id": comment_id,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+}
+
 fn write_issue_edit_refusal(out: &mut String, number: u64, reason: &str) -> i32 {
     out.push_str(
         &serde_json::json!({
@@ -3432,11 +3595,12 @@ where
                     number.0
                 )))
             })?;
-            if !cache.renew_validation_receipt_if_generation(expected, expected_generation)? {
-                return Err(SpecOpsError::from(ApiError::Network(format!(
-                    "issue #{} cache changed during validation",
-                    number.0
-                ))));
+            let renewal =
+                cache.renew_validation_receipt_if_generation(expected, expected_generation)?;
+            if !renewal.renewed() {
+                return Err(SpecOpsError::from(ApiError::Network(
+                    validation_receipt_refusal(number, renewal),
+                )));
             }
             return load_fresh_validated_entry(&cache, number);
         }
@@ -3476,14 +3640,39 @@ where
             );
         }
     }
-    if !cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))? {
-        return Err(SpecOpsError::from(ApiError::Network(format!(
-            "issue #{} cache changed before validation receipt publication: another cache \
-             writer replaced the snapshot during this read; retry the operation",
-            number.0
-        ))));
+    let renewal =
+        cache.renew_validation_receipt_if_generation(&snapshot, Some(&committed_generation))?;
+    if !renewal.renewed() {
+        return Err(SpecOpsError::from(ApiError::Network(
+            validation_receipt_refusal(number, renewal),
+        )));
     }
     load_fresh_validated_entry(&cache, number)
+}
+
+/// Issue #4436 AC-4: name the outcome that actually refused the read.
+///
+/// `cache changed before validation receipt publication ... retry the
+/// operation` used to be the single answer for all four refusals. Only
+/// [`ValidationReceiptRenewal::GenerationChanged`] is a concurrent writer;
+/// the rest describe the persisted entry and are unchanged by a retry, so
+/// telling an operator to retry sent them into a loop against a cache that was
+/// never moving.
+fn validation_receipt_refusal(number: IssueNumber, renewal: ValidationReceiptRenewal) -> String {
+    if renewal.cache_changed() {
+        return format!(
+            "issue #{} cache changed before validation receipt publication: {}; retry the \
+             operation",
+            number.0,
+            renewal.reason()
+        );
+    }
+    format!(
+        "issue #{} validation receipt could not be published: {}; the cached Issue did not \
+         change under this operation, so a retry cannot resolve it",
+        number.0,
+        renewal.reason()
+    )
 }
 
 fn load_fresh_validated_entry(
@@ -4144,7 +4333,8 @@ mod tests {
         let cache = Cache::new(cache_root.to_path_buf());
         assert!(cache
             .renew_validation_receipt_if_current(snapshot)
-            .expect("publish validation receipt"));
+            .expect("publish validation receipt")
+            .renewed());
         let path = cache.validation_receipt_path(snapshot.number);
         let mut receipt: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).expect("read validation receipt"))
@@ -4580,6 +4770,311 @@ mod tests {
                 .any(|call| call.starts_with("patch_") || call.starts_with("set_labels")),
             "nothing may reach the API"
         );
+    }
+
+    fn state_result(out: &str) -> serde_json::Value {
+        serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("state result JSON: {e}: {out}"))
+    }
+
+    /// SPEC #4249 AC-1: both a plain Issue and a `gwt-spec` Issue move between
+    /// open and closed, and the local cache — the one-way flow the UI and the
+    /// Monitor read — carries the new state afterwards.
+    #[test]
+    fn issue_close_and_reopen_move_the_state_and_the_cache() {
+        for labels in [&["bug"][..], &["gwt-spec", "phase/draft"][..]] {
+            let (_tmp, mut env) = seeded_edit_env(labels);
+
+            let mut out = String::new();
+            let code = run(
+                &mut env,
+                IssueCommand::Close {
+                    number: 7,
+                    reason: None,
+                    comment: None,
+                },
+                &mut out,
+            )
+            .unwrap_or_else(|e| panic!("close {labels:?}: {e}"));
+            assert_eq!(code, 0, "{out}");
+            let result = state_result(&out);
+            assert_eq!(result["status"], "closed", "{out}");
+            assert_eq!(result["changed"], true, "{out}");
+            assert_eq!(fetched(&env, 7).state, IssueState::Closed);
+            assert_eq!(
+                Cache::new(env.cache_root())
+                    .load_entry(IssueNumber(7))
+                    .expect("cache entry after close")
+                    .snapshot
+                    .state,
+                IssueState::Closed,
+                "the cache must follow the write, or the UI keeps showing an open Issue"
+            );
+
+            let mut out = String::new();
+            let code = run(
+                &mut env,
+                IssueCommand::Reopen {
+                    number: 7,
+                    comment: None,
+                },
+                &mut out,
+            )
+            .unwrap_or_else(|e| panic!("reopen {labels:?}: {e}"));
+            assert_eq!(code, 0, "{out}");
+            let result = state_result(&out);
+            assert_eq!(result["status"], "open", "{out}");
+            assert_eq!(result["changed"], true, "{out}");
+            assert_eq!(fetched(&env, 7).state, IssueState::Open);
+            assert_eq!(
+                Cache::new(env.cache_root())
+                    .load_entry(IssueNumber(7))
+                    .expect("cache entry after reopen")
+                    .snapshot
+                    .state,
+                IssueState::Open
+            );
+            // The body is never touched, so the section-managed refusal that
+            // guards `issue.edit` has nothing to protect here.
+            assert_eq!(fetched(&env, 7).body, "Original body");
+        }
+    }
+
+    /// SPEC #4249 FR-001: the close reason reaches the client, and an explaining
+    /// comment is posted *before* the close so a reader who finds the Issue
+    /// closed already sees why.
+    #[test]
+    fn issue_close_carries_the_reason_and_comments_before_closing() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                comment: Some("absorbed by #4249".to_string()),
+            },
+            &mut out,
+        )
+        .expect("close with reason and comment");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["reason"], "not_planned", "{out}");
+        assert!(result["comment_id"].is_u64(), "{out}");
+
+        let calls: Vec<String> = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("create_comment") || call.starts_with("set_state"))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                "create_comment:#7".to_string(),
+                "set_state:#7:not_planned".to_string()
+            ],
+            "the comment must land before the close, and the reason must reach the client"
+        );
+    }
+
+    /// SPEC #4249 FR-001: replaying the same envelope is a no-op. Nothing
+    /// reaches the API — a second `comment` would otherwise duplicate itself on
+    /// every retry.
+    #[test]
+    fn issue_close_and_reopen_are_idempotent() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("first close");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                comment: Some("second pass".to_string()),
+            },
+            &mut out,
+        )
+        .expect("replayed close is a success, not a failure");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["status"], "closed", "{out}");
+        assert_eq!(result["changed"], false, "{out}");
+
+        let mutations = env
+            .client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("set_state") || call.starts_with("create_comment"))
+            .count();
+        assert_eq!(mutations, 1, "the replay must not reach the API");
+
+        // The mirror case: reopening an already-open Issue.
+        let (_tmp2, mut open) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let code = run(
+            &mut open,
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("replayed reopen");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(state_result(&out)["changed"], false, "{out}");
+        assert!(
+            !open
+                .client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("set_state")),
+            "nothing may reach the API"
+        );
+    }
+
+    #[test]
+    fn issue_reopen_does_not_use_stale_cache_for_idempotence_when_throttled() {
+        let (tmp, mut env) = seeded_edit_env(&["bug"]);
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let cached = fetched(&env, 7);
+        Cache::new(env.cache_root())
+            .write_snapshot(&cached)
+            .unwrap();
+        let mut remote = cached;
+        remote.state = IssueState::Closed;
+        env.client.seed(remote);
+        let now = chrono::Utc::now();
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(300),
+            },
+            now,
+        );
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect("the client provides the current remote state");
+
+        assert_eq!(state_result(&out)["changed"], true, "{out}");
+        assert_eq!(fetched(&env, 7).state, IssueState::Open);
+    }
+
+    /// SPEC #4249 FR-001: an unknown Issue number fails with its own cause and
+    /// writes nothing.
+    #[test]
+    fn issue_close_reports_a_missing_issue() {
+        let (_tmp, mut env) = seeded_edit_env(&["bug"]);
+        let mut out = String::new();
+        let missing = run(
+            &mut env,
+            IssueCommand::Close {
+                number: 999,
+                reason: None,
+                comment: None,
+            },
+            &mut out,
+        )
+        .expect_err("missing issue");
+        assert!(missing.to_string().contains("#999 not found"), "{missing}");
+        assert!(
+            !env.client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("set_state")),
+            "a missing Issue must not reach the state endpoint"
+        );
+    }
+
+    /// SPEC #4249 AC-2: closing and reopening an Issue leaves the Monitor's
+    /// local queue accounting alone, so a `issue.monitor.requeue` right after a
+    /// reopen still returns the Issue to the queue. The operations write GitHub
+    /// and the Issue cache only; if either ever started writing a durable
+    /// closure hold, this test is the one that catches it.
+    #[test]
+    fn reopened_issue_still_requeues_into_the_monitor_queue() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                failed_issues: vec![crate::IssueMonitorFailedIssue {
+                    issue_number: 7,
+                    message: "agent window closed without a PR".to_string(),
+                    window_id: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.seed(IssueSnapshot {
+            number: IssueNumber(7),
+            title: "Closed by mistake".to_string(),
+            body: "Original body".to_string(),
+            labels: vec!["bug".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-09-01T00:00:00Z"),
+            comments: vec![],
+        });
+
+        for command in [
+            IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                comment: None,
+            },
+            IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            },
+        ] {
+            let mut out = String::new();
+            run(&mut env, command, &mut out).expect("state change");
+        }
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorRequeue {
+                project_root: Some(repo.clone()),
+                number: 7,
+                reason: "reopened after an absorption was reversed".to_string(),
+            },
+            &mut out,
+        )
+        .expect("requeue after reopen");
+        assert_eq!(code, 0, "{out}");
+        let result = state_result(&out);
+        assert_eq!(result["status"], "requeued", "{out}");
     }
 
     #[test]
@@ -5155,6 +5650,8 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: vec![2338],
             active_launches: vec![2338],
             max_active: 1,
@@ -5168,6 +5665,7 @@ mod tests {
             update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
+            effective_launch_profile: None,
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
@@ -5181,6 +5679,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -5194,6 +5693,8 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: vec![2338],
             active_launches: Vec::new(),
             max_active: 1,
@@ -5207,6 +5708,7 @@ mod tests {
             update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
+            effective_launch_profile: None,
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
@@ -5237,6 +5739,8 @@ mod tests {
                 attempts: 0,
                 last_failure_message: None,
                 failure_kind: None,
+                pane_state: None,
+                runtime_consistency: None,
             }],
             closure_held: Vec::new(),
             last_error: Some("issue #2338: live failure".to_string()),
@@ -5247,6 +5751,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -5311,6 +5816,8 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                source: crate::IssueMonitorStatusSource::Daemon,
+                active_launches_incomplete: false,
                 queue: vec![2338],
                 active_launches: Vec::new(),
                 max_active: 1,
@@ -5324,6 +5831,7 @@ mod tests {
                 update_drain: None,
                 launch_profile_summary: String::new(),
                 launch_profile_candidates: Vec::new(),
+                effective_launch_profile: None,
                 usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: vec![2338],
@@ -5354,6 +5862,8 @@ mod tests {
                     attempts: 0,
                     last_failure_message: None,
                     failure_kind: None,
+                    pane_state: None,
+                    runtime_consistency: None,
                 }],
                 closure_held: Vec::new(),
                 last_error: None,
@@ -5364,6 +5874,7 @@ mod tests {
                 generation_reclaim: None,
                 disk_space: None,
                 memory_pressure: None,
+                build_artifact_gc: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
                 failure_surge: None,
@@ -5402,6 +5913,8 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: vec![2338],
             active_launches: Vec::new(),
             max_active: 1,
@@ -5415,6 +5928,7 @@ mod tests {
             update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
+            effective_launch_profile: None,
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
@@ -5428,6 +5942,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
             failure_surge: None,
@@ -5583,8 +6098,20 @@ mod tests {
         assert_eq!(
             status,
             serde_json::json!({
+                // Issue #4413 AC-1/AC-3: this fallback is the rebuilt
+                // projection, and `active_launches` is whatever preferences
+                // still record — both facts ship with the numbers.
+                "source": "degraded_cache",
+                "active_launches_incomplete": true,
                 "queue": [2, 1],
                 "active_launches": [9],
+                "active_sessions": [],
+                "active_session_count": 0,
+                "worktree_sessions": [],
+                "session_observation": {
+                    "complete": true,
+                    "uncertainties": [],
+                },
                 "max_active": 3,
                 "enabled": true,
                 "autonomous_mode": false,
@@ -7064,6 +7591,90 @@ mod tests {
         );
     }
 
+    /// Issue #4413: a status read with no live Issue Monitor to answer, and a
+    /// scan cadence long past its interval — the shape the fleet was
+    /// misdiagnosed from.
+    fn degraded_status_json(tmp: &TempDir) -> serde_json::Value {
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                last_scan_at: Some("2026-09-15T00:00:00Z".to_string()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).expect("degraded status");
+        serde_json::from_str(out.trim()).expect("status JSON")
+    }
+
+    /// Issue #4413 AC-1/AC-3/AC-4: with nothing to answer, `issue.monitor.status`
+    /// rebuilds the projection from preferences and the local Issue cache. That
+    /// answer is shaped exactly like a monitor that lost every candidate, so it
+    /// has to say which of the two it is — twice a running fleet was reported
+    /// as fully stopped from this response.
+    #[test]
+    fn status_without_a_live_monitor_is_labeled_a_degraded_cache_projection() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let status = degraded_status_json(&tmp);
+
+        assert_eq!(
+            status["source"], "degraded_cache",
+            "a cache rebuild must not be readable as a daemon projection: {status}"
+        );
+        assert_eq!(
+            status["active_launches_incomplete"],
+            serde_json::Value::Bool(true),
+            "an empty active_launches here means 'none recorded', not 'none running': {status}"
+        );
+        assert_ne!(
+            status["gui_status"]["state"], "error",
+            "nothing errored; there is simply no live monitor to ask: {status}"
+        );
+        assert_eq!(
+            status["gui_status"]["state"], "degraded_cache",
+            "the state has to name the degradation, not a fault: {status}"
+        );
+    }
+
+    /// Issue #4413 AC-2: `#4184`'s inbox-shrink wording means "the candidates
+    /// were wiped". Emitting it unqualified for "nobody answered, so this was
+    /// rebuilt from disk" makes the real bug and its own absence read the same,
+    /// which also defeats anyone verifying the #4184 fix.
+    #[test]
+    fn a_degraded_projection_never_reports_an_unqualified_outage() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let status = degraded_status_json(&tmp);
+
+        for error in [&status["last_error"], &status["gui_status"]["last_error"]] {
+            let Some(error) = error.as_str() else {
+                continue;
+            };
+            assert!(
+                error.starts_with("[degraded_cache:"),
+                "a degraded error must announce its own provenance: {error}"
+            );
+        }
+
+        let shrink = "issue monitor inbox population shrank: 297 -> 0; removed issues: [1]";
+        let degraded = degraded_projection_error(shrink.to_string());
+        assert!(
+            !degraded.starts_with("issue monitor inbox population shrank"),
+            "the bare #4184 wording must never lead a degraded error: {degraded}"
+        );
+        assert!(
+            degraded.contains(shrink),
+            "the original diagnostic must survive the annotation: {degraded}"
+        );
+    }
+
     /// Issue #3732 AC-5: the identity read after a terminal Work escalation
     /// must still release that launch without requiring a pane close.
     #[test]
@@ -7515,6 +8126,8 @@ mod tests {
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: Vec::new(),
             active_launches: Vec::new(),
             max_active: 3,
@@ -7528,6 +8141,7 @@ mod tests {
             update_drain: None,
             launch_profile_summary: String::new(),
             launch_profile_candidates: Vec::new(),
+            effective_launch_profile: None,
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: Vec::new(),
@@ -7558,6 +8172,8 @@ mod tests {
                 attempts: 0,
                 last_failure_message: None,
                 failure_kind: None,
+                pane_state: None,
+                runtime_consistency: None,
             }],
             closure_held: Vec::new(),
             last_error: None,
@@ -7570,6 +8186,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            build_artifact_gc: None,
             review_windows: Vec::new(),
             failure_surge: None,
             issue_cache: None,
@@ -8515,6 +9132,48 @@ mod tests {
         assert!(!cache.validation_receipt_path(remote.number).exists());
     }
 
+    /// Issue #4436 AC-4: a refusal that no retry can resolve must not be
+    /// reported as a concurrent cache writer.
+    ///
+    /// Here the generation the read committed is still the persisted one — the
+    /// cache demonstrably did not change — but `body.md` no longer round-trips
+    /// to the validated snapshot. The old wording told the operator the cache
+    /// had changed and to retry, which is how five identical `issue.edit`
+    /// refusals arrived while `meta.json` never moved.
+    #[test]
+    fn a_stable_cache_is_never_reported_as_a_concurrent_writer() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let remote = sample_issue_snapshot();
+        env.client.seed(remote.clone());
+        let cache_root = env.cache_root();
+        let generation_before = Cache::new(cache_root.clone()).current_generation(remote.number);
+
+        let error =
+            load_or_refresh_issue_with_index_rebuild(&mut env, remote.number, false, move |_| {
+                // A half-written sibling: the body changes, the generation in
+                // meta.json does not.
+                fs::write(cache_root.join("42/body.md"), "partial writer body")
+                    .map_err(|error| error.to_string())
+            })
+            .expect_err("a snapshot that does not round-trip must refuse");
+
+        let message = error.to_string();
+        assert!(
+            !message.contains("cache changed"),
+            "a stable generation must not be reported as a concurrent writer: {message}"
+        );
+        assert!(
+            message.contains("does not match the validated snapshot"),
+            "the refusal must name what actually happened: {message}"
+        );
+        assert!(
+            !message.contains("retry the operation"),
+            "a permanent refusal must not advise a retry: {message}"
+        );
+        assert!(generation_before.is_ok());
+    }
+
     /// Issue #4392: a body that quotes a gwt-spec header with an unparseable
     /// sections index (the #4390 shape) used to fail every refresh with
     /// `cache changed before validation receipt publication`, because the
@@ -8734,6 +9393,8 @@ mod tests {
                             kind: "weekly".to_string(),
                             used_percent: 26,
                         }],
+                        attempts: Vec::new(),
+                        next_reverify_at: None,
                     },
                 )]),
                 autonomous_records: vec![crate::AutonomousIssueRecord {

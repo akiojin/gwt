@@ -34,16 +34,24 @@ error.
 
 ## Lifecycle
 
-Use the existing build lifecycle JSON operations for every implementation mode.
-The operation names and state file remain compatibility surfaces.
+Use the existing build lifecycle JSON operations for Issue-backed work.
+The operation names and state file remain compatibility surfaces. The `spec`
+parameter carries the owner Issue number; it does not require a `gwt-spec`
+label. Keep that same number throughout the lifecycle.
 
-- `build.start` with `params.spec:<n>` when the owner is a gwt-spec tagged Issue
-  or `params.task:<description>` for standalone work.
-- `build.phase` with `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at
-  each TDD milestone.
-- `build.complete` only after verification passed and the Ready PR Gate is
-  satisfied for a releaseable slice.
-- `build.abort` with a concrete reason when implementation cannot proceed.
+- `build.start` with `params.spec:<n>` for every Issue owner, including plain
+  Issues in direct mode.
+- `build.phase` with the same `params.spec:<n>` and
+  `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at each TDD milestone.
+- `build.complete` with the same `params.spec:<n>` only after verification
+  passed and the Ready PR Gate is satisfied for a releaseable slice.
+- `build.abort` with the same `params.spec:<n>` and a concrete `params.reason`
+  when implementation cannot proceed.
+
+Without an owner Issue, do not call `build.*` or invent an Issue number.
+Standalone work follows the approved task, TDD, and applicable verification
+workflow below without this Issue-bound lifecycle. If the work acquires a
+durable owner under the existing ownership rules, use that Issue number.
 
 If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`.
 

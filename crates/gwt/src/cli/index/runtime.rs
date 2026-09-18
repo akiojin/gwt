@@ -116,6 +116,12 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             needs_worktree_hash: false,
         },
         RebuildAction {
+            label: "works",
+            action: "index-works",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        RebuildAction {
             label: "files",
             action: "index-files",
             scope: Some("files"),
@@ -138,6 +144,7 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             .filter(|a| a.label == "discussions")
             .collect(),
         IndexScope::Board => all.into_iter().filter(|a| a.label == "board").collect(),
+        IndexScope::Works => all.into_iter().filter(|a| a.label == "works").collect(),
         IndexScope::Files => all.into_iter().filter(|a| a.label == "files").collect(),
         IndexScope::FilesDocs => all
             .into_iter()
