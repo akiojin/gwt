@@ -4873,6 +4873,109 @@ fn append_workspace_work_events_if_missing(path: &Path, events: &[WorkEvent]) ->
     append_workspace_work_events_to_path(path, &missing)
 }
 
+/// Record PR delivery metadata under the caller's durable PR mutation lease.
+///
+/// The caller must hold the current owner/Session execution-binding lease
+/// throughout this call. This narrowly scoped writer does not grant generic
+/// cross-Work mutation authority or change the shared current projection.
+pub fn record_workspace_pr_metadata_for_execution(
+    repo_path: &Path,
+    owner: &str,
+    session_id: &str,
+    container: &WorkspaceExecutionContainerRef,
+) -> Result<()> {
+    record_workspace_pr_metadata_for_execution_at(
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+        &gwt_repo_local_work_events_dir(repo_path),
+        owner,
+        session_id,
+        container,
+    )
+}
+
+fn record_workspace_pr_metadata_for_execution_at(
+    works_path: &Path,
+    events_dir: &Path,
+    owner: &str,
+    session_id: &str,
+    container: &WorkspaceExecutionContainerRef,
+) -> Result<()> {
+    let refusal =
+        || GwtError::Other("PR metadata target is missing, ambiguous, or unauthorized".into());
+    if owner.trim().is_empty()
+        || session_id.trim().is_empty()
+        || container
+            .branch
+            .as_deref()
+            .is_none_or(|v| v.trim().is_empty())
+        || container.worktree_path.is_none()
+        || container.pr_number.is_none_or(|number| number == 0)
+        || container
+            .pr_url
+            .as_deref()
+            .is_none_or(|v| v.trim().is_empty())
+        || !matches!(
+            container.pr_state.as_deref(),
+            Some("OPEN" | "CLOSED" | "MERGED")
+        )
+    {
+        return Err(refusal());
+    }
+    let canonical_worktree =
+        canonical_session_bound_path(container.worktree_path.as_deref().ok_or_else(refusal)?)?;
+    validate_workspace_work_event_store_path(events_dir)?;
+    with_workspace_work_items_lock(works_path, || {
+        let mut projection =
+            load_workspace_work_items_from_path(works_path)?.ok_or_else(refusal)?;
+        let mut matches = Vec::new();
+        for (index, item) in projection.work_items.iter().enumerate() {
+            for existing in &item.execution_containers {
+                if canonical_session_bound_branch(existing.branch.as_deref().unwrap_or_default())
+                    == canonical_session_bound_branch(
+                        container.branch.as_deref().unwrap_or_default(),
+                    )
+                    && session_bound_candidate_path_matches(
+                        existing.worktree_path.as_deref(),
+                        &canonical_worktree,
+                    )?
+                {
+                    matches.push((index, existing));
+                }
+            }
+        }
+        let [(index, existing)] = matches.as_slice() else {
+            return Err(refusal());
+        };
+        let item = &projection.work_items[*index];
+        if item.owner.as_deref() != Some(owner)
+            || item
+                .agents
+                .iter()
+                .filter(|agent| agent.session_id == session_id)
+                .count()
+                != 1
+        {
+            return Err(refusal());
+        }
+        let mut updated = (*existing).clone();
+        updated.pr_number = container.pr_number;
+        updated.pr_url = container.pr_url.clone();
+        updated.pr_state = container.pr_state.clone();
+        if **existing == updated {
+            return Ok(());
+        }
+        let mut event = WorkEvent::new(WorkEventKind::Pr, item.id.clone(), Utc::now());
+        event.agent_session_id = Some(session_id.to_string());
+        event.status_category = Some(item.status_category);
+        event.execution_container = Some(updated);
+        if projection.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
+            return Err(refusal());
+        }
+        write_workspace_work_event_shards_to_dir(events_dir, &[event])?;
+        save_workspace_work_items_projection_to_path(works_path, &projection)
+    })
+}
+
 pub fn record_workspace_work_event(repo_path: &Path, event: WorkEvent) -> Result<()> {
     // Refuse a symlinked managed store path before either legacy projection or
     // event-log migration can create files through it.

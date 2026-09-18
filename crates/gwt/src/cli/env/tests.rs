@@ -81,7 +81,10 @@ fn main() -> ExitCode {
 let args: Vec<String> = env::args().skip(1).collect();
 match args.as_slice() {
     [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
-        println!("{}", pr_json("12", "Current PR"));
+        let mut pr = pr_json("12", "Current PR");
+        pr.pop();
+        pr.push_str(r#", "headRefName":"feature/coverage", "headRepositoryOwner":{"login":"akiojin"}, "headRepository":{"name":"gwt"}}"#);
+        println!("{pr}");
         ExitCode::SUCCESS
     }
     [pr, view, number, repo_flag, _, json_flag, ..]
@@ -931,6 +934,22 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
 #[test]
 fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
     with_fake_gh(|repo_path| {
+        for args in [
+            vec!["init", "-b", "feature/coverage"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/akiojin/gwt.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("initialize current PR identity")
+                .success());
+        }
         let cache_root = repo_path.join(".cache");
         let mut env = DefaultCliEnv::new_with_client_factory_and_cache_root(
             "akiojin",
