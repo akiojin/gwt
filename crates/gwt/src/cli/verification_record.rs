@@ -5,7 +5,7 @@
 //! trusted executor: it runs the given verification commands in the worktree,
 //! captures each exit code, and writes a [`VerificationRunRecord`] bound to
 //! the session, the linked owner (from the Execution Control Record when
-//! present), and a content-level worktree fingerprint (HEAD + `git diff
+//! present), and a content-level worktree fingerprint (normalized HEAD + `git diff
 //! HEAD` + untracked file contents, `.gwt/` bookkeeping excluded; a run
 //! during which the worktree changed is self-invalidated). `execution.complete` and the PR handoff
 //! operations then accept only a fresh record for the same
@@ -288,7 +288,7 @@ pub struct VerificationRunRecord {
     /// remains readable only for pre-generation legacy executions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<ExecutionBindingIdentity>,
-    /// Worktree fingerprint at run time: HEAD + tracked changes (see
+    /// Worktree fingerprint at run time: normalized HEAD + tracked changes (see
     /// [`worktree_fingerprint`]). Completion recomputes and compares.
     pub worktree_fingerprint: String,
     pub commands: Vec<VerificationCommandResult>,
@@ -642,7 +642,8 @@ pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
 }
 
 /// Compute the worktree fingerprint at **content level**: sha256 over
-/// `git rev-parse HEAD`, the full `git diff HEAD` content (staged and
+/// HEAD (skipping canonical Work shard addition-only commits), the full
+/// `git diff HEAD` content (staged and
 /// unstaged tracked changes), and every untracked file's path and bytes —
 /// all with `.gwt/` excluded (the coordination bookkeeping under `.gwt/`
 /// changes continuously and must not invalidate evidence). Status lines
@@ -766,6 +767,56 @@ fn validate_quarantine_requests(
     Ok(())
 }
 
+/// PR metadata adds immutable shards after verification. Skip only regular-file
+/// shard additions, never source changes, rewrites, empty commits or merges.
+/// If Git cannot prove the exception, retain the commit as the freshness anchor.
+fn verification_head(worktree: &Path, head: &str) -> String {
+    let mut anchor = head.trim().to_string();
+    while let Ok(line) = git_stdout(worktree, &["rev-list", "--parents", "-n", "1", &anchor]) {
+        let parents: Vec<_> = line.split_whitespace().collect();
+        if parents.len() != 2 {
+            break;
+        }
+        let Ok(diff) = gwt_core::process::hidden_command("git")
+            .args([
+                "diff-tree",
+                "--no-commit-id",
+                "--raw",
+                "-r",
+                "-z",
+                "--no-renames",
+                parents[1],
+                &anchor,
+            ])
+            .current_dir(worktree)
+            .output()
+        else {
+            break;
+        };
+        if !diff.status.success() || diff.stdout.is_empty() {
+            break;
+        }
+        let Some(bytes) = diff.stdout.strip_suffix(&[0]) else {
+            break;
+        };
+        let fields: Vec<_> = bytes.split(|byte| *byte == 0).collect();
+        let (entries, remainder) = fields.as_chunks::<2>();
+        let additions_only = entries.iter().all(|entry| {
+            let metadata: Vec<_> = entry[0].split(|byte| *byte == b' ').collect();
+            metadata.len() == 5
+                && metadata[0] == b":000000"
+                && matches!(metadata[1], b"100644" | b"100755")
+                && metadata[4] == b"A"
+                && is_canonical_bucketed_work_event_shard(entry[1])
+        });
+        if !additions_only || !remainder.is_empty() {
+            break;
+        }
+        anchor = parents[1].to_string();
+    }
+    format!("{anchor}\n")
+}
+
 pub(crate) fn worktree_fingerprint_excluding(
     worktree: &Path,
     generated_outputs: &[String],
@@ -778,7 +829,10 @@ pub(crate) fn worktree_fingerprint_excluding(
         return Ok("no-git".to_string());
     }
     let mut hasher = Sha256::new();
-    hasher.update(&head.stdout);
+    hasher.update(verification_head(
+        worktree,
+        &String::from_utf8_lossy(&head.stdout),
+    ));
     hasher.update(b"\n--diff--\n");
     let mut diff_args = vec![
         "diff".to_string(),
@@ -3115,7 +3169,7 @@ impl EvidenceStatus {
                 "the verification record belongs to a legacy, predecessor, or superseded execution binding — register the plan and rerun `verify.run` from the current generation"
             }
             Self::StaleFingerprint => {
-                "the worktree changed after the last verification run (stale evidence) — rerun `verify.run`"
+                "the worktree changed after the last verification run (stale evidence): source/verification inputs or a commit other than canonical Work shard additions changed — rerun `verify.run`; pr.create shard-addition-only commits preserve evidence and do not require another run"
             }
             Self::Failing => {
                 "the last verification run has failing commands — fix the failures and rerun `verify.run`"
@@ -5716,6 +5770,42 @@ mod tests {
             evaluate_evidence(dir.path(), "sess-1", Some(3248)),
             EvidenceStatus::Fresh
         );
+    }
+
+    #[test]
+    fn fingerprint_preserves_shard_addition_commits_but_rejects_shard_rewrites() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        plan_and_run(&fixture.repo, "sess-shards", &["git --version".to_string()]);
+        let record = load(&fixture.repo).unwrap().unwrap();
+        fixture.write_event_shard("pr-created", b"{\"id\":\"pr-created\"}\n");
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): record PR creation");
+        fixture.push();
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-shards", None),
+            EvidenceStatus::Fresh,
+            "canonical Work shard additions must preserve the existing run"
+        );
+        assert_eq!(load(&fixture.repo).unwrap().unwrap(), record);
+
+        fs::write(
+            fixture.event_shard_path("pr-created"),
+            b"{\"id\":\"rewritten\"}\n",
+        )
+        .unwrap();
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): rewrite shard");
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-shards", None),
+            EvidenceStatus::StaleFingerprint,
+            "only additions qualify; immutable shard rewrites must not be exempt"
+        );
+        assert!(EvidenceStatus::StaleFingerprint
+            .describe()
+            .contains("source"));
+        assert!(EvidenceStatus::StaleFingerprint
+            .describe()
+            .contains("pr.create"));
     }
 
     // Freshness: a tracked-file change after the run invalidates evidence,
