@@ -12609,6 +12609,22 @@ fn finalize_recovery_probes(
     }
     snapshot.available_recoveries.sort();
     snapshot.available_recoveries.dedup();
+    if snapshot.ecr_status == ExecutionDiagnosisState::Active
+        && snapshot.binding_state == ExecutionBindingState::Bound
+        && snapshot.available_recoveries.is_empty()
+    {
+        if let Some(guidance) = recovery_context
+            .and_then(|context| context.as_ref().ok())
+            .and_then(discarded_canonical_work_guidance)
+        {
+            // This is a human instruction, not an executable recovery operation.
+            // #4074 owns successor Work materialization.
+            snapshot
+                .available_recoveries
+                .push("gwt-execute".to_string());
+            snapshot.warnings.push(guidance);
+        }
+    }
     snapshot.recovery_probes = probes;
     snapshot.recovery_hint = execution_recovery_hint(&snapshot);
     snapshot
@@ -12743,6 +12759,28 @@ fn execution_recovery_hint(snapshot: &ExecutionDiagnosisSnapshot) -> Option<Stri
         .then(|| RECOVERY_HINT_FRESH_LAUNCH_REQUIRED.to_string())
 }
 
+fn discarded_canonical_work_guidance(
+    context: &crate::agent_project_state::ExecutionRecoveryContext,
+) -> Option<String> {
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        context.project_state_root(),
+        Some(context.session().branch.as_str()),
+        Some(context.worktree()),
+    )?;
+    let works_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(context.project_state_root());
+    let works =
+        gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path).ok()??;
+    let work = works.work_items.iter().find(|work| work.id == work_id)?;
+    work.discarded.then(|| {
+        format!(
+            "canonical Work {work_id} is Discarded; successor Work materialization is required \
+             (owner #4074). Human action: open Issue #4074 in gwt and select Start Work to \
+             arrange implementation. The current Work cannot recover until that support is available."
+        )
+    })
+}
+
 /// Replace an operation-specific terminal refusal with guidance derived from
 /// the same operation-local diagnosis exposed by `execution.status`.
 pub(crate) fn terminal_recovery_refusal(
@@ -12751,6 +12789,26 @@ pub(crate) fn terminal_recovery_refusal(
     refusal: &str,
 ) -> String {
     let diagnosis = diagnose(invocation_scope, Some(session_id));
+    if diagnosis.ecr_status == ExecutionDiagnosisState::Active
+        && diagnosis.binding_state == ExecutionBindingState::Bound
+        && diagnosis.available_recoveries == ["gwt-execute"]
+    {
+        if let Some(guidance) = crate::agent_project_state::resolve_execution_recovery_context(
+            invocation_scope,
+            session_id,
+        )
+        .ok()
+        .as_ref()
+        .and_then(discarded_canonical_work_guidance)
+        {
+            let refusal = refusal
+                .split_once(
+                    "; run workspace.ensure for this Session before retrying workspace.update",
+                )
+                .map_or(refusal, |(reason, _)| reason);
+            return format!("{refusal}; {guidance}");
+        }
+    }
     if diagnosis.binding_state != ExecutionBindingState::Terminal {
         return refusal.to_string();
     }
