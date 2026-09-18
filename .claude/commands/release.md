@@ -14,8 +14,9 @@ GitHub Actions の `Prepare Release` ワークフローを使う。** GitHub の
 Actions → `Prepare Release` → `Run workflow` を押すだけで、CI が develop 上で
 バージョン更新（`scripts/compute_release_version.py` の最新タグ相対計算、`cargo set-version`、
 `cargo update -w`、git-cliff）・`chore(release): vX.Y.Z` コミット・develop→main の
-Release PR 作成までを実行する。`bump` 入力は `auto`（既定。breaking 検出時は失敗するので
-major は明示）/ `patch` / `minor` / `major`。
+Release PR 作成までを実行する。`bump` 入力は `auto`（既定。breaking marker を検出しても
+minor 止まりで、marker はログと Release PR 本文に列挙されるだけ。Issue #4373）/ `patch` /
+`minor` / `major`。**メジャーはユーザーが `major` を明示した場合のみ。**
 
 承認は **生成された Release PR をレビューして merge** で行う（実 diff・CHANGELOG を確認）。
 merge 後は `release.yml` がタグ・GitHub Release・5プラットフォームビルドを自動実行する。
@@ -154,7 +155,7 @@ HAS_FIX=$(git log ${PREV_TAG}..HEAD --pretty=format:"%s" --no-merges | grep -cE 
 #### 4.3 バージョン算出
 
 ```text
-- HAS_BREAKING > 0 → MAJOR + 1, MINOR = 0, PATCH = 0（※ 自動適用しない。ステップ5で必ずユーザー承認）
+- HAS_BREAKING > 0 → MINOR + 1, PATCH = 0（※ メジャーにはしない。該当コミットを一覧としてユーザーに提示するだけ。Issue #4373）
 - HAS_FEAT > 0     → MINOR + 1, PATCH = 0
 - HAS_FIX > 0      → PATCH + 1
 - いずれもない場合  → PATCH + 1（docs/chore のみでも patch bump）
@@ -162,7 +163,7 @@ HAS_FIX=$(git log ${PREV_TAG}..HEAD --pretty=format:"%s" --no-merges | grep -cE 
 
 算出結果を `NEW_VERSION`（`v` なし、例: `8.4.0`）として記録。
 
-**メジャーバージョン更新の場合**: 自動でメジャーバージョンを確定しない。ステップ5でユーザーが明示的に承認するまで仮バージョンとして扱う。
+**メジャーバージョン更新**: コミット内容から自動で導かない。ユーザーがステップ5で「メジャーで出す」と明示的に指示した場合のみ MAJOR + 1 に置き換える（Issue #4373）。
 
 #### 4.4 重複チェック
 
@@ -205,9 +206,9 @@ git log --oneline --no-merges
 - **変更内容**: git-cliff が生成した変更ログ（Features, Bug Fixes 等のカテゴリ別）
 - **コミット一覧**: 上記で取得したコミットログ
 
-**メジャーバージョン更新の場合（MAJOR bump）**:
+**breaking marker を検出した場合**:
 
-メジャーバージョン更新は破壊的変更を伴うため、通常より慎重な確認が必要。以下を追加で提示する：
+marker はメジャーの根拠にならない（Issue #4373）。ユーザーが明示的にメジャーを指示した場合に限り MAJOR bump として扱い、以下を追加で提示する：
 
 - 破壊的変更の該当コミット一覧（`!` 付きまたは `BREAKING CHANGE` を含むコミット）
 - 「このリリースはメジャーバージョン更新（破壊的変更）です。本当にメジャーバージョンを上げますか？」と明示的に警告

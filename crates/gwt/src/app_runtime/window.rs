@@ -503,6 +503,7 @@ impl AppRuntime {
         self.issue_monitor_review_dispatch_windows.remove(id);
         // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
         // in-flight restore marker must not outlive its window.
+        self.record_restore_window_outcome(id, Err(super::startup::RestoreRefusal::WindowClosed));
         self.restore_launch_windows.remove(id);
         // Issue #3783: the accepted close is the in-memory removal above.
         // Everything that may wait on PTY, execution, Session, or Work locks
@@ -610,7 +611,7 @@ impl AppRuntime {
             WindowProcessStatus::Stopped,
             None,
         ));
-        if let Some(event) = self.deferred_active_work_projection_broadcast_for_active_tab() {
+        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(event);
         }
         events

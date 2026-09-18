@@ -20,6 +20,8 @@ pub mod client;
 pub(crate) mod server;
 mod subscribe_resolver;
 pub(crate) mod transport;
+pub(crate) mod verification_host;
+pub(crate) mod verification_spawn;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

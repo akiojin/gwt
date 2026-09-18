@@ -5,7 +5,7 @@
 //! trusted executor: it runs the given verification commands in the worktree,
 //! captures each exit code, and writes a [`VerificationRunRecord`] bound to
 //! the session, the linked owner (from the Execution Control Record when
-//! present), and a content-level worktree fingerprint (HEAD + `git diff
+//! present), and a content-level worktree fingerprint (normalized HEAD + `git diff
 //! HEAD` + untracked file contents, `.gwt/` bookkeeping excluded; a run
 //! during which the worktree changed is self-invalidated). `execution.complete` and the PR handoff
 //! operations then accept only a fresh record for the same
@@ -288,7 +288,7 @@ pub struct VerificationRunRecord {
     /// remains readable only for pre-generation legacy executions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding: Option<ExecutionBindingIdentity>,
-    /// Worktree fingerprint at run time: HEAD + tracked changes (see
+    /// Worktree fingerprint at run time: normalized HEAD + tracked changes (see
     /// [`worktree_fingerprint`]). Completion recomputes and compares.
     pub worktree_fingerprint: String,
     pub commands: Vec<VerificationCommandResult>,
@@ -642,7 +642,8 @@ pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
 }
 
 /// Compute the worktree fingerprint at **content level**: sha256 over
-/// `git rev-parse HEAD`, the full `git diff HEAD` content (staged and
+/// HEAD (skipping canonical Work shard addition-only commits), the full
+/// `git diff HEAD` content (staged and
 /// unstaged tracked changes), and every untracked file's path and bytes —
 /// all with `.gwt/` excluded (the coordination bookkeeping under `.gwt/`
 /// changes continuously and must not invalidate evidence). Status lines
@@ -766,6 +767,56 @@ fn validate_quarantine_requests(
     Ok(())
 }
 
+/// PR metadata adds immutable shards after verification. Skip only regular-file
+/// shard additions, never source changes, rewrites, empty commits or merges.
+/// If Git cannot prove the exception, retain the commit as the freshness anchor.
+fn verification_head(worktree: &Path, head: &str) -> String {
+    let mut anchor = head.trim().to_string();
+    while let Ok(line) = git_stdout(worktree, &["rev-list", "--parents", "-n", "1", &anchor]) {
+        let parents: Vec<_> = line.split_whitespace().collect();
+        if parents.len() != 2 {
+            break;
+        }
+        let Ok(diff) = gwt_core::process::hidden_command("git")
+            .args([
+                "diff-tree",
+                "--no-commit-id",
+                "--raw",
+                "-r",
+                "-z",
+                "--no-renames",
+                parents[1],
+                &anchor,
+            ])
+            .current_dir(worktree)
+            .output()
+        else {
+            break;
+        };
+        if !diff.status.success() || diff.stdout.is_empty() {
+            break;
+        }
+        let Some(bytes) = diff.stdout.strip_suffix(&[0]) else {
+            break;
+        };
+        let fields: Vec<_> = bytes.split(|byte| *byte == 0).collect();
+        let (entries, remainder) = fields.as_chunks::<2>();
+        let additions_only = entries.iter().all(|entry| {
+            let metadata: Vec<_> = entry[0].split(|byte| *byte == b' ').collect();
+            metadata.len() == 5
+                && metadata[0] == b":000000"
+                && matches!(metadata[1], b"100644" | b"100755")
+                && metadata[4] == b"A"
+                && is_canonical_bucketed_work_event_shard(entry[1])
+        });
+        if !additions_only || !remainder.is_empty() {
+            break;
+        }
+        anchor = parents[1].to_string();
+    }
+    format!("{anchor}\n")
+}
+
 pub(crate) fn worktree_fingerprint_excluding(
     worktree: &Path,
     generated_outputs: &[String],
@@ -778,7 +829,10 @@ pub(crate) fn worktree_fingerprint_excluding(
         return Ok("no-git".to_string());
     }
     let mut hasher = Sha256::new();
-    hasher.update(&head.stdout);
+    hasher.update(verification_head(
+        worktree,
+        &String::from_utf8_lossy(&head.stdout),
+    ));
     hasher.update(b"\n--diff--\n");
     let mut diff_args = vec![
         "diff".to_string(),
@@ -1681,7 +1735,15 @@ fn evaluate_work_event_settlement_for_path(
     let (remote, merge_ref, upstream_ref) = match configured_upstream(worktree) {
         Ok(upstream) => upstream,
         Err(UpstreamFailure::Missing) => {
-            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream);
+            return terminal_work_integration_delivery(
+                worktree,
+                "origin",
+                &head_commit,
+                &event_commit,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::MissingUpstream,
+            ));
         }
         Err(UpstreamFailure::Git) => {
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
@@ -1690,9 +1752,15 @@ fn evaluate_work_event_settlement_for_path(
     let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
         Ok(remote_tip) => remote_tip,
         Err(()) => {
-            return WorkEventSettlementStatus::Blocked(
+            return terminal_work_integration_delivery(
+                worktree,
+                &remote,
+                &head_commit,
+                &event_commit,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
                 WorkEventSettlementBlocker::RemoteReadbackError,
-            );
+            ));
         }
     };
     let head_on_remote = match git_is_ancestor(worktree, &head_commit, &remote_tip) {
@@ -1724,6 +1792,40 @@ fn evaluate_work_event_settlement_for_path(
     }
 }
 
+/// A merged feature branch may already be deleted. For terminal Work only,
+/// fresh remote integration containment proves delivery independently of the
+/// predecessor's receipt or the deleted branch. Call after dirty/pending event
+/// checks; neither a local tracking ref nor a PR's historical state is proof
+/// that this exact HEAD was delivered.
+fn terminal_work_integration_delivery(
+    worktree: &Path,
+    remote: &str,
+    head_commit: &str,
+    event_commit: &str,
+) -> Option<WorkEventSettlementStatus> {
+    if !canonical_work_for_worktree_is_terminal(worktree) {
+        return None;
+    }
+    let mut observed_base = false;
+    for branch in ["develop", "main"] {
+        let Ok(tip) = fetch_upstream_tip(worktree, remote, &format!("refs/heads/{branch}")) else {
+            continue;
+        };
+        observed_base = true;
+        if git_is_ancestor(worktree, head_commit, &tip) == Ok(true) {
+            return Some(WorkEventSettlementStatus::Settled {
+                event_commit: event_commit.to_string(),
+                upstream_ref: format!("{remote}/{branch}"),
+            });
+        }
+    }
+    // A deleted upstream is no longer a mere network warning when the remote
+    // bases were read successfully and prove this HEAD has not landed there.
+    observed_base.then_some(WorkEventSettlementStatus::Blocked(
+        WorkEventSettlementBlocker::CommitNotPushed,
+    ))
+}
+
 /// Whether this worktree's canonical Work has already reached a terminal
 /// lifecycle, which makes a settlement receipt unmintable: the receipt is
 /// written only by a terminal `workspace.update`, that update resolves its
@@ -1734,6 +1836,19 @@ fn evaluate_work_event_settlement_for_path(
 /// infrastructure failure keeps the ordinary receipt requirement rather than
 /// silently waiving it.
 fn canonical_work_for_worktree_is_terminal(worktree: &Path) -> bool {
+    if let Ok(Some(execution)) = execution_state::load(worktree) {
+        match crate::agent_project_state::session_work_is_terminal(
+            worktree,
+            &execution.primary_session_id,
+        ) {
+            Ok(Some(terminal)) => return terminal,
+            Ok(None) => {} // Legacy executions have no durable Session assignment.
+            Err(error) => {
+                tracing::warn!(%error, "assigned Work lifecycle is unreadable");
+                return false;
+            }
+        }
+    }
     let branch = gwt_git::Repository::open(worktree)
         .ok()
         .and_then(|repository| repository.current_branch().ok().flatten());
@@ -1925,6 +2040,11 @@ fn stale_work_event_receipt_description(
         .map_or("legacy (unbound)", |binding| binding.generation_id.as_str());
     let current_generation =
         current_binding.map_or("unknown", |binding| binding.generation_id.as_str());
+    if receipt.execution_binding.is_some() && receipt_generation == current_generation {
+        return format!(
+            "Work event settlement refused: the receipt names the current execution generation `{current_generation}`, but its Session or ledger binding does not authorize this execution. Record an authorized terminal workspace.update for the assigned Work, then commit and push its event before retrying."
+        );
+    }
     format!(
         "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation (receipt `{receipt_generation}`, current generation `{current_generation}`) and the current generation has not recorded its own terminal Work update. Committing or pushing the predecessor's Work event cannot repair this: record this generation's terminal workspace.update for the canonical Work, then commit and push the Work event store before retrying."
     )
@@ -2434,8 +2554,33 @@ fn apply_child_environment_contract(process: &mut std::process::Command) {
     }
 }
 
-fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
-    execute_command_with_isolation(worktree, command, false, None)
+use crate::cli::daemon::verification_host::VerificationHost;
+
+/// The exact environment a `verify.run` child receives, as a complete list.
+///
+/// The daemon clears its own environment and applies this, so a delegated
+/// child sees precisely what an in-process one would. Both paths read the
+/// overrides from [`child_environment_contract`], which is why the contract
+/// stays a single list.
+fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> {
+    let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    for (key, value) in child_environment_contract() {
+        match value {
+            Some(value) => {
+                env.insert(key.to_string(), value.to_string());
+            }
+            None => {
+                env.remove(key);
+            }
+        }
+    }
+    if isolated_baseline {
+        for key in gwt_core::process::GIT_ENV_SCRUB_KEYS {
+            env.remove(key);
+        }
+        env.remove("CARGO_TARGET_DIR");
+    }
+    env.into_iter().collect()
 }
 
 fn execute_command_with_isolation(
@@ -2443,43 +2588,156 @@ fn execute_command_with_isolation(
     command: &str,
     isolated_baseline: bool,
     capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
-    let mut process = gwt_core::process::hidden_command(&args[0]);
-    process.args(&args[1..]).current_dir(worktree);
-    apply_child_environment_contract(&mut process);
-    if let Some(capture) = capture {
-        capture.configure(&mut process);
-    }
-    if isolated_baseline {
-        gwt_core::process::scrub_git_env(&mut process);
-        process.env_remove("CARGO_TARGET_DIR");
-    }
-    process
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    // Issue #4405: this process runs inside the agent tree, whose launch
-    // policy lowers priority; the workload must not inherit that.
-    let output =
-        match gwt_core::process_tree::spawn_at_normal_priority(&mut process).and_then(|spawned| {
-            let priority = spawned.priority.clone();
-            spawned.wait_with_output().map(|output| (output, priority))
-        }) {
-            Ok(output) => output,
-            Err(err) => {
-                let diagnostic = format!("failed to spawn '{command}': {err}");
-                let clipped = bounded_output_tail(diagnostic.as_bytes());
-                return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
+    match host {
+        VerificationHost::Daemon(endpoint) => execute_command_on_daemon(
+            worktree,
+            command,
+            &args,
+            isolated_baseline,
+            capture,
+            endpoint,
+        ),
+        VerificationHost::Inherit => {
+            let mut process = gwt_core::process::hidden_command(&args[0]);
+            process.args(&args[1..]).current_dir(worktree);
+            apply_child_environment_contract(&mut process);
+            if let Some(capture) = capture {
+                capture.configure(&mut process);
             }
-        };
-    let (output, priority) = output;
-    let exit_code = output.status.code().unwrap_or(-1);
-    let mut tail = String::new();
-    if !priority.restored {
-        tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+            if isolated_baseline {
+                gwt_core::process::scrub_git_env(&mut process);
+                process.env_remove("CARGO_TARGET_DIR");
+            }
+            process
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            // Issue #4405: this process runs inside the agent tree, whose
+            // launch policy lowers priority; the workload must not inherit
+            // that. Issue #4409 removes the inheritance at its source by
+            // launching from the daemon instead, but this branch is still
+            // taken whenever the launcher is already at baseline priority or
+            // has declared that it accepts its own.
+            let output = match gwt_core::process_tree::spawn_at_normal_priority(&mut process)
+                .and_then(|spawned| {
+                    let priority = spawned.priority.clone();
+                    spawned.wait_with_output().map(|output| (output, priority))
+                }) {
+                Ok(output) => output,
+                Err(err) => return Ok(spawn_failure_result(command, &err.to_string())),
+            };
+            let (output, priority) = output;
+            let exit_code = output.status.code().unwrap_or(-1);
+            let mut tail = String::new();
+            if !priority.restored {
+                tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+            }
+            tail.push_str(&render_streams(&[
+                ("stdout", &output.stdout),
+                ("stderr", &output.stderr),
+            ]));
+            Ok((exit_code, tail))
+        }
     }
-    for (label, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+}
+
+/// Build the request that describes one delegated command to the daemon.
+///
+/// A delegated child is assembled from an explicit program/args/env request
+/// rather than from a `Command`, so anything the in-process path expresses by
+/// configuring a `Command` has to be restated here. The headed E2E reporter is
+/// the case that bites: it is *both* arguments and an environment variable,
+/// and dropping either half leaves the run looking healthy while producing no
+/// evidence — every headed command would report `status: "missing"` and no
+/// Ready gate could ever pass through a daemon.
+///
+/// Split out from the spawn so that correspondence is testable without a live
+/// daemon, which is the whole reason the omission was easy to make.
+fn delegated_spawn_request(
+    worktree: &Path,
+    args: &[String],
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    stdout_path: std::path::PathBuf,
+    stderr_path: std::path::PathBuf,
+) -> gwt_core::daemon::VerificationSpawnRequest {
+    let mut child_args = args[1..].to_vec();
+    let mut env = resolved_child_environment(isolated_baseline);
+    if let Some(capture) = capture {
+        child_args.extend(capture.arguments());
+        let (key, value) = capture.environment();
+        env.retain(|(existing, _)| existing != &key);
+        env.push((key, value));
+    }
+    gwt_core::daemon::VerificationSpawnRequest {
+        program: args[0].clone(),
+        args: child_args,
+        cwd: worktree.to_path_buf(),
+        env,
+        stdout_path,
+        stderr_path,
+    }
+}
+
+/// Run one command through the daemon and read back what it produced.
+fn execute_command_on_daemon(
+    worktree: &Path,
+    command: &str,
+    args: &[String],
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    endpoint: &gwt_core::daemon::DaemonEndpoint,
+) -> Result<(i32, String), String> {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let stdout_path = temp.path().join("stdout");
+    let stderr_path = temp.path().join("stderr");
+    let request = delegated_spawn_request(
+        worktree,
+        args,
+        isolated_baseline,
+        capture,
+        stdout_path.clone(),
+        stderr_path.clone(),
+    );
+    let delegated = match crate::cli::daemon::verification_host::run(endpoint, &request) {
+        Ok(delegated) => delegated,
+        // A daemon that cannot take the command is a spawn failure like any
+        // other: the record must be written with the partial transcript, not
+        // abandoned. It is emphatically *not* a reason to retry in-process —
+        // that is the implicit fallback AC-5 forbids.
+        Err(error) => return Ok(spawn_failure_result(command, &error)),
+    };
+    let mut tail = String::new();
+    // AC-6: what the child actually got, recorded even when it is not
+    // baseline. An environment that refuses nice 0 is not the caller's to fix,
+    // so the run continues and says so.
+    if let Some(reason) = &delegated.accepted.nice_reason {
+        tail.push_str(&format!("--- priority ---\n{reason}\n"));
+    }
+    if delegated.reclaimed_survivors {
+        tail.push_str(
+            "--- reclaimed ---\nthe command left descendants running after it exited; the \
+             daemon killed its process group (Issue #3845)\n",
+        );
+    }
+    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+    tail.push_str(&render_streams(&[("stdout", &stdout), ("stderr", &stderr)]));
+    Ok((delegated.exit_code, tail))
+}
+
+fn spawn_failure_result(command: &str, error: &str) -> (i32, String) {
+    let diagnostic = format!("failed to spawn '{command}': {error}");
+    let clipped = bounded_output_tail(diagnostic.as_bytes());
+    (-1, format!("--- spawn error ---\n{clipped}\n"))
+}
+
+fn render_streams(streams: &[(&str, &[u8])]) -> String {
+    let mut tail = String::new();
+    for (label, bytes) in streams {
         if bytes.is_empty() {
             continue;
         }
@@ -2488,7 +2746,7 @@ fn execute_command_with_isolation(
             tail.push_str(&format!("--- {label} ---\n{clipped}\n"));
         }
     }
-    Ok((exit_code, tail))
+    tail
 }
 
 fn git_command(worktree: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
@@ -2525,6 +2783,7 @@ fn measure_baseline(
     worktree: &Path,
     merge_base_sha: &str,
     request: &VerificationQuarantineRequest,
+    host: &VerificationHost,
 ) -> Result<(i32, String), String> {
     request.validate()?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -2548,7 +2807,7 @@ fn measure_baseline(
         ],
     )?;
     let (exit_code, output) =
-        execute_command_with_isolation(&checkout, &request.baseline_command, true, None)?;
+        execute_command_with_isolation(&checkout, &request.baseline_command, true, None, host)?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
     }
@@ -2657,6 +2916,12 @@ pub fn run_verification(
     session_id: &str,
     commands: &[String],
 ) -> Result<(VerificationRunRecord, String), String> {
+    // Fixtures launch in place. Where a verification workload is hosted is a
+    // property of the caller-facing operation — it is decided from the
+    // launcher's inherited priority and the daemon it can reach, neither of
+    // which a fixture is exercising — and it is tested on its own in
+    // `gwt_core::verification_priority` and `daemon::verification_host`. That
+    // is what `VerificationHost::Inherit` being the default expresses.
     run_verification_inner(
         worktree,
         session_id,
@@ -2672,6 +2937,12 @@ pub fn run_verification(
 struct RunOptions<'a> {
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
+    /// Where this run launches its commands from (Issue #4409). It belongs
+    /// with the run's other inputs rather than being threaded separately: it
+    /// is resolved once for the whole run, and every caller that has an
+    /// opinion about the other options has one about this too.
+    host: VerificationHost,
+    on_progress: Option<&'a mut dyn FnMut(usize, usize, std::time::Duration)>,
 }
 
 fn run_verification_for_caller(
@@ -2693,13 +2964,17 @@ fn run_verification_for_caller(
     )
 }
 
+// The parameters are the run's inputs, each independently optional in a
+// different caller, so bundling them into a struct would move the same list
+// one indirection away without removing a single decision.
+#[allow(clippy::too_many_arguments)]
 fn run_verification_inner<F>(
     worktree: &Path,
     session_id: &str,
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    options: RunOptions<'_>,
+    mut options: RunOptions<'_>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
@@ -2758,6 +3033,10 @@ where
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
         );
     }
+    let commands_started = std::time::Instant::now();
+    if let Some(on_progress) = options.on_progress.as_mut() {
+        on_progress(0, commands.len(), std::time::Duration::ZERO);
+    }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
         let capture = options
@@ -2766,12 +3045,13 @@ where
             .then(headed_e2e::Capture::new)
             .transpose()
             .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
-        let (exit_code, tail) = match capture.as_ref() {
-            Some(capture) => {
-                execute_command_with_isolation(worktree, command, false, Some(capture))?
-            }
-            None => execute_command(worktree, command)?,
-        };
+        let (exit_code, tail) = execute_command_with_isolation(
+            worktree,
+            command,
+            false,
+            capture.as_ref(),
+            &options.host,
+        )?;
         let headed_e2e = capture.as_ref().map(|capture| {
             capture.evidence().unwrap_or(headed_e2e::HeadedE2eEvidence {
                 chromium_dark_passed: 0,
@@ -2788,6 +3068,9 @@ where
             output_tail: persisted_failure_output(exit_code, &tail),
             headed_e2e,
         });
+        if let Some(on_progress) = options.on_progress.as_mut() {
+            on_progress(results.len(), commands.len(), commands_started.elapsed());
+        }
     }
     after_commands();
     let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
@@ -2839,7 +3122,8 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request) {
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host)
+                {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
                             "quarantine: {test_identity} is typed non-blocking via owner #{} and PR #{}; merge-base {merge_base_sha} reported exact PASS\n",
@@ -3041,7 +3325,7 @@ impl EvidenceStatus {
                 "the verification record belongs to a legacy, predecessor, or superseded execution binding — register the plan and rerun `verify.run` from the current generation"
             }
             Self::StaleFingerprint => {
-                "the worktree changed after the last verification run (stale evidence) — rerun `verify.run`"
+                "the worktree changed after the last verification run (stale evidence): source/verification inputs or a commit other than canonical Work shard additions changed — rerun `verify.run`; pr.create shard-addition-only commits preserve evidence and do not require another run"
             }
             Self::Failing => {
                 "the last verification run has failing commands — fix the failures and rerun `verify.run`"
@@ -4115,15 +4399,36 @@ pub(super) fn run<E: CliEnv>(
                 out.push_str(&refusal);
                 return Ok(2);
             }
-            // SPEC #3576: the canonical runner owns its in-process lease.
-            // Ordinary development processes do not delay admission. A budget overrun
-            // answers `deferred` without writing a record.
+            // Issue #4409: decided before admission so a run that cannot be
+            // given baseline priority is refused without first taking the
+            // host-wide lease away from a claimant that could have used it.
+            let (host, host_note) = crate::cli::daemon::verification_host::resolve(&worktree)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?;
+            // SPEC #3576 / Issue #4196: only heavy canonical matrices claim
+            // an in-process lease. Classify the commands before admission;
+            // a budget overrun answers `deferred` without writing a record.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
-            let admission =
-                crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
-            out.push_str(&admission.summary());
-            out.push('\n');
+            let admission = match crate::cli::verification_lease::first_heavy_command(&commands) {
+                Some(heavy) => {
+                    out.push_str(&format!(
+                        "verify: scope — heavy; `{heavy}` needs the host to itself\n"
+                    ));
+                    let granted =
+                        crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
+                    out.push_str(&granted.summary());
+                    out.push('\n');
+                    Some(granted)
+                }
+                None => {
+                    out.push_str(&format!(
+                        "verify: scope — light; {count} command(s) narrowly scoped, so this run \
+                         shares the host instead of claiming the lease\n",
+                        count = commands.len()
+                    ));
+                    None
+                }
+            };
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to load verification plan for quarantine preparation: {error}"
@@ -4131,6 +4436,7 @@ pub(super) fn run<E: CliEnv>(
             })?;
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
+            out.push_str(&host_note);
             let run = run_verification_for_caller(
                 &worktree,
                 &session_id,
@@ -4147,6 +4453,12 @@ pub(super) fn run<E: CliEnv>(
                         user_verification_result.as_deref()
                     },
                     headed_e2e_commands: &headed_e2e_commands,
+                    host,
+                    on_progress: Some(&mut |done, total, elapsed| {
+                        if let Some(admission) = admission.as_ref() {
+                            admission.publish_progress(done, total, elapsed);
+                        }
+                    }),
                 },
             );
             // Release the in-process lease before the (lease-free) evidence
@@ -4639,6 +4951,64 @@ pub(crate) mod tests {
         assert!(serialized.get("output_tail").is_none(), "{serialized}");
     }
 
+    /// Issue #4409: the daemon-hosted path assembles its child from an
+    /// explicit request instead of a `Command`, so everything the in-process
+    /// path expresses through `Capture::configure` has to be restated. Both
+    /// halves matter — arguments alone give the run no report path, the
+    /// environment variable alone gives it no reporter — and losing either one
+    /// fails silently: the command still passes, the evidence is just never
+    /// written, and every headed command reads as `status: "missing"`.
+    #[test]
+    fn a_delegated_headed_command_carries_the_same_reporter_the_in_process_one_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = headed_e2e::Capture::new().unwrap();
+        let args = vec!["bunx".to_string(), "playwright".to_string()];
+        let request = delegated_spawn_request(
+            dir.path(),
+            &args,
+            false,
+            Some(&capture),
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+
+        for argument in capture.arguments() {
+            assert!(
+                request.args.contains(&argument),
+                "delegated child lost {argument}: {:?}",
+                request.args
+            );
+        }
+        assert_eq!(
+            request.args[0], "playwright",
+            "the reporter arguments must be appended to the command's own, not replace them"
+        );
+        let (key, value) = capture.environment();
+        assert_eq!(
+            request
+                .env
+                .iter()
+                .filter(|(existing, _)| *existing == key)
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec![value.as_str()],
+            "the report path must be present exactly once"
+        );
+
+        // Without a capture the request stays exactly the command asked for,
+        // so an ordinary matrix entry never picks up headed flags.
+        let plain = delegated_spawn_request(
+            dir.path(),
+            &args,
+            false,
+            None,
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+        assert_eq!(plain.args, vec!["playwright".to_string()]);
+        assert!(!plain.env.iter().any(|(existing, _)| *existing == key));
+    }
+
     #[test]
     #[cfg(unix)]
     fn missing_headed_report_cannot_be_adjudicated_as_passing() {
@@ -4653,6 +5023,7 @@ pub(crate) mod tests {
             RunOptions {
                 user_verification_result: None,
                 headed_e2e_commands: &commands,
+                ..RunOptions::default()
             },
             || {},
         )
@@ -5622,6 +5993,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fingerprint_preserves_shard_addition_commits_but_rejects_shard_rewrites() {
+        let fixture = WorkEventGitFixture::tracked_shards();
+        plan_and_run(&fixture.repo, "sess-shards", &["git --version".to_string()]);
+        let record = load(&fixture.repo).unwrap().unwrap();
+        fixture.write_event_shard("pr-created", b"{\"id\":\"pr-created\"}\n");
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): record PR creation");
+        fixture.push();
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-shards", None),
+            EvidenceStatus::Fresh,
+            "canonical Work shard additions must preserve the existing run"
+        );
+        assert_eq!(load(&fixture.repo).unwrap().unwrap(), record);
+
+        fs::write(
+            fixture.event_shard_path("pr-created"),
+            b"{\"id\":\"rewritten\"}\n",
+        )
+        .unwrap();
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): rewrite shard");
+        assert_eq!(
+            evaluate_evidence(&fixture.repo, "sess-shards", None),
+            EvidenceStatus::StaleFingerprint,
+            "only additions qualify; immutable shard rewrites must not be exempt"
+        );
+        assert!(EvidenceStatus::StaleFingerprint
+            .describe()
+            .contains("source"));
+        assert!(EvidenceStatus::StaleFingerprint
+            .describe()
+            .contains("pr.create"));
+    }
+
     // Freshness: a tracked-file change after the run invalidates evidence,
     // while .gwt/ bookkeeping churn does not.
     #[test]
@@ -6089,6 +6496,66 @@ mod tests {
         assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
     }
 
+    /// Issue #4196 AC-2 / AC-4: `verify.run` decides on host admission by
+    /// reading the commands it was given. A matrix narrowed to one named test
+    /// target starts while another target holds the host lease — before this,
+    /// admission ran unconditionally and the same matrix answered `deferred`
+    /// after waiting out its whole budget.
+    #[test]
+    fn verify_run_skips_host_admission_for_a_light_matrix() {
+        use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+        let coordinator = IndexCoordinator::open_default_verification().unwrap();
+        let other = TargetKey::verification("other-repo", "other-worktree");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(
+                &other,
+                JobPriority::ManualRebuild,
+                std::time::Duration::from_millis(250),
+            )
+            .unwrap()
+        else {
+            panic!("a private lease root must admit the owner");
+        };
+        let _lease = guard
+            .acquire_heavy_with_ttl(
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+
+        // Narrowed to one named integration test of one package, and pointed
+        // at a directory with no manifest so cargo answers immediately: the
+        // command's outcome is irrelevant here, its classification is not.
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (_code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["cargo test -p gwt --test issue-4196-absent".to_string()],
+                headed_e2e_commands: vec![],
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap_or_else(|err| panic!("a light matrix must not queue behind the host lease: {err}"));
+        assert!(
+            out.contains("scope — light"),
+            "the run must report the classification it acted on: {out}"
+        );
+        assert!(
+            !out.contains("host admission"),
+            "a light matrix must not claim the host lease: {out}"
+        );
+    }
+
     #[test]
     fn derived_trivial_plan_allows_empty_run_and_fresh_evidence() {
         let dir = tempfile::tempdir().unwrap();
@@ -6137,6 +6604,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
         let dir = tempfile::tempdir().unwrap();
         crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
@@ -6945,6 +7413,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -7014,6 +7483,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -7113,6 +7583,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -7403,6 +7874,8 @@ mod tests {
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("a foreign receipt Session must fail closed");
         assert!(refusal.contains("generation"), "{refusal}");
+        assert!(!refusal.contains("predecessor"), "{refusal}");
+        assert!(refusal.contains("Session or ledger binding"), "{refusal}");
 
         receipt.session_id = session_id.to_string();
         receipt
@@ -7415,6 +7888,8 @@ mod tests {
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("an arbitrary same-generation receipt head must fail closed");
         assert!(refusal.contains("generation"), "{refusal}");
+        assert!(!refusal.contains("predecessor"), "{refusal}");
+        assert!(refusal.contains("Session or ledger binding"), "{refusal}");
     }
 
     #[test]
@@ -7581,6 +8056,33 @@ mod tests {
             work_event_settlement_refusal(&fixture.repo),
             None,
             "a terminal canonical Work can never re-mint the receipt, so a predecessor              receipt must not refuse a delivered event log",
+        );
+
+        // #4368: delivery survives deletion of the feature upstream after
+        // integration. Read the remote base, not only the old receipt.
+        fixture.git_ok(&["push", "-q", "origin", "HEAD:refs/heads/develop"]);
+        fixture.git_ok(&[
+            "--git-dir",
+            fixture.remote.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/develop",
+        ]);
+        fixture.git_ok(&["push", "-q", "origin", "--delete", "main"]);
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "delivered HEAD on develop must settle after its old upstream disappears"
+        );
+        assert!(load_work_event_settlement_record(&fixture.repo).unwrap().unwrap().status.is_settled(),
+            "remote integration containment must be recorded as delivery, not waived as a readback warning");
+
+        fs::write(fixture.repo.join("src.txt"), "unpublished source\n").unwrap();
+        fixture.git_ok(&["add", "src.txt"]);
+        fixture.commit("fix: not delivered yet");
+        assert!(
+            work_event_settlement_refusal(&fixture.repo).is_some(),
+            "a remote base must not authorize an unpublished source commit"
         );
     }
 

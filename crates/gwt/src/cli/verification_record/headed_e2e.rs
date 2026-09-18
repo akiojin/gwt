@@ -39,15 +39,37 @@ impl Capture {
         })
     }
 
-    pub fn configure(&self, command: &mut Command) {
-        command
-            .arg("--headed")
-            .arg("--trace=on")
-            .arg(format!(
+    /// The arguments a headed run needs appended to its command line.
+    ///
+    /// Split out from [`Self::configure`] because a verification command is
+    /// not always launched from a [`Command`]: Issue #4409 delegates it to the
+    /// daemon as an explicit program/args/env request, and that path has to
+    /// attach the same reporter by hand. Keeping both halves here means the
+    /// two launch paths cannot drift into configuring different reporters.
+    pub fn arguments(&self) -> Vec<String> {
+        vec![
+            "--headed".to_string(),
+            "--trace=on".to_string(),
+            format!(
                 "--reporter=list,{}",
                 self.directory.path().join("reporter.cjs").display()
-            ))
-            .env("GWT_HEADED_E2E_REPORT", &self.report_path);
+            ),
+        ]
+    }
+
+    /// The environment variable telling the reporter where to write, as a
+    /// `(key, value)` pair. See [`Self::arguments`] for why it is exposed.
+    pub fn environment(&self) -> (String, String) {
+        (
+            "GWT_HEADED_E2E_REPORT".to_string(),
+            self.report_path.display().to_string(),
+        )
+    }
+
+    pub fn configure(&self, command: &mut Command) {
+        command.args(self.arguments());
+        let (key, value) = self.environment();
+        command.env(key, value);
     }
 
     pub fn evidence(&self) -> Option<HeadedE2eEvidence> {

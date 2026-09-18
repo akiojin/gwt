@@ -4,6 +4,12 @@ pub enum IssueMonitorPriorityPosition {
     Index(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueLabelAction {
+    Add,
+    Remove,
+}
+
 /// SPEC-1942 command model for `issue.*` and `issue.spec.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCommand {
@@ -108,6 +114,28 @@ pub enum IssueCommand {
         title: Option<String>,
         body: Option<String>,
         labels: Option<Vec<String>>,
+    },
+    /// SPEC #4249 FR-001: move a plain or `gwt-spec` Issue to closed. `reason`
+    /// is the GitHub `state_reason`; `comment` is posted before the close so the
+    /// rationale is already on the Issue when it drops out of the Monitor inbox.
+    Close {
+        number: u64,
+        reason: Option<gwt_github::client::IssueCloseReason>,
+        comment: Option<String>,
+    },
+    /// SPEC #4249 FR-001: reopen a closed Issue so it returns to readiness
+    /// evaluation and can be requeued.
+    Reopen {
+        number: u64,
+        comment: Option<String>,
+    },
+    Label {
+        number: u64,
+        action: IssueLabelAction,
+        labels: Vec<String>,
+        confirm_queue: bool,
+        confirm_design_gate: bool,
+        confirm_auto_merge: bool,
     },
     Comment {
         number: u64,

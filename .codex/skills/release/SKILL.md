@@ -20,8 +20,10 @@ GitHub Actions **Prepare Release** workflow (Actions → `Prepare Release` →
 (`scripts/compute_release_version.py` latest-tag-relative calc, `cargo
 set-version`, `cargo update -w`, git-cliff), the `chore(release): vX.Y.Z`
 commit, and the `develop -> main` Release PR. Inputs: `bump`
-= `auto` (default; fails on breaking so major is explicit) / `patch` / `minor`
-/ `major`. Approval happens by reviewing and merging the generated Release PR.
+= `auto` (default; a breaking marker caps at minor and is only listed in the
+Release PR body, Issue #4373) / `patch` / `minor` / `major`. A major release
+happens only when the user chooses `major` explicitly. Approval happens by
+reviewing and merging the generated Release PR.
 The manual steps below are a fallback for interactive runs on `develop`.
 
 ## Quick Reference
@@ -57,7 +59,7 @@ develop (バージョン更新・CHANGELOG更新) → main (PR)
     old — build `./target/debug/gwtd` or see Issue #3267.
 2. Fetch `origin/main`, `origin/develop`, and tags, then pull `origin/develop`.
 3. Identify the latest `v*` tag and confirm there are unreleased commits.
-4. Classify the next version from commits after the latest tag: breaking change -> major, `feat` -> minor, `fix` -> patch, otherwise patch. Do not use `git-cliff --bumped-version`.
+4. Classify the next version from commits after the latest tag: `feat` or a breaking marker -> minor, `fix` -> patch, otherwise patch. Never derive major from commits; major only when the user explicitly instructs it (Issue #4373). List breaking-marker commits for the user. Do not use `git-cliff --bumped-version`.
 5. Present the computed version, changelog preview, and commit list to the user, then wait for explicit approval.
 5a. **Arm a release-completion goal (required, both runtimes).** Right after approval, before mutating files, arm a goal so the flow does not stop at PR creation. Codex: call `create_goal` with the completion condition. Claude Code: inject `/goal <condition>` into your own pane via JSON operation `pane.send` (it cannot self-invoke `/goal`). Condition = "release.yml all jobs success AND GitHub Release v{VERSION} published (draft=false) with all platform assets; rerun transient build failures, report non-transient failures, cap at 60 min / 30 turns." If the goal cannot be armed, print the `/goal` line for the user and continue — step 11 monitoring still runs.
 6. Update `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.

@@ -624,6 +624,23 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
+      // Issue #4366 AC-6b: what launches actually use while a provider hold
+      // diverts them. Rendered on its own line so the saved settings above it
+      // never appear to change because of a hold.
+      function issueMonitorEffectiveLaunchText(effective) {
+        if (!effective || typeof effective !== "object" || Array.isArray(effective)) {
+          return "";
+        }
+        const reason = typeof effective.reason === "string" ? effective.reason.trim() : "";
+        if (!reason) return "";
+        const summary = typeof effective.summary === "string" ? effective.summary.trim() : "";
+        const agent = typeof effective.agent_id === "string" ? effective.agent_id.trim() : "";
+        const target = summary || agent;
+        return target
+          ? `Launching with ${target} (${reason})`
+          : `No launch candidate (${reason})`;
+      }
+
       function normalizedIssueMonitorQuotaHold(status) {
         const quotaHold = status?.quota_hold;
         if (!quotaHold || typeof quotaHold !== "object" || Array.isArray(quotaHold)) {
@@ -686,6 +703,14 @@ export function createKnowledgeKanbanSurface({
             issueMonitorStatus.launch_profile_summary || "configure before auto start";
           settings.textContent = `Agent settings ${source}: ${profile}`;
         }
+        const effective = panel.querySelector(".knowledge-monitor-effective-copy");
+        if (effective) {
+          const text = issueMonitorEffectiveLaunchText(
+            issueMonitorStatus.effective_launch_profile,
+          );
+          effective.textContent = text;
+          effective.hidden = !text;
+        }
         const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
         if (maxActiveInput && document.activeElement !== maxActiveInput) {
           maxActiveInput.value = String(maxActive);
@@ -743,6 +768,9 @@ export function createKnowledgeKanbanSurface({
           ...issueMonitorStatus,
           ...(nextStatus || {}),
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+          // Issue #4366 AC-6b: omitted once the hold clears, so it must not
+          // survive from the previous status the way merged fields do.
+          effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
         };
         // FR-017: the monitor's last_error is a notification-center error
         // row, not a banner. Report once per changed text; resolve on clear.
@@ -3539,6 +3567,7 @@ export function createKnowledgeKanbanSurface({
                   <div class="knowledge-monitor-overview">
                     <div class="knowledge-monitor-summary" aria-live="polite">Stopped | Queue 0 | Active 0/1</div>
                     <div class="knowledge-monitor-settings-copy">Agent settings Missing saved profile: configure before auto start</div>
+                    <div class="knowledge-monitor-effective-copy" aria-live="polite" hidden></div>
                   </div>
                   <div class="knowledge-monitor-controls">
                     <button type="button" class="wizard-button" data-action="monitor-settings">Agent settings</button>

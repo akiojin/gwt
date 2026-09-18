@@ -40,6 +40,7 @@
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
+      import { createRecoveryCenterController } from "/recovery-center-modal.js";
       import {
         continueWorkOutcomeNotice,
         createContinueWorkDispatcher,
@@ -442,6 +443,7 @@
       // dropped after the swap completes.
       let socketReceiveDispatcher = null;
       let socketReceiveDispatcherGeneration = 0;
+      let recoveryCenterController = null;
       let reconnectTimer = null;
       let focusedId = null;
       let dragState = null;
@@ -1245,6 +1247,7 @@
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
+        recoveryCenterController?.reconnect();
         while (pendingMessages.length > 0) {
           socket.send(JSON.stringify(pendingMessages.shift()));
         }
@@ -4699,6 +4702,14 @@
         getActiveWorkProjection: () => activeWorkProjection,
       });
 
+      recoveryCenterController = createRecoveryCenterController({
+        document,
+        modalEl: document.getElementById("recovery-center-modal"),
+        dialogEl: document.querySelector("#recovery-center-modal > .modal-shell"),
+        send,
+        focusBoardEntry,
+      });
+
       function openIssueLaunchWizard(windowId, issueNumber) {
         send({
           kind: "open_issue_launch_wizard",
@@ -6269,6 +6280,12 @@
           case "log_entry_appended":
             applyBoardLogsReceiveEvent(event);
             break;
+          case "recovery_center_state":
+            recoveryCenterController?.handleState(event);
+            break;
+          case "recovery_center_board_entry":
+            recoveryCenterController?.handleBoardEntry(event);
+            break;
           case "project_board_config":
             // SPEC-2963 FR-030: per-project Board routing → Board window chip.
             applyProjectBoardConfigEventToBoard(event);
@@ -7459,6 +7476,9 @@
             return;
           case "open-issue-monitor":
             focusOrSpawnPreset("issue");
+            return;
+          case "open-recovery-center":
+            recoveryCenterController?.open();
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");

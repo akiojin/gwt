@@ -468,7 +468,14 @@ lease acquisition loop.
 `verify.lease.status` lists the run under `pending`. A `deferred` response
 means admission timed out without a verification record. Inspect the
 reported holder and wait reason, then retry when contention is resolved;
-there is no fixed retry schedule. If a holder persists without a live
+there is no fixed retry schedule. A deferral is not a spent attempt and
+there is no attempt cap: the refusal keeps your turn reserved
+(`next_turn_reserved: yes`, `queue_position`), so keep rerunning
+`verify.run` (a resident wait) while the holder makes progress. The lease
+is released after every run and a holder's next run queues behind you. A
+running `verify.run` publishes its progress, so the refusal and
+`verify.lease.status` show `remaining_batches` (commands left in the
+holder's run) and `estimated_remaining_ms`. If a holder persists without a live
 verification workload, report its run / PID and timing evidence to the
 PM. `verify.lease.release` remains available to drain a legacy holder
 without killing its process.
@@ -487,6 +494,23 @@ execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
 `pr.*`, `board.*`, and `search` operations run through the resolved installed
 gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
 Issue, PR, or Board state.
+
+`verify.run` reads `params.commands` before it decides whether to admit at
+all (Issue #4196). A matrix is heavy when any command widens past a single
+target — `--workspace`, `--all`, `--all-features`, `--all-targets`,
+`--exclude`, multiple packages or targets, or glob selectors — and only a
+heavy matrix claims the host lease. Unknown commands and value-taking Cargo
+global options are conservatively heavy; `cargo fmt` and `cargo metadata`
+are light. A matrix
+narrowed to one named target (`--test <name>`, `--bin <name>`,
+`--example <name>`), or to `--lib` of an explicit `-p <crate>`, is light: it
+starts immediately and several worktrees may run one at the same time. Bare
+`--lib` is not narrow — this is a virtual workspace, so with no package it
+builds every default member's lib. The run reports which it acted on as
+`verify: scope — light|heavy`, naming the command that forced a heavy
+classification, so you can tell before starting whether the matrix will
+queue. Splitting a heavy matrix into narrower runs is therefore a real way to
+make progress while another worktree holds the lease.
 
 ## Stop Conditions
 
