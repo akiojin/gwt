@@ -9413,6 +9413,7 @@ mod lazy_session_ledger_tests {
         let mut stopped =
             gwt_agent::Session::new(&worktree, "work/stopped", gwt_agent::AgentId::Codex);
         stopped.id = "session-stopped".to_string();
+        stopped.agent_session_id = Some("native-stopped".to_string());
         stopped.update_status(gwt_agent::AgentStatus::Stopped);
         stopped.save(&sessions_dir).expect("save stopped session");
 
@@ -9429,6 +9430,22 @@ mod lazy_session_ledger_tests {
             Some(gwt_agent::AgentStatus::Stopped)
         );
         assert!(cache.clone().session_by_id("session-stopped").is_some());
+        let expected =
+            gwt::launch_wizard::load_quick_start_entries(&worktree, &sessions_dir, "work/stopped");
+        assert_eq!(
+            expected.len(),
+            1,
+            "the stopped conversation remains resumable"
+        );
+        assert_eq!(
+            cache.quick_start_entries(&worktree, "work/stopped"),
+            expected
+        );
+        let resumed = cache
+            .latest_resumable_branch_session(&worktree, "work/stopped")
+            .expect("stopped session remains a restore candidate");
+        assert_eq!(resumed.id, stopped.id);
+        assert_eq!(resumed.agent_session_id, stopped.agent_session_id);
     }
 }
 
