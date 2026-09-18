@@ -10,7 +10,10 @@
 //! the only injection mechanisms; `generated guidance` is now backed by
 //! this module.
 
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use crate::settings_local::write_text_atomically;
 
@@ -237,7 +240,7 @@ Board body to convey what the Work is.
 Make the final Work update before terminal operations, then converge in this
 exact order: `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`. After the final Work update or a
 terminal lifecycle transition, do not issue another `workspace.update`; keep
-blocker/recovery coordination on the Board or in a Draft PR comment instead.
+blocker/recovery coordination on the Board or in a PR comment instead.
 Set `params.status:"done"` on that explicit final update; its successful event
 append opens the machine-local delivery obligation used by Stop and final gates.
 
@@ -279,14 +282,25 @@ gwtd binary:
 
 There is no standalone `gwt-search` executable.
 
-## Autonomous delivery
+## Delivery: Ready PRs only, always auto-merge
+
+**Draft PRs are retired in this project (owner ruling, 2026-09-16).** Create
+every PR non-draft and enable `auto-merge` on it. Never open a Draft, and mark
+any Draft you inherit ready with `pr.ready`. "It is still in progress, so keep
+it a Draft" is no longer a valid state.
+
+CI is therefore the only delivery gate. That makes PR scope the thing to get
+right: cut each PR so it is independently shippable, and when work remains,
+say so in the body and file a follow-up Issue rather than holding the PR back.
+Verify locally before opening the PR — there is no longer a Draft to park
+unverified work in.
 
 Read the launch route from `execution.status`. With `launch_route: autonomous`,
 record `User Verification Result: n/a (autonomous)` and continue verified work
-through a Ready PR and the existing CI auto-merge path until merged. Do not
-request human visual confirmation, send a verification URL, or stop at a Draft
-PR merely because nobody performed a human check. Manual launches retain their
-user-verification contract and require an explicit request to drive to merge.
+through the PR and the CI auto-merge path until merged. Do not request human
+visual confirmation or send a verification URL merely because nobody performed
+a human check. Manual launches retain their user-verification contract and
+require an explicit request to drive to merge.
 
 Automated test / headed E2E / CI failures, known blockers, and all other Ready
 Gate conditions still require repair. For UI work, use the project's isolated
@@ -309,9 +323,18 @@ ledger. This includes Issue, PR, and Actions inspection, REST GET requests,
 and GraphQL queries. Prefer gwtd `pr.list` and `issue.view` when cached data
 or workflow lifecycle context is useful.
 
-Mutations must use gwtd JSON-envelope operations, including `pr.merge` and
-`actions.rerun`; direct `gh` writes and API mutations are blocked. Read
-permission does not bypass PR gates or the long PR/CI polling restriction.
+Mutations must use gwtd JSON-envelope operations, such as `pr.ready`,
+`pr.draft`, and `actions.rerun`; direct `gh` writes and API mutations are
+blocked. Read permission does not bypass PR gates or the long PR/CI polling
+restriction.
+
+gwtd has no merge operation. A PR is merged by the repository's own merge
+automation (GitHub auto-merge, or a workflow that merges non-Draft PRs) or by
+a human. Keep auto-merge enabled across routine pushes; verify code changes
+before pushing. For a BEHIND PR use `pr.update_branch`, or hand synchronization
+to the PM when assigned. An explicit owner-requested hold uses `pr.draft`:
+a Draft PR cannot be merged. Resume with `pr.ready` only after the Ready PR
+Gate passes again; routine pushes do not require a Draft/Ready cycle.
 
 ## Canonical verification admission
 
@@ -598,7 +621,7 @@ terminal operation の前に final Work update を行い、以後は exact
 `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`
 の順で収束します。final Work update または terminal lifecycle transition
 の後は、別の `workspace.update` を実行しません。blocker / recovery coordination
-は Board または Draft PR comment に残します。
+は Board または PR comment に残します。
 explicit final update では `params.status:"done"` を設定します。event append
 が成功すると、Stop と final gate が使用する machine-local delivery obligation
 が開きます。
@@ -769,8 +792,13 @@ pub fn generate_coordination_guidance_for_codex(worktree: &Path) -> io::Result<(
     write_skill_md(&worktree.join(".codex").join("skills"))
 }
 
+/// Path of the generated guidance within a provider's skills root.
+pub fn skill_path(skills_root: &Path) -> PathBuf {
+    skills_root.join(SKILL_NAME).join("SKILL.md")
+}
+
 fn write_skill_md(skills_root: &Path) -> io::Result<()> {
-    let path = skills_root.join(SKILL_NAME).join("SKILL.md");
+    let path = skill_path(skills_root);
     write_text_atomically(&path, &render_skill_md())
 }
 

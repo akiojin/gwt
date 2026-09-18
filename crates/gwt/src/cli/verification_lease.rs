@@ -3,14 +3,20 @@
 //! A lease lives inside its runner rather than a detached process with no
 //! workload. The retired acquire/hold/extend operations keep actionable
 //! diagnostics; status/release remain available to drain pre-upgrade holders.
+//!
+//! Issue #4285: the lease lives on the verification lane
+//! (`~/.gwt/runtime/verification-coordinator`), not on the model lane that
+//! searches and index builds share. A pre-upgrade binary still runs its
+//! canonical verification on the model lane; that holder stays observable
+//! and drainable here until every binary on the host has moved.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    coordinator_root, HeavyHolderKind, HeavyLeaseStatus, HeavyQueueEntry, IndexCoordinator,
-    JobPriority, TargetKey, VERIFICATION_RESERVATION_TTL,
+    coordinator_root, verification_coordinator_root, HeavyHolderKind, HeavyLeaseStatus,
+    HeavyQueueEntry, IndexCoordinator, TargetKey,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -23,6 +29,159 @@ use crate::cli::CliEnv;
 pub(crate) mod admission;
 /// Issue #4405: starved-versus-progressing reading of the lease holder.
 pub(crate) mod holder_activity;
+
+const CARGO_SCOPED_SUBCOMMANDS: &[&str] = &["test", "t", "nextest"];
+/// Flags that widen a `cargo test` past a single target, wherever they sit.
+const CARGO_SCOPE_WIDENING_FLAGS: &[&str] = &[
+    "--workspace",
+    "--all",
+    "--all-features",
+    "--all-targets",
+    "--benches",
+    "--bins",
+    "--examples",
+    "--tests",
+    "--doc",
+    "--bench",
+    "--exclude",
+];
+/// Flags that name one target, so they narrow a `cargo test` on their own.
+const CARGO_NAMED_TARGET_SELECTORS: &[&str] = &["--test", "--bin", "--example"];
+
+/// How much of the shared host one *requested* verification command needs.
+///
+/// Classify the requested command line before canonical verification starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandWeight {
+    /// Narrow enough that several worktrees can run it side by side.
+    Light,
+    /// Builds or runs enough of the tree to need the host to itself.
+    Heavy,
+}
+
+/// Classify one command `verify.run` was asked to execute (Issue #4196).
+///
+/// The host lease exists to stop several worktrees compiling the world at
+/// once, and every `cargo test` used to claim it whatever its scope: a single
+/// `--test <name>` queued behind `cargo test --workspace --all-features`, and
+/// the fleet's verification throughput was pinned at one window at a time. So
+/// the weight follows the scope the command will actually build — a widening
+/// flag is heavy, and a run narrowed to named targets of at most one package
+/// is light.
+///
+/// Anything this module cannot bound stays heavy. An unrecognized program may
+/// compile the world, and guessing light for it would trade one window's wait
+/// for the host-wide oversubscription the lease was built to prevent
+/// (Issue #3913).
+pub(crate) fn classify_command(command: &str) -> CommandWeight {
+    let Ok(args) = crate::cli::verification_record::split_command_line(command) else {
+        return CommandWeight::Heavy;
+    };
+    let Some(program) = args.first() else {
+        return CommandWeight::Heavy;
+    };
+    if Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        != Some("cargo")
+    {
+        return CommandWeight::Heavy;
+    }
+    // Cargo's own arguments end at a bare `--`; everything after it is the
+    // test binary's filter and says nothing about what cargo will build.
+    let cargo_args: Vec<&str> = args[1..]
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| *arg != "--")
+        .collect();
+    // Only skip global arguments known not to consume a value. Otherwise a
+    // --config path (even one named "fmt") could be mistaken for a command.
+    let mut args = cargo_args.iter().copied();
+    let subcommand = loop {
+        let Some(arg) = args.next() else {
+            return CommandWeight::Heavy;
+        };
+        if arg.starts_with('+')
+            || matches!(
+                arg,
+                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
+            )
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            return CommandWeight::Heavy;
+        }
+        break arg;
+    };
+    if matches!(subcommand, "fmt" | "metadata") {
+        return CommandWeight::Light;
+    }
+    if !CARGO_SCOPED_SUBCOMMANDS.contains(&subcommand) {
+        return CommandWeight::Heavy;
+    }
+    classify_cargo_scope(&cargo_args)
+}
+
+/// Weigh a scoped `cargo test` by the selection it builds.
+///
+/// `--lib` is deliberately not enough on its own. This repository is a virtual
+/// workspace with `default-members`, so `cargo test --lib` with no package
+/// selects the lib target of *every* default member — the workspace-wide build
+/// this classification exists to catch, wearing a narrowing flag.
+fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
+    let mut named_targets = 0usize;
+    let mut lib_target = false;
+    let mut packages = 0usize;
+    let mut args = cargo_args.iter().copied();
+    while let Some(arg) = args.next() {
+        // `--test=name` and `--test name` select the same target.
+        let (flag, inline_value) = arg
+            .split_once('=')
+            .map_or((arg, None), |(name, value)| (name, Some(value)));
+        if CARGO_SCOPE_WIDENING_FLAGS.contains(&flag) {
+            return CommandWeight::Heavy;
+        }
+        if flag == "--lib" {
+            lib_target = true;
+        }
+        let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
+        let package = flag == "-p" || flag == "--package" || attached_package.is_some();
+        if package || CARGO_NAMED_TARGET_SELECTORS.contains(&flag) {
+            let Some(value) = attached_package.or(inline_value).or_else(|| args.next()) else {
+                return CommandWeight::Heavy;
+            };
+            // Cargo expands these itself, including quoted package patterns.
+            if value.is_empty() || value.starts_with('-') || value.contains(['*', '?', '[', ']']) {
+                return CommandWeight::Heavy;
+            }
+            if package {
+                packages += 1;
+            } else {
+                named_targets += 1;
+            }
+        }
+    }
+    if packages > 1 || named_targets + usize::from(lib_target) > 1 {
+        return CommandWeight::Heavy;
+    }
+    if named_targets == 1 || (lib_target && packages == 1) {
+        CommandWeight::Light
+    } else {
+        CommandWeight::Heavy
+    }
+}
+
+/// The first command of a matrix that needs the host to itself, if any.
+///
+/// A matrix is only as light as its heaviest command, and naming the command
+/// that forces the wait is what lets an agent see in advance whether the run
+/// will queue — previously that was only discoverable by idling.
+pub(crate) fn first_heavy_command(commands: &[String]) -> Option<&String> {
+    commands
+        .iter()
+        .find(|command| classify_command(command) == CommandWeight::Heavy)
+}
 
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
@@ -56,7 +215,7 @@ pub enum VerificationLeaseCommand {
 }
 
 pub(super) fn run<E: CliEnv>(
-    env: &mut E,
+    _env: &mut E,
     command: VerificationLeaseCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -77,25 +236,24 @@ pub(super) fn run<E: CliEnv>(
                 .to_string(),
         )),
         VerificationLeaseCommand::Release { lease_id, reason } => {
-            release(env, &lease_id, reason.as_deref(), out)
+            release(&lease_id, reason.as_deref(), out)
         }
     }
 }
 
-fn release<E: CliEnv>(
-    env: &mut E,
-    lease_id: &str,
-    reason: Option<&str>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
+fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32, SpecOpsError> {
     let Some(control) = control_dir_for(lease_id) else {
-        if held_index_lease(lease_id)? {
-            return request_index_yield(env, lease_id, reason, out);
-        }
         return Err(missing_lease(lease_id));
     };
-    fs::write(control.join(RELEASE_FILE), reason.unwrap_or("").as_bytes())
-        .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
+    // Issue #4360: the holder waits for this file to exist and then reads the
+    // reason out of it, so a plain write lets it read the empty moment between
+    // create and fill. Publishing by rename makes "exists" mean "complete" —
+    // which also keeps an intentionally empty reason readable as itself.
+    gwt_core::atomic_file::write_atomic(
+        &control.join(RELEASE_FILE),
+        reason.unwrap_or("").as_bytes(),
+    )
+    .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
     await_settled(lease_id)?;
     // A holder that exited normally already removed this; a holder that was
     // killed cannot, so clean up on the caller's side too.
@@ -130,10 +288,13 @@ fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
 /// host-wide, so this scan sees one candidate in practice. Only a *granted*
 /// outcome may answer: a refusal snapshot names the lease it lost to, so
 /// matching on the lease id alone would route release requests to
-/// a directory with nobody listening.
+/// a directory with nobody listening. Pre-upgrade detached holders wrote
+/// their channel under the model lane, so both lanes are scanned.
 fn control_dir_for(lease_id: &str) -> Option<PathBuf> {
-    fs::read_dir(coordinator_root().join(CONTROL_DIR))
-        .ok()?
+    [verification_coordinator_root(), coordinator_root()]
+        .into_iter()
+        .filter_map(|root| fs::read_dir(root.join(CONTROL_DIR)).ok())
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .find(|dir| {
@@ -186,6 +347,15 @@ struct LeaseStatusSnapshot {
     holder_cpu_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     holder_state: Option<String>,
+    /// Issue #4470 AC-3: whether the ticket's owner process still exists and
+    /// what job status it last published, so a waiter can tell a working
+    /// holder from residue without reading the coordinator's files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_job_status: Option<String>,
+    #[serde(default)]
+    holder_stale: bool,
 }
 
 /// Fill in the holder's activity; only the status report pays for the
@@ -222,6 +392,9 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             holder_held_ms: None,
             holder_cpu_percent: None,
             holder_state: None,
+            holder_alive: status.holder_alive,
+            holder_job_status: status.holder_job_status.map(|job| job.as_str().to_string()),
+            holder_stale: status.holder_stale,
         }
     }
 }
@@ -235,15 +408,26 @@ struct LeaseOutcome {
     error: Option<String>,
 }
 
+/// The verification lane's lease. While the lane is free, a canonical
+/// verification that a pre-upgrade binary still runs on the model lane is
+/// reported in its place (Issue #4285 transition); index jobs and searches
+/// on the model lane are never verification holders.
 fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
-    Ok(open_coordinator()?
+    let status = open_coordinator()?
         .heavy_lease_status()
-        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?
-        .into())
+        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
+    if status.held || status.pending > 0 {
+        return Ok(status.into());
+    }
+    let legacy = IndexCoordinator::open_default()
+        .and_then(|coordinator| coordinator.heavy_lease_status())
+        .ok()
+        .filter(|legacy| legacy.held && legacy.holder_kind == Some(HeavyHolderKind::Verification));
+    Ok(legacy.unwrap_or(status).into())
 }
 
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
-    IndexCoordinator::open_default()
+    IndexCoordinator::open_default_verification()
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
 }
 
@@ -261,50 +445,6 @@ fn render(out: &mut String, held_label: &str, free_label: &str, status: &LeaseSt
     let label = if status.held { held_label } else { free_label };
     out.push_str(&format!("verification lease: {label}\n"));
     push_status_fields(out, status);
-}
-
-/// The live lease named by `lease_id` when it belongs to an index job
-/// (Issue #4086): such a lease has no verification control directory, so
-/// release requests are arbitrated through the coordinator instead.
-fn held_index_lease(lease_id: &str) -> Result<bool, SpecOpsError> {
-    let status = status()?;
-    Ok(status.held
-        && status.lease_id.as_deref() == Some(lease_id)
-        && status.holder_kind.as_deref() == Some(HeavyHolderKind::Index.as_str()))
-}
-
-/// PM arbitration of an index lease (Issue #4086): leave a verification-
-/// priority reservation for the caller's worktree. The runner observes it at
-/// its next batch boundary and yields; the host then defers to the
-/// reservation instead of re-taking the lease.
-fn request_index_yield<E: CliEnv>(
-    env: &mut E,
-    lease_id: &str,
-    reason: Option<&str>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
-    let key = verification_key(env)?;
-    open_coordinator()?
-        .reserve_heavy(
-            &key,
-            JobPriority::ManualRebuild,
-            VERIFICATION_RESERVATION_TTL,
-            Some(reason.unwrap_or("verify.lease.release arbitration")),
-        )
-        .map_err(|err| unexpected(format!("failed to reserve the heavy lease: {err}")))?;
-    out.push_str("verification lease: yield requested\n");
-    out.push_str(&format!("lease_id: {lease_id}\n"));
-    if let Some(reason) = reason {
-        out.push_str(&format!("reason: {reason}\n"));
-    }
-    push_status_fields(out, &status()?);
-    out.push_str(&format!(
-        "note: an index job holds this lease; it releases at its next batch boundary \
-         (at most {}s after this request when progress is published) and background index \
-         jobs defer to the reservation left for this worktree\n",
-        VERIFICATION_RESERVATION_TTL.as_secs()
-    ));
-    Ok(0)
 }
 
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
@@ -337,6 +477,15 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     }
     if let Some(spawn_host) = &status.holder_spawn_host {
         out.push_str(&format!("holder_spawn_host: {spawn_host}\n"));
+    }
+    if let Some(alive) = status.holder_alive {
+        out.push_str(&format!("holder_alive: {alive}\n"));
+    }
+    if let Some(job) = &status.holder_job_status {
+        out.push_str(&format!("holder_job_status: {job}\n"));
+    }
+    if status.holder_stale {
+        out.push_str("holder_stale: true\n");
     }
     if let Some(batches) = status.remaining_batches {
         out.push_str(&format!("remaining_batches: {batches}\n"));
@@ -396,7 +545,129 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    fn command_strings(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    /// Issue #4196 AC-1 / AC-3: what a requested command weighs follows the
+    /// scope it will actually build, not merely the fact that it says
+    /// `cargo test`. AC-3 pins the two ends down: a workspace-wide run is
+    /// heavy and a single named test target is light.
+    #[test]
+    fn classify_command_reads_the_scope_of_a_cargo_run() {
+        // AC-3: the two cases the Issue fixes by name.
+        assert_eq!(
+            classify_command("cargo test --workspace --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test -p gwt --test verification_lease"),
+            CommandWeight::Light
+        );
+
+        // A widening flag wins wherever it sits on the line.
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test --all-targets --test admission"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test --workspace --exclude gwt --lib"),
+            CommandWeight::Heavy
+        );
+        // Global option values and Cargo's glob/attached selector syntax must
+        // not let a broad run masquerade as one package and one target.
+        for command in [
+            "cargo --config net.offline=true test --workspace --all-features",
+            "cargo test -p 'gwt-*' --lib",
+            "cargo test -p gwt --test '*'",
+            "cargo test -pgwt -pgwt-core --test admission",
+            "cargo test -p gwt --test admission --test verification_lease",
+            "cargo test -p gwt --lib --test admission",
+            "cargo test -p gwt --test admission --bench benchmark",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+        }
+        assert_eq!(
+            classify_command("cargo test -pgwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Nothing narrows these: they build every target of the selected
+        // packages, which is the run the lease exists for.
+        assert_eq!(classify_command("cargo test"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test -p gwt-core"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test -p gwt -p gwt-core --lib"),
+            CommandWeight::Heavy,
+            "several packages is not one narrow target"
+        );
+        // `--lib` names a target *per package*, and this is a virtual
+        // workspace with `default-members`: with no package selected it builds
+        // every member's lib, so it must not read as narrow.
+        assert_eq!(classify_command("cargo test --lib"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Cargo's own arguments end at `--`; the rest is the test binary's
+        // filter and says nothing about what cargo builds.
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib -- --all-features"),
+            CommandWeight::Light
+        );
+        assert_eq!(
+            classify_command("cargo +nightly test -p gwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Other cargo subcommands keep the weight they already had.
+        assert_eq!(
+            classify_command("cargo clippy --all-targets --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(classify_command("cargo fmt --check"), CommandWeight::Light);
+        assert_eq!(classify_command("cargo metadata"), CommandWeight::Light);
+
+        // Anything this module cannot bound stays heavy: guessing light for an
+        // unrecognized program would trade one window's wait for the host-wide
+        // oversubscription the lease was built to prevent.
+        assert_eq!(
+            classify_command("npx playwright test --headed"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(classify_command("cargo"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test 'unbalanced"),
+            CommandWeight::Heavy
+        );
+    }
+
+    /// Issue #4196 AC-2 / AC-4: a matrix is only as light as its heaviest
+    /// command, and the caller can name the one that forces the wait instead
+    /// of leaving the agent to discover it by idling.
+    #[test]
+    fn first_heavy_command_names_what_forces_the_host_lease() {
+        let light = command_strings(&["cargo fmt --check", "cargo test -p gwt --test admission"]);
+        assert_eq!(first_heavy_command(&light), None);
+        assert_eq!(first_heavy_command(&[]), None);
+
+        let mixed = command_strings(&["cargo test -p gwt --lib", "cargo test --workspace"]);
+        assert_eq!(
+            first_heavy_command(&mixed).map(String::as_str),
+            Some("cargo test --workspace")
+        );
+    }
+
     use super::*;
+    use gwt_core::index_coordinator::JobPriority;
 
     #[test]
     fn free_status_renders_without_holder_fields() {
@@ -444,6 +715,9 @@ mod tests {
                 holder_held_ms: None,
                 holder_cpu_percent: None,
                 holder_state: None,
+                holder_alive: Some(true),
+                holder_job_status: Some("running".to_string()),
+                holder_stale: false,
             },
         );
         // Issue #4169 AC-2: the waiters are named in service order, each with
@@ -463,6 +737,8 @@ mod tests {
              holder_kind: verification\n\
              holder_nice: 10\n\
              holder_spawn_host: daemon\n\
+             holder_alive: true\n\
+             holder_job_status: running\n\
              estimated_remaining_ms: 60000\n\
              pending: 2\n\
              queue[0]: target=repo--verification--early priority=manual-rebuild \

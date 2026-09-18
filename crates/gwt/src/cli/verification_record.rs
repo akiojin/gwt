@@ -1681,7 +1681,15 @@ fn evaluate_work_event_settlement_for_path(
     let (remote, merge_ref, upstream_ref) = match configured_upstream(worktree) {
         Ok(upstream) => upstream,
         Err(UpstreamFailure::Missing) => {
-            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream);
+            return terminal_work_integration_delivery(
+                worktree,
+                "origin",
+                &head_commit,
+                &event_commit,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::MissingUpstream,
+            ));
         }
         Err(UpstreamFailure::Git) => {
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
@@ -1690,9 +1698,15 @@ fn evaluate_work_event_settlement_for_path(
     let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
         Ok(remote_tip) => remote_tip,
         Err(()) => {
-            return WorkEventSettlementStatus::Blocked(
+            return terminal_work_integration_delivery(
+                worktree,
+                &remote,
+                &head_commit,
+                &event_commit,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
                 WorkEventSettlementBlocker::RemoteReadbackError,
-            );
+            ));
         }
     };
     let head_on_remote = match git_is_ancestor(worktree, &head_commit, &remote_tip) {
@@ -1724,6 +1738,40 @@ fn evaluate_work_event_settlement_for_path(
     }
 }
 
+/// A merged feature branch may already be deleted. For terminal Work only,
+/// fresh remote integration containment proves delivery independently of the
+/// predecessor's receipt or the deleted branch. Call after dirty/pending event
+/// checks; neither a local tracking ref nor a PR's historical state is proof
+/// that this exact HEAD was delivered.
+fn terminal_work_integration_delivery(
+    worktree: &Path,
+    remote: &str,
+    head_commit: &str,
+    event_commit: &str,
+) -> Option<WorkEventSettlementStatus> {
+    if !canonical_work_for_worktree_is_terminal(worktree) {
+        return None;
+    }
+    let mut observed_base = false;
+    for branch in ["develop", "main"] {
+        let Ok(tip) = fetch_upstream_tip(worktree, remote, &format!("refs/heads/{branch}")) else {
+            continue;
+        };
+        observed_base = true;
+        if git_is_ancestor(worktree, head_commit, &tip) == Ok(true) {
+            return Some(WorkEventSettlementStatus::Settled {
+                event_commit: event_commit.to_string(),
+                upstream_ref: format!("{remote}/{branch}"),
+            });
+        }
+    }
+    // A deleted upstream is no longer a mere network warning when the remote
+    // bases were read successfully and prove this HEAD has not landed there.
+    observed_base.then_some(WorkEventSettlementStatus::Blocked(
+        WorkEventSettlementBlocker::CommitNotPushed,
+    ))
+}
+
 /// Whether this worktree's canonical Work has already reached a terminal
 /// lifecycle, which makes a settlement receipt unmintable: the receipt is
 /// written only by a terminal `workspace.update`, that update resolves its
@@ -1734,6 +1782,19 @@ fn evaluate_work_event_settlement_for_path(
 /// infrastructure failure keeps the ordinary receipt requirement rather than
 /// silently waiving it.
 fn canonical_work_for_worktree_is_terminal(worktree: &Path) -> bool {
+    if let Ok(Some(execution)) = execution_state::load(worktree) {
+        match crate::agent_project_state::session_work_is_terminal(
+            worktree,
+            &execution.primary_session_id,
+        ) {
+            Ok(Some(terminal)) => return terminal,
+            Ok(None) => {} // Legacy executions have no durable Session assignment.
+            Err(error) => {
+                tracing::warn!(%error, "assigned Work lifecycle is unreadable");
+                return false;
+            }
+        }
+    }
     let branch = gwt_git::Repository::open(worktree)
         .ok()
         .and_then(|repository| repository.current_branch().ok().flatten());
@@ -1925,6 +1986,11 @@ fn stale_work_event_receipt_description(
         .map_or("legacy (unbound)", |binding| binding.generation_id.as_str());
     let current_generation =
         current_binding.map_or("unknown", |binding| binding.generation_id.as_str());
+    if receipt.execution_binding.is_some() && receipt_generation == current_generation {
+        return format!(
+            "Work event settlement refused: the receipt names the current execution generation `{current_generation}`, but its Session or ledger binding does not authorize this execution. Record an authorized terminal workspace.update for the assigned Work, then commit and push its event before retrying."
+        );
+    }
     format!(
         "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation (receipt `{receipt_generation}`, current generation `{current_generation}`) and the current generation has not recorded its own terminal Work update. Committing or pushing the predecessor's Work event cannot repair this: record this generation's terminal workspace.update for the canonical Work, then commit and push the Work event store before retrying."
     )
@@ -2822,6 +2888,7 @@ struct RunOptions<'a> {
     /// is resolved once for the whole run, and every caller that has an
     /// opinion about the other options has one about this too.
     host: VerificationHost,
+    on_progress: Option<&'a mut dyn FnMut(usize, usize, std::time::Duration)>,
 }
 
 fn run_verification_for_caller(
@@ -2853,7 +2920,7 @@ fn run_verification_inner<F>(
     commands: &[String],
     authority: Option<&VerificationCallerAuthority>,
     prepared_quarantines: &[PreparedQuarantineRequest],
-    options: RunOptions<'_>,
+    mut options: RunOptions<'_>,
     after_commands: F,
 ) -> Result<(VerificationRunRecord, String), String>
 where
@@ -2912,6 +2979,10 @@ where
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
         );
     }
+    let commands_started = std::time::Instant::now();
+    if let Some(on_progress) = options.on_progress.as_mut() {
+        on_progress(0, commands.len(), std::time::Duration::ZERO);
+    }
     for command in commands {
         transcript.push_str(&format!("$ {command}\n"));
         let capture = options
@@ -2943,6 +3014,9 @@ where
             output_tail: persisted_failure_output(exit_code, &tail),
             headed_e2e,
         });
+        if let Some(on_progress) = options.on_progress.as_mut() {
+            on_progress(results.len(), commands.len(), commands_started.elapsed());
+        }
     }
     after_commands();
     let has_headed_e2e = results.iter().any(|result| result.headed_e2e.is_some());
@@ -4276,15 +4350,31 @@ pub(super) fn run<E: CliEnv>(
             // host-wide lease away from a claimant that could have used it.
             let (host, host_note) = crate::cli::daemon::verification_host::resolve(&worktree)
                 .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?;
-            // SPEC #3576: the canonical runner owns its in-process lease.
-            // Ordinary development processes do not delay admission. A budget overrun
-            // answers `deferred` without writing a record.
+            // SPEC #3576 / Issue #4196: only heavy canonical matrices claim
+            // an in-process lease. Classify the commands before admission;
+            // a budget overrun answers `deferred` without writing a record.
             let max_wait =
                 crate::cli::verification_lease::admission::resolve_max_wait(max_wait_secs)?;
-            let admission =
-                crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
-            out.push_str(&admission.summary());
-            out.push('\n');
+            let admission = match crate::cli::verification_lease::first_heavy_command(&commands) {
+                Some(heavy) => {
+                    out.push_str(&format!(
+                        "verify: scope — heavy; `{heavy}` needs the host to itself\n"
+                    ));
+                    let granted =
+                        crate::cli::verification_lease::admission::admit(env, &worktree, max_wait)?;
+                    out.push_str(&granted.summary());
+                    out.push('\n');
+                    Some(granted)
+                }
+                None => {
+                    out.push_str(&format!(
+                        "verify: scope — light; {count} command(s) narrowly scoped, so this run \
+                         shares the host instead of claiming the lease\n",
+                        count = commands.len()
+                    ));
+                    None
+                }
+            };
             let plan_for_quarantine = load_plan(&worktree).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
                     "failed to load verification plan for quarantine preparation: {error}"
@@ -4310,6 +4400,11 @@ pub(super) fn run<E: CliEnv>(
                     },
                     headed_e2e_commands: &headed_e2e_commands,
                     host,
+                    on_progress: Some(&mut |done, total, elapsed| {
+                        if let Some(admission) = admission.as_ref() {
+                            admission.publish_progress(done, total, elapsed);
+                        }
+                    }),
                 },
             );
             // Release the in-process lease before the (lease-free) evidence
@@ -6311,6 +6406,66 @@ mod tests {
         assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
     }
 
+    /// Issue #4196 AC-2 / AC-4: `verify.run` decides on host admission by
+    /// reading the commands it was given. A matrix narrowed to one named test
+    /// target starts while another target holds the host lease — before this,
+    /// admission ran unconditionally and the same matrix answered `deferred`
+    /// after waiting out its whole budget.
+    #[test]
+    fn verify_run_skips_host_admission_for_a_light_matrix() {
+        use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-light");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+        let coordinator = IndexCoordinator::open_default_verification().unwrap();
+        let other = TargetKey::verification("other-repo", "other-worktree");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(
+                &other,
+                JobPriority::ManualRebuild,
+                std::time::Duration::from_millis(250),
+            )
+            .unwrap()
+        else {
+            panic!("a private lease root must admit the owner");
+        };
+        let _lease = guard
+            .acquire_heavy_with_ttl(
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+
+        // Narrowed to one named integration test of one package, and pointed
+        // at a directory with no manifest so cargo answers immediately: the
+        // command's outcome is irrelevant here, its classification is not.
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let (_code, out) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["cargo test -p gwt --test issue-4196-absent".to_string()],
+                headed_e2e_commands: vec![],
+                max_wait_secs: Some(0),
+                user_verification_result: None,
+            }),
+        )
+        .unwrap_or_else(|err| panic!("a light matrix must not queue behind the host lease: {err}"));
+        assert!(
+            out.contains("scope — light"),
+            "the run must report the classification it acted on: {out}"
+        );
+        assert!(
+            !out.contains("host admission"),
+            "a light matrix must not claim the host lease: {out}"
+        );
+    }
+
     #[test]
     fn derived_trivial_plan_allows_empty_run_and_fresh_evidence() {
         let dir = tempfile::tempdir().unwrap();
@@ -7629,6 +7784,8 @@ mod tests {
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("a foreign receipt Session must fail closed");
         assert!(refusal.contains("generation"), "{refusal}");
+        assert!(!refusal.contains("predecessor"), "{refusal}");
+        assert!(refusal.contains("Session or ledger binding"), "{refusal}");
 
         receipt.session_id = session_id.to_string();
         receipt
@@ -7641,6 +7798,8 @@ mod tests {
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("an arbitrary same-generation receipt head must fail closed");
         assert!(refusal.contains("generation"), "{refusal}");
+        assert!(!refusal.contains("predecessor"), "{refusal}");
+        assert!(refusal.contains("Session or ledger binding"), "{refusal}");
     }
 
     #[test]
@@ -7807,6 +7966,33 @@ mod tests {
             work_event_settlement_refusal(&fixture.repo),
             None,
             "a terminal canonical Work can never re-mint the receipt, so a predecessor              receipt must not refuse a delivered event log",
+        );
+
+        // #4368: delivery survives deletion of the feature upstream after
+        // integration. Read the remote base, not only the old receipt.
+        fixture.git_ok(&["push", "-q", "origin", "HEAD:refs/heads/develop"]);
+        fixture.git_ok(&[
+            "--git-dir",
+            fixture.remote.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/develop",
+        ]);
+        fixture.git_ok(&["push", "-q", "origin", "--delete", "main"]);
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "delivered HEAD on develop must settle after its old upstream disappears"
+        );
+        assert!(load_work_event_settlement_record(&fixture.repo).unwrap().unwrap().status.is_settled(),
+            "remote integration containment must be recorded as delivery, not waived as a readback warning");
+
+        fs::write(fixture.repo.join("src.txt"), "unpublished source\n").unwrap();
+        fixture.git_ok(&["add", "src.txt"]);
+        fixture.commit("fix: not delivered yet");
+        assert!(
+            work_event_settlement_refusal(&fixture.repo).is_some(),
+            "a remote base must not authorize an unpublished source commit"
         );
     }
 

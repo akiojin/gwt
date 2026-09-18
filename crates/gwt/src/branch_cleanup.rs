@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Mutex, PoisonError},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +46,147 @@ pub struct BranchCleanupProgressEntry {
     pub total: usize,
     pub phase: BranchCleanupProgressPhase,
     pub message: String,
+}
+
+/// Issue #4433: the latest state of a cleanup operation, as a reconnecting
+/// client needs to see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchCleanupOperationSnapshot {
+    Progress(BranchCleanupProgressEntry),
+    Result(Vec<BranchCleanupResultEntry>),
+}
+
+#[derive(Debug, Clone)]
+struct TrackedBranchCleanupOperation {
+    operation_id: String,
+    snapshot: BranchCleanupOperationSnapshot,
+}
+
+/// Issue #4433: the latest cleanup status per cleanup surface, keyed by window
+/// id and tagged with the frontend-generated operation id.
+///
+/// Cleanup progress and results are broadcast, so a client that reconnects
+/// mid-run still misses everything the worker emitted while it was away. This
+/// store lets that client pull the current state back by
+/// `(window id, operation id)`.
+///
+/// Only the most recent operation per window is kept: a cleanup surface runs
+/// one cleanup at a time, so the next run evicts the previous snapshot. That
+/// bounds the store by the number of cleanup surfaces and makes a stale result
+/// unreachable once a new operation id is in flight.
+#[derive(Debug, Default)]
+pub struct BranchCleanupOperationStore {
+    operations: Mutex<HashMap<String, TrackedBranchCleanupOperation>>,
+}
+
+impl BranchCleanupOperationStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Remember the latest progress for `operation_id`. Untagged operations
+    /// (an older frontend that does not send `operation_id`) are not tracked:
+    /// there is no key a reconnecting client could ask for.
+    pub fn record_progress(
+        &self,
+        id: &str,
+        operation_id: Option<&str>,
+        progress: &BranchCleanupProgressEntry,
+    ) {
+        self.store(
+            id,
+            operation_id,
+            BranchCleanupOperationSnapshot::Progress(progress.clone()),
+        );
+    }
+
+    /// Replace any remembered progress with the operation's final result.
+    pub fn record_result(
+        &self,
+        id: &str,
+        operation_id: Option<&str>,
+        results: &[BranchCleanupResultEntry],
+    ) {
+        self.store(
+            id,
+            operation_id,
+            BranchCleanupOperationSnapshot::Result(results.to_vec()),
+        );
+    }
+
+    /// The current state of `operation_id`, or `None` when the operation was
+    /// cleared or superseded. `None` means "nothing to replay" and must never
+    /// be rendered as a cleanup failure.
+    pub fn snapshot(&self, id: &str, operation_id: &str) -> Option<BranchCleanupOperationSnapshot> {
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations
+            .get(id)
+            .filter(|tracked| tracked.operation_id == operation_id)
+            .map(|tracked| tracked.snapshot.clone())
+    }
+
+    /// Every tracked operation as `(id, operation_id, snapshot)`.
+    ///
+    /// A WebView reload wipes the page's JS state, so the reloaded client
+    /// cannot name the operation it was watching. The initial per-client sync
+    /// hands it the live operations instead.
+    pub fn live_operations(&self) -> Vec<(String, String, BranchCleanupOperationSnapshot)> {
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations
+            .iter()
+            .map(|(id, tracked)| {
+                (
+                    id.clone(),
+                    tracked.operation_id.clone(),
+                    tracked.snapshot.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Drop the operation once the client has consumed its result. A clear for
+    /// an operation that has already been superseded is a no-op, so a late
+    /// modal close cannot wipe the run that is currently in flight.
+    pub fn clear(&self, id: &str, operation_id: &str) {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if operations
+            .get(id)
+            .is_some_and(|tracked| tracked.operation_id == operation_id)
+        {
+            operations.remove(id);
+        }
+    }
+
+    fn store(
+        &self,
+        id: &str,
+        operation_id: Option<&str>,
+        snapshot: BranchCleanupOperationSnapshot,
+    ) {
+        let Some(operation_id) = operation_id else {
+            return;
+        };
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations.insert(
+            id.to_string(),
+            TrackedBranchCleanupOperation {
+                operation_id: operation_id.to_string(),
+                snapshot,
+            },
+        );
+    }
 }
 
 pub fn cleanup_selected_branches(

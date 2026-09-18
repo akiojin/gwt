@@ -1064,7 +1064,7 @@ pub(super) fn run<E: CliEnv>(
                         && work_item_shares_agent_container(item, &agent)
                     {
                         return Err(GwtError::Other(format!(
-                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.prune to review and discard the stale duplicate (Issue #3684)"
+                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.work_prune with params.ids=[\"{workspace_id}\"] to detach the stale container ref (dry-run by default; pass params.dry_run=false to apply) (Issue #3684, #4465)"
                         )));
                     }
                 }
@@ -1474,12 +1474,17 @@ fn run_work_prune(
         .map_err(core_error)?
         .map(|projection| projection.work_items)
         .unwrap_or_default();
+    // Issue #4465 AC-4'': `ids` scopes which Works are *repaired*; canonical
+    // resolution still sees every Work. Filtering both used to make a scoped
+    // call silently find nothing, leaving the whole machine as the only
+    // workable scope.
     let works: Vec<WorkItem> = if ids.is_empty() {
-        all_works
+        all_works.clone()
     } else {
         all_works
-            .into_iter()
+            .iter()
             .filter(|item| ids.iter().any(|id| id == &item.id))
+            .cloned()
             .collect()
     };
 
@@ -1549,13 +1554,14 @@ fn run_work_prune(
     // Third pass (Issue #3684 AC-3): stale same-container duplicates of a
     // coexisting canonical Work. They deadlock `workspace.ensure` for every
     // session launched into that container, so surface and discard them here.
-    let duplicates = classify_same_container_duplicate_works(&works, |container| {
+    let canonical_id_for = |container: &WorkspaceExecutionContainerRef| {
         gwt_core::workspace_projection::canonical_work_id(
             repo_path,
             container.branch.as_deref(),
             container.worktree_path.as_deref(),
         )
-    });
+    };
+    let duplicates = classify_same_container_duplicate_works(&works, &all_works, canonical_id_for);
     for candidate in &duplicates {
         out.push_str(&format!(
             "  discard {} — same-container duplicate of {} — {}\n",
@@ -1580,6 +1586,48 @@ fn run_work_prune(
         }
     }
 
+    // Fourth pass (Issue #4465 AC-3'): accreted container refs on Works that
+    // are otherwise legitimate. Detaching a ref is not a close or a discard,
+    // so an open owner Issue does not gate it.
+    let discarded_ids = duplicates
+        .iter()
+        .map(|candidate| candidate.work_id.as_str())
+        .collect::<Vec<_>>();
+    let foreign_refs = classify_foreign_container_refs(&works, &all_works, canonical_id_for)
+        .into_iter()
+        .filter(|candidate| !discarded_ids.contains(&candidate.work_id.as_str()))
+        .collect::<Vec<_>>();
+    let mut detached = 0usize;
+    for candidate in &foreign_refs {
+        out.push_str(&format!(
+            "  detach {} — container ref owned by {} — {}\n",
+            candidate.work_id, candidate.canonical_id, candidate.title
+        ));
+        if dry_run {
+            continue;
+        }
+        match gwt_core::workspace_projection::detach_foreign_container_refs(
+            repo_path,
+            &candidate.canonical_id,
+            std::slice::from_ref(&candidate.work_id),
+            |container| {
+                gwt_core::workspace_projection::workspace_execution_container_same(
+                    container,
+                    &candidate.container,
+                )
+            },
+        ) {
+            Ok(_) => detached += 1,
+            Err(error) => {
+                failed += 1;
+                out.push_str(&format!(
+                    "  ! {} container ref could not be detached: {error}\n",
+                    candidate.work_id
+                ));
+            }
+        }
+    }
+
     let mut reasons: std::collections::BTreeMap<&'static str, usize> = Default::default();
     for skip in &plan.skipped {
         *reasons.entry(skip.reason.as_str()).or_default() += 1;
@@ -1590,11 +1638,13 @@ fn run_work_prune(
         .collect::<Vec<_>>()
         .join(" ");
     out.push_str(&format!(
-        "{mode}: closed_candidates={} closed={} discard_candidates={} discarded={} failed={} skipped={} [{skip_detail}]\n",
+        "{mode}: closed_candidates={} closed={} discard_candidates={} discarded={} detach_candidates={} detached={} failed={} skipped={} [{skip_detail}]\n",
         plan.candidates.len(),
         closed,
         orphans.candidates.len() + duplicates.len(),
         discarded,
+        foreign_refs.len(),
+        detached,
         failed,
         plan.skipped.len(),
     ));
@@ -1828,6 +1878,29 @@ pub(super) fn ensure_workspace_for_agent(
                         canonical_id = %canonical_id,
                         healed = ?healed,
                         "workspace.ensure detached same-container duplicate claim attachments (Issue #3684)"
+                    );
+                }
+                // Issue #4465 AC-2: a container ref held by a Work other than
+                // its canonical owner is accretion from branch/worktree reuse,
+                // not an authority conflict — `canonical_work_id` already
+                // names the single rightful owner. Detach the ref so the
+                // container resolves, instead of refusing the session forever.
+                // #3684's claim heal does not reach this: the stale Work keeps
+                // its own container, so it is never a whole-Work duplicate.
+                let detached = gwt_core::workspace_projection::detach_foreign_container_refs_for_work_event_root(
+                    &recovery.project_state_root,
+                    &recovery.work_event_root,
+                    &canonical_id,
+                    &[],
+                    |container| workspace_execution_container_matches_recovery(container, &recovery),
+                )
+                .map_err(core_error)?;
+                if !detached.is_empty() {
+                    tracing::info!(
+                        session_id = %input.agent_session,
+                        canonical_id = %canonical_id,
+                        detached = ?detached,
+                        "workspace.ensure detached foreign execution container refs (Issue #4465)"
                     );
                 }
             }
@@ -2389,11 +2462,28 @@ fn validate_workspace_ensure_recovery_state(
         })
         .map(|other| other.id.as_str())
         .collect::<Vec<_>>();
-    if !conflicting_work_ids.is_empty() {
+    // Issue #4465 AC-2: on the Host these refs are accretion from branch or
+    // worktree reuse, not an authority conflict — the canonical Work above is
+    // incomplete and holds this container exactly once, so `canonical_work_id`
+    // already names the single rightful owner. The Host arm detaches the
+    // foreign refs before its mutation transaction, so the session recovers
+    // instead of staying fail-closed forever. Docker never bootstraps and
+    // cannot repair state, so it still refuses.
+    if !conflicting_work_ids.is_empty() && policy == WorkspaceEnsurePolicy::DockerExistingOnly {
+        // AC-5 / AC-6' / AC-9: name the Works to repair, the operation that
+        // repairs them, and a route that exists. The previous text named
+        // `workspace.prune`, which has never been an operation — #4396 and
+        // #4465 both burned agents on that dead end.
         return Err(GwtError::Other(format!(
-            "canonical execution container for Session {} is ambiguous across Works: {}; these share the container of canonical Work {} — run workspace.prune to review and discard stale same-container duplicates (Issue #3684)",
+            "canonical execution container for Session {} is ambiguous across Works: {}; these hold a container ref owned by canonical Work {}. Detach the stale refs with workspace.work_prune params.ids=[{}] (dry-run by default; pass params.dry_run=false to apply), then retry workspace.ensure. To inspect first, run workspace.candidates; to attach explicitly without repairing, run workspace.join params.workspace_id=\"{}\" (Issue #3684, #4465)",
             input.agent_session,
             conflicting_work_ids.join(", "),
+            canonical_id,
+            conflicting_work_ids
+                .iter()
+                .map(|id| format!("\"{id}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
             canonical_id,
         )));
     }
@@ -3364,9 +3454,15 @@ pub(crate) struct SameContainerDuplicateWork {
 /// Issue #3684 AC-3: detect same-container duplicates within `works`.
 /// Fail-closed: a Work is a candidate only when every one of its containers
 /// resolves to one canonical id, that id differs from the Work's own id, and
-/// the canonical Work itself exists in `works` and is incomplete.
+/// the canonical Work itself exists and is incomplete.
+///
+/// Issue #4465: the canonical owner is looked up in `universe`, not in
+/// `works`. Scoping a prune to the stale Work alone used to remove its
+/// canonical owner from the search and silently yield zero candidates, so the
+/// operation was only usable against every Work on the machine at once.
 pub(crate) fn classify_same_container_duplicate_works<F>(
     works: &[WorkItem],
+    universe: &[WorkItem],
     canonical_id_for: F,
 ) -> Vec<SameContainerDuplicateWork>
 where
@@ -3387,7 +3483,7 @@ where
         if canonical_id == work.id {
             continue;
         }
-        if !works
+        if !universe
             .iter()
             .any(|other| other.id == canonical_id && other.is_incomplete())
         {
@@ -3398,6 +3494,65 @@ where
             canonical_id,
             title: work.title.clone(),
         });
+    }
+    candidates
+}
+
+/// One accreted execution container ref: `work_id` holds a container whose
+/// canonical owner is a different, still-incomplete Work.
+pub(crate) struct ForeignContainerRef {
+    pub(crate) work_id: String,
+    pub(crate) canonical_id: String,
+    pub(crate) container: WorkspaceExecutionContainerRef,
+    pub(crate) title: String,
+}
+
+/// Issue #4465 AC-3': detect accreted container refs — the shape
+/// [`classify_same_container_duplicate_works`] cannot see.
+///
+/// A Work that keeps its own container and additionally holds one owned by
+/// another Work is not a whole-Work duplicate, so the #3684 classifier skips
+/// it; but it is exactly what makes `workspace.ensure` ambiguous when a branch
+/// or worktree is reused. The repair is per-ref, so the owner Issue's state is
+/// irrelevant — nothing is closed or discarded, which is why `owner_open` (170
+/// Works when measured on 2026-09-16) is no longer an obstacle.
+///
+/// Fail-closed: a ref is a candidate only when it resolves to a canonical id
+/// that is not the holder's own and names a Work that exists in `universe` and
+/// is incomplete.
+pub(crate) fn classify_foreign_container_refs<F>(
+    works: &[WorkItem],
+    universe: &[WorkItem],
+    canonical_id_for: F,
+) -> Vec<ForeignContainerRef>
+where
+    F: Fn(&WorkspaceExecutionContainerRef) -> Option<String>,
+{
+    let mut candidates = Vec::new();
+    for work in works {
+        if work.is_terminal() {
+            continue;
+        }
+        for container in &work.execution_containers {
+            let Some(canonical_id) = canonical_id_for(container) else {
+                continue;
+            };
+            if canonical_id == work.id {
+                continue;
+            }
+            if !universe
+                .iter()
+                .any(|other| other.id == canonical_id && other.is_incomplete())
+            {
+                continue;
+            }
+            candidates.push(ForeignContainerRef {
+                work_id: work.id.clone(),
+                canonical_id,
+                container: container.clone(),
+                title: work.title.clone(),
+            });
+        }
     }
     candidates
 }
@@ -8474,6 +8629,10 @@ pub(crate) mod tests {
         assert!(!paused.is_terminal(), "Pause remains resumable history");
     }
 
+    /// Issue #4465 narrowed this boundary: a shadow that holds the *current*
+    /// Session is still a double attach and stays fail-closed, but a shadow
+    /// left behind by a historical Session only holds an accreted container
+    /// ref, and the Host detaches it instead of blocking the Session forever.
     #[test]
     fn workspace_ensure_rejects_live_or_current_session_shadow_when_canonical_work_exists() {
         let _guard = env_guard();
@@ -8542,7 +8701,7 @@ pub(crate) mod tests {
             let paths = workspace_recovery_state_paths(&project_root, &worktree);
             let before = workspace_recovery_state_bytes(&paths);
 
-            let error = ensure_workspace_for_agent(
+            let result = ensure_workspace_for_agent(
                 &worktree,
                 WorkspaceEnsureInput {
                     agent_session: session_id.to_string(),
@@ -8553,22 +8712,49 @@ pub(crate) mod tests {
                     topic: None,
                     boundary: None,
                 },
-            )
-            .expect_err("live or current-Session shadow must remain fail-closed");
+            );
 
-            let message = error.to_string();
+            if shadow_session == session_id {
+                let error = result.expect_err("a current-Session shadow must remain fail-closed");
+                let message = error.to_string();
+                assert!(
+                    message.contains("ambiguous") || message.contains("noncanonical Work"),
+                    "{label}: {error}"
+                );
+                assert!(
+                    message.contains(&format!("work-{label}-shadow")),
+                    "{label}: refusal must identify the conflicting Work: {error}"
+                );
+                assert_eq!(
+                    workspace_recovery_state_bytes(&paths),
+                    before,
+                    "{label} refusal must be zero-mutation"
+                );
+                continue;
+            }
+
+            // Issue #4465 AC-2: a historical Session's shadow is accretion.
+            result.unwrap_or_else(|error| {
+                panic!("{label}: a foreign shadow must not block workspace.ensure: {error}")
+            });
+            let shadow = load_workspace_work_items(&project_root)
+                .expect("load WorkItems")
+                .expect("WorkItems")
+                .work_items
+                .into_iter()
+                .find(|item| item.id == format!("work-{label}-shadow"))
+                .expect("shadow item");
             assert!(
-                message.contains("ambiguous") || message.contains("noncanonical Work"),
-                "{label}: {error}"
+                shadow.execution_containers.is_empty(),
+                "{label}: the accreted container ref must be detached: {:?}",
+                shadow.execution_containers
             );
             assert!(
-                message.contains(&format!("work-{label}-shadow")),
-                "{label}: refusal must identify the conflicting Work: {error}"
-            );
-            assert_eq!(
-                workspace_recovery_state_bytes(&paths),
-                before,
-                "{label} refusal must be zero-mutation"
+                shadow
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == shadow_session),
+                "{label}: the historical Session's own attach must be preserved"
             );
         }
     }
@@ -8629,7 +8815,7 @@ pub(crate) mod tests {
             let paths = workspace_recovery_state_paths(&project_root, &worktree);
             let before = workspace_recovery_state_bytes(&paths);
 
-            let error = ensure_workspace_for_agent(
+            let result = ensure_workspace_for_agent(
                 &worktree,
                 WorkspaceEnsureInput {
                     agent_session: session_id,
@@ -8640,9 +8826,34 @@ pub(crate) mod tests {
                     topic: None,
                     boundary: None,
                 },
-            )
-            .expect_err("nonhistorical or current-Session shadow must fail closed");
+            );
 
+            if !shadow_is_current {
+                // Issue #4465 AC-2: a historical Session's live shadow holds
+                // an accreted container ref, not competing authority.
+                result.unwrap_or_else(|error| {
+                    panic!("{label}: a foreign shadow must not block workspace.ensure: {error}")
+                });
+                let shadow = load_workspace_work_items(&project_root)
+                    .expect("load WorkItems")
+                    .expect("WorkItems")
+                    .work_items
+                    .into_iter()
+                    .find(|item| item.id == format!("work-{label}-shadow"))
+                    .expect("shadow item");
+                assert!(
+                    shadow.execution_containers.is_empty(),
+                    "{label}: the accreted container ref must be detached: {:?}",
+                    shadow.execution_containers
+                );
+                assert!(
+                    shadow.is_incomplete() && !shadow.discarded,
+                    "{label}: detaching a ref must not terminalize the shadow"
+                );
+                continue;
+            }
+
+            let error = result.expect_err("a current-Session shadow must fail closed");
             assert!(
                 error.to_string().contains(&format!("work-{label}-shadow")),
                 "{label}: {error}"
@@ -10220,7 +10431,7 @@ pub(crate) mod tests {
     /// (the Docker shadow contract), but the refusal must now name the
     /// consolidation path so a blocked agent can recover without guessing.
     #[test]
-    fn workspace_ensure_ambiguous_duplicate_refusal_names_consolidation() {
+    fn workspace_ensure_heals_an_active_same_container_duplicate_on_the_host() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -10243,11 +10454,11 @@ pub(crate) mod tests {
             WorkspaceStatusCategory::Active,
         );
 
-        let error = ensure_workspace_for_agent(
+        ensure_workspace_for_agent(
             &worktree,
             WorkspaceEnsureInput {
                 agent_session: "session-blocked".to_string(),
-                title_summary: "Active duplicate must stay fail-closed".to_string(),
+                title_summary: "Active duplicate must self-heal".to_string(),
                 current_focus: None,
                 spec: None,
                 issue: None,
@@ -10255,12 +10466,24 @@ pub(crate) mod tests {
                 boundary: None,
             },
         )
-        .expect_err("active same-container duplicate must fail closed");
-        let message = error.to_string();
-        assert!(message.contains("work-legacy-dup"), "{message}");
+        .expect("Issue #4465: an active same-container shadow must not block the host path");
+
+        let items = load_workspace_work_items(&project_root)
+            .expect("load work items")
+            .expect("work items");
+        let shadow = items
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-legacy-dup")
+            .expect("shadow item");
         assert!(
-            message.contains("workspace.prune"),
-            "refusal must name the consolidation path: {message}"
+            shadow.execution_containers.is_empty(),
+            "the shadow's only container belonged to the canonical Work: {:?}",
+            shadow.execution_containers
+        );
+        assert!(
+            shadow.is_incomplete() && !shadow.discarded,
+            "detaching a ref never terminalizes the shadow Work"
         );
     }
 
@@ -10307,6 +10530,334 @@ pub(crate) mod tests {
         assert!(
             canonical.is_incomplete() && !canonical.discarded,
             "canonical Work must be kept"
+        );
+    }
+
+    /// Issue #4465: seed the measured accretion shape — a stale Work that
+    /// keeps its own container *and* has picked up the container of a reused
+    /// worktree (`work-work-issue-2359-34a6ca7a` held both `work/issue-2359`
+    /// and `work/issue-4465` on 2026-09-16).
+    fn seed_accreted_foreign_container_work(
+        project_state_root: &Path,
+        worktree: &Path,
+        work_id: &str,
+        session_id: &str,
+    ) {
+        let mut own = WorkEvent::new(WorkEventKind::Start, work_id, Utc::now());
+        own.title = Some("Stale Work with its own container".to_string());
+        own.status_category = Some(WorkspaceStatusCategory::Active);
+        own.owner = Some("Issue #2359".to_string());
+        own.agent_session_id = Some(session_id.to_string());
+        own.agent_id = Some("codex".to_string());
+        own.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-2359".to_string()),
+            worktree_path: Some(PathBuf::from("/nonexistent/work/issue-2359")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        record_recovery_work_event(project_state_root, worktree, own);
+
+        let canonical_worktree = dunce::canonicalize(worktree).expect("canonical worktree");
+        let mut accreted = WorkEvent::new(WorkEventKind::Update, work_id, Utc::now());
+        accreted.agent_session_id = Some(session_id.to_string());
+        accreted.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/20260601-0934".to_string()),
+            worktree_path: Some(canonical_worktree),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        record_recovery_work_event(project_state_root, worktree, accreted);
+    }
+
+    /// Issue #4465 AC-2: `workspace.ensure` resolves the canonical container
+    /// instead of refusing. `canonical_work_id` already names the single
+    /// rightful owner, so a foreign ref is accretion to detach — not an
+    /// authority conflict. The stale Work keeps its own container and stays
+    /// incomplete.
+    #[test]
+    fn workspace_ensure_detaches_accreted_foreign_container_ref_instead_of_refusing() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-4465");
+        write_bound_projectionless_session("session-blocked", &worktree, &project_root, 4465);
+        let canonical_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            "session-blocked",
+            Some("Issue #4465"),
+            "codex",
+        );
+        seed_accreted_foreign_container_work(
+            &project_root,
+            &worktree,
+            "work-work-issue-2359-stale",
+            "session-old",
+        );
+
+        ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: "session-blocked".to_string(),
+                title_summary: "Accreted container ref must self-heal".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("an accreted foreign container ref must not block workspace.ensure");
+
+        let items = load_workspace_work_items(&project_root)
+            .expect("load work items")
+            .expect("work items");
+        let stale = items
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-work-issue-2359-stale")
+            .expect("stale item");
+        assert_eq!(
+            stale.execution_containers.len(),
+            1,
+            "only the accreted ref is detached: {:?}",
+            stale.execution_containers
+        );
+        assert_eq!(
+            stale.execution_containers[0].branch.as_deref(),
+            Some("work/issue-2359"),
+            "the stale Work keeps its own container"
+        );
+        assert!(
+            stale.is_incomplete() && !stale.discarded,
+            "self-heal must never terminalize the stale Work"
+        );
+        let canonical = items
+            .work_items
+            .iter()
+            .find(|item| item.id == canonical_id)
+            .expect("canonical item");
+        assert!(
+            canonical
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == "session-blocked"),
+            "the session stays attached to its canonical Work"
+        );
+    }
+
+    /// Issue #4465 AC-5 / AC-6' / AC-9: where the refusal survives (Docker
+    /// never bootstraps, so it cannot self-heal), it must name an operation
+    /// that exists and a route that actually clears the symptom. The old text
+    /// named `workspace.prune`, which has never existed — #4396 and #4465 both
+    /// lost agents to that dead end.
+    #[test]
+    fn workspace_ensure_ambiguous_refusal_names_operations_that_exist() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let session_id = "session-docker-ambiguous";
+        write_docker_session_for_owner(
+            session_id,
+            &repo,
+            crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            3412,
+        );
+        let work_id =
+            seed_exact_workspace_work(&repo, &repo, session_id, Some("Issue #3412"), "codex");
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        projection.owner = Some("Issue #3412".to_string());
+        let mut agent = assigned_agent_with_window(session_id, "window-docker", &repo);
+        agent.workspace_id = Some(work_id.clone());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save Docker assignment");
+        seed_workspace_container_shadow(
+            &repo,
+            &repo,
+            "work-legacy-dup",
+            "historical-session",
+            WorkspaceStatusCategory::Active,
+        );
+
+        let error = ensure_workspace_for_agent(
+            &repo,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Refusal must be actionable".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect_err("a Docker same-container duplicate must fail closed");
+        let message = error.to_string();
+
+        assert!(message.contains("work-legacy-dup"), "{message}");
+        assert!(message.contains(&work_id), "{message}");
+        assert!(
+            !message.contains("workspace.prune"),
+            "the refusal must not name the nonexistent workspace.prune: {message}"
+        );
+        for operation in [
+            "workspace.work_prune",
+            "workspace.candidates",
+            "workspace.join",
+        ] {
+            assert!(
+                message.contains(operation),
+                "refusal must name {operation}: {message}"
+            );
+        }
+    }
+
+    /// Issue #4465 AC-3': the accretion shape must be a prune candidate. The
+    /// #3684 classifier requires *every* container to be foreign, so a stale
+    /// Work that kept its own container escaped it — which is why the measured
+    /// `owner_open=170` backlog never shrank.
+    #[test]
+    fn run_work_prune_detaches_accreted_foreign_container_ref() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-4465");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let canonical_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            "session-live",
+            Some("Issue #4465"),
+            "codex",
+        );
+        seed_accreted_foreign_container_work(
+            &project_root,
+            &worktree,
+            "work-work-issue-2359-stale",
+            "session-old",
+        );
+
+        let mut out = String::new();
+        let code = run_work_prune(&project_root, true, &[], &mut out).expect("prune dry-run");
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("detach work-work-issue-2359-stale"),
+            "dry-run must propose detaching the accreted ref: {out}"
+        );
+        assert!(out.contains(&canonical_id), "{out}");
+        let unchanged = load_workspace_work_items(&project_root)
+            .expect("load work items")
+            .expect("work items");
+        assert_eq!(
+            unchanged
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-work-issue-2359-stale")
+                .expect("stale item")
+                .execution_containers
+                .len(),
+            2,
+            "dry-run must not mutate"
+        );
+
+        let mut out = String::new();
+        let code = run_work_prune(&project_root, false, &[], &mut out).expect("prune apply");
+        assert_eq!(code, 0, "{out}");
+        let items = load_workspace_work_items(&project_root)
+            .expect("load work items")
+            .expect("work items");
+        let stale = items
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-work-issue-2359-stale")
+            .expect("stale item");
+        assert_eq!(
+            stale.execution_containers.len(),
+            1,
+            "apply must detach exactly the accreted ref: {:?}",
+            stale.execution_containers
+        );
+        assert!(
+            stale.is_incomplete() && !stale.discarded,
+            "a detach never terminalizes the Work, so an open owner is no obstacle"
+        );
+    }
+
+    /// Issue #4465 AC-4'': scoping the prune to one Work id must actually work.
+    /// The `ids` filter used to be applied before canonical resolution, so
+    /// naming only the stale Work silently produced zero candidates — the
+    /// caller then had to run the whole machine (1100+ Works) or nothing.
+    #[test]
+    fn run_work_prune_ids_scope_resolves_the_canonical_owner_outside_the_scope() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-4465");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            "session-live",
+            Some("Issue #4465"),
+            "codex",
+        );
+        seed_accreted_foreign_container_work(
+            &project_root,
+            &worktree,
+            "work-work-issue-2359-stale",
+            "session-old",
+        );
+        seed_accreted_foreign_container_work(
+            &project_root,
+            &worktree,
+            "work-work-issue-4029-stale",
+            "session-older",
+        );
+
+        let mut out = String::new();
+        let code = run_work_prune(
+            &project_root,
+            false,
+            &["work-work-issue-2359-stale".to_string()],
+            &mut out,
+        )
+        .expect("scoped prune");
+        assert_eq!(code, 0, "{out}");
+
+        let items = load_workspace_work_items(&project_root)
+            .expect("load work items")
+            .expect("work items");
+        assert_eq!(
+            items
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-work-issue-2359-stale")
+                .expect("scoped item")
+                .execution_containers
+                .len(),
+            1,
+            "the named Work is repaired"
+        );
+        assert_eq!(
+            items
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-work-issue-4029-stale")
+                .expect("out-of-scope item")
+                .execution_containers
+                .len(),
+            2,
+            "a Work outside the scope must be untouched"
         );
     }
 }

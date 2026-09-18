@@ -227,6 +227,37 @@ pub enum ContinueWorkOutcomeKind {
     Failed,
 }
 
+/// Public Recovery Center state. This deliberately mirrors only the three
+/// user-facing lifecycle states and never carries durable authority details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCenterItemState {
+    Pending,
+    Acknowledged,
+    Conflicted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCenterLoadStatus {
+    Ready,
+    Error,
+}
+
+/// Allowlisted Recovery Center row. `action_handle` is process-local and
+/// opaque; the remaining fields are presentation data derived from the
+/// sanitized Board payload already accepted by RecoveryStore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveryCenterItemView {
+    pub action_handle: String,
+    pub state: RecoveryCenterItemState,
+    pub worktree_form: gwt_core::coordination::BoardWorktreeForm,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub summary: String,
+    pub updated_at: String,
+}
+
 /// SPEC #1921 Phase 86 (#3813): wire shape of the agent process-tree
 /// resource policy shared by `update_system_settings` and the
 /// `system_settings` / `system_settings_updated` replies. Numeric `null`
@@ -295,6 +326,18 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    /// Explicit, client-scoped Recovery Center refresh. Durable identities are
+    /// discovered from the active project and never accepted from the client.
+    LoadRecoveryCenter {
+        request_id: String,
+    },
+    /// Resolve one process-local row handle. Only acknowledged rows may yield
+    /// a public Board entry id.
+    OpenRecoveryCenterBoardEntry {
+        request_id: String,
+        generation: u64,
+        action_handle: String,
+    },
     /// Toggle Claude account-usage collection (SPEC-2970 FR-009).
     SetClaudeAccountUsageEnabled {
         enabled: bool,
@@ -431,6 +474,12 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         request_id: Option<String>,
+    },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
     },
     /// SPEC-2356 安心 Addendum (FR-041): stop the window's agent runtime (kill
     /// the PTY through the existing stop path) but KEEP the window and its
@@ -639,12 +688,35 @@ pub enum FrontendEvent {
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: frontend-generated id for this cleanup run, so a
+        /// client that reconnects mid-cleanup can re-sync the operation it
+        /// started. `None` only for clients predating the field.
+        #[serde(default)]
+        operation_id: Option<String>,
     },
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: see [`FrontendEvent::RunBranchCleanup::operation_id`].
+        #[serde(default)]
+        operation_id: Option<String>,
+    },
+    /// Issue #4433: a reconnected client asks for the current state of the
+    /// cleanup operation it is still showing as running. The backend replies
+    /// with the latest [`BackendEvent::BranchCleanupProgress`] or
+    /// [`BackendEvent::BranchCleanupResult`], or with nothing when the
+    /// operation is unknown.
+    SyncBranchCleanup {
+        id: String,
+        operation_id: String,
+    },
+    /// Issue #4433: the client consumed the operation's result, so the backend
+    /// can drop the snapshot instead of replaying it into the next cleanup.
+    ClearBranchCleanupStatus {
+        id: String,
+        operation_id: String,
     },
     /// SPEC-1939 US-5: trigger a per-cell index rebuild for
     /// `(project_root, scope, worktree_hash?)`. The backend funnels this
@@ -1734,6 +1806,18 @@ pub enum BackendEvent {
     WindowList {
         windows: Vec<PersistedWindowState>,
     },
+    RecoveryCenterState {
+        request_id: String,
+        generation: u64,
+        status: RecoveryCenterLoadStatus,
+        items: Vec<RecoveryCenterItemView>,
+    },
+    RecoveryCenterBoardEntry {
+        request_id: String,
+        generation: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        board_entry_id: Option<String>,
+    },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
     /// types directly.
@@ -2073,10 +2157,17 @@ pub enum BackendEvent {
     },
     BranchCleanupResult {
         id: String,
+        /// Issue #4433: identifies the cleanup run this result belongs to so a
+        /// reconnected client can drop a result from a superseded run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchCleanupProgress {
         id: String,
+        /// Issue #4433: see [`BackendEvent::BranchCleanupResult::operation_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         branch: String,
         execution_branch: Option<String>,
         index: usize,
@@ -2541,6 +2632,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "active_work_projection_patch",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "recovery_center_state",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "recovery_center_board_entry",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "window_list",
@@ -3042,6 +3143,8 @@ impl BackendEvent {
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::RecoveryCenterState { .. } => "recovery_center_state",
+            BackendEvent::RecoveryCenterBoardEntry { .. } => "recovery_center_board_entry",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
@@ -3213,7 +3316,8 @@ mod tests {
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
         IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
+        ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
+        RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -3381,6 +3485,25 @@ mod tests {
         assert_eq!(
             policy.backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn recover_restored_window_request_preserves_expected_session() {
+        let value = serde_json::json!({
+            "kind": "recover_restored_window",
+            "id": "tab-1::agent-1",
+            "session_id": "restored-session",
+            "child_pid": 123,
+            "child_started_at": 456
+        });
+        serde_json::from_value::<FrontendEvent>(value).expect("restored-window recovery request");
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": "tab-1::agent-1"
+            }))
+            .is_err(),
+            "recovery requires an expected Session identity"
         );
     }
 
@@ -5453,6 +5576,87 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "ui_trace_error");
         assert_eq!(value["message"], "trace payload missing entries");
+    }
+
+    #[test]
+    fn recovery_center_frontend_events_carry_only_correlation_and_opaque_handles() {
+        let load = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "load_recovery_center",
+            "request_id": "request-1"
+        }))
+        .expect("deserialize recovery center load");
+        assert!(matches!(
+            load,
+            FrontendEvent::LoadRecoveryCenter { request_id } if request_id == "request-1"
+        ));
+
+        let open = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "open_recovery_center_board_entry",
+            "request_id": "request-2",
+            "generation": 7,
+            "action_handle": "opaque-row-handle"
+        }))
+        .expect("deserialize recovery center Board action");
+        assert!(matches!(
+            open,
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id,
+                generation: 7,
+                action_handle,
+            } if request_id == "request-2" && action_handle == "opaque-row-handle"
+        ));
+    }
+
+    #[test]
+    fn recovery_center_backend_projection_is_public_safe_and_uses_canonical_facets() {
+        let event = BackendEvent::RecoveryCenterState {
+            request_id: "request-1".to_string(),
+            generation: 3,
+            status: RecoveryCenterLoadStatus::Ready,
+            items: vec![RecoveryCenterItemView {
+                action_handle: "opaque-row-handle".to_string(),
+                state: RecoveryCenterItemState::Acknowledged,
+                worktree_form: gwt_core::coordination::BoardWorktreeForm::BranchBacked,
+                title: Some("Delivery recovered".to_string()),
+                summary: "Public Board summary".to_string(),
+                updated_at: "2026-08-10T00:00:00Z".to_string(),
+            }],
+        };
+
+        let value = serde_json::to_value(event).expect("serialize recovery center state");
+        assert_eq!(value["kind"], "recovery_center_state");
+        assert_eq!(value["status"], "ready");
+        assert_eq!(value["items"][0]["state"], "acknowledged");
+        assert_eq!(value["items"][0]["worktree_form"], "branch-backed");
+        assert_eq!(value["items"][0]["action_handle"], "opaque-row-handle");
+        let encoded = serde_json::to_string(&value).expect("encode projection");
+        for forbidden in [
+            "session_id",
+            "project_root",
+            "recovery_id",
+            "intent_id",
+            "provider_receipt",
+            "payload_digest",
+            "private_error",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "Recovery Center wire projection leaked private field {forbidden}: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_center_board_action_returns_only_public_board_entry_identity() {
+        let event = BackendEvent::RecoveryCenterBoardEntry {
+            request_id: "request-2".to_string(),
+            generation: 3,
+            board_entry_id: Some("public-board-entry".to_string()),
+        };
+        let value = serde_json::to_value(event).expect("serialize recovery center action");
+        assert_eq!(value["kind"], "recovery_center_board_entry");
+        assert_eq!(value["board_entry_id"], "public-board-entry");
+        assert_eq!(value.as_object().expect("object").len(), 4);
     }
 
     // SPEC-2356 安心 Addendum (FR-041): StopWindow is a distinct kill-switch

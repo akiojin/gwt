@@ -2237,6 +2237,8 @@ impl AppRuntime {
     /// SPEC-3431 FR-026: the launch config for a fresh PM spawn.
     ///
     /// Pure so the resolved agent/model can be asserted without spawning.
+    /// The canonical worktree remains the config and Session identity; the
+    /// launch worker selects the separate PM runtime as the provider's cwd.
     /// `suppress_execution_control` is set because the PM is a conversational
     /// role, not an execution-controlled implementation session.
     ///
