@@ -29198,6 +29198,35 @@ exit 1
             .unwrap();
             assert_eq!(adopt_code, 0, "{adopt_out}");
 
+            let adopted = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-handoff.toml"),
+            )
+            .unwrap();
+            let now = chrono::Utc::now();
+            let mut work = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Start,
+                "adopted-delivery-work",
+                now,
+            );
+            work.owner = Some("SPEC-3248".to_string());
+            work.agent_session_id = Some(adopted.id);
+            work.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some(adopted.branch),
+                    worktree_path: Some(adopted.worktree_path),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let mut works = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+            works.apply_event(work);
+            gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path()),
+                &works,
+            )
+            .unwrap();
+
             let commands = vec!["git --version".to_string()];
             let (plan_code, plan_out) = run_collect(
                 &mut env,
