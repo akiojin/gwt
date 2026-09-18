@@ -51,7 +51,7 @@ pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-c
 /// silently rewrite this independently hashed record.
 pub const EXECUTION_GENERATION_POINTER_STATE_RELATIVE: &str =
     ".gwt/skill-state/execution-generation-pointer.json";
-const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
+pub(crate) const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
 const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
@@ -2335,6 +2335,9 @@ pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool 
             ) | (
                 SuccessorPredecessorStatus::Completed,
                 MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+            ) | (
+                SuccessorPredecessorStatus::Active,
+                CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
             )
         )
 }
@@ -2945,7 +2948,7 @@ pub struct OwnerExecutionDiagnosis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_worktree: Option<String>,
     /// Exact runtime evidence for the holder: `live`, `terminal`, `defunct`,
-    /// `host_dead`, `absent`, `unknown`, or `not_evaluated`.
+    /// `host_dead`, `child_exited`, `absent`, `unknown`, or `not_evaluated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_runtime: Option<String>,
     /// Whether the generation reaper is allowed to release this generation as
@@ -7328,6 +7331,9 @@ pub fn prepared_owner_launch_successor_for_predecessor(
         .filter(|attempt| {
             attempt.status == ContinuationAttemptStatus::Prepared
                 && is_owner_launch_successor_attempt(attempt)
+                // Concurrent launches are independent requests, not a replay
+                // of the terminal predecessor's manual launch.
+                && attempt.predecessor_status != SuccessorPredecessorStatus::Active
                 && attempt.predecessor.generation_id == current.identity.generation_id
         });
     let candidate = candidates.next().cloned();
@@ -9929,8 +9935,18 @@ fn update_exact_recovery_session_with_publisher<T>(
         },
     ) {
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated((value, binding))) => {
-            if let Some(publisher) = publisher.as_mut() {
-                publisher.publish(binding.expect("Host adoption retains its Session binding"));
+            // Issue #4443 AC-10: an unbound Session here is a refusal, not an
+            // invariant violation. Panicking crossed the `spawn_blocking`
+            // boundary and the adoption handler answered `500 code=internal`.
+            match (publisher.as_mut(), binding) {
+                (Some(publisher), Some(binding)) => publisher.publish(binding),
+                (Some(_), None) => {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "Host adoption cannot publish authority: the durable Session carries no execution binding; run JSON operation `execution.continue` to bind canonical authority first",
+                    ))
+                }
+                (None, _) => {}
             }
             Ok(value)
         }
@@ -10764,6 +10780,49 @@ pub fn settle(
     })
 }
 
+/// Identity of the Session holding a worktree's execution control record when
+/// the caller is not that Session (Issue #4454).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignExecutionRecordHolder {
+    pub holder_session_id: String,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+}
+
+/// Prove that `session_id` holds no execution authority over this worktree's
+/// Work, and name the Session that does (Issue #4454).
+///
+/// Stop gates use this to tell an orphan window from an authority holder
+/// before demanding a settlement. Every refusal path stays conservative: a
+/// missing record (never launched, so the settlement operations accept the
+/// caller), a failed integrity check (the execution control gate owns that
+/// case and blocks first), and a concurrent generation owned by `session_id`
+/// all return `None`. A Session that might hold authority is therefore never
+/// mistaken for an orphan.
+pub(crate) fn foreign_record_holder(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<ForeignExecutionRecordHolder>> {
+    let Some(flat) = load(worktree)? else {
+        return Ok(None);
+    };
+    if !integrity_ok(&flat) || flat.primary_session_id == session_id {
+        return Ok(None);
+    }
+    let owner = ExecutionOwnerKey {
+        kind: flat.owner_kind,
+        number: flat.owner_number,
+    };
+    if concurrent_generation_record_for_session(worktree, owner, session_id)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(ForeignExecutionRecordHolder {
+        holder_session_id: flat.primary_session_id,
+        owner_kind: flat.owner_kind,
+        owner_number: flat.owner_number,
+    }))
+}
+
 /// SPEC #3590 FR-009: the execution projection a Session owns when the flat
 /// one names a concurrent Session instead.
 ///
@@ -11533,6 +11592,11 @@ pub struct ExecutionDiagnosisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_probes: Vec<crate::cli::governance::RecoveryProbe>,
     pub available_recoveries: Vec<String>,
+    /// Machine-readable guidance when `available_recoveries` cannot help this
+    /// Session: [`RECOVERY_HINT_FRESH_LAUNCH_REQUIRED`] for a terminal record
+    /// that only a fresh linked-owner launch can proceed from (Issue #4029).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
     pub warnings: Vec<String>,
     /// Issue #4217 FR-002: `manual` or `autonomous` — who started this
     /// session, read from the durable Session the launcher wrote.
@@ -11697,17 +11761,91 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
     "workspace.ensure",
 ];
 
+/// Verification recoveries that `verify.*` accepts only from the Session
+/// holding current verification authority (Issue #4029).
+///
+/// They stay visible to GUI projections, but `execution.status` advertises
+/// them only after the same authority gate `verify.plan` / `verify.run`
+/// enforce has accepted the caller.
+const VERIFICATION_RECOVERY_OPERATIONS: [&str; 2] = ["verify.plan", "verify.run"];
+
+/// Recoveries that act on the execution record itself. When none of them is
+/// advertised for a terminal record, this Session cannot recover the record
+/// and `recovery_hint` names the fresh linked-owner launch instead.
+const EXECUTION_RECORD_RECOVERY_OPERATIONS: [&str; 6] = [
+    "execution.continue",
+    "execution.repair",
+    "execution.adopt",
+    "execution.reopen",
+    "verify.plan",
+    "verify.run",
+];
+
+/// `recovery_hint` value: the record is terminal and no operation-local
+/// recovery is available to this Session; only a fresh linked-owner launch
+/// can proceed (Issue #4029 AC-2).
+pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
+
+/// Issue #4443 AC-2: the gwtd operations a Host refusal may name to an agent.
+///
+/// A refusal that reaches an agent over the capability bridge carries operation
+/// names from this list and nothing else. Membership is the truthfulness check:
+/// #4396 stalled an agent for over an hour by naming `workspace.prune`, which
+/// does not exist, and free-form refusal prose cannot cross the bridge because
+/// it may carry host-side paths and identifiers.
+///
+/// Ordered so that a name containing another is matched first;
+/// [`recovery_operations_named_in`] then reports the specific operation rather
+/// than the one embedded in it.
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 14] = [
+    "execution.release_prepared",
+    "execution.continue",
+    "execution.status",
+    "execution.repair",
+    "execution.reopen",
+    "execution.adopt",
+    "workspace.ensure",
+    "workspace.update",
+    // Issue #4465: the container-ambiguity refusal names these three. They
+    // were absent, so the one refusal that actually needed a prune route could
+    // not carry it across the bridge and the agent was left guessing.
+    "workspace.work_prune",
+    "workspace.candidates",
+    "workspace.join",
+    "build.abort",
+    "verify.plan",
+    "verify.run",
+];
+
+/// The recovery operations `message` names, deduplicated and ordered as in
+/// [`AGENT_RECOVERY_OPERATIONS`]. Refusals already state their route in prose;
+/// this lifts it into a structured field the agent bridge is allowed to carry.
+#[must_use]
+pub fn recovery_operations_named_in(message: &str) -> Vec<String> {
+    let mut remaining = message.to_string();
+    let mut named = Vec::new();
+    for operation in AGENT_RECOVERY_OPERATIONS {
+        if remaining.contains(operation) {
+            // Blank the match so `execution.continue` is not also reported as
+            // `execution.repair`'s shorter neighbours in a later pass.
+            remaining = remaining.replace(operation, " ");
+            named.push(operation.to_string());
+        }
+    }
+    named
+}
+
 /// Recoveries that need no session identity or execution authority, so naming
 /// one is always truthful (Issue #4074 AC-3).
 ///
 /// `gwt-execute` and `relaunch` are instructions to the human or the Monitor
-/// rather than gwtd operations; `verify.plan` / `verify.run` are accepted from
-/// any session that owns the record, so the enumeration names them only for the
-/// owning caller (Issue #4154). Everything else must be probe-gated — see
-/// [`PROTECTED_RECOVERY_OPERATIONS`].
+/// rather than gwtd operations; `verify.plan` / `verify.run` are named only
+/// for a caller that owns the record (Issue #4154) and are then probe-gated
+/// through the authority they actually enforce (Issue #4029). Everything else
+/// must be probe-gated too — see [`PROTECTED_RECOVERY_OPERATIONS`] and
+/// [`VERIFICATION_RECOVERY_OPERATIONS`].
 #[cfg(test)]
-const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 4] =
-    ["gwt-execute", "relaunch", "verify.plan", "verify.run"];
+const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 2] = ["gwt-execute", "relaunch"];
 
 /// The recoveries a diagnosis names before the probes decide which of them the
 /// caller would actually be allowed to run.
@@ -11831,12 +11969,12 @@ fn autonomous_verification_block_refusal(
         "execution: blocked refused — this is an autonomous launch \
          (launch_route: autonomous), so a missing user or visual verification \
          is not a blocker: nobody is watching by design. Record \
-         `{label} {deferred}` in the PR body, hand off a Draft PR, and settle \
-         this execution normally; the owner sweeps the deferred PRs later. If \
+         `{label} n/a (autonomous)` in the PR body. Run the required automated \
+         verification, including headed E2E for UI changes, hand off a Ready PR \
+         for CI auto-merge, and settle this execution normally. If \
          something else is genuinely blocking you, restate params.reason \
          without the verification clause.\n",
         label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
-        deferred = gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
     ))
 }
 
@@ -11912,6 +12050,7 @@ fn diagnose_with_mode(
         open_obligations: Vec::new(),
         recovery_probes: Vec::new(),
         available_recoveries: vec!["gwt-execute".to_string()],
+        recovery_hint: None,
         warnings: Vec::new(),
         // The route belongs to the session, not to the record, so it is
         // reported even when this worktree carries no Execution Control
@@ -12429,7 +12568,13 @@ fn finalize_recovery_probes(
             probe_execution_repair_for_recovery(worktree, session_id, recovery_context),
             probe_execution_adopt_for_recovery(worktree, caller, recovery_context),
             probe_execution_reopen_for_recovery(worktree, caller, recovery_context),
-            crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            workspace_update_recovery_probe(
+                worktree,
+                &snapshot,
+                session_id,
+                recovery_context,
+                crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            ),
             crate::cli::workspace::probe_workspace_ensure(worktree, &ensure_candidate),
         ]
     } else {
@@ -12446,6 +12591,14 @@ fn finalize_recovery_probes(
         .map(invalid_execution_recovery_scope_probe)
         .collect()
     };
+    let probes = probes
+        .into_iter()
+        .chain(verification_recovery_probes(
+            worktree,
+            session_id,
+            snapshot.ecr_status,
+        ))
+        .collect::<Vec<_>>();
     for probe in &probes {
         snapshot
             .available_recoveries
@@ -12456,8 +12609,176 @@ fn finalize_recovery_probes(
     }
     snapshot.available_recoveries.sort();
     snapshot.available_recoveries.dedup();
+    if snapshot.ecr_status == ExecutionDiagnosisState::Active
+        && snapshot.binding_state == ExecutionBindingState::Bound
+        && snapshot.available_recoveries.is_empty()
+    {
+        if let Some(guidance) = recovery_context
+            .and_then(|context| context.as_ref().ok())
+            .and_then(discarded_canonical_work_guidance)
+        {
+            // This is a human instruction, not an executable recovery operation.
+            // #4074 owns successor Work materialization.
+            snapshot
+                .available_recoveries
+                .push("gwt-execute".to_string());
+            snapshot.warnings.push(guidance);
+        }
+    }
     snapshot.recovery_probes = probes;
+    snapshot.recovery_hint = execution_recovery_hint(&snapshot);
     snapshot
+}
+
+/// The Host refuses `workspace.update` unless the caller's Session holds the
+/// *current Active* execution binding: `active_execution_binding()` is `None`
+/// for a `Prepared` or `Inspection` authority, and
+/// `validate_current_execution_binding_authority` rejects a superseded one.
+/// Both answer `ExecutionBindingMismatch`, which the bridge reports as
+/// `authority_mismatch` at HTTP 409 with no local fallback.
+///
+/// The Work-mutation probe validates Session identity, cwd, repo and Work
+/// resolution but never reads generation currency, so it reported `Available`
+/// for a caller the Host would refuse. Gate its verdict through the same
+/// predicate the Host enforces (Issue #4029 AC-2).
+///
+/// A caller with no durable binding keeps the probe's own verdict: it never
+/// reaches the bound Host path, so its `workspace.update` is not the
+/// advertisement this Issue is about.
+fn workspace_update_recovery_probe(
+    worktree: &Path,
+    snapshot: &ExecutionDiagnosisSnapshot,
+    session_id: Option<&str>,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+    probe: crate::cli::governance::RecoveryProbe,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceCause, GovernanceMetadata, RecoveryProbe};
+
+    if !probe.advertise() {
+        return probe;
+    }
+    let (Some(owner_kind), Some(owner_number)) = (snapshot.owner_kind, snapshot.owner_number)
+    else {
+        return probe;
+    };
+    let (Some(session_id), Some(Ok(recovery_context))) = (session_id, recovery_context) else {
+        return probe;
+    };
+    let Some(binding) = recovery_context.session().execution_binding.as_ref() else {
+        return probe;
+    };
+    let owner = ExecutionOwnerKey {
+        kind: owner_kind,
+        number: owner_number,
+    };
+    // Cloned up front so the refusal builder does not borrow `probe`, which the
+    // authorized arm moves.
+    let governance = probe.governance.clone();
+    let unavailable = move |cause, reason: &str| {
+        RecoveryProbe::unavailable(
+            "workspace.update",
+            GovernanceMetadata {
+                cause: Some(cause),
+                retryable: Some(false),
+                ..governance.clone()
+            },
+            reason,
+        )
+    };
+    match current_active_execution_binding_matches(worktree, owner, session_id, &binding.identity) {
+        Ok(true) => probe,
+        Ok(false) => unavailable(
+            GovernanceCause::Authority,
+            "workspace_update_execution_binding_not_current",
+        ),
+        Err(error) => unavailable(GovernanceCause::Integrity, &error.to_string()),
+    }
+}
+
+/// Probe `verify.plan` / `verify.run` through the exact authority gate the
+/// operations enforce, so `execution.status` never advertises them to a
+/// Session that `verify.*` would refuse (Issue #4029 AC-1).
+///
+/// The verification lane only recovers a Blocked record (fresh derived
+/// evidence feeds `execution.reopen`); every other record state refuses it
+/// as not applicable before any authority lookup runs.
+fn verification_recovery_probes(
+    worktree: &Path,
+    session_id: Option<&str>,
+    ecr_status: ExecutionDiagnosisState,
+) -> Vec<crate::cli::governance::RecoveryProbe> {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    let metadata = |cause| GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        cause,
+        retryable: Some(false),
+        ..GovernanceMetadata::default()
+    };
+    let refusal = match session_id {
+        _ if ecr_status != ExecutionDiagnosisState::Blocked => Some((
+            GovernanceCause::DomainInvalid,
+            "verify_recovery_requires_blocked",
+        )),
+        None => Some((GovernanceCause::ManagedIdentity, "session_id_unavailable")),
+        Some(session_id)
+            if !crate::cli::verification_record::caller_has_verification_authority(
+                worktree, session_id,
+            ) =>
+        {
+            Some((
+                GovernanceCause::Authority,
+                "verify.* requires current verification authority",
+            ))
+        }
+        Some(_) => None,
+    };
+    VERIFICATION_RECOVERY_OPERATIONS
+        .into_iter()
+        .map(|operation| match refusal {
+            Some((cause, reason)) => {
+                RecoveryProbe::unavailable(operation, metadata(Some(cause)), reason)
+            }
+            None => RecoveryProbe::available(operation, metadata(None)),
+        })
+        .collect()
+}
+
+/// A terminal record that advertises no execution-record recovery cannot be
+/// continued from this Session; only a fresh linked-owner launch proceeds
+/// (Issue #4029 AC-2).
+fn execution_recovery_hint(snapshot: &ExecutionDiagnosisSnapshot) -> Option<String> {
+    let recoverable = snapshot
+        .available_recoveries
+        .iter()
+        .any(|operation| EXECUTION_RECORD_RECOVERY_OPERATIONS.contains(&operation.as_str()));
+    (snapshot.binding_state == ExecutionBindingState::Terminal && !recoverable)
+        .then(|| RECOVERY_HINT_FRESH_LAUNCH_REQUIRED.to_string())
+}
+
+fn discarded_canonical_work_guidance(
+    context: &crate::agent_project_state::ExecutionRecoveryContext,
+) -> Option<String> {
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        context.project_state_root(),
+        Some(context.session().branch.as_str()),
+        Some(context.worktree()),
+    )?;
+    let works_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(context.project_state_root());
+    let works =
+        gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path).ok()??;
+    let work = works.work_items.iter().find(|work| work.id == work_id)?;
+    work.discarded.then(|| {
+        format!(
+            "canonical Work {work_id} is Discarded; successor Work materialization is required \
+             (owner #4074). Human action: open Issue #4074 in gwt and select Start Work to \
+             arrange implementation. The current Work cannot recover until that support is available."
+        )
+    })
 }
 
 /// Replace an operation-specific terminal refusal with guidance derived from
@@ -12468,6 +12789,26 @@ pub(crate) fn terminal_recovery_refusal(
     refusal: &str,
 ) -> String {
     let diagnosis = diagnose(invocation_scope, Some(session_id));
+    if diagnosis.ecr_status == ExecutionDiagnosisState::Active
+        && diagnosis.binding_state == ExecutionBindingState::Bound
+        && diagnosis.available_recoveries == ["gwt-execute"]
+    {
+        if let Some(guidance) = crate::agent_project_state::resolve_execution_recovery_context(
+            invocation_scope,
+            session_id,
+        )
+        .ok()
+        .as_ref()
+        .and_then(discarded_canonical_work_guidance)
+        {
+            let refusal = refusal
+                .split_once(
+                    "; run workspace.ensure for this Session before retrying workspace.update",
+                )
+                .map_or(refusal, |(reason, _)| reason);
+            return format!("{refusal}; {guidance}");
+        }
+    }
     if diagnosis.binding_state != ExecutionBindingState::Terminal {
         return refusal.to_string();
     }
@@ -12486,8 +12827,13 @@ pub(crate) fn terminal_recovery_refusal(
         .and_then(|probe| probe.reason.as_deref())
         .map(|reason| format!("; recovery_probes[execution.reopen]={reason}"))
         .unwrap_or_default();
+    let hint = diagnosis
+        .recovery_hint
+        .as_deref()
+        .map(|hint| format!("; recovery_hint={hint}"))
+        .unwrap_or_default();
     format!(
-        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}",
+        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}{hint}",
         ecr_status = match diagnosis.ecr_status {
             ExecutionDiagnosisState::Active => "active",
             ExecutionDiagnosisState::Completed => "completed",
@@ -14957,10 +15303,13 @@ pub(crate) fn adopt_for_authenticated_host(
         &mut out,
         Some(publisher),
     )
-    .map_err(|_| {
+    // Issue #4443 AC-10: the underlying refusal already names the repair route
+    // (`execution.repair`, `verify.plan` ...). Replacing it with a fixed
+    // sentence left the agent with a bare `code=internal` and no way forward.
+    .map_err(|error| {
         AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::Internal,
-            "Host adoption did not complete; inspect execution.status before retrying",
+            format!("Host adoption did not complete: {error}"),
         )
     })?;
     if code != 0 {
@@ -15245,6 +15594,8 @@ mod tests {
                         ) {
                             assert!(
                                 PROTECTED_RECOVERY_OPERATIONS.contains(&operation.as_str())
+                                    || VERIFICATION_RECOVERY_OPERATIONS
+                                        .contains(&operation.as_str())
                                     || SESSION_INDEPENDENT_RECOVERY_OPERATIONS
                                         .contains(&operation.as_str()),
                                 "{state:?}/{binding:?} names `{operation}`, which is neither \
@@ -18516,6 +18867,9 @@ mod tests {
         .unwrap();
 
         let held = diagnose_owner(worktree.path(), owner);
+        // Issue #3712 AC-3: the literal the PM reads for this shape, so a
+        // living GUI Host can never be mistaken for a living agent again.
+        assert_eq!(held.holder_runtime.as_deref(), Some("child_exited"));
         assert!(
             held.reclaimable,
             "a living GUI host does not keep its dead child alive"
@@ -23346,10 +23700,15 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 7);
+            assert_eq!(probes.len(), 9);
             assert!(probes.iter().all(|probe| {
-                probe["state"] == "unavailable"
-                    && probe["reason"] == "execution_recovery_scope_invalid"
+                let operation = probe["operation"].as_str().unwrap_or_default();
+                let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
+                    "verify_recovery_requires_blocked"
+                } else {
+                    "execution_recovery_scope_invalid"
+                };
+                probe["state"] == "unavailable" && probe["reason"] == expected_reason
             }));
         }
 
@@ -23442,7 +23801,8 @@ exit 1
 
             assert_eq!(code, 2, "{out}");
             assert!(out.contains("launch_route: autonomous"), "{out}");
-            assert!(out.contains("deferred (autonomous execution)"), "{out}");
+            assert!(out.contains("n/a (autonomous)"), "{out}");
+            assert!(out.contains("Ready PR"), "{out}");
             assert_eq!(
                 load(repo.path())
                     .expect("load execution record")
@@ -23832,6 +24192,8 @@ exit 1
                     "execution.continue",
                     "execution.reopen",
                     "execution.repair",
+                    "verify.plan",
+                    "verify.run",
                     "workspace.ensure",
                     "workspace.update",
                 ],
@@ -25316,10 +25678,19 @@ exit 1
             );
             assert_eq!(snapshot.verification_state, "missing_record");
             assert_eq!(snapshot.open_obligations, vec!["issue_update"]);
-            assert_eq!(
-                snapshot.available_recoveries,
-                vec!["verify.plan", "verify.run"]
+            // Issue #4029: `sess-status` has no durable Session binding, so
+            // `verify.*` would refuse it and must not be advertised; the
+            // terminal record then points at a fresh launch instead.
+            assert!(
+                snapshot.available_recoveries.is_empty(),
+                "{:?}",
+                snapshot.available_recoveries
             );
+            assert_eq!(
+                snapshot.recovery_hint.as_deref(),
+                Some(RECOVERY_HINT_FRESH_LAUNCH_REQUIRED)
+            );
+            assert_all_operation_local_recovery_probes(&snapshot);
             assert_eq!(
                 snapshot
                     .recovery_probes
@@ -26887,6 +27258,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -26977,6 +27349,7 @@ exit 1
                     CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                         commands: Vec::new(),
                         max_wait_secs: None,
+                        headed_e2e_commands: Vec::new(),
                         user_verification_result: None,
                     }),
                 )
@@ -28793,6 +29166,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
             let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
@@ -28824,6 +29198,35 @@ exit 1
             .unwrap();
             assert_eq!(adopt_code, 0, "{adopt_out}");
 
+            let adopted = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-handoff.toml"),
+            )
+            .unwrap();
+            let now = chrono::Utc::now();
+            let mut work = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Start,
+                "adopted-delivery-work",
+                now,
+            );
+            work.owner = Some("SPEC-3248".to_string());
+            work.agent_session_id = Some(adopted.id);
+            work.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some(adopted.branch),
+                    worktree_path: Some(adopted.worktree_path),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let mut works = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+            works.apply_event(work);
+            gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path()),
+                &works,
+            )
+            .unwrap();
+
             let commands = vec!["git --version".to_string()];
             let (plan_code, plan_out) = run_collect(
                 &mut env,
@@ -28839,6 +29242,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 }),
             )
@@ -28863,7 +29267,7 @@ exit 1
                     base: "develop".to_string(),
                     head: None,
                     title: "fix: restore adopted authority".to_string(),
-                    body: "production-path authority acceptance".to_string(),
+                    body: "production-path authority acceptance\nUser Verification Result: confirmed\n".to_string(),
                     labels: Vec::new(),
                     draft: false,
                 }),
@@ -28935,6 +29339,97 @@ exit 1
             }
         }
 
+        /// Issue #4029 AC-2: the Host refuses `workspace.update` unless the
+        /// caller's Session still holds the *current Active* execution binding
+        /// — `active_execution_binding()` is `None` for a `Prepared` or
+        /// `Inspection` authority, and
+        /// `validate_current_execution_binding_authority` rejects a superseded
+        /// one, both answering `ExecutionBindingMismatch` / `authority_mismatch`
+        /// at HTTP 409. The Work-mutation probe only validates Session identity,
+        /// cwd, repo and Work resolution, so `execution.status` advertised the
+        /// operation to a caller the Host would refuse. Advertisement must track
+        /// the binding predicate the Host enforces, in both directions.
+        #[test]
+        fn status_advertises_workspace_update_only_while_the_caller_holds_the_active_binding() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+
+            crate::cli::trusted_store::init_git_repo_with_origin(repo);
+            save(repo, &active_record("sess-bound")).unwrap();
+            ensure_generation_ledger(repo, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo, owner).unwrap().unwrap();
+            persist_generation_session_binding(repo, owner, "sess-bound", binding);
+            // Only `workspace.ensure` materializes the Work projection the
+            // mutation probe resolves, and it must run while the Session is
+            // still the current binding holder.
+            crate::cli::workspace::ensure_workspace_for_agent(
+                repo,
+                crate::cli::workspace::workspace_ensure_status_candidate("sess-bound"),
+            )
+            .expect("ensure the Work projection for the bound Session");
+
+            let advertised = |status: &serde_json::Value| -> bool {
+                status["available_recoveries"]
+                    .as_array()
+                    .expect("available_recoveries")
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|operation| operation == "workspace.update")
+            };
+
+            let bound = status_snapshot(repo, "sess-bound");
+            assert_eq!(bound["ecr_status"], "active", "{bound:?}");
+            assert!(
+                advertised(&bound),
+                "the Session holding the current Active binding executes \
+                 `workspace.update`, so it must stay advertised: {bound:?}"
+            );
+
+            // A foreign generation takes over the Active authority; the caller's
+            // Session file, branch and Work projection are all untouched, so
+            // every Work-mutation precondition still holds while the Host would
+            // now refuse the call.
+            replace_current_generation_authority(
+                repo,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3249,
+                },
+            );
+
+            let superseded = status_snapshot(repo, "sess-bound");
+            assert_eq!(superseded["ecr_status"], "active", "{superseded:?}");
+            assert!(
+                !advertised(&superseded),
+                "`workspace.update` is refused with `authority_mismatch` once the \
+                 caller no longer holds the Active binding, so it must not be \
+                 advertised: {superseded:?}"
+            );
+            let probe = superseded["recovery_probes"]
+                .as_array()
+                .expect("recovery_probes")
+                .iter()
+                .find(|probe| probe["operation"] == "workspace.update")
+                .expect("workspace.update probe")
+                .clone();
+            assert_eq!(probe["state"], "unavailable", "{probe:?}");
+            assert_eq!(
+                probe["governance"]["cause"], "authority",
+                "the refusal the Host answers is an authority mismatch: {probe:?}"
+            );
+        }
+
         /// Issue #4154 AC-1 / AC-2: `execution.adopt` transfers a settled
         /// Blocked record to the relaunched Session without changing its
         /// lifecycle state, which reconnects the ordinary same-session recovery
@@ -28944,6 +29439,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
             let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
@@ -28990,6 +29486,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 }),
             )

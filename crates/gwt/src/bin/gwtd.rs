@@ -60,6 +60,19 @@ fn main() -> ExitCode {
     // every later `record_*` call a no-op.
     gwt::perf::install_appending_to_established_log_from_settings();
 
+    // PM agent instruction discovery remains in runtime; this short-lived
+    // gateway resolves all operations and legacy cwd-based hooks in its
+    // canonical project checkout. No environment variable can redirect it.
+    if let Some(worktree) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| gwt::pm_registry::pm_worktree_for_runtime_dir(&cwd))
+    {
+        if let Err(error) = std::env::set_current_dir(&worktree) {
+            eprintln!("cannot resolve PM project directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let code = match argv.get(1).map(String::as_str) {
         None => run_json_envelope_cli(&argv),
         Some(_) if is_allowed_argv_exception(&argv) => {
@@ -178,11 +191,25 @@ fn format_workspace_help() -> String {
         "  workspace.update                       Set Work status fields and Agent purpose/focus",
         "  workspace.create | workspace.ensure    Create or ensure a Work assignment",
         "  workspace.join | workspace.candidates  Join/list Work candidates",
+        "  workspace.work_prune                   Repair stale Works: close closed-owner Works,",
+        "                                         discard orphaned placeholders, detach container",
+        "                                         refs owned by another canonical Work",
+        "  workspace.projection_list              List Workspace projections (--stale/--all)",
+        "  workspace.projection_prune             Archive/delete stale Workspace projections",
+        "  workspace.store_consolidate            Move durable Workspace state to the split root",
         "",
         "Key params:",
         "  purpose                                Short Agent/window title purpose",
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
+        "  ids                                    Scope work_prune/projection_prune to these ids",
+        "  dry_run                                Both prune operations default to dry-run;",
+        "                                         pass false to apply",
+        "",
+        "Resolving an ambiguous execution container:",
+        "  1. workspace.candidates                List the Works on this container",
+        "  2. workspace.work_prune {\"ids\":[<stale Work id>]}   Detach the stale ref (dry-run first)",
+        "  3. workspace.join {\"workspace_id\":<canonical Work id>}  Attach explicitly if needed",
         "",
     ]
     .join("\n")
@@ -258,7 +285,7 @@ fn format_issue_help() -> String {
         "",
         "Operations:",
         "  issue.view | issue.comments | issue.linked_prs",
-        "  issue.create | issue.comment",
+        "  issue.create | issue.comment | issue.label",
         "  issue.spec.read | issue.spec.section | issue.spec.edit",
         "  issue.spec.create | issue.spec.list | issue.spec.pull",
         "  issue.spec.repair | issue.spec.rename | issue.spec.audit",
@@ -268,12 +295,16 @@ fn format_issue_help() -> String {
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
-        "  issue.monitor.wait",
+        "  issue.monitor.wait | issue.monitor.wait.invalidate",
         "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
         "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
+        "  action=add|remove, labels               issue.label; remove accepts one label",
+        "  confirm_queue                         Confirm removal of hold",
+        "  confirm_design_gate                   Confirm removal of gwt-spec",
+        "  confirm_auto_merge                    Confirm addition of auto-merge",
         "  structured                             Treat issue.spec body as structured JSON",
         "  replace                                Replace structured SPEC section instead of merging",
         "  all, numbers                           Controls issue.spec.pull",
@@ -289,6 +320,9 @@ fn format_issue_help() -> String {
         "  reason, resume_condition, clear       issue.monitor.wait declares that the",
         "                                        current launch is waiting (stuck detection",
         "                                        pauses, max 3h); clear=true when resumed",
+        "  number, reason, by?                   issue.monitor.wait.invalidate: the PM",
+        "                                        voids a wait whose condition no longer",
+        "                                        holds; stuck detection resumes next scan",
         "  provider, reason                      issue.monitor.quota_hold.clear releases a",
         "                                        provider-wide quota hold (e.g. codex / claude;",
         "                                        any agent id the hold is keyed by)",
@@ -371,7 +405,11 @@ fn format_board_help() -> String {
         "Key params:",
         "  kind, body, title, topics, owners, targets, mentions, parent, broadcast",
         "  resolves                                 Blocked entry id(s) this post closes",
-        "  workspace, all                           board.show filters",
+        "  workspace, all, limit                    board.show filters; latest 20 by default",
+        "  all:true removes the default cap; explicit limit always wins (0 is empty).",
+        "  Provider retention still applies. Unknown board.show params are rejected.",
+        "  Cost: N x serialized entry size + metadata; 20 x 2 KiB is about 40 KiB.",
+        "  No fixed byte cap; all:true can return hundreds of KiB or more.",
         "",
         "Note: board.post does not accept purpose/title_summary; update Agent title",
         "      through workspace.update params.purpose.",
@@ -414,10 +452,21 @@ fn format_index_help() -> String {
         "Operations:",
         "  index.status                            Show index runtime and asset status",
         "  index.rebuild                           Rebuild a specific scope",
+        "  index.repair                            Recover the issues index",
+        "  index.cancel                            Request cancellation of an issues rebuild",
         "",
         "Key params:",
         "  scope                                   all|issues|specs|memory|discussions|board|files|files-docs",
         "                                          JSON also accepts files_docs",
+        "                                          index.repair and index.cancel take issues only",
+        "  wait                                    index.repair only. Default false: submit the",
+        "                                          job to a detached worker and answer at once",
+        "                                          with the collection, the job id and the",
+        "                                          index's own repair state. true blocks until",
+        "                                          the job settles and reports the result.",
+        "",
+        "Notes:",
+        "  - index.repair always answers; follow a submitted job with index.status.",
         "",
     ]
     .join("\n")
@@ -601,7 +650,8 @@ fn format_verify_help() -> String {
         "  minutes (params.ttl_minutes); the holder self-releases when it",
         "  lapses, and a killed holder releases at once.",
         "  A refusal reports holder_kind (verification | index | other) and",
-        "  estimated_remaining_ms (remaining_batches for an index job), and",
+        "  estimated_remaining_ms (remaining_batches: batches left in an index",
+        "  job, commands left in a verify.run), and",
         "  reserves the caller's turn: background index jobs defer to it until",
         "  a retry is granted or the reservation lapses (Issue #4086).",
         "  verify.lease.release with an index job's lease_id answers `yield",
@@ -787,7 +837,7 @@ fn format_update_help() -> String {
 
 fn run_json_envelope_cli(argv: &[String]) -> i32 {
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Some((owner, repo)) = resolve_repo_coordinates() {
+    if let Some((owner, repo)) = resolve_repo_coordinates(&repo_path) {
         let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
         return gwt::cli::dispatch(&mut env, argv);
     }
@@ -840,7 +890,7 @@ fn json_only_argv_message(argv: &[String]) -> String {
     message
 }
 
-fn resolve_repo_coordinates() -> Option<(String, String)> {
+fn resolve_repo_coordinates(repo_path: &std::path::Path) -> Option<(String, String)> {
     // Issue #2054: scan every remote (not just `origin`) and honour
     // `GWT_GITHUB_REPO` / `GWT_REMOTE` overrides so multi-remote repos
     // (local mirror + GitHub under a non-origin name) can still resolve.
@@ -853,7 +903,7 @@ fn resolve_repo_coordinates() -> Option<(String, String)> {
         }
     }
 
-    let remotes = load_remote_pairs();
+    let remotes = load_remote_pairs(repo_path);
 
     if let Some(name) = std::env::var("GWT_REMOTE").ok().filter(|v| !v.is_empty()) {
         if let Some((_, url)) = remotes.iter().find(|(remote_name, _)| remote_name == &name) {
@@ -874,9 +924,10 @@ fn resolve_repo_coordinates() -> Option<(String, String)> {
         .find_map(|(_, url)| parse_github_remote_url(url))
 }
 
-fn load_remote_pairs() -> Vec<(String, String)> {
+fn load_remote_pairs(repo_path: &std::path::Path) -> Vec<(String, String)> {
     let Ok(output) = gwt_core::process::hidden_command("git")
         .args(["remote", "-v"])
+        .current_dir(repo_path)
         .output()
     else {
         return Vec::new();
@@ -926,6 +977,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pm_runtime_remote_discovery_uses_explicit_project_directory() {
+        let project = tempfile::tempdir().unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .arg("init")
+            .arg(project.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fixture/pm-runtime.git"
+            ])
+            .current_dir(project.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert_eq!(
+            load_remote_pairs(project.path()),
+            vec![(
+                "origin".into(),
+                "https://github.com/fixture/pm-runtime.git".into()
+            )]
+        );
+    }
+
+    #[test]
     fn did_you_mean_suggests_search_for_typo() {
         // The motivating misuse: `gwtd serach`-style typos and invented verbs
         // must point at the real `search` family (SPEC-1942 FR-109).
@@ -943,6 +1025,32 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "actions help must mention {expected}, got:\n{help}"
+            );
+        }
+    }
+
+    /// Issue #4465 AC-6'': every workspace operation that exists must be
+    /// discoverable from `gwtd --help workspace`. `workspace.work_prune` and
+    /// the projection operations were absent, so a refusal telling an agent to
+    /// prune had no discoverable route at all — the help, the refusal text and
+    /// four guessed names all missed on 2026-09-16.
+    #[test]
+    fn workspace_family_help_lists_every_workspace_operation() {
+        let help = family_help("workspace").expect("workspace family help");
+        for expected in [
+            "workspace.update",
+            "workspace.create",
+            "workspace.ensure",
+            "workspace.join",
+            "workspace.candidates",
+            "workspace.work_prune",
+            "workspace.projection_list",
+            "workspace.projection_prune",
+            "workspace.store_consolidate",
+        ] {
+            assert!(
+                help.contains(expected),
+                "workspace help must mention {expected}, got:\n{help}"
             );
         }
     }
@@ -1148,6 +1256,9 @@ mod tests {
             // Issue #3844: the only way a waiting agent can tell the monitor it
             // is waiting rather than stuck.
             "issue.monitor.wait",
+            // Issue #4286: the only way the PM can void a wait whose condition
+            // its ruling removed, short of waiting out the 3h cap.
+            "issue.monitor.wait.invalidate",
             // Issue #3923: the only release for a provider-wide quota hold.
             "issue.monitor.quota_hold.list",
             "issue.monitor.quota_hold.clear",

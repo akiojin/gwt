@@ -1111,6 +1111,42 @@ mod store_consolidation {
         fs2::FileExt::unlock(&held).expect("release lock");
     }
 
+    /// Issue #4296: Windows refuses to rename a directory while any process
+    /// holds a handle to a file beneath it, and reports it as a bare
+    /// `os error 5`. A reader that merely has the split store's `works.json`
+    /// open is a busy store, not corrupt input, so the refusal must carry the
+    /// retryable `WriterBusy` code and name the cause the operator can act on.
+    #[cfg(windows)]
+    #[test]
+    fn apply_reports_an_open_handle_under_the_source_store_as_a_busy_writer() {
+        let fixture =
+            SplitStoreFixture::new("https://example.invalid/acme/consolidate-open-handle.git");
+        let plan = plan_store_consolidation(&fixture.layout_root).expect("plan");
+        let held = std::fs::File::open(fixture.orphan_store.join("project-state/works.json"))
+            .expect("hold a reader's handle inside the split store");
+
+        let error = apply_store_consolidation(&fixture.layout_root, &review(&plan), TEST_SESSION)
+            .expect_err("an unmovable split store must fail the migration closed");
+
+        assert_eq!(
+            error.refusal,
+            StoreConsolidationRefusal::WriterBusy,
+            "an open handle under the source store is a busy store: {}",
+            error.detail
+        );
+        assert!(error.refusal.retryable(), "closing the reader clears this");
+        assert!(
+            error.detail.contains("open handle"),
+            "the refusal must name why the move failed: {}",
+            error.detail
+        );
+        assert!(
+            fixture.orphan_store.is_dir(),
+            "a refusal must be zero-mutation"
+        );
+        drop(held);
+    }
+
     /// Issue #3524 (folded into #3606): contention on the canonical store must
     /// be a bounded refusal too. Blocking on `works.lock` would hang the
     /// migration behind whatever writer happens to be running, with the source

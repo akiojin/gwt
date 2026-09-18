@@ -51,6 +51,32 @@ const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
 const CODEX_DIRECTORY_TRUST_PROMPT_REASON: &str =
     "Codex requires directory trust confirmation for the managed worktree";
 
+fn runtime_hook_source_event_profile_label(source_event: Option<&str>) -> &'static str {
+    match source_event {
+        Some("SessionStart") => "session_start",
+        Some("UserPromptSubmit") => "user_prompt_submit",
+        Some("PreToolUse") => "pre_tool_use",
+        Some("PostToolUse") => "post_tool_use",
+        Some("Stop") => "stop",
+        Some("SubagentStart") => "subagent_start",
+        Some("SubagentStop") => "subagent_stop",
+        Some("Notification") => "notification",
+        Some("PermissionRequest") => "permission_request",
+        Some(_) => "other",
+        None => "none",
+    }
+}
+
+fn runtime_hook_composed_state_profile_label(state: WindowProcessStatus) -> &'static str {
+    match state {
+        WindowProcessStatus::Running => "running",
+        WindowProcessStatus::Waiting => "waiting",
+        WindowProcessStatus::Stopped => "stopped",
+        WindowProcessStatus::Error => "error",
+        _ => "other",
+    }
+}
+
 fn marker_is_inside_double_quotes(line: &str, marker_offset: usize) -> bool {
     let mut quoted = false;
     let mut escaped = false;
@@ -133,7 +159,7 @@ pub(super) fn provider_usage_limit_failure(
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        evidence,
+        evidence: evidence.map(Box::new),
     }
 }
 
@@ -206,6 +232,13 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
     // attempt on host contention.
     if gwt_agent::is_codex_shared_state_lock_failure(tail) {
         return Some(gwt_agent::codex_shared_state_lock_detail());
+    }
+    // Issue #4445: an npm shim whose target executable was renamed away by the
+    // provider's auto-update reports a localized shell message and a bare exit
+    // status. The path it could not find is the whole diagnosis, and it is at
+    // the head of the tail, so it is named before truncation can drop it.
+    if let Some(named) = gwt_agent::missing_launcher_binary_detail(tail) {
+        return Some(named);
     }
     let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
         let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
@@ -794,6 +827,7 @@ impl AppRuntime {
         // some other reason and the text is stale.
         let quota_notice = self
             .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
+            .filter(|notice| self.released_provider_quota_notices.get(&id) != Some(notice))
             .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
         match quota_notice.as_ref() {
             Some(notice) => {
@@ -1122,8 +1156,13 @@ impl AppRuntime {
         });
         let Some(notice) = notice else {
             self.provider_quota_candidates.remove(window_id);
+            self.released_provider_quota_notices.remove(window_id);
             return Vec::new();
         };
+        if self.released_provider_quota_notices.get(window_id) == Some(&notice) {
+            return Vec::new();
+        }
+        self.released_provider_quota_notices.remove(window_id);
         let agent_id = self.pane_agent_id(window_id);
         let first_seen = self
             .provider_quota_candidates
@@ -1274,7 +1313,7 @@ impl AppRuntime {
     /// PTY teardown removes the active session before the failure is published,
     /// so the persisted fallback is what keeps the account attributable at the
     /// moment it matters — the same ordering `approval_prompt_provider` uses.
-    fn pane_agent_id(&self, window_id: &str) -> Option<String> {
+    pub(crate) fn pane_agent_id(&self, window_id: &str) -> Option<String> {
         self.active_agent_sessions
             .get(window_id)
             .map(|session| session.agent_id.clone())
@@ -1427,6 +1466,7 @@ impl AppRuntime {
         // fires a hook well inside the settle window.
         self.provider_quota_holds.remove(&window_id);
         self.provider_quota_candidates.remove(&window_id);
+        self.released_provider_quota_notices.remove(&window_id);
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
         if !hook_state_changed && !approval_wait_cleared {
@@ -1474,8 +1514,24 @@ impl AppRuntime {
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
         ) {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            // Issue #4406 AC-4: acknowledge the ended pane from the cached
+            // projection and rebuild off the event loop. Rebuilding here read
+            // the home works.json, every session ledger TOML and one execution
+            // diagnosis per Work row, holding the GUI thread for up to 35,982ms.
+            if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
                 events.push(event);
+            }
+            // Issue #3777 AC-2: the rebuild itself is scheduled off the event
+            // loop, carrying the content-free RuntimeHook profile labels.
+            if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+                self.schedule_runtime_hook_active_work_projection_refresh(
+                    &project_root,
+                    runtime_hook_source_event_profile_label(event.source_event.as_deref()),
+                    runtime_hook_composed_state_profile_label(composed_state),
+                );
+            }
+            if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                self.request_active_work_projection_refresh(project_root);
             }
         }
         if hook_state_changed || effective_before != Some(composed_state) {
@@ -1783,6 +1839,35 @@ mod tests {
     use std::sync::{mpsc, Mutex};
 
     /// Issue #3490 AC-2/AC-3: a Codex pane that died on the shared `~/.codex`
+    /// Issue #4445 AC-2: when the npm shim's target executable is gone the
+    /// operator gets `Process exited with status 1` plus a localized shell
+    /// message, and the path that was missing is only readable by inspecting
+    /// the cache directory. Name it in the detail instead.
+    #[test]
+    fn a_missing_launcher_binary_is_named_in_the_pane_detail() {
+        let missing = r"C:\Users\dev\AppData\Local\npm-cache\_npx\2842f47953679de1\node_modules\.bin\..\@anthropic-ai\claude-code\bin\claude.exe";
+
+        // The shim prints the path first, so a raw tail loses it to truncation
+        // exactly when the screen carries anything else.
+        let scrollback = "x".repeat(super::AGENT_ERROR_TAIL_MAX_CHARS);
+        let detail = super::compose_agent_error_detail(
+            Some("Process exited with status 1".to_string()),
+            Some(&format!(
+                "'\"{missing}\"' \u{306f}\u{3001}\u{5185}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{307e}\u{305f}\u{306f}\u{5916}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{3068}\u{3057}\u{3066}\u{8a8d}\u{8b58}\u{3055}\u{308c}\u{3066}\u{3044}\u{307e}\u{305b}\u{3093}\u{3002}\n{scrollback}"
+            )),
+        )
+        .expect("an errored agent pane always carries a detail");
+
+        assert!(
+            detail.contains(missing),
+            "the pane must name the executable that was not found: {detail}"
+        );
+        assert!(
+            !detail.starts_with("Process exited with status 1"),
+            "a bare exit status is what the operator could not diagnose: {detail}"
+        );
+    }
+
     /// SQLite race must not show the raw provider stack. The same string is the
     /// message the Issue Monitor receives, so it also has to classify as a
     /// transient launch failure — the contention is about the host, not the
