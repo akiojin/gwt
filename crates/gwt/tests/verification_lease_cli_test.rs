@@ -200,6 +200,11 @@ fn legacy_holder_can_still_be_observed_and_released() {
     // kernel lease. The new binary must never spawn a replacement holder.
     let release_path = control.join("release");
     let old_holder = std::thread::spawn(move || {
+        // Waiting for the path is sound only because the release channel is
+        // published by rename (Issue #4360): the file appears already holding
+        // its whole payload. An empty reason is a legitimate value here, so
+        // "non-empty" cannot be the readiness signal — do not weaken the
+        // writer back to a plain `fs::write`.
         let deadline = Instant::now() + Duration::from_secs(10);
         while !release_path.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
