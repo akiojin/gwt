@@ -267,10 +267,13 @@ async fn run_session(
             DaemonFrame::Error { message } => {
                 return Err(format!("subscribe rejected: {message}"));
             }
-            DaemonFrame::Status(_) => {
-                // The daemon does not currently emit Status before
-                // an Ack, but if it ever does we want to ignore it
-                // and keep waiting for the canonical Ack.
+            DaemonFrame::Status(_)
+            | DaemonFrame::VerificationAccepted(_)
+            | DaemonFrame::VerificationFinished(_) => {
+                // The daemon does not currently emit these before an Ack, and
+                // verification frames belong to a different connection
+                // entirely, but if one ever arrives we want to ignore it and
+                // keep waiting for the canonical Ack.
                 continue;
             }
         }
@@ -296,7 +299,10 @@ async fn run_session(
                     DaemonFrame::Event { channel, payload } => {
                         on_event(channel, payload);
                     }
-                    DaemonFrame::Ack | DaemonFrame::Status(_) => {
+                    DaemonFrame::Ack
+                    | DaemonFrame::Status(_)
+                    | DaemonFrame::VerificationAccepted(_)
+                    | DaemonFrame::VerificationFinished(_) => {
                         // ignore stray non-event frames; daemon may emit
                         // them for unrelated control flow.
                     }

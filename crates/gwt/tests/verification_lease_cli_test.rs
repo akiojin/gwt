@@ -27,6 +27,10 @@ fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
     let mut child = command
         .env("HOME", home)
         .env("USERPROFILE", home)
+        // Issue #4409: this suite is about the lease surface, not about where
+        // verification is hosted. Declaring the host keeps the result from
+        // depending on the priority the test runner happened to inherit.
+        .env("GWT_VERIFY_SPAWN_HOST", "inherit")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

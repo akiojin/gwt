@@ -2554,8 +2554,33 @@ fn apply_child_environment_contract(process: &mut std::process::Command) {
     }
 }
 
-fn execute_command(worktree: &Path, command: &str) -> Result<(i32, String), String> {
-    execute_command_with_isolation(worktree, command, false, None)
+use crate::cli::daemon::verification_host::VerificationHost;
+
+/// The exact environment a `verify.run` child receives, as a complete list.
+///
+/// The daemon clears its own environment and applies this, so a delegated
+/// child sees precisely what an in-process one would. Both paths read the
+/// overrides from [`child_environment_contract`], which is why the contract
+/// stays a single list.
+fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> {
+    let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    for (key, value) in child_environment_contract() {
+        match value {
+            Some(value) => {
+                env.insert(key.to_string(), value.to_string());
+            }
+            None => {
+                env.remove(key);
+            }
+        }
+    }
+    if isolated_baseline {
+        for key in gwt_core::process::GIT_ENV_SCRUB_KEYS {
+            env.remove(key);
+        }
+        env.remove("CARGO_TARGET_DIR");
+    }
+    env.into_iter().collect()
 }
 
 fn execute_command_with_isolation(
@@ -2563,43 +2588,156 @@ fn execute_command_with_isolation(
     command: &str,
     isolated_baseline: bool,
     capture: Option<&headed_e2e::Capture>,
+    host: &VerificationHost,
 ) -> Result<(i32, String), String> {
     let args = split_command_line(command)?;
-    let mut process = gwt_core::process::hidden_command(&args[0]);
-    process.args(&args[1..]).current_dir(worktree);
-    apply_child_environment_contract(&mut process);
-    if let Some(capture) = capture {
-        capture.configure(&mut process);
-    }
-    if isolated_baseline {
-        gwt_core::process::scrub_git_env(&mut process);
-        process.env_remove("CARGO_TARGET_DIR");
-    }
-    process
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    // Issue #4405: this process runs inside the agent tree, whose launch
-    // policy lowers priority; the workload must not inherit that.
-    let output =
-        match gwt_core::process_tree::spawn_at_normal_priority(&mut process).and_then(|spawned| {
-            let priority = spawned.priority.clone();
-            spawned.wait_with_output().map(|output| (output, priority))
-        }) {
-            Ok(output) => output,
-            Err(err) => {
-                let diagnostic = format!("failed to spawn '{command}': {err}");
-                let clipped = bounded_output_tail(diagnostic.as_bytes());
-                return Ok((-1, format!("--- spawn error ---\n{clipped}\n")));
+    match host {
+        VerificationHost::Daemon(endpoint) => execute_command_on_daemon(
+            worktree,
+            command,
+            &args,
+            isolated_baseline,
+            capture,
+            endpoint,
+        ),
+        VerificationHost::Inherit => {
+            let mut process = gwt_core::process::hidden_command(&args[0]);
+            process.args(&args[1..]).current_dir(worktree);
+            apply_child_environment_contract(&mut process);
+            if let Some(capture) = capture {
+                capture.configure(&mut process);
             }
-        };
-    let (output, priority) = output;
-    let exit_code = output.status.code().unwrap_or(-1);
-    let mut tail = String::new();
-    if !priority.restored {
-        tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+            if isolated_baseline {
+                gwt_core::process::scrub_git_env(&mut process);
+                process.env_remove("CARGO_TARGET_DIR");
+            }
+            process
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            // Issue #4405: this process runs inside the agent tree, whose
+            // launch policy lowers priority; the workload must not inherit
+            // that. Issue #4409 removes the inheritance at its source by
+            // launching from the daemon instead, but this branch is still
+            // taken whenever the launcher is already at baseline priority or
+            // has declared that it accepts its own.
+            let output = match gwt_core::process_tree::spawn_at_normal_priority(&mut process)
+                .and_then(|spawned| {
+                    let priority = spawned.priority.clone();
+                    spawned.wait_with_output().map(|output| (output, priority))
+                }) {
+                Ok(output) => output,
+                Err(err) => return Ok(spawn_failure_result(command, &err.to_string())),
+            };
+            let (output, priority) = output;
+            let exit_code = output.status.code().unwrap_or(-1);
+            let mut tail = String::new();
+            if !priority.restored {
+                tail.push_str(&format!("--- priority ---\n{}\n", priority.detail));
+            }
+            tail.push_str(&render_streams(&[
+                ("stdout", &output.stdout),
+                ("stderr", &output.stderr),
+            ]));
+            Ok((exit_code, tail))
+        }
     }
-    for (label, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+}
+
+/// Build the request that describes one delegated command to the daemon.
+///
+/// A delegated child is assembled from an explicit program/args/env request
+/// rather than from a `Command`, so anything the in-process path expresses by
+/// configuring a `Command` has to be restated here. The headed E2E reporter is
+/// the case that bites: it is *both* arguments and an environment variable,
+/// and dropping either half leaves the run looking healthy while producing no
+/// evidence — every headed command would report `status: "missing"` and no
+/// Ready gate could ever pass through a daemon.
+///
+/// Split out from the spawn so that correspondence is testable without a live
+/// daemon, which is the whole reason the omission was easy to make.
+fn delegated_spawn_request(
+    worktree: &Path,
+    args: &[String],
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    stdout_path: std::path::PathBuf,
+    stderr_path: std::path::PathBuf,
+) -> gwt_core::daemon::VerificationSpawnRequest {
+    let mut child_args = args[1..].to_vec();
+    let mut env = resolved_child_environment(isolated_baseline);
+    if let Some(capture) = capture {
+        child_args.extend(capture.arguments());
+        let (key, value) = capture.environment();
+        env.retain(|(existing, _)| existing != &key);
+        env.push((key, value));
+    }
+    gwt_core::daemon::VerificationSpawnRequest {
+        program: args[0].clone(),
+        args: child_args,
+        cwd: worktree.to_path_buf(),
+        env,
+        stdout_path,
+        stderr_path,
+    }
+}
+
+/// Run one command through the daemon and read back what it produced.
+fn execute_command_on_daemon(
+    worktree: &Path,
+    command: &str,
+    args: &[String],
+    isolated_baseline: bool,
+    capture: Option<&headed_e2e::Capture>,
+    endpoint: &gwt_core::daemon::DaemonEndpoint,
+) -> Result<(i32, String), String> {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let stdout_path = temp.path().join("stdout");
+    let stderr_path = temp.path().join("stderr");
+    let request = delegated_spawn_request(
+        worktree,
+        args,
+        isolated_baseline,
+        capture,
+        stdout_path.clone(),
+        stderr_path.clone(),
+    );
+    let delegated = match crate::cli::daemon::verification_host::run(endpoint, &request) {
+        Ok(delegated) => delegated,
+        // A daemon that cannot take the command is a spawn failure like any
+        // other: the record must be written with the partial transcript, not
+        // abandoned. It is emphatically *not* a reason to retry in-process —
+        // that is the implicit fallback AC-5 forbids.
+        Err(error) => return Ok(spawn_failure_result(command, &error)),
+    };
+    let mut tail = String::new();
+    // AC-6: what the child actually got, recorded even when it is not
+    // baseline. An environment that refuses nice 0 is not the caller's to fix,
+    // so the run continues and says so.
+    if let Some(reason) = &delegated.accepted.nice_reason {
+        tail.push_str(&format!("--- priority ---\n{reason}\n"));
+    }
+    if delegated.reclaimed_survivors {
+        tail.push_str(
+            "--- reclaimed ---\nthe command left descendants running after it exited; the \
+             daemon killed its process group (Issue #3845)\n",
+        );
+    }
+    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+    tail.push_str(&render_streams(&[("stdout", &stdout), ("stderr", &stderr)]));
+    Ok((delegated.exit_code, tail))
+}
+
+fn spawn_failure_result(command: &str, error: &str) -> (i32, String) {
+    let diagnostic = format!("failed to spawn '{command}': {error}");
+    let clipped = bounded_output_tail(diagnostic.as_bytes());
+    (-1, format!("--- spawn error ---\n{clipped}\n"))
+}
+
+fn render_streams(streams: &[(&str, &[u8])]) -> String {
+    let mut tail = String::new();
+    for (label, bytes) in streams {
         if bytes.is_empty() {
             continue;
         }
@@ -2608,7 +2746,7 @@ fn execute_command_with_isolation(
             tail.push_str(&format!("--- {label} ---\n{clipped}\n"));
         }
     }
-    Ok((exit_code, tail))
+    tail
 }
 
 fn git_command(worktree: &Path, args: &[&std::ffi::OsStr]) -> Result<String, String> {
@@ -2645,6 +2783,7 @@ fn measure_baseline(
     worktree: &Path,
     merge_base_sha: &str,
     request: &VerificationQuarantineRequest,
+    host: &VerificationHost,
 ) -> Result<(i32, String), String> {
     request.validate()?;
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -2668,7 +2807,7 @@ fn measure_baseline(
         ],
     )?;
     let (exit_code, output) =
-        execute_command_with_isolation(&checkout, &request.baseline_command, true, None)?;
+        execute_command_with_isolation(&checkout, &request.baseline_command, true, None, host)?;
     if exit_code != 0 {
         return Err(format!("baseline command exited {exit_code}"));
     }
@@ -2777,6 +2916,12 @@ pub fn run_verification(
     session_id: &str,
     commands: &[String],
 ) -> Result<(VerificationRunRecord, String), String> {
+    // Fixtures launch in place. Where a verification workload is hosted is a
+    // property of the caller-facing operation — it is decided from the
+    // launcher's inherited priority and the daemon it can reach, neither of
+    // which a fixture is exercising — and it is tested on its own in
+    // `gwt_core::verification_priority` and `daemon::verification_host`. That
+    // is what `VerificationHost::Inherit` being the default expresses.
     run_verification_inner(
         worktree,
         session_id,
@@ -2792,6 +2937,11 @@ pub fn run_verification(
 struct RunOptions<'a> {
     user_verification_result: Option<&'a str>,
     headed_e2e_commands: &'a [String],
+    /// Where this run launches its commands from (Issue #4409). It belongs
+    /// with the run's other inputs rather than being threaded separately: it
+    /// is resolved once for the whole run, and every caller that has an
+    /// opinion about the other options has one about this too.
+    host: VerificationHost,
     on_progress: Option<&'a mut dyn FnMut(usize, usize, std::time::Duration)>,
 }
 
@@ -2814,6 +2964,10 @@ fn run_verification_for_caller(
     )
 }
 
+// The parameters are the run's inputs, each independently optional in a
+// different caller, so bundling them into a struct would move the same list
+// one indirection away without removing a single decision.
+#[allow(clippy::too_many_arguments)]
 fn run_verification_inner<F>(
     worktree: &Path,
     session_id: &str,
@@ -2891,12 +3045,13 @@ where
             .then(headed_e2e::Capture::new)
             .transpose()
             .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
-        let (exit_code, tail) = match capture.as_ref() {
-            Some(capture) => {
-                execute_command_with_isolation(worktree, command, false, Some(capture))?
-            }
-            None => execute_command(worktree, command)?,
-        };
+        let (exit_code, tail) = execute_command_with_isolation(
+            worktree,
+            command,
+            false,
+            capture.as_ref(),
+            &options.host,
+        )?;
         let headed_e2e = capture.as_ref().map(|capture| {
             capture.evidence().unwrap_or(headed_e2e::HeadedE2eEvidence {
                 chromium_dark_passed: 0,
@@ -2967,7 +3122,8 @@ where
                         continue;
                     }
                 };
-                match measure_baseline(worktree, &merge_base_sha, &prepared.request) {
+                match measure_baseline(worktree, &merge_base_sha, &prepared.request, &options.host)
+                {
                     Ok((baseline_exit_code, baseline_result_line)) => {
                         transcript.push_str(&format!(
                             "quarantine: {test_identity} is typed non-blocking via owner #{} and PR #{}; merge-base {merge_base_sha} reported exact PASS\n",
@@ -4243,6 +4399,11 @@ pub(super) fn run<E: CliEnv>(
                 out.push_str(&refusal);
                 return Ok(2);
             }
+            // Issue #4409: decided before admission so a run that cannot be
+            // given baseline priority is refused without first taking the
+            // host-wide lease away from a claimant that could have used it.
+            let (host, host_note) = crate::cli::daemon::verification_host::resolve(&worktree)
+                .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?;
             // SPEC #3576 / Issue #4196: only heavy canonical matrices claim
             // an in-process lease. Classify the commands before admission;
             // a budget overrun answers `deferred` without writing a record.
@@ -4275,6 +4436,7 @@ pub(super) fn run<E: CliEnv>(
             })?;
             let (prepared_quarantines, quarantine_diagnostics) =
                 prepare_quarantine_requests(env, plan_for_quarantine.as_ref());
+            out.push_str(&host_note);
             let run = run_verification_for_caller(
                 &worktree,
                 &session_id,
@@ -4291,6 +4453,7 @@ pub(super) fn run<E: CliEnv>(
                         user_verification_result.as_deref()
                     },
                     headed_e2e_commands: &headed_e2e_commands,
+                    host,
                     on_progress: Some(&mut |done, total, elapsed| {
                         if let Some(admission) = admission.as_ref() {
                             admission.publish_progress(done, total, elapsed);
@@ -4786,6 +4949,64 @@ pub(crate) mod tests {
         assert!(record.commands[0].output_tail.is_empty());
         let serialized = serde_json::to_value(&record.commands[0]).unwrap();
         assert!(serialized.get("output_tail").is_none(), "{serialized}");
+    }
+
+    /// Issue #4409: the daemon-hosted path assembles its child from an
+    /// explicit request instead of a `Command`, so everything the in-process
+    /// path expresses through `Capture::configure` has to be restated. Both
+    /// halves matter — arguments alone give the run no report path, the
+    /// environment variable alone gives it no reporter — and losing either one
+    /// fails silently: the command still passes, the evidence is just never
+    /// written, and every headed command reads as `status: "missing"`.
+    #[test]
+    fn a_delegated_headed_command_carries_the_same_reporter_the_in_process_one_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = headed_e2e::Capture::new().unwrap();
+        let args = vec!["bunx".to_string(), "playwright".to_string()];
+        let request = delegated_spawn_request(
+            dir.path(),
+            &args,
+            false,
+            Some(&capture),
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+
+        for argument in capture.arguments() {
+            assert!(
+                request.args.contains(&argument),
+                "delegated child lost {argument}: {:?}",
+                request.args
+            );
+        }
+        assert_eq!(
+            request.args[0], "playwright",
+            "the reporter arguments must be appended to the command's own, not replace them"
+        );
+        let (key, value) = capture.environment();
+        assert_eq!(
+            request
+                .env
+                .iter()
+                .filter(|(existing, _)| *existing == key)
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec![value.as_str()],
+            "the report path must be present exactly once"
+        );
+
+        // Without a capture the request stays exactly the command asked for,
+        // so an ordinary matrix entry never picks up headed flags.
+        let plain = delegated_spawn_request(
+            dir.path(),
+            &args,
+            false,
+            None,
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+        assert_eq!(plain.args, vec!["playwright".to_string()]);
+        assert!(!plain.env.iter().any(|(existing, _)| *existing == key));
     }
 
     #[test]
@@ -6383,6 +6604,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-ob");
         let dir = tempfile::tempdir().unwrap();
         crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob", "バグを修正して")
@@ -7191,6 +7413,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -7260,6 +7483,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -7359,6 +7583,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());

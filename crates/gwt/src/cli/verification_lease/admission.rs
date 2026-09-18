@@ -18,7 +18,7 @@ use gwt_core::index_coordinator::{
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::board::{BoardCommand, BoardPostCommand};
-use crate::cli::verification_lease::holder_activity::HolderActivity;
+use crate::cli::verification_lease::holder_activity::{HolderActivity, HolderProbe};
 use crate::cli::verification_lease::{self, DEFAULT_TTL_MINUTES};
 use crate::cli::CliEnv;
 
@@ -238,17 +238,28 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
         .estimated_remaining_ms
         .or(status.remaining_ms)
         .map(Duration::from_millis);
+    // Issue #4409 AC-4: a deferred caller is deciding whether to keep waiting,
+    // and a starved holder changes that answer.
+    let priority = match (status.holder_nice, status.holder_spawn_host.as_deref()) {
+        (None, None) => String::new(),
+        (nice, host) => format!(
+            ", nice {}, spawn-host {}",
+            nice.map(|nice| nice.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            host.unwrap_or("unknown")
+        ),
+    };
     match status.remaining_ms {
         Some(remaining_ms) => HolderNotice {
             detail: format!(
-                "verification lease held by {kind} {target} ({holder}, {}s left{progress})",
+                "verification lease held by {kind} {target} ({holder}{priority}, {}s left{progress})",
                 remaining_ms / 1000
             ),
             retry_after,
         },
         None => HolderNotice {
             detail: format!(
-                "verification lease held by {kind} {target} ({holder}, no TTL — it releases \
+                "verification lease held by {kind} {target} ({holder}{priority}, no TTL — it releases \
                  only when its job finishes{progress})"
             ),
             retry_after,
@@ -256,16 +267,18 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
     }
 }
 
-fn describe_holder(coordinator: &IndexCoordinator) -> HolderNotice {
+/// `probe` is kept across the wait loop's polls on purpose: it makes the
+/// window between readings the poll interval instead of one this call has to
+/// sleep through, and a longer window is what keeps a slow-but-moving holder
+/// off the "may be hung" verdict (Issue #4409 AC-9/AC-10).
+fn describe_holder(coordinator: &IndexCoordinator, probe: &mut HolderProbe) -> HolderNotice {
     match coordinator.heavy_lease_status() {
         Ok(status) => {
             let activity = status
                 .owner
                 .as_ref()
                 .filter(|_| status.held)
-                .and_then(|owner| {
-                    verification_lease::holder_activity::observe(owner.pid, status.acquired_at_ms)
-                });
+                .and_then(|owner| probe.observe(owner.pid, status.acquired_at_ms));
             holder_notice(&status, activity.as_ref())
         }
         Err(err) => HolderNotice {
@@ -393,12 +406,13 @@ pub(crate) fn admit<E: CliEnv>(
             }
         }
     };
+    let mut probe = HolderProbe::default();
     let lease = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match guard.acquire_heavy_with_ttl(remaining.min(POLL), LEASE_TTL) {
             Ok(lease) => break lease,
             Err(CoordinatorError::Timeout { .. }) => {
-                let holder = describe_holder(&coordinator);
+                let holder = describe_holder(&coordinator, &mut probe);
                 if Instant::now() >= deadline {
                     let _ = guard.complete(JobOutcome::Failed {
                         message: "host admission deferred".to_string(),
@@ -445,6 +459,13 @@ pub(crate) fn admit<E: CliEnv>(
             }
         }
     };
+    let mut lease = lease;
+    // Issue #4409 AC-4: a waiter needs to know whether this holder escaped the
+    // agent process tree, because a holder that did not will take far longer
+    // than its history suggests.
+    let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    let (spawn_host, _) = crate::cli::daemon::verification_host::describe_for_lease(&worktree);
+    lease.record_spawn_host(spawn_host);
     let admission = Admission {
         guard: Some(guard),
         lease_id: lease.id().to_string(),
@@ -515,6 +536,52 @@ mod tests {
         assert!(err.to_string().contains("max_wait_secs"), "{err}");
     }
 
+    /// Issue #4409 AC-4: a deferred caller is deciding whether waiting is
+    /// worth it, and a holder that is itself starved will take far longer than
+    /// its history suggests. The refusal has to say so.
+    #[test]
+    fn a_deferred_refusal_reports_the_holders_priority_and_spawn_host() {
+        let notice = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("repo--verification".to_string()),
+                owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                    pid: 4242,
+                    start_id: "start".to_string(),
+                }),
+                remaining_ms: Some(60_000),
+                holder_nice: Some(10),
+                holder_spawn_host: Some("inherit".to_string()),
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
+        assert!(notice.detail.contains("nice 10"), "{}", notice.detail);
+        assert!(
+            notice.detail.contains("spawn-host inherit"),
+            "{}",
+            notice.detail
+        );
+    }
+
+    /// A pre-#4409 ticket carries neither field. The refusal must stay
+    /// readable rather than printing "nice unknown, spawn-host unknown" at
+    /// every caller that ever waits on an older holder.
+    #[test]
+    fn a_holder_that_published_no_priority_is_described_without_empty_fields() {
+        let notice = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("repo--verification".to_string()),
+                remaining_ms: Some(60_000),
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
+        assert!(!notice.detail.contains("nice"), "{}", notice.detail);
+        assert!(!notice.detail.contains("spawn-host"), "{}", notice.detail);
+    }
+
     /// Issue #4140 AC-3: a holder with a TTL must publish a usable ETA, and a
     /// holder without one must say so instead of reading as "0s left" — the
     /// index job's untimed lease is exactly the case that misled agents into
@@ -578,7 +645,10 @@ mod tests {
         let starved = HolderActivity {
             held_ms: 7_260_000,
             cpu_percent: 1.4,
-            processes: 3,
+            cpu_gained_ms: 17,
+            turnover: false,
+            processes: 1,
+            window_ms: 1_200,
             host_cpu_percent: Some(95.0),
         };
         let notice = holder_notice(&status, Some(&starved));
@@ -589,7 +659,10 @@ mod tests {
         let progressing = HolderActivity {
             held_ms: 600_000,
             cpu_percent: 380.0,
+            cpu_gained_ms: 4_560,
+            turnover: true,
             processes: 5,
+            window_ms: 1_200,
             host_cpu_percent: Some(95.0),
         };
         let notice = holder_notice(&status, Some(&progressing));

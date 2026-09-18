@@ -2232,6 +2232,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
@@ -2386,6 +2387,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());

@@ -39,7 +39,7 @@ use std::{
 use gwt_core::daemon::{
     persist_endpoint, resolve_daemon_socket_path, validate_handshake, ClientFrame, DaemonEndpoint,
     DaemonFrame, DaemonSocketPlacement, DaemonStatus, IpcHandshakeRequest, IpcHandshakeResponse,
-    RuntimeScope, DAEMON_PROTOCOL_VERSION,
+    RuntimeScope, VerificationSpawnFinished, DAEMON_PROTOCOL_VERSION,
 };
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
@@ -4816,6 +4816,10 @@ async fn handle_connection(
 
     let mut line = String::new();
     let mut materializer_lease = None;
+    // Binds any verification child to this connection. Dropped on every exit
+    // from the loop below, which is what makes a dead or disconnected caller
+    // reclaim its workload instead of orphaning it (Issue #4409 AC-2).
+    let mut verification_reclaim: Option<super::verification_spawn::VerificationReclaim> = None;
     let mut subscribed_channels = HashSet::new();
     loop {
         line.clear();
@@ -4950,6 +4954,55 @@ async fn handle_connection(
                     break;
                 }
             }
+            Ok(ClientFrame::SpawnVerification(request)) => {
+                // One verification child per connection. A second request
+                // would orphan the first one's reclamation handle, which is
+                // the exact failure this whole path exists to prevent.
+                if verification_reclaim.is_some() {
+                    if out_tx
+                        .send(DaemonFrame::Error {
+                            message: "this connection already owns a verification child; open a \
+                                      second connection to run a second command"
+                                .to_string(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                match super::verification_spawn::spawn(&request) {
+                    Err(message) => {
+                        if out_tx.send(DaemonFrame::Error { message }).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(child) => {
+                        let accepted = child.accepted().clone();
+                        // The connection keeps the reclamation right while the
+                        // child is waited on elsewhere: when this connection
+                        // ends for any reason, the handle drops and the whole
+                        // group goes with it (Issue #4409 AC-2 / AC-7).
+                        verification_reclaim = Some(child.reclaim_handle());
+                        let finished_tx = out_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let (exit_code, reclaimed_survivors) = child.wait();
+                            let _ = finished_tx.send(DaemonFrame::VerificationFinished(
+                                VerificationSpawnFinished {
+                                    exit_code,
+                                    reclaimed_survivors,
+                                },
+                            ));
+                        });
+                        if out_tx
+                            .send(DaemonFrame::VerificationAccepted(accepted))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
             Ok(ClientFrame::Status) => {
                 let snapshot = DaemonStatus {
                     protocol_version: endpoint.protocol_version,
@@ -5030,6 +5083,13 @@ async fn handle_connection(
     // `None` and the task ends, allowing this connection task (and
     // its `ConnectionGuard`) to be released.
     drop(materializer_lease.take());
+    // Issue #4409 AC-2: reclaim here rather than by letting the handle fall out
+    // of scope. The `writer.await` below cannot finish while the verification
+    // child is alive — the task waiting on that child holds an `out_tx` clone
+    // so it can report the exit code — so a handle dropped at the end of this
+    // function would only fire once the workload had already run to completion,
+    // which is precisely the orphan the binding exists to prevent.
+    drop(verification_reclaim.take());
     forwarder_cancel.store(true, Ordering::SeqCst);
     forwarder_notify.notify_waiters();
     drop(out_tx);
@@ -6735,6 +6795,79 @@ exit 0
         drop(same_connection_overlay);
         assert!(!super::issue_monitor_gui_connected(&hub));
         drop(issue_monitor);
+    }
+
+    /// Issue #4409 AC-2, observed failing against a live daemon before the
+    /// fix: the reclamation handle used to be dropped when the connection task
+    /// returned, but that task cannot return while a verification child is
+    /// running — the task reporting its exit code holds a writer-channel
+    /// sender, so the handler parks on `writer.await`. The handle therefore
+    /// fired only *after* the workload had run to completion, which is exactly
+    /// the orphan the binding exists to prevent (#3845).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_disconnected_caller_reclaims_its_verification_child_immediately() {
+        use crate::cli::daemon::client::DaemonClient;
+        use gwt_core::daemon::VerificationSpawnRequest;
+
+        let temp = TempDir::new().expect("tempdir");
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint = sample_endpoint(sample_scope(&temp), &socket_path, "token");
+        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let hub = BroadcastHub::new();
+        let server_hub = hub.clone();
+        let server_endpoint = Arc::new(endpoint.clone());
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let guard = ConnectionGuard::new(connections);
+            handle_connection(
+                super::IpcStream::Unix(stream),
+                server_endpoint,
+                server_hub,
+                Instant::now(),
+                &guard,
+            )
+            .await
+        });
+
+        let mut client = DaemonClient::connect(&endpoint).await.expect("connect");
+        client
+            .send_frame(&ClientFrame::SpawnVerification(VerificationSpawnRequest {
+                program: "/bin/sh".to_string(),
+                // A shell that outlives its own foreground command, so the
+                // survivor is a grandchild only group-wide reclamation reaches.
+                args: vec!["-c".to_string(), "sleep 120 & sleep 120".to_string()],
+                cwd: temp.path().to_path_buf(),
+                env: std::env::vars().collect(),
+                stdout_path: temp.path().join("stdout"),
+                stderr_path: temp.path().join("stderr"),
+            }))
+            .await
+            .expect("send spawn request");
+        let accepted = match client.read_frame::<DaemonFrame>().await.expect("accepted") {
+            DaemonFrame::VerificationAccepted(accepted) => accepted,
+            other => panic!("expected VerificationAccepted, got {other:?}"),
+        };
+        let alive = |pid: u32| unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        assert!(alive(accepted.pid), "the child should be running");
+
+        // Dropping the client is what a dead `gwtd` or a closed pane looks
+        // like from the daemon's side.
+        drop(client);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while alive(accepted.pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !alive(accepted.pid),
+            "a caller that disconnected must not leave its verification workload running"
+        );
+        server
+            .await
+            .expect("connection task joins")
+            .expect("handle connection");
     }
 
     #[tokio::test]

@@ -27200,6 +27200,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -29107,6 +29108,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
             let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
@@ -29350,6 +29352,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
             let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
