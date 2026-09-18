@@ -1010,6 +1010,7 @@ pub(crate) struct PreparedProjectOpen {
 #[derive(Debug, Clone)]
 pub(crate) enum PreparedProjectWindowRestore {
     Agent {
+        window_id: String,
         session: Box<gwt_agent::Session>,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         fallback_geometry: WindowGeometry,
