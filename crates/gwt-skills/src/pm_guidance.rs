@@ -173,6 +173,16 @@ body cannot hold `plan` / `tasks` sections.
   `exclusion_reason` and names the deadline in `claim_expires_at` —
   read those before concluding that a queued-looking Issue is simply
   waiting its turn.
+- Read `source` before you read any number in that snapshot. `daemon`
+  means a live Issue Monitor answered. `degraded_cache` means nothing
+  answered and the projection was rebuilt from preferences and the
+  local Issue cache: every count is a lower bound, `active_launches` is
+  marked `active_launches_incomplete`, `gui_status.state` reads
+  `degraded_cache` rather than `error`, and any `last_error` is
+  prefixed with `[degraded_cache: …]`. A `degraded_cache` snapshot can
+  never establish that the fleet stopped — check `pane.list` and the
+  worktrees' last commits instead. A running fleet has twice been
+  reported as fully stopped from this snapshot.
 - Reflect the semantic order with `issue.monitor.priority.set`
   (full order) or `issue.monitor.priority.move` (single issue).
   Your ordering decision takes precedence over a GUI reorder: the GUI

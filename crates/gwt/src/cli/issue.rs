@@ -549,6 +549,26 @@ fn merge_board_escalations_into_needs_human(
     status.needs_human.sort_unstable();
 }
 
+/// Issue #4413 AC-4: the `gui_status.state` of a projection this process
+/// rebuilt from disk. `error` used to stand here, sending every reader after a
+/// fault that had not happened.
+const DEGRADED_CACHE_STATE: &str = "degraded_cache";
+
+/// Issue #4413 AC-2: qualify an error carried by a rebuilt projection.
+///
+/// A live monitor reports a wiped candidate set as `issue monitor inbox
+/// population shrank: N -> 0` (#4184). Handing back that same sentence for
+/// "nobody answered, so this was rebuilt from preferences and the local Issue
+/// cache" makes the outage and its own absence one response — which is how a
+/// running fleet was twice reported as fully stopped, and how anyone
+/// verifying the #4184 fix reads a pass and a failure identically.
+fn degraded_projection_error(error: String) -> String {
+    format!(
+        "[{DEGRADED_CACHE_STATE}: no live Issue Monitor answered; \
+         rebuilt from preferences and the local Issue cache] {error}"
+    )
+}
+
 fn run_monitor_status<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -600,6 +620,10 @@ fn load_monitor_agent_status(
     if let Some(published) = published {
         let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(published)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+        // Issue #4413 AC-1: a live monitor answered. Stamped here rather than
+        // trusted from the payload so a pre-#4413 publication — which only a
+        // live monitor could have produced — is labelled the same way.
+        status.source = crate::IssueMonitorStatusSource::Daemon;
         attach_monitor_control_identity(&authority, &mut status);
         return Ok(status);
     }
@@ -624,7 +648,32 @@ fn load_monitor_agent_status(
     // would silently disagree about what a caller can rely on.
     let mut status = monitor.agent_status_at(&now);
     attach_monitor_control_identity(&authority, &mut status);
+    mark_degraded_cache_projection(&mut status);
     Ok(status)
+}
+
+/// Issue #4413: label a projection this process rebuilt from preferences and
+/// the local Issue cache, so no reader can mistake it for a census.
+///
+/// The numbers stay as they are — they are the best this process can see — but
+/// every field a reader uses to conclude "the fleet stopped" has to be
+/// distinguishable from the same field under a live monitor. Left unlabelled,
+/// the two are one response: on 2026-09-15 this shape was reported as a total
+/// fleet outage while thirteen agent windows were committing and a PR landed.
+fn mark_degraded_cache_projection(status: &mut crate::IssueMonitorAgentStatus) {
+    status.source = crate::IssueMonitorStatusSource::DegradedCache;
+    // AC-3: preferences are what a stopped monitor stops maintaining, so an
+    // empty list here is "no launch recorded", not "no launch running".
+    status.active_launches_incomplete = true;
+    status.last_error = status.last_error.take().map(degraded_projection_error);
+    if let Some(view) = status.gui_status.as_mut() {
+        view.last_error = view.last_error.take().map(degraded_projection_error);
+        // AC-4: nothing faulted. There is simply no live monitor to ask, and
+        // `error` sends the reader hunting a failure that did not happen.
+        if view.state == "error" {
+            view.state = DEGRADED_CACHE_STATE.to_string();
+        }
+    }
 }
 
 /// Issue #3732: stop/failover load this durable state without scanning. Neither
@@ -5601,6 +5650,8 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: vec![2338],
             active_launches: vec![2338],
             max_active: 1,
@@ -5641,6 +5692,8 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: vec![2338],
             active_launches: Vec::new(),
             max_active: 1,
@@ -5761,6 +5814,8 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                source: crate::IssueMonitorStatusSource::Daemon,
+                active_launches_incomplete: false,
                 queue: vec![2338],
                 active_launches: Vec::new(),
                 max_active: 1,
@@ -5855,6 +5910,8 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: vec![2338],
             active_launches: Vec::new(),
             max_active: 1,
@@ -6037,6 +6094,11 @@ mod tests {
         assert_eq!(
             status,
             serde_json::json!({
+                // Issue #4413 AC-1/AC-3: this fallback is the rebuilt
+                // projection, and `active_launches` is whatever preferences
+                // still record — both facts ship with the numbers.
+                "source": "degraded_cache",
+                "active_launches_incomplete": true,
                 "queue": [2, 1],
                 "active_launches": [9],
                 "active_sessions": [],
@@ -7525,6 +7587,90 @@ mod tests {
         );
     }
 
+    /// Issue #4413: a status read with no live Issue Monitor to answer, and a
+    /// scan cadence long past its interval — the shape the fleet was
+    /// misdiagnosed from.
+    fn degraded_status_json(tmp: &TempDir) -> serde_json::Value {
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                last_scan_at: Some("2026-09-15T00:00:00Z".to_string()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let env = crate::cli::TestEnv::new(repo);
+        let mut out = String::new();
+        run_monitor_status(&env, None, &mut out).expect("degraded status");
+        serde_json::from_str(out.trim()).expect("status JSON")
+    }
+
+    /// Issue #4413 AC-1/AC-3/AC-4: with nothing to answer, `issue.monitor.status`
+    /// rebuilds the projection from preferences and the local Issue cache. That
+    /// answer is shaped exactly like a monitor that lost every candidate, so it
+    /// has to say which of the two it is — twice a running fleet was reported
+    /// as fully stopped from this response.
+    #[test]
+    fn status_without_a_live_monitor_is_labeled_a_degraded_cache_projection() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let status = degraded_status_json(&tmp);
+
+        assert_eq!(
+            status["source"], "degraded_cache",
+            "a cache rebuild must not be readable as a daemon projection: {status}"
+        );
+        assert_eq!(
+            status["active_launches_incomplete"],
+            serde_json::Value::Bool(true),
+            "an empty active_launches here means 'none recorded', not 'none running': {status}"
+        );
+        assert_ne!(
+            status["gui_status"]["state"], "error",
+            "nothing errored; there is simply no live monitor to ask: {status}"
+        );
+        assert_eq!(
+            status["gui_status"]["state"], "degraded_cache",
+            "the state has to name the degradation, not a fault: {status}"
+        );
+    }
+
+    /// Issue #4413 AC-2: `#4184`'s inbox-shrink wording means "the candidates
+    /// were wiped". Emitting it unqualified for "nobody answered, so this was
+    /// rebuilt from disk" makes the real bug and its own absence read the same,
+    /// which also defeats anyone verifying the #4184 fix.
+    #[test]
+    fn a_degraded_projection_never_reports_an_unqualified_outage() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let status = degraded_status_json(&tmp);
+
+        for error in [&status["last_error"], &status["gui_status"]["last_error"]] {
+            let Some(error) = error.as_str() else {
+                continue;
+            };
+            assert!(
+                error.starts_with("[degraded_cache:"),
+                "a degraded error must announce its own provenance: {error}"
+            );
+        }
+
+        let shrink = "issue monitor inbox population shrank: 297 -> 0; removed issues: [1]";
+        let degraded = degraded_projection_error(shrink.to_string());
+        assert!(
+            !degraded.starts_with("issue monitor inbox population shrank"),
+            "the bare #4184 wording must never lead a degraded error: {degraded}"
+        );
+        assert!(
+            degraded.contains(shrink),
+            "the original diagnostic must survive the annotation: {degraded}"
+        );
+    }
+
     /// Issue #3732 AC-5: the identity read after a terminal Work escalation
     /// must still release that launch without requiring a pane close.
     #[test]
@@ -7976,6 +8122,8 @@ mod tests {
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            source: crate::IssueMonitorStatusSource::Daemon,
+            active_launches_incomplete: false,
             queue: Vec::new(),
             active_launches: Vec::new(),
             max_active: 3,
