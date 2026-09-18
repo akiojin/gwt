@@ -2614,6 +2614,7 @@ body {
 
 .knowledge-monitor-summary,
 .knowledge-monitor-settings-copy,
+.knowledge-monitor-effective-copy,
 .knowledge-monitor-max-active,
 .knowledge-monitor-blackout {
   font-family: var(--font-mono);
@@ -2625,7 +2626,8 @@ body {
   color: var(--color-text-strong);
 }
 
-.knowledge-monitor-settings-copy {
+.knowledge-monitor-settings-copy,
+.knowledge-monitor-effective-copy {
   min-width: 0;
   color: var(--color-text-muted);
   overflow: hidden;
