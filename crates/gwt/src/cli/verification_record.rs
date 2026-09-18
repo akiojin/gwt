@@ -3103,7 +3103,7 @@ impl EvidenceStatus {
                 "the verification record belongs to a legacy, predecessor, or superseded execution binding — register the plan and rerun `verify.run` from the current generation"
             }
             Self::StaleFingerprint => {
-                "source/verification inputs or a commit other than canonical Work shard additions changed after the last run (stale evidence) — rerun `verify.run`; pr.create shard-addition-only commits preserve evidence and do not require another run"
+                "the worktree changed after the last verification run (stale evidence): source/verification inputs or a commit other than canonical Work shard additions changed — rerun `verify.run`; pr.create shard-addition-only commits preserve evidence and do not require another run"
             }
             Self::Failing => {
                 "the last verification run has failing commands — fix the failures and rerun `verify.run`"
