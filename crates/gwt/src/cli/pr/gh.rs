@@ -23,6 +23,8 @@ use crate::cli::{
     PrCheckItem, PrChecksSummary, PrCreateCall, PrReview, PrReviewThread, PrReviewThreadComment,
 };
 
+use super::{PrQuarantineComment, PrQuarantineContext};
+
 fn run_gh_in<I, S>(label: &str, repo_path: Option<&Path>, args: I) -> io::Result<SpawnOutput>
 where
     I: IntoIterator<Item = S>,
@@ -36,6 +38,23 @@ where
         options = options.current_dir(dir);
     }
     spawn_logged_blocking(&hub, ProcessKind::Gh, "gh", &args_vec, options)
+}
+
+/// Issue #3891 AC-3: the raw `gh api rate_limit` payload. The endpoint is
+/// free (spends neither budget), so observing the budget never consumes it.
+pub fn probe_github_rate_limit_via_gh(repo_path: &Path) -> io::Result<String> {
+    let output = run_gh_in(
+        "gh api rate_limit",
+        Some(repo_path),
+        gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS,
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh api rate_limit: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(output.stdout)
 }
 
 fn run_gh<I, S>(label: &str, args: I) -> io::Result<SpawnOutput>
@@ -59,7 +78,7 @@ where
 }
 
 const PR_STATUS_FIELDS: &str =
-    "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
+    "number,title,state,url,headRefName,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
 const PR_LIST_FIELDS: &str = "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,headRepository,headRepositoryOwner";
 
 pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
@@ -470,6 +489,79 @@ mutation($id: ID!) {
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+/// Whether a `updatePullRequestBranch` failure is GitHub saying the merge
+/// would conflict, rather than the call itself breaking.
+///
+/// GitHub answers a conflicting update with an ordinary GraphQL error, so the
+/// wording is the only signal available. Anything unrecognised stays an error:
+/// a PM must never read an unknown failure as "conflict, owner's problem".
+pub fn update_branch_failure_is_conflict(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("conflict") || message.contains("merge conflict")
+}
+
+/// Merge the base branch into the PR head through the GraphQL mutation
+/// `updatePullRequestBranch` (SPEC #3835 AC-15). This is the PM's only way out
+/// of `BEHIND`, and the one action `default_action` has been recommending
+/// without an operation behind it.
+///
+/// A conflicting update is reported as
+/// [`PrUpdateBranchOutcome::Conflicted`](super::types::PrUpdateBranchOutcome::Conflicted)
+/// and pushes nothing: resolving conflicts stays the owner's work (FR-007).
+pub fn update_pr_branch_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    number: u64,
+) -> io::Result<super::types::PrUpdateBranchResult> {
+    use super::types::{PrUpdateBranchOutcome, PrUpdateBranchResult};
+
+    let node_id = fetch_pr_node_id_via_gh(repo_slug, repo_path, number)?;
+    let mutation = r#"
+mutation($id: ID!) {
+  updatePullRequestBranch(input: { pullRequestId: $id }) {
+    pullRequest { number }
+  }
+}
+"#;
+    let output = run_gh(
+        "gh api graphql updatePullRequestBranch",
+        [
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={mutation}"),
+            "-f",
+            &format!("id={node_id}"),
+        ],
+    )?;
+    if !output.success() {
+        // `gh api graphql` reports a GraphQL-level error on stdout (the
+        // `errors` array) and a transport-level one on stderr, and a
+        // conflicting update is the former. Read both so a conflict is not
+        // mistaken for a broken call.
+        let detail = [output.stderr.trim(), output.stdout.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if update_branch_failure_is_conflict(&detail) {
+            return Ok(PrUpdateBranchResult {
+                number,
+                outcome: PrUpdateBranchOutcome::Conflicted,
+                detail,
+            });
+        }
+        return Err(io::Error::other(format!(
+            "gh api graphql updatePullRequestBranch: {detail}"
+        )));
+    }
+    Ok(PrUpdateBranchResult {
+        number,
+        outcome: PrUpdateBranchOutcome::Updated,
+        detail: String::new(),
+    })
+}
+
 pub fn extract_pr_url(stdout: &str) -> Option<String> {
     stdout
         .lines()
@@ -500,6 +592,98 @@ pub fn comment_on_pr_via_gh(
         )));
     }
     Ok(())
+}
+
+fn quarantine_body(value: &serde_json::Value, field: &str) -> io::Result<String> {
+    match value.get(field) {
+        Some(serde_json::Value::String(body)) => Ok(body.clone()),
+        Some(serde_json::Value::Null) => Ok(String::new()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("GitHub response is missing a valid {field}"),
+        )),
+    }
+}
+
+fn parse_pr_quarantine_context(
+    expected_number: u64,
+    pr_json: &str,
+    comments_json: &str,
+) -> io::Result<PrQuarantineContext> {
+    let pr: serde_json::Value = serde_json::from_str(pr_json)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let number = pr
+        .get("number")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "PR response is missing number")
+        })?;
+    if number != expected_number {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("PR response number #{number} does not match requested #{expected_number}"),
+        ));
+    }
+    let body = quarantine_body(&pr, "body")?;
+    let pages: Vec<Vec<serde_json::Value>> = serde_json::from_str(comments_json)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let comments = pages
+        .into_iter()
+        .flatten()
+        .map(|value| {
+            let id = value
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "PR comment response is missing durable id",
+                    )
+                })?;
+            let body = quarantine_body(&value, "body")?;
+            Ok(PrQuarantineComment { id, body })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(PrQuarantineContext {
+        number,
+        body,
+        comments,
+    })
+}
+
+pub fn fetch_pr_quarantine_context_via_gh(
+    owner: &str,
+    repo: &str,
+    repo_path: &Path,
+    number: u64,
+) -> io::Result<PrQuarantineContext> {
+    let pr_endpoint = format!("repos/{owner}/{repo}/pulls/{number}");
+    let pr = run_gh_in(
+        &format!("gh api {pr_endpoint}"),
+        Some(repo_path),
+        ["api", pr_endpoint.as_str()],
+    )?;
+    if !pr.success() {
+        return Err(io::Error::other(format!(
+            "gh api {pr_endpoint}: {}",
+            pr.stderr.trim()
+        )));
+    }
+
+    let comments_endpoint = format!("repos/{owner}/{repo}/issues/{number}/comments?per_page=100");
+    let comments = run_gh_in(
+        &format!("gh api --paginate {comments_endpoint}"),
+        Some(repo_path),
+        ["api", "--paginate", "--slurp", comments_endpoint.as_str()],
+    )?;
+    if !comments.success() {
+        return Err(io::Error::other(format!(
+            "gh api {comments_endpoint}: {}",
+            comments.stderr.trim()
+        )));
+    }
+
+    parse_pr_quarantine_context(number, &pr.stdout, &comments.stdout)
 }
 
 pub fn fetch_pr_reviews_via_gh(owner: &str, repo: &str, number: u64) -> io::Result<Vec<PrReview>> {
@@ -978,11 +1162,69 @@ mod tests {
         }
     }
 
+    /// SPEC #3835 AC-15: GitHub answers a conflicting update with an ordinary
+    /// GraphQL error, so only the wording separates "the base would conflict"
+    /// from "the call broke". An unrecognised failure stays an error: reading
+    /// it as a conflict would tell the PM to relaunch an owner for a problem
+    /// that is not theirs.
+    #[test]
+    fn only_a_conflict_message_is_read_as_a_conflict() {
+        for message in [
+            "merge conflict between base and head",
+            "GraphQL: Merge conflict (updatePullRequestBranch)",
+            "CONFLICT: cannot update branch",
+        ] {
+            assert!(
+                update_branch_failure_is_conflict(message),
+                "must be read as a conflict: {message}"
+            );
+        }
+        for message in [
+            "HTTP 401: Bad credentials",
+            "GraphQL: Resource not accessible by integration",
+            "could not resolve to a PullRequest",
+            "",
+        ] {
+            assert!(
+                !update_branch_failure_is_conflict(message),
+                "must stay an error: {message}"
+            );
+        }
+    }
+
     #[test]
     fn unresolved_outdated_review_threads_are_still_resolution_targets() {
         assert!(should_resolve_review_thread(&review_thread(false, true)));
         assert!(should_resolve_review_thread(&review_thread(false, false)));
         assert!(!should_resolve_review_thread(&review_thread(true, true)));
         assert!(!should_resolve_review_thread(&review_thread(true, false)));
+    }
+
+    #[test]
+    fn quarantine_context_parser_flattens_every_comment_page() {
+        let context = parse_pr_quarantine_context(
+            42,
+            r#"{"number":42,"body":"body marker"}"#,
+            r#"[[{"id":1,"body":"first"}],[{"id":2,"body":"later marker"}]]"#,
+        )
+        .expect("parse paginated quarantine context");
+
+        assert_eq!(context.number, 42);
+        assert_eq!(context.body, "body marker");
+        assert_eq!(context.comments.len(), 2);
+        assert_eq!(context.comments[1].id, 2);
+        assert_eq!(context.comments[1].body, "later marker");
+    }
+
+    #[test]
+    fn quarantine_context_parser_rejects_incomplete_comment_identity() {
+        let error = parse_pr_quarantine_context(
+            42,
+            r#"{"number":42,"body":null}"#,
+            r#"[[{"body":"marker without durable id"}]]"#,
+        )
+        .expect_err("comment id must be present");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

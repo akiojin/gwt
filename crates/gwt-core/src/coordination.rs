@@ -55,6 +55,18 @@ fn fail_next_event_manifest_write() {
     FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.set(true));
 }
 
+#[cfg(test)]
+thread_local! {
+    static COORDINATION_GIT_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Issue #4406: count the Git processes a Board read starts, so tests can pin
+/// that a steady-state read starts none.
+fn note_coordination_git_spawn() {
+    #[cfg(test)]
+    COORDINATION_GIT_SPAWNS.with(|count| count.set(count.get() + 1));
+}
+
 /// Who authored a Board entry: the human operator, an agent session, or
 /// gwt itself (system notices).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -920,8 +932,12 @@ fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
 
 pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
     if let Some(project_dir) = coordination_project_dir(worktree_root) {
-        let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
-        migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        // Issue #4406: discovery runs `git worktree list`, which scales with
+        // the worktree count; once migrated there is nothing left to find.
+        if !coordination_migration_marker_path(&project_dir).exists() {
+            let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
+            migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        }
     }
 
     let dir = coordination_dir(worktree_root);
@@ -1015,42 +1031,93 @@ fn resolved_escalation_cutoff() -> DateTime<Utc> {
     Utc::now() - chrono::Duration::days(RESOLVED_ESCALATION_RETENTION_DAYS)
 }
 
-fn rebuild_escalation_store_locked(worktree_root: &Path) -> Result<BoardEscalationStore> {
+fn rebuild_escalation_store_in_memory(worktree_root: &Path) -> Result<BoardEscalationStore> {
     let coordination_root = coordination_dir(worktree_root);
     let mut entries = load_board_entries_from_segments_root(&coordination_root)?;
     entries.sort_by_key(|entry| entry.created_at);
     let mut store = BoardEscalationStore::from_entries(entries.iter());
     store.prune_resolved_before(resolved_escalation_cutoff());
+    Ok(store)
+}
+
+fn rebuild_escalation_store_locked(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let store = rebuild_escalation_store_in_memory(worktree_root)?;
     write_atomic_json(&coordination_escalations_path(worktree_root), &store)?;
     Ok(store)
+}
+
+fn load_escalation_store_for_update(worktree_root: &Path) -> Result<BoardEscalationStore> {
+    let path = coordination_escalations_path(worktree_root);
+    if !path.exists() {
+        return rebuild_escalation_store_in_memory(worktree_root);
+    }
+    match load_json_or_default::<BoardEscalationStore>(&path) {
+        Ok(store) if store.version == crate::board_escalation::ESCALATION_STORE_VERSION => {
+            Ok(store)
+        }
+        Ok(store) => {
+            tracing::warn!(
+                version = store.version,
+                "board escalation index has an unknown version; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "board escalation index is unreadable; rebuilding from the event log"
+            );
+            rebuild_escalation_store_in_memory(worktree_root)
+        }
+    }
+}
+
+/// Re-insert blocked posts that `params.resolves` names but the on-disk index
+/// no longer carries — typically because the index was rebuilt from the hot
+/// Board window (Issue #3690).
+fn restore_lost_resolve_targets(
+    store: &mut BoardEscalationStore,
+    worktree_root: &Path,
+    target_ids: &[String],
+) -> Result<bool> {
+    let mut changed = false;
+    let coordination_root = coordination_dir(worktree_root);
+    for target_id in target_ids {
+        let target_id = target_id.trim();
+        if target_id.is_empty()
+            || store
+                .escalations
+                .iter()
+                .any(|escalation| escalation.entry_id == target_id)
+        {
+            continue;
+        }
+        let Some(historical) = find_board_entry_in_segments(&coordination_root, target_id)? else {
+            continue;
+        };
+        if store.restore_lost_blocked(&historical) {
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 /// Fold one freshly appended entry into the index, already holding the
 /// coordination lock.
 ///
-/// A never-written index is rebuilt from the whole log instead of started from
-/// this single entry, so upgrading an existing repository does not silently
-/// discard the escalations that were already open.
+/// A never-written or unreadable index is rebuilt from the whole log instead
+/// of started from this single entry, so upgrading an existing repository does
+/// not silently discard the escalations that were already open. The incoming
+/// entry is always folded afterwards — a rebuild that dropped the resolve
+/// would leave the PM unable to close overflowed blockers (Issue #3690).
 fn update_escalation_store_locked(worktree_root: &Path, entry: &BoardEntry) -> Result<()> {
     let path = coordination_escalations_path(worktree_root);
-    if !path.exists() {
-        rebuild_escalation_store_locked(worktree_root)?;
-        return Ok(());
-    }
-    let mut store: BoardEscalationStore = match load_json_or_default(&path) {
-        Ok(store) => store,
-        Err(_) => {
-            rebuild_escalation_store_locked(worktree_root)?;
-            return Ok(());
-        }
-    };
-    if store.version != crate::board_escalation::ESCALATION_STORE_VERSION {
-        rebuild_escalation_store_locked(worktree_root)?;
-        return Ok(());
-    }
+    let mut store = load_escalation_store_for_update(worktree_root)?;
+    let restored =
+        restore_lost_resolve_targets(&mut store, worktree_root, &entry.resolves_entry_ids)?;
     let applied = store.apply_entry(entry);
     let pruned = store.prune_resolved_before(resolved_escalation_cutoff());
-    if applied || pruned {
+    if restored || applied || pruned || !path.exists() {
         write_atomic_json(&path, &store)?;
     }
     Ok(())
@@ -1288,6 +1355,118 @@ pub fn load_snapshot_for_scope(
     })
 }
 
+/// Issue #4406: a Board view filtered to one audience scope, together with the
+/// hot-projection position it was derived from, so the next refresh can apply
+/// only what was posted since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedBoardView {
+    pub scope: BoardAudienceScope,
+    pub board: BoardProjection,
+    source_total_entries: usize,
+    source_newest_entry_id: Option<String>,
+}
+
+/// How [`refresh_scoped_board_view`] produced its view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedBoardRefresh {
+    /// Nothing was posted since the previous view.
+    Unchanged,
+    /// Only the posts since the previous view were applied.
+    Appended,
+    /// The view was rebuilt from the full history.
+    Rebuilt,
+}
+
+impl ScopedBoardView {
+    fn derived_from(
+        scope: &BoardAudienceScope,
+        board: BoardProjection,
+        hot: &BoardProjection,
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            board,
+            source_total_entries: hot.total_entries,
+            source_newest_entry_id: hot.newest_entry_id.clone(),
+        }
+    }
+}
+
+/// Refresh a scoped Board view (Issue #4406).
+///
+/// A scoped view is the newest [`HOT_PROJECTION_ENTRY_LIMIT`] entries visible
+/// to the scope, which can reach past the hot projection, so building one
+/// reads the whole history. Posts only append, though: when the hot projection
+/// holds exactly the entries posted since `previous`, those are applied to it
+/// and the history is not read again. Anything else — a first load, another
+/// scope, a backdated entry, more posts than the hot projection keeps — is
+/// rebuilt from the history.
+pub fn refresh_scoped_board_view(
+    worktree_root: &Path,
+    scope: &BoardAudienceScope,
+    previous: Option<ScopedBoardView>,
+) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+    let hot = load_snapshot(worktree_root)?.board;
+    if let Some(previous) = previous.filter(|previous| previous.scope == *scope) {
+        if let Some(appended) = entries_posted_since(
+            &hot,
+            previous.source_total_entries,
+            previous.source_newest_entry_id.as_deref(),
+        ) {
+            if appended.is_empty() {
+                return Ok((previous, ScopedBoardRefresh::Unchanged));
+            }
+            let mut board = previous.board;
+            // A rebuild reads the history after the hot projection, so it can
+            // already hold a post that the hot projection now reports as new.
+            let visible = appended
+                .iter()
+                .filter(|entry| board_entry_visible_for_scope(entry, scope))
+                .filter(|entry| !board.entries.iter().any(|known| known.id == entry.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            board.total_entries += visible.len();
+            board.entries.extend(visible);
+            let excess = board
+                .entries
+                .len()
+                .saturating_sub(HOT_PROJECTION_ENTRY_LIMIT);
+            board.entries.drain(..excess);
+            board.has_more_before = board.total_entries > board.entries.len();
+            board.oldest_entry_id = board.entries.first().map(|entry| entry.id.clone());
+            board.newest_entry_id = board.entries.last().map(|entry| entry.id.clone());
+            board.updated_at = hot.updated_at;
+            let view = ScopedBoardView::derived_from(scope, board, &hot);
+            return Ok((view, ScopedBoardRefresh::Appended));
+        }
+    }
+    let board = if *scope == BoardAudienceScope::All {
+        hot.clone()
+    } else {
+        load_snapshot_for_scope(worktree_root, scope)?.board
+    };
+    let view = ScopedBoardView::derived_from(scope, board, &hot);
+    Ok((view, ScopedBoardRefresh::Rebuilt))
+}
+
+/// The hot-projection entries posted after the entry `previous_newest`, or
+/// `None` when they are not exactly the `hot.total_entries - previous_total`
+/// posts made since (a backdated entry, or more posts than the hot projection
+/// keeps).
+fn entries_posted_since<'a>(
+    hot: &'a BoardProjection,
+    previous_total: usize,
+    previous_newest: Option<&str>,
+) -> Option<&'a [BoardEntry]> {
+    let posted = hot.total_entries.checked_sub(previous_total)?;
+    let start = match previous_newest {
+        Some(id) => hot.entries.iter().position(|entry| entry.id == id)? + 1,
+        None => 0,
+    };
+    let since = &hot.entries[start..];
+    (since.len() == posted).then_some(since)
+}
+
 fn load_json_or_default<T>(path: &Path) -> Result<T>
 where
     T: serde::de::DeserializeOwned + Default,
@@ -1311,13 +1490,37 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
     Some(gwt_project_dir_for_repo_path(&repo_root).join("coordination"))
 }
 
+/// Issue #4406: every coordination path helper resolves the repository root,
+/// and each resolution used to start `git rev-parse`. A worktree path keeps
+/// its repository, so a successful resolution is cached for the process; a
+/// failed one is not, so a directory that becomes a repository later is seen.
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    static RESOLVED: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, PathBuf>>> =
+        std::sync::OnceLock::new();
+    let cache = RESOLVED.get_or_init(Default::default);
+    if let Some(repo_root) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(worktree_root)
+    {
+        return Some(repo_root.clone());
+    }
+    let repo_root = resolve_coordination_repo_root(worktree_root)?;
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(worktree_root.to_path_buf(), repo_root.clone());
+    Some(repo_root)
+}
+
+fn resolve_coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
     // Issue #3629 AC-1/AC-2: a workspace-home layout root cannot resolve
     // through git — skip the guaranteed exit-128 spawn and use the child
     // bare repository directly.
     if !crate::paths::git_repository_discovery_possible(worktree_root) {
         return coordination_child_bare_repo(worktree_root);
     }
+    note_coordination_git_spawn();
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree_root);
@@ -1506,6 +1709,7 @@ fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<Even
 fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     let repo_root = coordination_repo_root(worktree_root);
     let list_root = repo_root.as_deref().unwrap_or(worktree_root);
+    note_coordination_git_spawn();
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["worktree", "list", "--porcelain"])
         .current_dir(list_root);
@@ -2218,24 +2422,40 @@ pub fn has_recent_post_by(
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
     ensure_repo_local_files(worktree_root)?;
+    Ok(find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)?.is_some())
+}
+
+/// Load one immutable Board entry by its durable id, including entries that
+/// have aged out of the hot projection.
+pub fn load_board_entry(worktree_root: &Path, entry_id: &str) -> Result<Option<BoardEntry>> {
+    ensure_repo_local_files(worktree_root)?;
+    find_board_entry_in_segments(&coordination_dir(worktree_root), entry_id)
+}
+
+fn find_board_entry_in_segments(
+    coordination_root: &Path,
+    entry_id: &str,
+) -> Result<Option<BoardEntry>> {
     let entry_id = entry_id.trim();
     if entry_id.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let coordination_root = coordination_dir(worktree_root);
-    let manifest = load_event_manifest_from_dir(&coordination_root)?;
-    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    let manifest = load_event_manifest_from_dir(coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
     for segment in manifest.segments.into_iter().rev() {
         let path = segments_dir.join(segment.file);
+        if !path.exists() {
+            continue;
+        }
         for event in load_events_from_path(&path)? {
             let CoordinationEvent::MessageAppended { entry } = event;
             if entry.id == entry_id {
-                return Ok(true);
+                return Ok(Some(entry));
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub fn load_entries_before(
@@ -2357,6 +2577,19 @@ pub trait BoardProvider {
         limit: usize,
         scope: &BoardAudienceScope,
     ) -> Result<BoardHistoryPage>;
+    /// Refresh a scoped view after a Board change (Issue #4406). Providers
+    /// without an append-only local history rebuild it every time.
+    fn refresh_scoped_board_view(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+        _previous: Option<ScopedBoardView>,
+    ) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+        let hot = self.load_snapshot(worktree_root)?.board;
+        let board = self.load_snapshot_for_scope(worktree_root, scope)?.board;
+        let view = ScopedBoardView::derived_from(scope, board, &hot);
+        Ok((view, ScopedBoardRefresh::Rebuilt))
+    }
 }
 
 /// Filesystem-backed Board provider (offline, default).
@@ -2381,6 +2614,15 @@ impl BoardProvider for LocalProvider {
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
         load_snapshot(worktree_root)
+    }
+
+    fn refresh_scoped_board_view(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+        previous: Option<ScopedBoardView>,
+    ) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+        refresh_scoped_board_view(worktree_root, scope, previous)
     }
 
     fn load_snapshot_for_scope(
@@ -3397,7 +3639,15 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "entry-0"));
         assert!(board_entry_exists(dir.path(), "entry-0").unwrap());
+        let historical = load_board_entry(dir.path(), "entry-0")
+            .unwrap()
+            .expect("load entry outside hot projection");
+        assert_eq!(historical.id, "entry-0");
+        assert_eq!(historical.body, "entry-0");
         assert!(!board_entry_exists(dir.path(), "missing-entry").unwrap());
+        assert!(load_board_entry(dir.path(), "missing-entry")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -4147,6 +4397,141 @@ mod tests {
             serde_json::to_writer(&mut file, event).unwrap();
             file.write_all(b"\n").unwrap();
         }
+    }
+
+    #[test]
+    fn steady_state_board_reads_start_no_git_process() {
+        // Issue #4406: every GUI Board refresh used to run `git rev-parse`
+        // per path helper plus `git worktree list` over every worktree, even
+        // after the legacy migration had completed.
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        load_snapshot(&repo).unwrap();
+        assert!(coordination_migration_marker_path(&coordination_dir(&repo)).exists());
+
+        COORDINATION_GIT_SPAWNS.with(|count| count.set(0));
+        for _ in 0..3 {
+            load_snapshot(&repo).unwrap();
+        }
+        load_snapshot_for_scope(&repo, &BoardAudienceScope::Workspace("w".to_string())).unwrap();
+
+        assert_eq!(COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get), 0);
+    }
+
+    fn scoped_seed_entry(body: String, audience: &str) -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec![audience])
+    }
+
+    fn entry_ids(board: &BoardProjection) -> Vec<&str> {
+        board
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn scoped_board_refresh_after_a_post_never_rescans_history_at_any_board_size() {
+        // Issue #4406 AC-2: the per-post cost of a scoped Board refresh must
+        // not grow with the Board size. A refresh after a post is served from
+        // the bounded hot projection; only a cold start rescans the history.
+        let scope = BoardAudienceScope::Workspace("workspace-a".to_string());
+        for total in [500_usize, 2_000, 5_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = Utc::now() - chrono::Duration::hours(2);
+            let events = (0..total)
+                .map(|idx| {
+                    let audience = if idx % 2 == 0 {
+                        "workspace-a"
+                    } else {
+                        "workspace-b"
+                    };
+                    let mut entry = scoped_seed_entry(format!("seed {idx}"), audience);
+                    entry.created_at = base + chrono::Duration::milliseconds(idx as i64);
+                    entry.updated_at = entry.created_at;
+                    CoordinationEvent::MessageAppended { entry }
+                })
+                .collect::<Vec<_>>();
+            write_events(&coordination_events_path(dir.path()), &events);
+
+            let (view, refresh) = refresh_scoped_board_view(dir.path(), &scope, None).unwrap();
+            assert_eq!(refresh, ScopedBoardRefresh::Rebuilt, "board size {total}");
+            let (mut view, refresh) =
+                refresh_scoped_board_view(dir.path(), &scope, Some(view)).unwrap();
+            assert_eq!(refresh, ScopedBoardRefresh::Unchanged, "board size {total}");
+
+            for post in 0..4 {
+                let audience = if post % 2 == 0 {
+                    "workspace-a"
+                } else {
+                    "workspace-b"
+                };
+                post_entry(
+                    dir.path(),
+                    scoped_seed_entry(format!("live {post}"), audience),
+                )
+                .unwrap();
+                let (next, refresh) =
+                    refresh_scoped_board_view(dir.path(), &scope, Some(view)).unwrap();
+                assert_eq!(
+                    refresh,
+                    ScopedBoardRefresh::Appended,
+                    "board size {total}, post {post}"
+                );
+                let full = load_snapshot_for_scope(dir.path(), &scope).unwrap().board;
+                assert_eq!(
+                    entry_ids(&next.board),
+                    entry_ids(&full),
+                    "board size {total}"
+                );
+                assert_eq!(next.board.total_entries, full.total_entries);
+                assert_eq!(next.board.has_more_before, full.has_more_before);
+                view = next;
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_board_refresh_rebuilds_when_the_scope_changes_or_history_is_backdated() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            scoped_seed_entry("a".to_string(), "workspace-a"),
+        )
+        .unwrap();
+        let scope_a = BoardAudienceScope::Workspace("workspace-a".to_string());
+        let scope_b = BoardAudienceScope::Workspace("workspace-b".to_string());
+        let (view, _) = refresh_scoped_board_view(dir.path(), &scope_a, None).unwrap();
+
+        let (_, refresh) =
+            refresh_scoped_board_view(dir.path(), &scope_b, Some(view.clone())).unwrap();
+        assert_eq!(refresh, ScopedBoardRefresh::Rebuilt);
+
+        let mut backdated = scoped_seed_entry("backdated".to_string(), "workspace-a");
+        backdated.created_at = Utc::now() - chrono::Duration::days(30);
+        backdated.updated_at = backdated.created_at;
+        post_entry(dir.path(), backdated).unwrap();
+        let (next, refresh) = refresh_scoped_board_view(dir.path(), &scope_a, Some(view)).unwrap();
+        assert_eq!(refresh, ScopedBoardRefresh::Rebuilt);
+        let full = load_snapshot_for_scope(dir.path(), &scope_a).unwrap().board;
+        assert_eq!(entry_ids(&next.board), entry_ids(&full));
     }
 
     #[test]
@@ -4922,6 +5307,105 @@ mod tests {
             1,
             "the index must answer independently of the hot projection window"
         );
+    }
+
+    #[test]
+    fn an_explicit_resolution_closes_an_escalation_that_has_left_the_hot_projection() {
+        // Issue #3690: the PM's only handle is params.resolves with the
+        // durable index id. Once the blocked post has scrolled out of the
+        // 500-entry Board window, that handle must still close the row.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 5) {
+            post_entry(
+                dir.path(),
+                escalation_entry(BoardEntryKind::Status, "2338", &format!("noise {idx}")),
+            )
+            .unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(
+            !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.id == blocked_id),
+            "the blocked post must have scrolled out for this test to mean anything"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("the durable index must still carry the overflowed row");
+        assert!(
+            closed.resolved_at.is_some(),
+            "params.resolves must stamp resolved_at even after the Board window has moved on"
+        );
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resolution_recovers_an_escalation_dropped_by_a_hot_window_rebuild() {
+        // Issue #3690 production shape: BoardEscalationStore::from_entries on
+        // the hot projection drops overflowed blocked posts from the in-memory
+        // index. apply_entry then no-ops, the persisted file is left unchanged,
+        // and the wake prompt keeps quoting the open row. Recreate that index
+        // state and require the next params.resolves to fold the historical
+        // blocked post back in and close it.
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 実行不能");
+        let blocked_id = blocked.id.clone();
+        post_entry(dir.path(), blocked).unwrap();
+
+        write_atomic_json(
+            &coordination_escalations_path(dir.path()),
+            &BoardEscalationStore::default(),
+        )
+        .unwrap();
+        assert!(
+            load_open_escalations(dir.path()).unwrap().is_empty(),
+            "the fixture is the index after a hot-window rebuild, which no longer has the row"
+        );
+
+        let mut resolution = escalation_entry(
+            BoardEntryKind::Decision,
+            "2338",
+            "fresh launch を手配しました",
+        );
+        let resolution_id = resolution.id.clone();
+        resolution.resolves_entry_ids = vec![blocked_id.clone()];
+        post_entry(dir.path(), resolution).unwrap();
+
+        let store = load_escalation_store(dir.path()).unwrap();
+        let closed = store
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == blocked_id)
+            .expect("resolving must recover the historical blocked post into the index");
+        assert!(closed.resolved_at.is_some());
+        assert_eq!(
+            closed.resolved_by_entry_id.as_deref(),
+            Some(resolution_id.as_str())
+        );
+        assert!(load_open_escalations(dir.path()).unwrap().is_empty());
     }
 
     #[test]

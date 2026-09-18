@@ -100,6 +100,9 @@ pub(crate) struct AgentBridgeFailure {
     error_code: Option<crate::AgentWorkspaceUpdateErrorCode>,
     bridge_code: Option<String>,
     bridge_reason: Option<String>,
+    recovery_operations: RecoveryOperationSet,
+    diagnostic_reason: Option<String>,
+    mismatched_fields: Vec<String>,
     exact_workspace_ensure_required: bool,
     message: &'static str,
 }
@@ -112,6 +115,9 @@ impl AgentBridgeFailure {
             error_code: None,
             bridge_code: None,
             bridge_reason: None,
+            recovery_operations: RecoveryOperationSet::default(),
+            diagnostic_reason: None,
+            mismatched_fields: Vec::new(),
             exact_workspace_ensure_required: false,
             message,
         }
@@ -134,6 +140,19 @@ impl AgentBridgeFailure {
                 .and_then(parse_workspace_update_error_code),
             bridge_code,
             bridge_reason,
+            recovery_operations: RecoveryOperationSet::from_response(
+                response.and_then(|response| response.recovery_operations.as_ref()),
+            ),
+            diagnostic_reason: response
+                .and_then(|response| safe_bridge_token(&response.diagnostic_reason)),
+            mismatched_fields: response
+                .and_then(|response| response.mismatched_fields.as_ref())
+                .into_iter()
+                .flatten()
+                .filter(|field| safe_binding_field_name(field))
+                .take(16)
+                .cloned()
+                .collect(),
             exact_workspace_ensure_required,
             message,
         }
@@ -161,7 +180,24 @@ impl AgentBridgeFailure {
 impl std::fmt::Display for AgentBridgeFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "[{}] {}", self.reason.as_str(), self.message)?;
-        if self.http_status.is_some() || self.bridge_code.is_some() || self.bridge_reason.is_some()
+        // Issue #4443 AC-2: a stuck agent needs the route out, not only the
+        // machine tokens, so the recovery operations lead the diagnostic.
+        if !self.recovery_operations.is_empty() {
+            write!(
+                formatter,
+                " — run JSON operation {}",
+                self.recovery_operations
+                    .names()
+                    .map(|operation| format!("`{operation}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )?;
+        }
+        if self.http_status.is_some()
+            || self.bridge_code.is_some()
+            || self.bridge_reason.is_some()
+            || self.diagnostic_reason.is_some()
+            || !self.mismatched_fields.is_empty()
         {
             formatter.write_str(" (")?;
             let mut separator = "";
@@ -175,6 +211,18 @@ impl std::fmt::Display for AgentBridgeFailure {
             }
             if let Some(reason) = self.bridge_reason.as_deref() {
                 write!(formatter, "{separator}bridge_reason={reason}")?;
+                separator = ", ";
+            }
+            if let Some(reason) = self.diagnostic_reason.as_deref() {
+                write!(formatter, "{separator}diagnostic_reason={reason}")?;
+                separator = ", ";
+            }
+            if !self.mismatched_fields.is_empty() {
+                write!(
+                    formatter,
+                    "{separator}mismatched_fields={}",
+                    self.mismatched_fields.join(",")
+                )?;
             }
             formatter.write_str(")")?;
         }
@@ -211,6 +259,44 @@ fn read_bounded_agent_bridge_error_body(
     Ok(body)
 }
 
+/// Issue #4443 AC-2 (and #4396): the recovery operations a Host refusal names,
+/// held as one bit per entry of
+/// [`crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS`].
+///
+/// A set of indices rather than strings so an operation that does not exist —
+/// `workspace.prune`, which stalled an agent for over an hour — is not merely
+/// filtered out but unrepresentable, and so the agent-visible diagnostic keeps
+/// the canonical spelling rather than whatever the response wrote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RecoveryOperationSet(u16);
+
+impl RecoveryOperationSet {
+    fn from_response(values: Option<&Vec<String>>) -> Self {
+        let mut bits = 0u16;
+        for value in values.into_iter().flatten() {
+            if let Some(index) = crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS
+                .iter()
+                .position(|operation| operation == value)
+            {
+                bits |= 1 << index;
+            }
+        }
+        Self(bits)
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn names(self) -> impl Iterator<Item = &'static str> {
+        crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS
+            .into_iter()
+            .enumerate()
+            .filter(move |(index, _)| self.0 & (1 << index) != 0)
+            .map(|(_, operation)| operation)
+    }
+}
+
 fn safe_bridge_token(value: &Option<String>) -> Option<String> {
     value.as_deref().and_then(|value| {
         (!value.is_empty()
@@ -220,6 +306,24 @@ fn safe_bridge_token(value: &Option<String>) -> Option<String> {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
         .then(|| value.to_string())
     })
+}
+
+fn safe_binding_field_name(field: &str) -> bool {
+    matches!(
+        field,
+        "schema_version"
+            | "session_id"
+            | "repo_hash"
+            | "owner_kind"
+            | "owner_number"
+            | "generation_id"
+            | "binding_id"
+            | "ledger_head_hash"
+            | "capability_generation"
+            | "project_root"
+            | "worktree"
+            | "host_instance_id"
+    )
 }
 
 fn parse_workspace_update_error_code(code: &str) -> Option<crate::AgentWorkspaceUpdateErrorCode> {
@@ -241,18 +345,21 @@ fn parse_workspace_update_error_code(code: &str) -> Option<crate::AgentWorkspace
 }
 
 #[derive(Debug, Deserialize)]
-struct AgentBridgeErrorResponse {
-    code: crate::AgentWorkspaceUpdateErrorCode,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct WorkspaceBridgeDiagnosticResponse {
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    /// Issue #4443 AC-2: the recovery operations the caller may actually run.
+    /// The Host's free-form `message` stays withheld — it can carry host-side
+    /// paths and identifiers — so the route out crosses as canonical operation
+    /// names alone, resolved through [`RecoveryOperationSet`].
+    #[serde(default)]
+    recovery_operations: Option<Vec<String>>,
+    #[serde(default)]
+    diagnostic_reason: Option<String>,
+    #[serde(default)]
+    mismatched_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +369,16 @@ struct WorkspaceBridgeErrorResponse {
     reason: String,
     #[serde(default, rename = "message")]
     _message: Option<String>,
+    #[serde(default, rename = "diagnostic_reason")]
+    _diagnostic_reason: Option<String>,
+    #[serde(default, rename = "mismatched_fields")]
+    _mismatched_fields: Option<Vec<String>>,
+    /// Issue #4443 AC-2: read only so `deny_unknown_fields` keeps accepting the
+    /// exact `workspace_ensure_required` refusal. That refusal names
+    /// `workspace.ensure`, so it now carries this field, and rejecting it here
+    /// would silently drop the ensure-required handling this struct exists for.
+    #[serde(default, rename = "recovery_operations")]
+    _recovery_operations: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +545,69 @@ impl HookForwardTarget {
     }
 }
 
+pub fn send_execution_adoption_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentExecutionAdoptionRequest,
+    expected_session: &gwt_agent::Session,
+) -> Result<crate::AgentExecutionAdoptionReceipt, String> {
+    let mut url = target.execution_continuation_url()?;
+    url.set_path("/internal/execution-adoption");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| {
+            "Host adoption bridge client is unavailable; no local fallback was attempted"
+        })?;
+    let response = client.post(url).bearer_auth(&target.token).json(request).send()
+        .map_err(|_| "Host adoption bridge is unavailable; no local fallback was attempted; inspect execution.status before retrying")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_bounded_agent_bridge_error_body(response,
+            "Host adoption rejection body could not be read safely; no local fallback was attempted")
+            .map_err(|error| error.to_string())?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        let reason = if diagnostic.as_ref().and_then(|error| error.code.as_deref())
+            == Some("execution_binding_mismatch")
+        {
+            AgentBridgeFailureReason::AuthorityMismatch
+        } else {
+            AgentBridgeFailureReason::OperationRejected
+        };
+        return Err(AgentBridgeFailure::rejected(
+            reason,
+            status,
+            diagnostic.as_ref(),
+            false,
+            "Host adoption bridge rejected the operation; no local fallback was attempted",
+        )
+        .to_string());
+    }
+    let receipt = response.json::<crate::AgentExecutionAdoptionReceipt>()
+        .map_err(|_| "Host adoption bridge returned an invalid receipt; inspect execution.status before retrying")?;
+    let binding = &receipt.execution_binding;
+    if receipt.schema_version != 1
+        || binding.schema_version != gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+        || binding.session_id != expected_session.id
+        || Some(binding.owner_number) != expected_session.linked_issue_number
+        || Some(&binding.repo_hash) != expected_session.repo_hash.as_ref()
+        || binding.capability_generation == 0
+        || binding.identity.generation_id.trim().is_empty()
+        || binding.identity.binding_id.trim().is_empty()
+        || binding.identity.ledger_head_hash.trim().is_empty()
+        || expected_session
+            .execution_binding
+            .as_ref()
+            .is_some_and(|previous| {
+                binding.owner_kind != previous.owner_kind
+                    || binding.capability_generation < previous.capability_generation
+            })
+    {
+        return Err("Host adoption bridge returned mismatched authority evidence".into());
+    }
+    Ok(receipt)
+}
+
 pub fn send_execution_continuation_via_agent_bridge(
     target: &HookForwardTarget,
     request: &crate::AgentExecutionContinuationRequest,
@@ -462,21 +642,32 @@ pub fn send_execution_continuation_via_agent_bridge(
             )
             .to_string()
         })?;
-    if !response.status().is_success() {
-        let reason = response
-            .json::<AgentBridgeErrorResponse>()
-            .map(|error| {
-                if error.code == crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
-                    || error.reason.as_deref() == Some("authority_mismatch")
-                {
-                    AgentBridgeFailureReason::AuthorityMismatch
-                } else {
-                    AgentBridgeFailureReason::OperationRejected
-                }
-            })
-            .unwrap_or(AgentBridgeFailureReason::OperationRejected);
-        return Err(AgentBridgeFailure::new(
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host continuation bridge rejection body could not be read safely; no local fallback was attempted",
+        )
+        .map_err(|error| error.to_string())?;
+        let diagnostic = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body).ok();
+        let diagnostic_code = diagnostic
+            .as_ref()
+            .and_then(|error| safe_bridge_token(&error.code));
+        let diagnostic_reason = diagnostic
+            .as_ref()
+            .and_then(|error| safe_bridge_token(&error.reason));
+        let reason = if diagnostic_code.as_deref() == Some("execution_binding_mismatch")
+            || diagnostic_reason.as_deref() == Some("authority_mismatch")
+        {
+            AgentBridgeFailureReason::AuthorityMismatch
+        } else {
+            AgentBridgeFailureReason::OperationRejected
+        };
+        return Err(AgentBridgeFailure::rejected(
             reason,
+            status,
+            diagnostic.as_ref(),
+            false,
             "Host continuation bridge rejected the operation; no local fallback was attempted",
         )
         .to_string());
@@ -705,14 +896,17 @@ pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
         return Ok(());
     }
     runtime_state::handle_with_input(event, input)?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::RuntimeState,
+    emit_live_event_fail_open(
         Some(event),
-        runtime_state::status_for_event(event).map(str::to_string),
-        None,
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some(event),
+            runtime_state::status_for_event(event).map(str::to_string),
+            None,
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
@@ -721,40 +915,61 @@ pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
         return Ok(());
     }
     runtime_state::record_blocked_stop_from_env()?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::RuntimeState,
+    emit_live_event_fail_open(
         Some("Stop"),
-        Some("Running".to_string()),
-        Some("blocked-stop".to_string()),
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::RuntimeState,
+            Some("Stop"),
+            Some("Running".to_string()),
+            Some("blocked-stop".to_string()),
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
 pub fn handle_coordination_event(event: &str, input: &str) -> Result<(), HookError> {
     coordination_event::handle(event)?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::CoordinationEvent,
+    emit_live_event_fail_open(
         Some(event),
-        None,
-        Some(format!("coordination:{event}")),
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::CoordinationEvent,
+            Some(event),
+            None,
+            Some(format!("coordination:{event}")),
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
 pub fn handle_forward(input: &str) -> Result<(), HookError> {
+    forward_with_diagnostic_event(None, input)
+}
+
+/// [`handle_forward`] that knows which hook event it serves, so a fail-open
+/// transport failure can be attributed in the error ledger (Issue #3541). The
+/// live payload itself is unchanged: `Forward` events keep `source_event`
+/// empty so the receiver's SessionStart readiness policy is not triggered.
+pub fn handle_forward_for_event(event: &str, input: &str) -> Result<(), HookError> {
+    forward_with_diagnostic_event(Some(event), input)
+}
+
+fn forward_with_diagnostic_event(event: Option<&str>, input: &str) -> Result<(), HookError> {
     forward::handle_with_input(input)?;
-    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
-        RuntimeHookEventKind::Forward,
-        None,
-        None,
-        None,
-        current_session_from_env(),
-        parse_hook_event_best_effort(input),
-    ));
+    emit_live_event_fail_open(
+        event,
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::Forward,
+            None,
+            None,
+            None,
+            current_session_from_env(),
+            parse_hook_event_best_effort(input),
+        ),
+    );
     Ok(())
 }
 
@@ -836,10 +1051,58 @@ fn live_event_agent_session_id(
         .map(str::to_string)
 }
 
-fn emit_live_event_fail_open(event: RuntimeHookEvent) {
-    if let Err(error) = emit_live_event(&event) {
-        eprintln!("gwtd hook live event: {error}");
-    }
+/// Live forwarding never fails the hook (non-policy fail-open contract), but
+/// Issue #3541 requires the failure to stay observable: record it in the host
+/// error ledger with event/handler context and say so on stderr.
+fn emit_live_event_fail_open(diagnostic_event: Option<&str>, event: RuntimeHookEvent) {
+    use gwt_core::error_ledger::{sanitize_error_message, ErrorKind, ErrorTarget};
+
+    let Err(error) = emit_live_event(&event) else {
+        return;
+    };
+    let handler = match event.kind {
+        RuntimeHookEventKind::RuntimeState => "runtime-state/live-forward",
+        RuntimeHookEventKind::CoordinationEvent => "coordination-event/live-forward",
+        RuntimeHookEventKind::Forward => "forward/live-forward",
+    };
+    let source_event = diagnostic_event
+        .or(event.source_event.as_deref())
+        .unwrap_or("unknown");
+    let detail = sanitize_error_message(&error);
+    let linked_issue = runtime_state::linked_issue_from_env();
+    let context = std::collections::BTreeMap::from([
+        ("event".to_string(), source_event.to_string()),
+        ("handler".to_string(), handler.to_string()),
+        ("exit_status".to_string(), "0".to_string()),
+        ("fail_open".to_string(), "true".to_string()),
+    ]);
+    let recorded = crate::error_report::report_error_and_publish_with_context(
+        ErrorKind::HookFailure,
+        format!("{source_event}/{handler} (fail-open): {detail}"),
+        ErrorTarget {
+            issue: linked_issue,
+            session_id: event.gwt_session_id.clone(),
+            project_root: event.project_root.clone().or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|dir| dir.display().to_string())
+            }),
+            ..ErrorTarget::default()
+        },
+        context,
+    );
+    let diagnostic = match recorded {
+        Some(record) => format!("errors.list id={}", record.id),
+        None => {
+            "errors.list (row not appended: recent duplicate or ledger unavailable)".to_string()
+        }
+    };
+    let report_target = linked_issue
+        .map(|number| format!("Board/Issue #{number}"))
+        .unwrap_or_else(|| "Board/owning Issue".to_string());
+    eprintln!(
+        "gwtd hook live event: {source_event}/{handler} failed (fail-open): {detail} | diagnostic={diagnostic} report_status=not_sent report_target={report_target}"
+    );
 }
 
 fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
@@ -1558,6 +1821,81 @@ mod tests {
     }
 
     #[test]
+    fn execution_continuation_preserves_bounded_safe_rejection_diagnostics() {
+        let server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "execution_binding_mismatch",
+                "reason": "authority_mismatch",
+                "diagnostic_reason": "host_binding_stale",
+                "mismatched_fields": ["ledger_head_hash", "capability_generation", "private-value-sentinel"],
+                "message": "private-message-sentinel",
+                // Issue #4443 AC-2 / #4396: the real operation crosses, the
+                // one that does not exist is discarded.
+                "recovery_operations": ["execution.continue", "workspace.prune"]
+            }),
+        );
+        let request = crate::AgentExecutionContinuationRequest {
+            schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+            operation_id: "continuation-diagnostics".to_string(),
+        };
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "private-token-sentinel".to_string(),
+        };
+        let error = send_execution_continuation_via_agent_bridge(&target, &request)
+            .expect_err("stale continuation must retain actionable diagnostics");
+        for expected in [
+            "http_status=409",
+            "code=execution_binding_mismatch",
+            "bridge_reason=authority_mismatch",
+            "diagnostic_reason=host_binding_stale",
+            "mismatched_fields=ledger_head_hash,capability_generation",
+            "run JSON operation `execution.continue`",
+        ] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
+        assert!(!error.contains("sentinel"), "{error}");
+        assert!(
+            !error.contains("workspace.prune"),
+            "a recovery operation that does not exist reached the agent: {error}"
+        );
+        server.receive();
+
+        let unsafe_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "execution_binding_mismatch",
+                "reason": "authority_mismatch",
+                "diagnostic_reason": "private value sentinel",
+                "mismatched_fields": ["C:/private/path", "session_id=private-session"]
+            }),
+        );
+        let unsafe_target = HookForwardTarget {
+            url: unsafe_server.forward_url.clone(),
+            token: "private-token-sentinel".to_string(),
+        };
+        let error = send_execution_continuation_via_agent_bridge(&unsafe_target, &request)
+            .expect_err("unsafe diagnostics must be discarded");
+        assert!(error.contains("http_status=409"), "{error}");
+        assert!(!error.contains("private"), "{error}");
+        unsafe_server.receive();
+
+        let oversized_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::Value::String("x".repeat(64 * 1024 + 1)),
+        );
+        let oversized_target = HookForwardTarget {
+            url: oversized_server.forward_url.clone(),
+            token: "private-token-sentinel".to_string(),
+        };
+        let error = send_execution_continuation_via_agent_bridge(&oversized_target, &request)
+            .expect_err("oversized continuation diagnostics must fail closed");
+        assert!(error.contains("transport_failure"), "{error}");
+        oversized_server.receive();
+    }
+
+    #[test]
     fn operation_local_bridge_failures_have_stable_reason_codes() {
         let request = crate::AgentWorkspaceUpdateRequest {
             schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
@@ -1619,7 +1957,14 @@ mod tests {
             serde_json::json!({
                 "code": "workspace_ensure_required",
                 "reason": "workspace_ensure_required",
-                "message": "old Host uses the legacy WorkItems scope"
+                "diagnostic_reason": "workspace_ensure_required",
+                "mismatched_fields": [],
+                "message": "old Host uses the legacy WorkItems scope",
+                // Issue #4443 AC-2: the real refusal names `workspace.ensure`,
+                // so it carries this field. The strict `deny_unknown_fields`
+                // parser behind `is_exact_workspace_ensure_required` must keep
+                // accepting it.
+                "recovery_operations": ["workspace.ensure"]
             }),
         );
         let ensure_target = HookForwardTarget {

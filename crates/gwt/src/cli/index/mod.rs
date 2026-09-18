@@ -10,6 +10,7 @@
 //!   `index rebuild`.
 
 mod audit;
+mod repair;
 pub mod runtime;
 
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -20,10 +21,19 @@ use audit::{
     audit_log_dir, audit_rebuild_result, audit_rebuild_start, audit_runner_progress, audit_status,
     audit_status_failure,
 };
+use repair::RepairOutcome;
 use runtime::{
     format_runner_failure, parse_runner_json, rebuild_actions, render_index_status,
-    resolve_index_context, run_runner_rebuild, run_runner_status,
+    resolve_index_context, run_runner_rebuild, run_runner_rebuild_with_repair, run_runner_status,
+    IndexContext, RebuildAction,
 };
+
+/// The only collection `index.repair` recovers (SPEC #1939 / Issue #4205).
+const REPAIR_COLLECTION: &str = "issues";
+
+/// Carries the submitting call's job identifier into the detached worker so
+/// both halves of one repair name the same job.
+const REPAIR_JOB_ID_ENV: &str = "GWT_INDEX_REPAIR_JOB_ID";
 
 /// SPEC-1942 command model for `index.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +42,14 @@ pub enum IndexCommand {
     Status,
     /// `index.rebuild`.
     Rebuild { scope: IndexScope },
+    /// Request cancellation of an issues rebuild.
+    Cancel,
+    /// Explicitly repair the issues index.
+    ///
+    /// Issue #4435: the default submits the job to a detached worker and
+    /// answers immediately. `wait` keeps the blocking form, which is what the
+    /// worker itself runs.
+    Repair { wait: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +76,25 @@ pub fn parse(args: &[String]) -> Result<IndexCommand, CliParseError> {
         "rebuild" => Ok(IndexCommand::Rebuild {
             scope: parse_rebuild_scope(rest)?,
         }),
+        "cancel" | "repair" => {
+            let wait = rest.iter().any(|arg| arg == "--wait");
+            let scope_args: Vec<String> = rest
+                .iter()
+                .filter(|arg| *arg != "--wait")
+                .cloned()
+                .collect();
+            if !scope_args.is_empty() && parse_rebuild_scope(&scope_args)? != IndexScope::Issues {
+                return Err(CliParseError::Usage);
+            }
+            Ok(if head == "cancel" {
+                if wait {
+                    return Err(CliParseError::Usage);
+                }
+                IndexCommand::Cancel
+            } else {
+                IndexCommand::Repair { wait }
+            })
+        }
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
 }
@@ -89,7 +126,19 @@ pub fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     match cmd {
         IndexCommand::Status => run_status(env, out),
-        IndexCommand::Rebuild { scope } => run_rebuild(env, scope, out),
+        IndexCommand::Rebuild { scope } => run_rebuild(env, scope, false, out),
+        IndexCommand::Repair { wait } => run_repair(env, wait, out),
+        IndexCommand::Cancel => {
+            let context = resolve_index_context(env.repo_path())?;
+            let scope_dir = gwt_core::index::paths::gwt_index_root()
+                .join(context.repo_hash.as_str())
+                .join("issues");
+            std::fs::create_dir_all(&scope_dir)
+                .and_then(|()| std::fs::write(scope_dir.join("cancel-requested"), b""))
+                .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?;
+            out.push_str("issues: cancellation requested\n");
+            Ok(0)
+        }
     }
 }
 
@@ -120,6 +169,7 @@ fn run_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsEr
 fn run_rebuild<E: CliEnv>(
     env: &mut E,
     scope: IndexScope,
+    repair: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let context = resolve_index_context(env.repo_path())?;
@@ -135,39 +185,9 @@ fn run_rebuild<E: CliEnv>(
     ));
 
     let mut ok = true;
-    let log_dir = audit_log_dir(&context);
     for action in rebuild_actions(scope) {
-        let _ = audit_rebuild_start(&log_dir, &context, action.label);
-        let coordinator_worktree = action
-            .needs_worktree_hash
-            .then(|| context.worktree_hash.clone());
-        // Manual rebuilds coordinate host-wide like every other index build
-        // (SPEC #1939 Phase 70 FR-379/FR-383): at most one heavy runner tree,
-        // manual priority above background repair.
-        let run = crate::index_worker::run_coordinated_index_job(
-            context.repo_hash.as_str(),
-            action.label,
-            coordinator_worktree.as_deref(),
-            gwt_core::index_coordinator::JobPriority::ManualRebuild,
-            || {
-                let output = run_runner_rebuild(&context, action, "interactive")
-                    .map_err(|err| err.to_string())?;
-                let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
-                let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
-                if !output.status.success() {
-                    return Err(format_runner_failure(&output));
-                }
-                // PR #3301 review: interactive QoS never yields today, but a
-                // yielded payload must still resume instead of being
-                // recorded as a completed build.
-                if crate::index_worker::runner_payload_yielded(&output.stdout) {
-                    return Ok(crate::index_worker::BuildStep::Yielded);
-                }
-                Ok(crate::index_worker::BuildStep::Done(()))
-            },
-        );
-        match run {
-            Ok(_) => out.push_str(&format!("{}: ok\n", action.label)),
+        match run_coordinated_action(&context, action, repair) {
+            Ok(()) => out.push_str(&format!("{}: ok\n", action.label)),
             Err(error) => {
                 ok = false;
                 out.push_str(&format!("{}: error\n", action.label));
@@ -180,6 +200,175 @@ fn run_rebuild<E: CliEnv>(
     }
 
     Ok(if ok { 0 } else { 1 })
+}
+
+/// Run one rebuild action under the host-wide index coordinator.
+///
+/// Manual rebuilds coordinate host-wide like every other index build
+/// (SPEC #1939 Phase 70 FR-379/FR-383): at most one heavy runner tree, manual
+/// priority above background repair.
+fn run_coordinated_action(
+    context: &IndexContext,
+    action: RebuildAction,
+    repair: bool,
+) -> Result<(), String> {
+    let log_dir = audit_log_dir(context);
+    let _ = audit_rebuild_start(&log_dir, context, action.label);
+    let coordinator_worktree = action
+        .needs_worktree_hash
+        .then(|| context.worktree_hash.clone());
+    crate::index_worker::run_coordinated_index_job(
+        context.repo_hash.as_str(),
+        action.label,
+        coordinator_worktree.as_deref(),
+        gwt_core::index_coordinator::JobPriority::ManualRebuild,
+        || {
+            let output = if repair {
+                run_runner_rebuild_with_repair(context, action, "interactive", true)
+            } else {
+                run_runner_rebuild(context, action, "interactive")
+            }
+            .map_err(|err| err.to_string())?;
+            let _ = audit_runner_progress(&log_dir, context, action.label, &output.stderr);
+            let _ = audit_rebuild_result(&log_dir, context, action.label, &output);
+            if !output.status.success() {
+                return Err(format_runner_failure(&output));
+            }
+            // PR #3301 review: interactive QoS never yields today, but a
+            // yielded payload must still resume instead of being
+            // recorded as a completed build.
+            if crate::index_worker::runner_payload_yielded(&output.stdout) {
+                return Ok(crate::index_worker::BuildStep::Yielded);
+            }
+            Ok(crate::index_worker::BuildStep::Done(()))
+        },
+    )
+    .map(|_| ())
+}
+
+/// `index.repair` (Issue #4435).
+///
+/// The default submits the job and answers immediately; `wait` runs it here
+/// and reports the collection's post-run repair state. Either way the caller
+/// gets a structured, non-empty verdict that names the collection and the job.
+fn run_repair<E: CliEnv>(env: &mut E, wait: bool, out: &mut String) -> Result<i32, SpecOpsError> {
+    let context = resolve_index_context(env.repo_path())?;
+    gwt_core::runtime::ensure_project_index_runtime().map_err(runtime_error)?;
+    let job = std::env::var(REPAIR_JOB_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            repair::job_id(
+                context.repo_hash.as_str(),
+                REPAIR_COLLECTION,
+                &repair::new_run_token(),
+            )
+        });
+
+    let probe = probe_repair_status(&context);
+    let scope = probe
+        .as_ref()
+        .ok()
+        .and_then(|payload| repair::scope_status(payload, REPAIR_COLLECTION).cloned());
+    let health_error = probe.as_ref().err().cloned();
+
+    if !repair::repair_required(scope.as_ref()) {
+        let outcome = RepairOutcome::NotRequired;
+        repair::render_report(
+            out,
+            REPAIR_COLLECTION,
+            &job,
+            &outcome,
+            scope.as_ref(),
+            health_error.as_deref(),
+        );
+        return Ok(outcome.exit_code());
+    }
+
+    let outcome = if wait {
+        match run_coordinated_action(&context, repair_action(), true) {
+            Ok(()) => RepairOutcome::Completed,
+            Err(detail) => RepairOutcome::Failed { detail },
+        }
+    } else {
+        match submit_detached_repair(&context, &job) {
+            Ok(()) => RepairOutcome::Submitted,
+            Err(detail) => RepairOutcome::Refused { detail },
+        }
+    };
+
+    // A waiting run changed the collection, so report what it left behind
+    // rather than the state we probed before it started (AC-3).
+    let (scope, health_error) = if wait {
+        let after = probe_repair_status(&context);
+        let scope = after
+            .as_ref()
+            .ok()
+            .and_then(|payload| repair::scope_status(payload, REPAIR_COLLECTION).cloned());
+        let error = after.as_ref().err().cloned();
+        (scope, error)
+    } else {
+        (scope, health_error)
+    };
+
+    repair::render_report(
+        out,
+        REPAIR_COLLECTION,
+        &job,
+        &outcome,
+        scope.as_ref(),
+        health_error.as_deref(),
+    );
+    Ok(outcome.exit_code())
+}
+
+fn repair_action() -> RebuildAction {
+    rebuild_actions(IndexScope::Issues)
+        .into_iter()
+        .next()
+        .expect("the issues scope always yields its rebuild action")
+}
+
+/// Read the collection's health without holding any index lease.
+fn probe_repair_status(context: &IndexContext) -> Result<serde_json::Value, String> {
+    let output = run_runner_status(context).map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(format_runner_failure(&output));
+    }
+    parse_runner_json(&output.stdout).map_err(|err| err.to_string())
+}
+
+/// Hand the repair to a detached copy of this binary and return.
+///
+/// The worker re-enters `index.repair` with `wait`, so the whole coordinated
+/// job — admission, heavy lease, the ten-minute runner — runs there instead of
+/// holding the caller's process silent for its entire duration (Issue #4435).
+fn submit_detached_repair(context: &IndexContext, job: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let exe = std::env::current_exe().map_err(|err| format!("current executable: {err}"))?;
+    let mut child = gwt_core::process::hidden_command(exe)
+        .current_dir(&context.project_root)
+        .env(REPAIR_JOB_ID_ENV, job)
+        .stdin(Stdio::piped())
+        // The worker outlives this process; inheriting the caller's pipes
+        // would keep them open and make a capturing caller block on a job it
+        // was explicitly told not to wait for.
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("could not start the repair worker: {err}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "the repair worker exposed no stdin".to_string())?;
+    stdin
+        .write_all(
+            br#"{"schema_version":1,"operation":"index.repair","params":{"scope":"issues","wait":true}}"#,
+        )
+        .map_err(|err| format!("could not hand the envelope to the repair worker: {err}"))?;
+    Ok(())
 }
 
 fn runtime_error(err: gwt_core::GwtError) -> SpecOpsError {
@@ -240,6 +429,36 @@ mod tests {
     }
 
     #[test]
+    fn cancel_issues_records_request_without_bootstrapping_python() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = make_bare_workspace_with_worktree(&tmp.path().join("workspace"));
+        let context = resolve_index_context(&repo).unwrap();
+        let mut env = crate::cli::env::TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = repo;
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                parse(&s(&["cancel", "--scope", "issues"])).unwrap(),
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        assert!(gwt_core::index::paths::gwt_index_root()
+            .join(context.repo_hash.as_str())
+            .join("issues/cancel-requested")
+            .exists());
+        assert!(!context.python.exists());
+    }
+
+    #[test]
     fn parses_index_status_and_rebuild_scope() {
         assert_eq!(parse(&s(&["status"])).unwrap(), IndexCommand::Status);
         assert_eq!(
@@ -254,6 +473,23 @@ mod tests {
                 scope: IndexScope::All
             }
         );
+    }
+
+    /// Issue #4435: `index.repair` submits by default and only blocks when
+    /// the caller — or the worker it spawned — asks for `--wait`.
+    #[test]
+    fn parses_index_repair_wait_flag() {
+        assert_eq!(
+            parse(&s(&["repair"])).unwrap(),
+            IndexCommand::Repair { wait: false }
+        );
+        assert_eq!(
+            parse(&s(&["repair", "--scope", "issues", "--wait"])).unwrap(),
+            IndexCommand::Repair { wait: true }
+        );
+        assert_eq!(parse(&s(&["cancel"])).unwrap(), IndexCommand::Cancel);
+        assert!(parse(&s(&["cancel", "--wait"])).is_err());
+        assert!(parse(&s(&["repair", "--scope", "specs"])).is_err());
     }
 
     #[test]

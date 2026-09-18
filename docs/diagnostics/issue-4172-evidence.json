@@ -1,0 +1,1666 @@
+{
+  "owner": 4172,
+  "scope": "Observed Windows backend stall; not all acceptance criteria complete",
+  "source_commit": "0849fd177d82bab401d3201152b7db2cabbe3342",
+  "binary_version": "9.94.0",
+  "binary_sha256": "EB70673FBA1E612391499653CDD6A66354D1AF19BA1FA2DB8D45C3AEC60B1FA8",
+  "process_id": 34952,
+  "main_thread_id_hex": "9a80",
+  "started_at": "2026-09-09T19:17:50.7375692+09:00",
+  "collector": "Microsoft.Debugging.Platform.DbgEng 20260319.1511.0; NONINVASIVE | NO_SUSPEND",
+  "limitations": [
+    "Running threads can change during unwind; incomplete stacks are retained",
+    "Matching application PDB unavailable; gwt frames remain module offsets",
+    "Main-stack checksum warning paths omitted from excerpts",
+    "Source checkout differs from deployed release",
+    "CIM query start is not the process creation or exact observation time"
+  ],
+  "pane_list": [
+    {
+      "started_at": "2026-09-09T22:12:58.5046831+09:00",
+      "elapsed_ms": 825,
+      "reply": "{\"exit_code\":0,\"ok\":true,\"operation\":\"pane.list\",\"output\":\"project-694f0f381b744cc59c1956d564ce1d1e::agent-225\\tidle\\tcodex\\tfix(gui): gwt がアプリ全体で入力を受け付けなくなる（PM 窓 / agent ペイン / GUI 全体 / 起動直後、Windows・macOS 共通）\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-228\\tidle\\tcodex\\tperf(startup): gwt のコールドスタート所要時間が計測不能で、起動フェーズ別の内訳と予算が存在しない\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-230\\tidle\\tcodex\\tfix(verify): 解放された host 検証 lease が待機列を飛ばして非待機 worktree に渡り、waiter が飢餓する\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-231\\tidle\\tcodex\\tfix(issue-monitor): 自動更新再起動で pane が死んだ launch が slot を leak し、stop 後は unique commit のため fresh launch も拒否されて恒久パークする\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-220\\trunning\\tclaude\\tagent_failed の GUI 復旧導線と全断検知\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-221\\tidle\\tclaude\\tCI queue 飽和対策 (concurrency + path filter)\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-222\\tidle\\tclaude\\tCI cargo cache warm for develop/main\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-223\\tidle\\tclaude\\tbug(skills): runtime materialization が deliver-flow.md を .claude のみに書き、ローカル parity test が失敗する\\nproject-694f0f381b744cc59c1956d564ce1d1e::agent-224\\trunning\\tclaude\\tNotification toast UX redesign\\n\"}"
+    },
+    {
+      "at": "2026-09-09T22:15:31.3846726+09:00",
+      "elapsed_ms": 30893,
+      "response": "{\"error\":\"network error: pane list: pane_backend_unresponsive — the gwt instance behind this pane WebSocket accepted the connection and then sent nothing within 15000ms. It is running but not answering, which is what a saturated instance looks like from here. Nothing was changed; retry, or restart that instance.\",\"exit_code\":1,\"ok\":false,\"operation\":\"pane.list\"}"
+    }
+  ],
+  "stacks": [
+    {
+      "file": "stack-01.txt",
+      "sha256": "E47DFA088738955A81F816D2BCC04F433D2B7DDF438327B716697EC24D743324",
+      "debug_time": "Debug session time: Wed Sep  9 22:12:30.678 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 79
+    },
+    {
+      "file": "stack-02.txt",
+      "sha256": "C0BB787B83E76834B63F905AE951AF6440A6DAE50F2ED0DBE09F5C80F3006FB9",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:05.059 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 79
+    },
+    {
+      "file": "stack-03.txt",
+      "sha256": "53DA56C5ED9F15F167795F6287D7A6B8B0F9D94C60ECA0F307C22C57D5B97CCD",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:08.156 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 79
+    },
+    {
+      "file": "stack-04.txt",
+      "sha256": "EB0B03A3FD61BFF8BF518CBAB42D4383C837B768B4B0FE72372242DBC639B9F1",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:10.803 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 79
+    },
+    {
+      "file": "stack-05.txt",
+      "sha256": "3CC8C4CA62D5E9D4177914EF6B1D915CD297DCE80CFCDD34CBB76E85FECDF21B",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:13.458 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-06.txt",
+      "sha256": "83AEABE3D60502E734C8FAEA4709CC10DFB34DBE903AE0ACDB73C56F4CE4924C",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:16.106 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-07.txt",
+      "sha256": "C105DFC4FC331C468E5FC8EF9D3D85B5787F276DA1D998B1E088D098592F5190",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:18.763 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-08.txt",
+      "sha256": "3723CD6B29D42C339184683148CF71AFDF389BE5840EB89F4D2C07769544C1C0",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:21.422 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fb3d8 00007ffb`45527e04     win32u!NtUserMessageCall+0x14",
+        "00000062`6d4fb3e0 00000000`00000000     user32!IsWindowEnabled+0x344"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-09.txt",
+      "sha256": "67DD51C93D482EA6426454E07118EF2690F6D7FB09E4DD8DBD5E9CEE884C1D0D",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:24.080 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-10.txt",
+      "sha256": "4D4623C670F890E96FD0881A2A113E3A22E79814294FC0685D05B82471995DDF",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:26.740 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4fbd78 00007ffb`45542812     win32u!NtUserGetMessage+0x14",
+        "00000062`6d4fbd80 00007ff6`4ce36d8e     user32!GetMessageW+0x22",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16d8e",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b",
+        "00000062`6d4ffc30 00007ffb`46e9cd87     gwt+0x163631f",
+        "00000062`6d4ffc70 00007ffb`4776caec     KERNEL32!BaseThreadInitThunk+0x17",
+        "00000062`6d4ffca0 00000000`00000000     ntdll!RtlUserThreadStart+0x2c"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-11.txt",
+      "sha256": "168686E61D5D7556C1C85DC4235FB864299D2EF49651EC0B4989C71BC707503E",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:29.412 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f1b38 00000000`00000000     ntdll!ZwCreateFile+0x14",
+        "00000062`6d4f1b40 00000000`00d400d2     0x000001e8`b5551420",
+        "00000062`6d4f1b48 5bfa6cc9`79e60069     0x00000062`6d4f1e00"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-12.txt",
+      "sha256": "8C02C963DA3219CAC8D66D63100310A15C178371827865CA0F0B7049E5605E1A",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:32.077 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f3568 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f3570 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f3860 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f38a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f3a70 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f3bb0 00007ff6`4dc3d6a5     gwt+0xe22c07",
+        "00000062`6d4f3df0 00007ff6`4d4b5aaa     gwt+0xe1d6a5",
+        "00000062`6d4f4590 00007ff6`4d4bec17     gwt+0x695aaa",
+        "00000062`6d4f49b0 00007ff6`4d333fa4     gwt+0x69ec17",
+        "00000062`6d4f4cb0 00007ff6`4d338261     gwt+0x513fa4",
+        "00000062`6d4f6010 00007ff6`4d29d7cc     gwt+0x518261",
+        "00000062`6d4f6700 00007ff6`4d2e5eac     gwt+0x47d7cc",
+        "00000062`6d4f70f0 00007ff6`4d43fe16     gwt+0x4c5eac",
+        "00000062`6d4f9c50 00007ff6`4d1cc5cc     gwt+0x61fe16",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ac5cc",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-13.txt",
+      "sha256": "0875B43860A7280736C9804A87CCD50022B1755D79A95AA274C6631342F71333",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:34.752 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f3568 00000000`00000000     ntdll!NtWaitForMultipleObjects+0x14"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-14.txt",
+      "sha256": "45A51F7D80A46D39602EA7BE855BFE9878CCBB4FA265C3CD5A4C1AAF52560748",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:37.427 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f28d8 00000000`00000000     ntdll!NtReadFile+0x14"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-15.txt",
+      "sha256": "91C87F118C4C86426B2A994C541A20943D154182BF7554A9F7EE600175991A8C",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:40.113 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f3568 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f3570 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f3860 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f38a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f3a70 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f3bb0 00007ff6`4dc3d6a5     gwt+0xe22c07",
+        "00000062`6d4f3df0 00007ff6`4d4b5aaa     gwt+0xe1d6a5",
+        "00000062`6d4f4590 00007ff6`4d4bc5b7     gwt+0x695aaa",
+        "00000062`6d4f49b0 00007ff6`4d333fa4     gwt+0x69c5b7",
+        "00000062`6d4f4cb0 00007ff6`4d338261     gwt+0x513fa4",
+        "00000062`6d4f6010 00007ff6`4d29d7cc     gwt+0x518261",
+        "00000062`6d4f6700 00007ff6`4d2e5eac     gwt+0x47d7cc",
+        "00000062`6d4f70f0 00007ff6`4d43fe16     gwt+0x4c5eac",
+        "00000062`6d4f9c50 00007ff6`4d1cc5cc     gwt+0x61fe16",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ac5cc",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-16.txt",
+      "sha256": "A0A5B8F48E578106D71B787DB03B6D4006BB6DC9810BAB54941182FB492FBB35",
+      "debug_time": "Debug session time: Wed Sep  9 22:13:42.781 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f3568 000001e8`98c902a4     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f3570 00000000`00000000     0x000001e8`98c902a4"
+      ],
+      "thread_count": 78
+    },
+    {
+      "file": "stack-b-01.txt",
+      "sha256": "928C82927E581AE4929219512A6E2151EAE0632320CF3A7EF9A3E534709D66BE",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:14.468 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f7368 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f7370 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f7660 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f76a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f7870 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f79b0 00007ff6`4dc3d746     gwt+0xe22c07",
+        "00000062`6d4f7bf0 00007ff6`4d4b5aaa     gwt+0xe1d746",
+        "00000062`6d4f8390 00007ff6`4d4bec17     gwt+0x695aaa",
+        "00000062`6d4f87b0 00007ff6`4d333fa4     gwt+0x69ec17",
+        "00000062`6d4f8ab0 00007ff6`4d3383e0     gwt+0x513fa4",
+        "00000062`6d4f9e10 00007ff6`4d1cd87b     gwt+0x5183e0",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ad87b",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b"
+      ],
+      "thread_count": 82
+    },
+    {
+      "file": "stack-b-02.txt",
+      "sha256": "C41F84D3036B986DB8BEAB4E90369E74E46E2FB8D672EA5DE082B09444833D12",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:17.170 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f6ad8 00000000`00000000     ntdll!ZwCreateFile+0x14"
+      ],
+      "thread_count": 82
+    },
+    {
+      "file": "stack-b-03.txt",
+      "sha256": "98DF64CE1B26C63EF902503A83B1851D8EA652AD300C2A5F3008E18C4DA292F9",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:19.839 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f7368 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f7370 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f7660 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f76a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f7870 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f79b0 00007ff6`4dc3d746     gwt+0xe22c07",
+        "00000062`6d4f7bf0 00007ff6`4d4b5aaa     gwt+0xe1d746",
+        "00000062`6d4f8390 00007ff6`4d4bc5b7     gwt+0x695aaa",
+        "00000062`6d4f87b0 00007ff6`4d333fa4     gwt+0x69c5b7",
+        "00000062`6d4f8ab0 00007ff6`4d3383e0     gwt+0x513fa4",
+        "00000062`6d4f9e10 00007ff6`4d1cd87b     gwt+0x5183e0",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ad87b",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b"
+      ],
+      "thread_count": 82
+    },
+    {
+      "file": "stack-b-04.txt",
+      "sha256": "C3770FE87C794D427E6AAB00B47AECD97F5E7F84A0CC7FAD9D2E4F144C4DEE69",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:22.526 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f4ab8 00007ffb`44e944dc     ntdll!NtCreateUserProcess+0x14",
+        "00000062`6d4f4ac0 00007ffb`44e8d656     KERNELBASE!CreateProcessInternalW+0x6dfc",
+        "00000062`6d4f6f10 00007ffb`46eabe24     KERNELBASE!CreateProcessW+0x66",
+        "00000062`6d4f6f80 000001e8`98c90e40     KERNEL32!CreateProcessW+0x54",
+        "00000062`6d4f6fe0 000001e8`98b90000     0x000001e8`98c90e40",
+        "00000062`6d4f6fe8 00000000`00000000     0x000001e8`98b90000"
+      ],
+      "thread_count": 81
+    },
+    {
+      "file": "stack-b-05.txt",
+      "sha256": "61FCBE0A841A3A49FE5EFDA636981A8F5F24BBBAD8182028F144FE09F837EBF0",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:25.215 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f7368 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f7370 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f7660 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f76a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f7870 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f79b0 00007ff6`4dc3d746     gwt+0xe22c07",
+        "00000062`6d4f7bf0 00007ff6`4d4b5aaa     gwt+0xe1d746",
+        "00000062`6d4f8390 00007ff6`4d4bc5b7     gwt+0x695aaa",
+        "00000062`6d4f87b0 00007ff6`4d333fa4     gwt+0x69c5b7",
+        "00000062`6d4f8ab0 00007ff6`4d3383e0     gwt+0x513fa4",
+        "00000062`6d4f9e10 00007ff6`4d1cd87b     gwt+0x5183e0",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ad87b",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b"
+      ],
+      "thread_count": 82
+    },
+    {
+      "file": "stack-b-06.txt",
+      "sha256": "38E7412A651A8617C545F75080ED4E9F60285FFF326E2B487AAB39EE797997DE",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:27.950 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f7368 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f7370 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f7660 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f76a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f7870 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f79b0 00007ff6`4dc3d746     gwt+0xe22c07",
+        "00000062`6d4f7bf0 00007ff6`4d4b5aaa     gwt+0xe1d746",
+        "00000062`6d4f8390 00007ff6`4d4bc5b7     gwt+0x695aaa",
+        "00000062`6d4f87b0 00007ff6`4d333fa4     gwt+0x69c5b7",
+        "00000062`6d4f8ab0 00007ff6`4d3383e0     gwt+0x513fa4",
+        "00000062`6d4f9e10 00007ff6`4d1cd87b     gwt+0x5183e0",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ad87b",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b"
+      ],
+      "thread_count": 82
+    },
+    {
+      "file": "stack-b-07.txt",
+      "sha256": "3E5C28FD969A1DB7BAEC171B3857532BEAF5DEF021C8A60EB1DACA4281ECF215",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:30.663 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f7368 000001e8`98c902a4     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f7370 00000000`00000000     0x000001e8`98c902a4"
+      ],
+      "thread_count": 82
+    },
+    {
+      "file": "stack-b-08.txt",
+      "sha256": "AC2488695DDAA18F5E521F619CF7DB3E541951EADB342ABCBA227D66C019903C",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:33.345 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f7368 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f7370 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f7660 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f76a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f7870 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f79b0 00007ff6`4dc3d6a5     gwt+0xe22c07",
+        "00000062`6d4f7bf0 00007ff6`4d4b5aaa     gwt+0xe1d6a5",
+        "00000062`6d4f8390 00007ff6`4d4bc5b7     gwt+0x695aaa",
+        "00000062`6d4f87b0 00007ff6`4d333fa4     gwt+0x69c5b7",
+        "00000062`6d4f8ab0 00007ff6`4d3383e0     gwt+0x513fa4",
+        "00000062`6d4f9e10 00007ff6`4d1cd87b     gwt+0x5183e0",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ad87b",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b"
+      ],
+      "thread_count": 82
+    },
+    {
+      "file": "stack-b-09.txt",
+      "sha256": "F844E9A2006F1C13985726207A0EAF21429D656A7B1CA5F1548973C108FF6DCA",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:36.029 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f7368 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f7370 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f7660 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f76a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f7870 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f79b0 00007ff6`4dc3d746     gwt+0xe22c07",
+        "00000062`6d4f7bf0 00007ff6`4d4b5aaa     gwt+0xe1d746",
+        "00000062`6d4f8390 00007ff6`4d4bc5b7     gwt+0x695aaa",
+        "00000062`6d4f87b0 00007ff6`4d333fa4     gwt+0x69c5b7",
+        "00000062`6d4f8ab0 00007ff6`4d3383e0     gwt+0x513fa4",
+        "00000062`6d4f9e10 00007ff6`4d1cd87b     gwt+0x5183e0",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ad87b",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5",
+        "00000062`6d4fbe70 00007ff6`4cf73326     gwt+0x46fe2e",
+        "00000062`6d4ffb90 00007ff6`4d5b187b     gwt+0x153326",
+        "00000062`6d4ffbc0 00007ff6`4e45631f     gwt+0x79187b"
+      ],
+      "thread_count": 81
+    },
+    {
+      "file": "stack-b-10.txt",
+      "sha256": "4288A40CAD69BCEC37D55E5C5919A4374C54D154305CD8F724A496790F837ECE",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:38.704 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f1d78 00000000`00000008     ntdll!NtDeviceIoControlFile+0x14",
+        "00000062`6d4f1d80 00000000`0000002c     0x8",
+        "00000062`6d4f1d88 00000000`00000000     0x2c"
+      ],
+      "thread_count": 83
+    },
+    {
+      "file": "stack-b-11.txt",
+      "sha256": "D44C426B80258FB0B58E3A3D93F010CEB5F5F2451DFB868C460B30BE036CF22A",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:41.392 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f3568 00007ffb`44e32773     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f3570 00007ffb`44e32641     KERNELBASE!WaitForMultipleObjectsEx+0x123",
+        "00000062`6d4f3860 00007ff6`4e33b354     KERNELBASE!WaitForMultipleObjects+0x11",
+        "00000062`6d4f38a0 00007ff6`4e0c2842     gwt+0x151b354",
+        "00000062`6d4f3a70 00007ff6`4dc42c07     gwt+0x12a2842",
+        "00000062`6d4f3bb0 00007ff6`4dc3d6a5     gwt+0xe22c07",
+        "00000062`6d4f3df0 00007ff6`4d4b5aaa     gwt+0xe1d6a5",
+        "00000062`6d4f4590 00007ff6`4d4bec17     gwt+0x695aaa",
+        "00000062`6d4f49b0 00007ff6`4d333fa4     gwt+0x69ec17",
+        "00000062`6d4f4cb0 00007ff6`4d338261     gwt+0x513fa4",
+        "00000062`6d4f6010 00007ff6`4d29d7cc     gwt+0x518261",
+        "00000062`6d4f6700 00007ff6`4d2e5eac     gwt+0x47d7cc",
+        "00000062`6d4f70f0 00007ff6`4d43fe16     gwt+0x4c5eac",
+        "00000062`6d4f9c50 00007ff6`4d1cc5cc     gwt+0x61fe16",
+        "00000062`6d4fa1c0 00007ff6`4d19a4fa     gwt+0x3ac5cc",
+        "00000062`6d4faf60 00007ff6`4ce2f5e2     gwt+0x37a4fa",
+        "00000062`6d4fb130 00007ff6`4d38e729     gwt+0xf5e2",
+        "00000062`6d4fb310 00007ff6`4cff4437     gwt+0x56e729",
+        "00000062`6d4fb650 00007ffb`455252c6     gwt+0x1d4437",
+        "00000062`6d4fbc00 00007ffb`45525d9d     user32!CallWindowProcW+0x6a6",
+        "00000062`6d4fbd60 00007ff6`4ce36db5     user32!IsWindowUnicode+0x20d",
+        "00000062`6d4fbde0 00007ff6`4d28fe2e     gwt+0x16db5"
+      ],
+      "thread_count": 83
+    },
+    {
+      "file": "stack-b-12.txt",
+      "sha256": "CA1BD7A8518BE41C25DF9F607598094CDAB1D2CD5E7D61D85C14718EF0E618CA",
+      "debug_time": "Debug session time: Wed Sep  9 22:15:44.078 2026 (UTC + 9:00)",
+      "main_stack": [
+        ".  0  Id: 8888.9a80 Suspend: 0 Teb: 00000062`6d31a000 Unfrozen \"main\"",
+        "Child-SP          RetAddr               Call Site",
+        "00000062`6d4f3568 000001e8`98c902a4     ntdll!NtWaitForMultipleObjects+0x14",
+        "00000062`6d4f3570 00000000`00000000     0x000001e8`98c902a4"
+      ],
+      "thread_count": 83
+    }
+  ],
+  "logs": [
+    {
+      "timestamp": "2026-09-09T22:12:58.618169300+09:00",
+      "level": "INFO",
+      "fields": {
+        "message": "embedded server access",
+        "method": "GET",
+        "path": "/internal/pane-ws",
+        "status": 101,
+        "peer": "127.0.0.1:58376",
+        "user_agent": "None",
+        "elapsed_ms": 0
+      },
+      "target": "gwt_access"
+    },
+    {
+      "timestamp": "2026-09-09T22:13:54.427206500+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "BoardProjectionChanged blocked the GUI event loop for 27546ms",
+        "event": "BoardProjectionChanged",
+        "elapsed_ms": 27546
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:14:30.909327900+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "IssueMonitorLaunchRequest blocked the GUI event loop for 941ms",
+        "event": "IssueMonitorLaunchRequest",
+        "elapsed_ms": 941
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:14:34.808295+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "LaunchComplete blocked the GUI event loop for 87ms",
+        "event": "LaunchComplete",
+        "elapsed_ms": 87
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:15:07.394115700+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "BoardProjectionChanged blocked the GUI event loop for 27869ms",
+        "event": "BoardProjectionChanged",
+        "elapsed_ms": 27869
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:15:08.682303100+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "WorkEventsIngested blocked the GUI event loop for 1214ms",
+        "event": "WorkEventsIngested",
+        "elapsed_ms": 1214
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:15:31.511087900+09:00",
+      "level": "INFO",
+      "fields": {
+        "message": "embedded server access",
+        "method": "GET",
+        "path": "/internal/pane-ws",
+        "status": 101,
+        "peer": "127.0.0.1:64643",
+        "user_agent": "None",
+        "elapsed_ms": 0
+      },
+      "target": "gwt_access"
+    },
+    {
+      "timestamp": "2026-09-09T22:15:36.921604700+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "WorkTipSubjects blocked the GUI event loop for 27814ms",
+        "event": "WorkTipSubjects",
+        "elapsed_ms": 27814
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:16:04.902985200+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "BoardProjectionChanged blocked the GUI event loop for 27932ms",
+        "event": "BoardProjectionChanged",
+        "elapsed_ms": 27932
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:16:32.284147500+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "WorkPrTitles blocked the GUI event loop for 27379ms",
+        "event": "WorkPrTitles",
+        "elapsed_ms": 27379
+      },
+      "target": "gwt.frontend.timing"
+    }
+  ],
+  "git_sample_count": 254,
+  "git_distinct_pids": 214,
+  "git_commands": [
+    {
+      "at": "2026-09-09T22:15:01.6729052+09:00",
+      "pid": 28952,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:01.783885+09:00",
+      "command": "\"git\" -C E:/gwt\\.codex ls-files --error-unmatch -z -- E:/gwt\\.codex/hooks.json"
+    },
+    {
+      "at": "2026-09-09T22:15:08.6027626+09:00",
+      "pid": 9036,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:08.684395+09:00",
+      "command": "\"git\" for-each-ref \"--format=%(refname:short)\t%(contents:subject)\" refs/heads/ refs/remotes/origin/"
+    },
+    {
+      "at": "2026-09-09T22:15:08.6027626+09:00",
+      "pid": 42120,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:08.715303+09:00",
+      "command": "\"git\" for-each-ref \"--format=%(refname:short)\t%(committerdate:unix)\" refs/heads/ refs/remotes/origin/"
+    },
+    {
+      "at": "2026-09-09T22:15:08.8842111+09:00",
+      "pid": 9036,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:08.684395+09:00",
+      "command": "\"git\" for-each-ref \"--format=%(refname:short)\t%(contents:subject)\" refs/heads/ refs/remotes/origin/"
+    },
+    {
+      "at": "2026-09-09T22:15:08.8842111+09:00",
+      "pid": 42120,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:08.715303+09:00",
+      "command": "\"git\" for-each-ref \"--format=%(refname:short)\t%(committerdate:unix)\" refs/heads/ refs/remotes/origin/"
+    },
+    {
+      "at": "2026-09-09T22:15:09.2125122+09:00",
+      "pid": 4856,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:09.200648+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-0827"
+    },
+    {
+      "at": "2026-09-09T22:15:09.5268538+09:00",
+      "pid": 42548,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:09.60057+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-0847"
+    },
+    {
+      "at": "2026-09-09T22:15:09.808671+09:00",
+      "pid": 42548,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:09.60057+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-0847"
+    },
+    {
+      "at": "2026-09-09T22:15:10.0928504+09:00",
+      "pid": 32576,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:09.995574+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-0952"
+    },
+    {
+      "at": "2026-09-09T22:15:10.0928504+09:00",
+      "pid": 11616,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:10.062144+09:00",
+      "command": "\"git\" for-each-ref \"--format=%(refname:short)\t%(committerdate:unix)\" refs/heads/ refs/remotes/origin/"
+    },
+    {
+      "at": "2026-09-09T22:15:10.3774293+09:00",
+      "pid": 724,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:10.395665+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-0954"
+    },
+    {
+      "at": "2026-09-09T22:15:10.9577118+09:00",
+      "pid": 32376,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:10.834311+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-1031"
+    },
+    {
+      "at": "2026-09-09T22:15:11.2422076+09:00",
+      "pid": 2304,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:11.230432+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-1035-2"
+    },
+    {
+      "at": "2026-09-09T22:15:11.5248399+09:00",
+      "pid": 34036,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:11.624865+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-1107"
+    },
+    {
+      "at": "2026-09-09T22:15:11.806454+09:00",
+      "pid": 34036,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:11.624865+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-1107"
+    },
+    {
+      "at": "2026-09-09T22:15:12.1044851+09:00",
+      "pid": 35420,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:12.01936+09:00",
+      "command": "\"git\" cherry origin/develop work/20260518-1110"
+    },
+    {
+      "at": "2026-09-09T22:15:12.3899288+09:00",
+      "pid": 12644,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:12.411068+09:00",
+      "command": "\"git\" cherry origin/develop work/20260525-0914"
+    },
+    {
+      "at": "2026-09-09T22:15:12.6731314+09:00",
+      "pid": 20076,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:12.782786+09:00",
+      "command": "\"git\" cherry origin/develop work/20260525-0916"
+    },
+    {
+      "at": "2026-09-09T22:15:12.9730818+09:00",
+      "pid": 20076,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:12.782786+09:00",
+      "command": "\"git\" cherry origin/develop work/20260525-0916"
+    },
+    {
+      "at": "2026-09-09T22:15:13.2580979+09:00",
+      "pid": 3724,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:13.149538+09:00",
+      "command": "\"git\" cherry origin/develop work/20260525-0917"
+    },
+    {
+      "at": "2026-09-09T22:15:13.5409242+09:00",
+      "pid": 18796,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:13.52663+09:00",
+      "command": "\"git\" cherry origin/develop work/20260525-0919"
+    },
+    {
+      "at": "2026-09-09T22:15:13.8710576+09:00",
+      "pid": 11864,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:13.906568+09:00",
+      "command": "\"git\" cherry origin/develop work/20260525-1121"
+    },
+    {
+      "at": "2026-09-09T22:15:14.4685724+09:00",
+      "pid": 37656,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:14.27927+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0738"
+    },
+    {
+      "at": "2026-09-09T22:15:14.7521032+09:00",
+      "pid": 41136,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:14.648678+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0739"
+    },
+    {
+      "at": "2026-09-09T22:15:15.0339311+09:00",
+      "pid": 37256,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:15.015781+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0743"
+    },
+    {
+      "at": "2026-09-09T22:15:15.6342222+09:00",
+      "pid": 37432,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:15.495902+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0745"
+    },
+    {
+      "at": "2026-09-09T22:15:15.9468219+09:00",
+      "pid": 38868,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:15.902267+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0751"
+    },
+    {
+      "at": "2026-09-09T22:15:16.2438503+09:00",
+      "pid": 12172,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:16.268568+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop...work/20260527-0751 --"
+    },
+    {
+      "at": "2026-09-09T22:15:16.5255047+09:00",
+      "pid": 39404,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:16.453756+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop work/20260527-0751 --"
+    },
+    {
+      "at": "2026-09-09T22:15:16.8230393+09:00",
+      "pid": 36444,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:16.808879+09:00",
+      "command": "\"git\" cherry origin/main work/20260527-0751"
+    },
+    {
+      "at": "2026-09-09T22:15:17.1193842+09:00",
+      "pid": 41812,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:17.176459+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main...work/20260527-0751 --"
+    },
+    {
+      "at": "2026-09-09T22:15:17.4162742+09:00",
+      "pid": 18708,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:17.311466+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main work/20260527-0751 --"
+    },
+    {
+      "at": "2026-09-09T22:15:17.7126243+09:00",
+      "pid": 35096,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:17.636218+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0756"
+    },
+    {
+      "at": "2026-09-09T22:15:18.6039004+09:00",
+      "pid": 41108,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:18.489069+09:00",
+      "command": "\"git\" cherry origin/main work/20260527-0756"
+    },
+    {
+      "at": "2026-09-09T22:15:18.9016954+09:00",
+      "pid": 35340,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:19.004607+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main work/20260527-0756 --"
+    },
+    {
+      "at": "2026-09-09T22:15:19.5099325+09:00",
+      "pid": 27508,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:19.344382+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0923"
+    },
+    {
+      "at": "2026-09-09T22:15:19.5099325+09:00",
+      "pid": 29504,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:19.590902+09:00",
+      "command": "\"git\" -C E:\\gwt\\work\\issue-4033\\.claude ls-files --error-unmatch -z -- E:\\gwt\\work\\issue-4033\\.claude/settings.local.json"
+    },
+    {
+      "at": "2026-09-09T22:15:19.7910395+09:00",
+      "pid": 7376,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:19.743636+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0926"
+    },
+    {
+      "at": "2026-09-09T22:15:20.0886517+09:00",
+      "pid": 32984,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:20.141923+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0944"
+    },
+    {
+      "at": "2026-09-09T22:15:20.3842367+09:00",
+      "pid": 32984,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:20.141923+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0944"
+    },
+    {
+      "at": "2026-09-09T22:15:20.6818491+09:00",
+      "pid": 33304,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:20.637366+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-0947"
+    },
+    {
+      "at": "2026-09-09T22:15:20.963817+09:00",
+      "pid": 34432,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:21.00529+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-1054"
+    },
+    {
+      "at": "2026-09-09T22:15:21.2607004+09:00",
+      "pid": 40004,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:21.368586+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-1124"
+    },
+    {
+      "at": "2026-09-09T22:15:21.5572156+09:00",
+      "pid": 40004,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:21.368586+09:00",
+      "command": "\"git\" cherry origin/develop work/20260527-1124"
+    },
+    {
+      "at": "2026-09-09T22:15:21.8539464+09:00",
+      "pid": 8916,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:21.896267+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop work/20260527-1124 --"
+    },
+    {
+      "at": "2026-09-09T22:15:22.1349203+09:00",
+      "pid": 4952,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:22.222107+09:00",
+      "command": "\"git\" cherry origin/main work/20260527-1124"
+    },
+    {
+      "at": "2026-09-09T22:15:22.1349203+09:00",
+      "pid": 4564,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:22.234908+09:00",
+      "command": "\"git\" -C E:/gwt\\.codex ls-files --error-unmatch -z -- E:/gwt\\.codex/hooks.json"
+    },
+    {
+      "at": "2026-09-09T22:15:22.4162453+09:00",
+      "pid": 4952,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:22.222107+09:00",
+      "command": "\"git\" cherry origin/main work/20260527-1124"
+    },
+    {
+      "at": "2026-09-09T22:15:22.6974061+09:00",
+      "pid": 36436,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:22.777445+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main work/20260527-1124 --"
+    },
+    {
+      "at": "2026-09-09T22:15:23.009685+09:00",
+      "pid": 39992,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:23.121208+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0339"
+    },
+    {
+      "at": "2026-09-09T22:15:23.3060647+09:00",
+      "pid": 39992,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:23.121208+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0339"
+    },
+    {
+      "at": "2026-09-09T22:15:23.6036487+09:00",
+      "pid": 35744,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:23.517295+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0549"
+    },
+    {
+      "at": "2026-09-09T22:15:23.9000099+09:00",
+      "pid": 13824,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:23.880674+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0550"
+    },
+    {
+      "at": "2026-09-09T22:15:23.9000099+09:00",
+      "pid": 38968,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:24.008889+09:00",
+      "command": "\"git\" -C E:\\gwt\\work\\issue-3875\\.codex ls-files --error-unmatch -z -- E:\\gwt\\work\\issue-3875\\.codex/hooks.json"
+    },
+    {
+      "at": "2026-09-09T22:15:24.1982681+09:00",
+      "pid": 39012,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:24.264112+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0550-2"
+    },
+    {
+      "at": "2026-09-09T22:15:24.7913106+09:00",
+      "pid": 3392,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:24.627536+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0550-3"
+    },
+    {
+      "at": "2026-09-09T22:15:25.0724574+09:00",
+      "pid": 35996,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:24.994857+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0609"
+    },
+    {
+      "at": "2026-09-09T22:15:25.3689318+09:00",
+      "pid": 33880,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:25.363122+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0610"
+    },
+    {
+      "at": "2026-09-09T22:15:25.6668906+09:00",
+      "pid": 36712,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:25.733418+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0720"
+    },
+    {
+      "at": "2026-09-09T22:15:26.26074+09:00",
+      "pid": 39100,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:26.096556+09:00",
+      "command": "\"git\" cherry origin/develop work/20260528-0752"
+    },
+    {
+      "at": "2026-09-09T22:15:26.5562871+09:00",
+      "pid": 42032,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:26.553235+09:00",
+      "command": "\"git\" cherry origin/develop work/20260601-1023"
+    },
+    {
+      "at": "2026-09-09T22:15:27.1657293+09:00",
+      "pid": 7348,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:26.985216+09:00",
+      "command": "\"git\" cherry origin/develop work/20260602-0537"
+    },
+    {
+      "at": "2026-09-09T22:15:27.4636664+09:00",
+      "pid": 35284,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:27.357871+09:00",
+      "command": "\"git\" cherry origin/develop work/20260602-0537-2"
+    },
+    {
+      "at": "2026-09-09T22:15:27.7438689+09:00",
+      "pid": 35264,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:27.788291+09:00",
+      "command": "\"git\" cherry origin/develop work/20260608-0232"
+    },
+    {
+      "at": "2026-09-09T22:15:28.3547871+09:00",
+      "pid": 36620,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:28.334511+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop work/20260608-0232 --"
+    },
+    {
+      "at": "2026-09-09T22:15:28.6510642+09:00",
+      "pid": 37156,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:28.641846+09:00",
+      "command": "\"git\" cherry origin/main work/20260608-0232"
+    },
+    {
+      "at": "2026-09-09T22:15:28.9473375+09:00",
+      "pid": 30152,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:29.004236+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main...work/20260608-0232 --"
+    },
+    {
+      "at": "2026-09-09T22:15:29.243916+09:00",
+      "pid": 37620,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:29.145837+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main work/20260608-0232 --"
+    },
+    {
+      "at": "2026-09-09T22:15:29.5413495+09:00",
+      "pid": 19308,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:29.44768+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0141"
+    },
+    {
+      "at": "2026-09-09T22:15:29.8382563+09:00",
+      "pid": 30216,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:29.796975+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0142"
+    },
+    {
+      "at": "2026-09-09T22:15:30.1356542+09:00",
+      "pid": 5292,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:30.158952+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0144"
+    },
+    {
+      "at": "2026-09-09T22:15:30.7445592+09:00",
+      "pid": 10312,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:30.698105+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop work/20260610-0144 --"
+    },
+    {
+      "at": "2026-09-09T22:15:30.7445592+09:00",
+      "pid": 25052,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:30.860159+09:00",
+      "command": "\"git\" -C E:\\gwt\\work\\issue-3560\\.codex ls-files --error-unmatch -z -- E:\\gwt\\work\\issue-3560\\.codex/hooks.json"
+    },
+    {
+      "at": "2026-09-09T22:15:31.0415433+09:00",
+      "pid": 37660,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:30.998814+09:00",
+      "command": "\"git\" cherry origin/main work/20260610-0144"
+    },
+    {
+      "at": "2026-09-09T22:15:31.323533+09:00",
+      "pid": 10168,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:31.426056+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main...work/20260610-0144 --"
+    },
+    {
+      "at": "2026-09-09T22:15:31.6348633+09:00",
+      "pid": 1732,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:31.58787+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main work/20260610-0144 --"
+    },
+    {
+      "at": "2026-09-09T22:15:31.9483383+09:00",
+      "pid": 39780,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:31.887783+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0218"
+    },
+    {
+      "at": "2026-09-09T22:15:32.2604235+09:00",
+      "pid": 27204,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:32.301715+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0355"
+    },
+    {
+      "at": "2026-09-09T22:15:33.1513496+09:00",
+      "pid": 32824,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:33.024415+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0545"
+    },
+    {
+      "at": "2026-09-09T22:15:33.4473307+09:00",
+      "pid": 10796,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:33.379192+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0554"
+    },
+    {
+      "at": "2026-09-09T22:15:33.744869+09:00",
+      "pid": 34184,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:33.723672+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0554-2"
+    },
+    {
+      "at": "2026-09-09T22:15:34.041971+09:00",
+      "pid": 29184,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:34.071786+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0608"
+    },
+    {
+      "at": "2026-09-09T22:15:34.3385732+09:00",
+      "pid": 32264,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:34.42465+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0608-2"
+    },
+    {
+      "at": "2026-09-09T22:15:34.9326057+09:00",
+      "pid": 42992,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:34.771174+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0802"
+    },
+    {
+      "at": "2026-09-09T22:15:35.2288278+09:00",
+      "pid": 33880,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:35.171819+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0803"
+    },
+    {
+      "at": "2026-09-09T22:15:35.2288278+09:00",
+      "pid": 37984,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:35.341315+09:00",
+      "command": "\"git\" -C E:\\gwt\\work\\20260601-1023\\.codex ls-files --error-unmatch -z -- E:\\gwt\\work\\20260601-1023\\.codex/hooks.json"
+    },
+    {
+      "at": "2026-09-09T22:15:35.5099011+09:00",
+      "pid": 33744,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:35.51491+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0807"
+    },
+    {
+      "at": "2026-09-09T22:15:35.8215975+09:00",
+      "pid": 30744,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:35.855927+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0825"
+    },
+    {
+      "at": "2026-09-09T22:15:36.4169455+09:00",
+      "pid": 26028,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:36.408707+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop work/20260610-0825 --"
+    },
+    {
+      "at": "2026-09-09T22:15:36.7127137+09:00",
+      "pid": 25704,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:36.62902+09:00",
+      "command": "\"git\" cherry origin/main work/20260610-0825"
+    },
+    {
+      "at": "2026-09-09T22:15:36.9898015+09:00",
+      "pid": 12128,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:37.027047+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main...work/20260610-0825 --"
+    },
+    {
+      "at": "2026-09-09T22:15:37.2752117+09:00",
+      "pid": 42880,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:37.384449+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0844"
+    },
+    {
+      "at": "2026-09-09T22:15:37.8531894+09:00",
+      "pid": 42792,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:37.730587+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-0917"
+    },
+    {
+      "at": "2026-09-09T22:15:38.1190682+09:00",
+      "pid": 23432,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:38.07646+09:00",
+      "command": "\"git\" cherry origin/develop work/20260610-1134"
+    },
+    {
+      "at": "2026-09-09T22:15:38.3998179+09:00",
+      "pid": 40476,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:38.491474+09:00",
+      "command": "\"git\" cherry origin/develop work/20260612-0334"
+    },
+    {
+      "at": "2026-09-09T22:15:38.6665442+09:00",
+      "pid": 40476,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:38.491474+09:00",
+      "command": "\"git\" cherry origin/develop work/20260612-0334"
+    },
+    {
+      "at": "2026-09-09T22:15:38.94829+09:00",
+      "pid": 27600,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:38.868563+09:00",
+      "command": "\"git\" cherry origin/develop work/20260612-0355"
+    },
+    {
+      "at": "2026-09-09T22:15:39.2288782+09:00",
+      "pid": 27872,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:39.210835+09:00",
+      "command": "\"git\" cherry origin/develop work/20260612-0946"
+    },
+    {
+      "at": "2026-09-09T22:15:39.5107547+09:00",
+      "pid": 27908,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:39.553634+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop...work/20260612-0946 --"
+    },
+    {
+      "at": "2026-09-09T22:15:40.0877109+09:00",
+      "pid": 7880,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:39.931093+09:00",
+      "command": "\"git\" cherry origin/main work/20260612-0946"
+    },
+    {
+      "at": "2026-09-09T22:15:40.3688446+09:00",
+      "pid": 40732,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:40.402214+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main work/20260612-0946 --"
+    },
+    {
+      "at": "2026-09-09T22:15:40.6664554+09:00",
+      "pid": 35636,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:40.644339+09:00",
+      "command": "\"git\" cherry origin/develop work/20260612-1308"
+    },
+    {
+      "at": "2026-09-09T22:15:40.9788625+09:00",
+      "pid": 28832,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:40.983709+09:00",
+      "command": "\"git\" cherry origin/develop work/20260613-0401"
+    },
+    {
+      "at": "2026-09-09T22:15:41.2606142+09:00",
+      "pid": 42248,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:41.327925+09:00",
+      "command": "\"git\" cherry origin/develop work/20260613-0410"
+    },
+    {
+      "at": "2026-09-09T22:15:41.5565238+09:00",
+      "pid": 42628,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:41.662508+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop...work/20260613-0410 --"
+    },
+    {
+      "at": "2026-09-09T22:15:41.8688576+09:00",
+      "pid": 2324,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:41.830787+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/develop work/20260613-0410 --"
+    },
+    {
+      "at": "2026-09-09T22:15:42.1503894+09:00",
+      "pid": 35996,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:42.050826+09:00",
+      "command": "\"git\" cherry origin/main work/20260613-0410"
+    },
+    {
+      "at": "2026-09-09T22:15:42.4474268+09:00",
+      "pid": 10824,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:42.488059+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main work/20260613-0410 --"
+    },
+    {
+      "at": "2026-09-09T22:15:42.7436719+09:00",
+      "pid": 39356,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:42.706737+09:00",
+      "command": "\"git\" cherry origin/develop work/20260613-0525"
+    },
+    {
+      "at": "2026-09-09T22:15:43.0411879+09:00",
+      "pid": 28228,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:43.047484+09:00",
+      "command": "\"git\" cherry origin/develop work/20260613-0625"
+    },
+    {
+      "at": "2026-09-09T22:15:43.3223149+09:00",
+      "pid": 3692,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:43.39205+09:00",
+      "command": "\"git\" cherry origin/develop work/20260613-0626"
+    },
+    {
+      "at": "2026-09-09T22:15:43.884729+09:00",
+      "pid": 41488,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:43.726668+09:00",
+      "command": "\"git\" cherry origin/develop work/20260613-1834"
+    },
+    {
+      "at": "2026-09-09T22:15:44.1663361+09:00",
+      "pid": 33472,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:44.103485+09:00",
+      "command": "\"git\" cherry origin/develop work/20260614-0628"
+    },
+    {
+      "at": "2026-09-09T22:15:44.4481651+09:00",
+      "pid": 36732,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:44.441449+09:00",
+      "command": "\"git\" cherry origin/develop work/20260624-0506"
+    },
+    {
+      "at": "2026-09-09T22:15:45.3379321+09:00",
+      "pid": 36180,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:45.368134+09:00",
+      "command": "\"git\" diff --quiet --exit-code origin/main...work/issue-1921 --"
+    },
+    {
+      "at": "2026-09-09T22:15:45.6189092+09:00",
+      "pid": 3876,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:45.625037+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3041"
+    },
+    {
+      "at": "2026-09-09T22:15:45.9161812+09:00",
+      "pid": 39632,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:45.918581+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3152"
+    },
+    {
+      "at": "2026-09-09T22:15:46.2128004+09:00",
+      "pid": 7020,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:46.211491+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3160"
+    },
+    {
+      "at": "2026-09-09T22:15:46.5095811+09:00",
+      "pid": 38460,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:46.550619+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3170"
+    },
+    {
+      "at": "2026-09-09T22:15:46.8075351+09:00",
+      "pid": 40736,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:46.91844+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3170-silent-recovery-20260803"
+    },
+    {
+      "at": "2026-09-09T22:15:47.1038759+09:00",
+      "pid": 39440,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:47.209652+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3214"
+    },
+    {
+      "at": "2026-09-09T22:15:47.4164915+09:00",
+      "pid": 39172,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:47.52499+09:00",
+      "command": "\"git\" -C E:\\gwt\\work\\issue-4033\\.claude ls-files --error-unmatch -z -- E:\\gwt\\work\\issue-4033\\.claude/settings.local.json"
+    },
+    {
+      "at": "2026-09-09T22:15:47.4164915+09:00",
+      "pid": 42548,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:47.536086+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3233"
+    },
+    {
+      "at": "2026-09-09T22:15:47.6974897+09:00",
+      "pid": 39448,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:47.747072+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3248"
+    },
+    {
+      "at": "2026-09-09T22:15:47.9940648+09:00",
+      "pid": 41980,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:48.054032+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3263"
+    },
+    {
+      "at": "2026-09-09T22:15:48.2907568+09:00",
+      "pid": 37572,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:48.377324+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3268"
+    },
+    {
+      "at": "2026-09-09T22:15:48.6043612+09:00",
+      "pid": 2536,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:48.703079+09:00",
+      "command": "\"git\" -C E:\\gwt\\work\\issue-3897\\.claude ls-files --error-unmatch -z -- E:\\gwt\\work\\issue-3897\\.claude/settings.local.json"
+    },
+    {
+      "at": "2026-09-09T22:15:48.6043612+09:00",
+      "pid": 42012,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:48.709176+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3287"
+    },
+    {
+      "at": "2026-09-09T22:15:49.1977262+09:00",
+      "pid": 22656,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:49.062168+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3293"
+    },
+    {
+      "at": "2026-09-09T22:15:49.791581+09:00",
+      "pid": 42712,
+      "parent": 34952,
+      "created": "2026-09-09T22:15:49.733486+09:00",
+      "command": "\"git\" cherry origin/develop work/issue-3348"
+    }
+  ],
+  "lease_followup_at": "2026-09-09T22:19:28.8839032+09:00",
+  "lease_followup": {
+    "exit_code": 0,
+    "ok": true,
+    "operation": "verify.lease.status",
+    "output": "verification lease: held\nlease_id: ff543ffc-6150-40f1-a47b-55d8d17e0341\ntarget: 99a8660247f5bc49--issues\nowner_pid: 34952\nacquired_at_ms: 1788959088593\nexpires_at_ms: 1788966288593\nremaining_ms: 6319806\nexpired: false\nholder_kind: index\nremaining_batches: 2\nestimated_remaining_ms: 29574\npending: 0\n"
+  },
+  "wpr_error": "0xc5585011: Failed to enable the policy to profile system performance.",
+  "lease_initial_observation": {
+    "observed_around": "2026-09-09T22:13+09:00",
+    "source": "verify.lease.status tool output; copied without recalculation",
+    "lease_id": "ff543ffc-6150-40f1-a47b-55d8d17e0341",
+    "target": "99a8660247f5bc49--issues",
+    "owner_pid": 34952,
+    "acquired_at_ms": 1788959088593,
+    "expires_at_ms": 1788966288593,
+    "remaining_ms": 6669748,
+    "remaining_batches": 26,
+    "estimated_remaining_ms": 383578,
+    "pending": 0
+  },
+  "capture_api_results_from_stdout": {
+    "captures": 28,
+    "attach_process_hresult": "00000000 for all 28",
+    "execute_hresult_recorded": false,
+    "wait_for_event_hresult": "00000000 for all 28"
+  },
+  "git_raw_samples_sha256": "A28C50F821DB58A56231E8377C0AC8AD5427E6161F58D9359C7F2464907F4F9F"
+}

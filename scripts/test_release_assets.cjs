@@ -313,6 +313,83 @@ run("CI workflows call direct verification scripts and skip npm publish", () => 
   }
 });
 
+run("Nightly CI proves the Rust suites with default parallelism three times", () => {
+  const testWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "test.yml"),
+    "utf8"
+  );
+  // Issue #4134 AC-1: the loop cost 2806s and was test.yml's critical path,
+  // re-running on Windows a suite Linux had already run. It keeps its purpose
+  // on the nightly schedule instead of on every pull request.
+  assert.doesNotMatch(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
+  const nightlyWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "nightly.yml"),
+    "utf8"
+  );
+  assert.doesNotMatch(nightlyWorkflow, /pull_request/);
+  assert.match(nightlyWorkflow, /^ {2}test-windows-default-parallel:$/m);
+  assert.match(nightlyWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
+  assert.match(nightlyWorkflow, /1\.\.3 \| ForEach-Object/);
+  assert.match(nightlyWorkflow, /cargo test -p gwt --lib --all-features/);
+  // A scheduled run has no pull request to turn red, so the failure has to
+  // reach a named destination or the schedule silently stops meaning anything.
+  assert.match(nightlyWorkflow, /if: failure\(\)/);
+  assert.match(nightlyWorkflow, /gh issue create/);
+  // The three runs must share one job so they share one SHA and one runner.
+  // Splitting them across jobs would let a green run and a red run coexist.
+  const defaultParallelJob = nightlyWorkflow.slice(
+    nightlyWorkflow.indexOf("  test-windows-default-parallel:")
+  );
+  assert.match(defaultParallelJob, /1\.\.3 \| ForEach-Object/);
+  // The build must sit outside the timed loop, or the first iteration is
+  // charged for the compile and a slow build reads as an unstable suite.
+  assert.match(defaultParallelJob, /--all-features --no-run/);
+  assert.ok(
+    defaultParallelJob.indexOf("--all-features --no-run") <
+      defaultParallelJob.indexOf("1..3 | ForEach-Object"),
+    "the --no-run build must precede the timed three-run loop"
+  );
+  // `--bin gwt` and `-p gwt-core` are excluded: each fails Windows default
+  // parallelism for its own reason, and including either would fail every PR.
+  // Assert the loop's cargo invocations positively — matching comment prose
+  // negatively would pass or fail on how the exclusions happen to be worded.
+  const loopBody = defaultParallelJob.slice(
+    defaultParallelJob.indexOf("1..3 | ForEach-Object")
+  );
+  const loopCommands = loopBody
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("cargo "));
+  assert.deepStrictEqual(
+    loopCommands,
+    ["cargo test -p gwt --lib --all-features"],
+    "the timed loop must run exactly the targets proven green under Windows default parallelism"
+  );
+  // Keep each exclusion tied to its reason so it cannot quietly become
+  // permanent once the underlying defect is fixed.
+  assert.match(
+    defaultParallelJob,
+    /deadlocks[\s\S]*?#4014/,
+    "the --bin gwt exclusion must carry its reason and its follow-up owner"
+  );
+  assert.match(
+    defaultParallelJob,
+    /`-p gwt-core` is absent[\s\S]*?await their own owner/,
+    "the gwt-core exclusion must carry its reason and its follow-up"
+  );
+  for (const command of [
+    "cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture",
+    "cargo test -p gwt-agent --lib package_runner_resolution_failure_still_emits_an_end_summary",
+    "cargo test -p gwt --bin gwt real_bun_global_placeholder_fixture",
+    "cargo test -p gwt --bin gwt command_prompt_agent_wrapper",
+  ]) {
+    assert.doesNotMatch(
+      testWorkflow,
+      new RegExp(`${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*--test-threads=1`)
+    );
+  }
+});
+
 run("README install guidance points to GUI-first release assets", () => {
   const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
   const readmeJa = fs.readFileSync(path.join(__dirname, "..", "README.ja.md"), "utf8");

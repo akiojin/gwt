@@ -270,6 +270,215 @@ fn mixed_version_event_log_roundtrips_unknown_kind_and_fields_byte_exact() {
 }
 
 #[test]
+fn preserve_workspace_work_event_log_keeps_raw_records_visible_without_changing_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let original = format!("\t{}  ", T820_MIXED_EVENT_LOG.trim_end());
+    fs::write(&source, &original).expect("write mixed source without final newline");
+
+    let paths = crate::workspace_projection::preserve_workspace_work_event_log_as_shards(
+        &source,
+        &events_dir,
+    )
+    .expect("preserve future-compatible raw events");
+
+    assert_eq!(paths.len(), 3);
+    for (path, line) in paths.iter().zip(original.split('\n')) {
+        let value: serde_json::Value = serde_json::from_str(line).expect("source JSON");
+        assert_eq!(
+            *path,
+            gwt_work_event_shard_path(&events_dir, value["id"].as_str().unwrap())
+        );
+        assert_eq!(fs::read(path).unwrap(), format!("{line}\n").as_bytes());
+    }
+    let records = read_workspace_work_event_shard_records_from_dir(&events_dir)
+        .expect("ordinary reader sees all preserved events");
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .into_iter()
+            .filter_map(WorkEventLogRecord::into_known_event)
+            .count(),
+        2,
+        "future kind remains opaque while known events remain visible"
+    );
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_makes_flat_shard_canonical_and_is_idempotent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    fs::create_dir_all(&events_dir).unwrap();
+    let original = T820_MIXED_EVENT_LOG.lines().nth(1).unwrap().to_string() + "\n";
+    let canonical = gwt_work_event_shard_path(&events_dir, "event-known-additive");
+    let source = events_dir.join(canonical.file_name().unwrap());
+    fs::write(&source, &original).unwrap();
+
+    for input in [&source, &source, &canonical] {
+        assert_eq!(
+            preserve_workspace_work_event_log_as_shards(input, &events_dir).unwrap(),
+            vec![canonical.clone()]
+        );
+        assert_eq!(fs::read(&canonical).unwrap(), original.as_bytes());
+        assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+    }
+    assert_eq!(
+        fs::read_dir(canonical.parent().unwrap()).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn preserve_workspace_work_event_log_deduplicates_identical_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    let original = format!("{line}\n\n{line}\n");
+    fs::write(&source, &original).unwrap();
+
+    let paths = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap();
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(fs::read(&paths[0]).unwrap(), format!("{line}\n").as_bytes());
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_invalid_batch_before_publication() {
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    for invalid in [
+        "{\"id\":",
+        r#"{"id":"bad","kind":"update","work_item_id":{},"updated_at":"2026-07-22T02:00:00Z"}"#,
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source.jsonl");
+        let events_dir = temp.path().join("repo/.gwt/work/events");
+        let original = format!("{line}\n{invalid}");
+        fs::write(&source, &original).unwrap();
+
+        assert!(preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err());
+        assert!(!events_dir.exists(), "valid prefix must not be published");
+        assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+    }
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_divergent_batch_before_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    let line = T820_MIXED_EVENT_LOG.lines().next().unwrap();
+    let original = format!("{line}\n{}\n", line.replace("Known title", "Changed title"));
+    fs::write(&source, &original).unwrap();
+
+    let error = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap_err();
+
+    assert!(error.to_string().contains("divergent"), "{error}");
+    assert!(!events_dir.exists());
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preserve_workspace_work_event_log_rejects_existing_conflict_before_any_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.jsonl");
+    let events_dir = temp.path().join("repo/.gwt/work/events");
+    fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+    let conflict = gwt_work_event_shard_path(&events_dir, "event-future-correction");
+    fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+    let conflicting_bytes = b"existing immutable bytes\n";
+    fs::write(&conflict, conflicting_bytes).unwrap();
+
+    let error = preserve_workspace_work_event_log_as_shards(&source, &events_dir).unwrap_err();
+
+    assert!(error.to_string().contains("divergent"), "{error}");
+    assert_eq!(fs::read(&conflict).unwrap(), conflicting_bytes);
+    assert!(!gwt_work_event_shard_path(&events_dir, "event-known-start").exists());
+    assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn preserve_workspace_work_event_log_rejects_symlinked_source_and_managed_parents() {
+    for linked_component in ["source", ".gwt", "work", "events"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp
+            .path()
+            .join("source-repo/.gwt/work/events/source.jsonl");
+        let events_dir = temp.path().join("destination/.gwt/work/events");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+        let indirect = if linked_component == "source" {
+            source.clone()
+        } else {
+            source
+                .ancestors()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == linked_component)
+                })
+                .unwrap()
+                .to_path_buf()
+        };
+        let external = temp.path().join("external");
+        fs::rename(&indirect, &external).unwrap();
+        std::os::unix::fs::symlink(&external, &indirect).unwrap();
+
+        assert!(
+            preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err(),
+            "must reject indirect {linked_component} source"
+        );
+        assert!(!events_dir.exists());
+        assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preserve_workspace_work_event_log_rejects_symlinked_destination_before_any_publication() {
+    for linked_component in [".gwt", "work", "events", "bucket", "shard"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source.jsonl");
+        let events_dir = temp.path().join("destination/.gwt/work/events");
+        fs::write(&source, T820_MIXED_EVENT_LOG).unwrap();
+        let last = gwt_work_event_shard_path(&events_dir, "event-future-correction");
+        fs::create_dir_all(last.parent().unwrap()).unwrap();
+        let indirect = match linked_component {
+            "shard" => last.clone(),
+            "bucket" => last.parent().unwrap().to_path_buf(),
+            _ => last
+                .ancestors()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == linked_component)
+                })
+                .unwrap()
+                .to_path_buf(),
+        };
+        let external = temp.path().join("external");
+        if linked_component == "shard" {
+            fs::write(&external, b"external user bytes").unwrap();
+        } else {
+            fs::rename(&indirect, &external).unwrap();
+        }
+        std::os::unix::fs::symlink(&external, &indirect).unwrap();
+
+        assert!(
+            preserve_workspace_work_event_log_as_shards(&source, &events_dir).is_err(),
+            "must reject indirect {linked_component} destination"
+        );
+        assert!(!gwt_work_event_shard_path(&events_dir, "event-known-start").exists());
+        assert_eq!(fs::read(&source).unwrap(), T820_MIXED_EVENT_LOG.as_bytes());
+        if linked_component == "shard" {
+            assert_eq!(fs::read(&external).unwrap(), b"external user bytes");
+        }
+    }
+}
+
+#[test]
 fn mixed_version_event_reader_keeps_identity_and_container_schemas_strict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cases = [
@@ -5846,6 +6055,121 @@ fn exact_terminal_confirmation_accepts_repaired_identity_and_unrelated_legacy_cl
 }
 
 #[test]
+fn session_bound_update_copies_matching_current_pr_metadata() {
+    assert_session_bound_pr_metadata("matching", true, true, false, true);
+}
+
+#[test]
+fn session_bound_update_does_not_copy_foreign_container_pr_metadata() {
+    assert_session_bound_pr_metadata("foreign-branch", false, true, false, false);
+    assert_session_bound_pr_metadata("foreign-path", true, false, false, false);
+}
+
+#[test]
+fn session_bound_update_preserves_existing_pr_metadata_without_current_metadata() {
+    assert_session_bound_pr_metadata("existing", true, true, true, false);
+}
+
+fn assert_session_bound_pr_metadata(
+    label: &str,
+    same_branch: bool,
+    same_path: bool,
+    existing_metadata: bool,
+    expect_copy: bool,
+) {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    current.git_details = Some(GitDetails {
+        branch: Some(if same_branch {
+            T812_TARGET_BRANCH.to_string()
+        } else {
+            "work/foreign-pr".to_string()
+        }),
+        worktree_path: Some(if same_path {
+            fixture.target.worktree_identity.clone()
+        } else {
+            temp.path().join("foreign-worktree")
+        }),
+        base_branch: None,
+        pr_number: (!existing_metadata).then_some(3697),
+        pr_url: (!existing_metadata)
+            .then(|| "https://github.com/akiojin/gwt/pull/3697".to_string()),
+        pr_state: (!existing_metadata).then(|| "OPEN".to_string()),
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: Utc::now(),
+    });
+    save_workspace_projection_to_path(&fixture.current_path, &current).expect("save PR details");
+    if existing_metadata {
+        let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+            .expect("load target")
+            .expect("target");
+        let container = &mut work_items.work_items[0].execution_containers[0];
+        container.pr_number = Some(3697);
+        container.pr_url = Some("https://github.com/akiojin/gwt/pull/3697".to_string());
+        container.pr_state = Some("OPEN".to_string());
+        save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+            .expect("save existing PR metadata");
+    }
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: Some("PR status checked".to_string()),
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("session-bound update");
+
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load updated Work")
+        .expect("updated Work");
+    let item = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work");
+    let event = item.events.last().expect("update event");
+    assert_eq!(event.kind, WorkEventKind::Update);
+    let expected = expect_copy || existing_metadata;
+    for container in [
+        event.execution_container.as_ref().expect("event container"),
+        &item.execution_containers[0],
+    ] {
+        assert_eq!(container.branch.as_deref(), Some(T812_TARGET_BRANCH));
+        assert_eq!(
+            container.worktree_path.as_deref(),
+            Some(fixture.target.worktree_identity.as_path())
+        );
+        assert_eq!(container.pr_number, expected.then_some(3697), "{label}");
+        assert_eq!(
+            container.pr_url.as_deref(),
+            expected.then_some("https://github.com/akiojin/gwt/pull/3697"),
+            "{label}"
+        );
+        assert_eq!(
+            container.pr_state.as_deref(),
+            expected.then_some("OPEN"),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn session_bound_sparse_update_does_not_inherit_foreign_shared_current_fields() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
@@ -9033,6 +9357,119 @@ fn record_workspace_work_paused_event_retains_incomplete_history_item() {
         .events
         .iter()
         .any(|event| event.kind == WorkEventKind::Pause));
+}
+
+#[test]
+fn delayed_pause_recorded_after_newer_resume_does_not_regress_active_work() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("works.json");
+    let events_path = temp.path().join("work-events.jsonl");
+    let t0 = Utc::now();
+    let t1 = t0 + chrono::Duration::seconds(1);
+    let t2 = t0 + chrono::Duration::seconds(2);
+    let work_id = "work-session-delayed-close";
+
+    let mut start = WorkEvent::new(WorkEventKind::Start, work_id, t0);
+    start.status_category = Some(WorkspaceStatusCategory::Active);
+    start.agent_session_id = Some("delayed-close".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, start)
+        .expect("record initial Work");
+
+    let mut resume = WorkEvent::new(WorkEventKind::Resume, work_id, t2);
+    resume.status_category = Some(WorkspaceStatusCategory::Active);
+    resume.agent_session_id = Some("delayed-close".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, resume)
+        .expect("record newer Resume");
+
+    // The close worker acquired the Work lock only after Resume landed, but
+    // its event time is the close acceptance time. Re-folding by that time
+    // must keep the newer generation Active.
+    super::record_workspace_work_paused_event_paths(
+        &work_items_path,
+        &events_path,
+        work_id,
+        Some("Delayed close"),
+        None,
+        None,
+        &[],
+        None,
+        Some("delayed-close"),
+        t1,
+    )
+    .expect("record delayed Pause");
+
+    let projection = super::load_workspace_work_items_from_path(&work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems present");
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("Work item");
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+    assert_eq!(item.updated_at, t2);
+}
+
+#[test]
+fn delayed_pause_batch_keeps_unrelated_newer_update_for_same_work() {
+    // PR #3787 review: the superseded-Pause guard keys by Work item, so a
+    // batch carrying a genuinely newer Update next to the late Pause must
+    // still fold that Update. Only the Pause itself and the Board-ref
+    // Updates stamped with it may be dropped from the stored projection.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("works.json");
+    let events_path = temp.path().join("work-events.jsonl");
+    let t0 = Utc::now();
+    let t1 = t0 + chrono::Duration::seconds(1);
+    let t2 = t0 + chrono::Duration::seconds(2);
+    let t3 = t0 + chrono::Duration::seconds(3);
+    let work_id = "work-session-delayed-close-batch";
+
+    let mut start = WorkEvent::new(WorkEventKind::Start, work_id, t0);
+    start.status_category = Some(WorkspaceStatusCategory::Active);
+    start.agent_session_id = Some("delayed-close-batch".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, start)
+        .expect("record initial Work");
+
+    let mut resume = WorkEvent::new(WorkEventKind::Resume, work_id, t2);
+    resume.status_category = Some(WorkspaceStatusCategory::Active);
+    resume.agent_session_id = Some("delayed-close-batch".to_string());
+    super::record_workspace_work_event_paths(&work_items_path, &events_path, resume)
+        .expect("record newer Resume");
+
+    let mut board_ref_update = WorkEvent::new(WorkEventKind::Update, work_id, t1);
+    board_ref_update.board_entry_id = Some("board-entry-late-close".to_string());
+    board_ref_update.agent_session_id = Some("delayed-close-batch".to_string());
+    let mut pause = WorkEvent::new(WorkEventKind::Pause, work_id, t1);
+    pause.agent_session_id = Some("delayed-close-batch".to_string());
+    let mut newer_update = WorkEvent::new(WorkEventKind::Update, work_id, t3);
+    newer_update.title = Some("Newer focus".to_string());
+    newer_update.agent_session_id = Some("delayed-close-batch".to_string());
+    super::record_workspace_work_events_paths(
+        &work_items_path,
+        &events_path,
+        vec![board_ref_update, pause, newer_update],
+    )
+    .expect("record mixed late-Pause batch");
+
+    let projection = super::load_workspace_work_items_from_path(&work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems present");
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("Work item");
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+    assert_eq!(item.updated_at, t3, "the newer Update must fold");
+    assert_eq!(item.title.as_str(), "Newer focus");
+    assert!(
+        !item
+            .board_refs
+            .iter()
+            .any(|board_ref| board_ref == "board-entry-late-close"),
+        "the Board-ref Update stamped with the superseded Pause is skipped"
+    );
 }
 
 /// Issue #3524 (folded into #3606): two views of the same origin can each hold a

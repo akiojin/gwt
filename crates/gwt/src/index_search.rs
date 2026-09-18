@@ -7,6 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use gwt_core::index_coordinator::{
+    IndexCoordinator, TargetKey, INTERACTIVE_SEARCH_ADMISSION_DEADLINE,
+};
 use serde_json::Value;
 
 use crate::{
@@ -59,6 +62,16 @@ pub struct IndexSearchFailed {
 pub(crate) struct IndexSearchUnavailable {
     pub(crate) reason: String,
     pub(crate) retry_after_ms: u64,
+}
+
+/// Non-retryable stop state that only an explicit `index.repair` clears
+/// (Issue #3866 AC-3). Crate-private for the same source-compatibility reason
+/// as [`IndexSearchUnavailable`]; public callers see `SearchFailed`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexSearchRepairRequired {
+    pub(crate) reason: String,
+    pub(crate) affected_scopes: Vec<String>,
+    pub(crate) recovery: String,
 }
 
 /// Search error surface (Phase 70 FR-388). `NotReady` is retryable and maps
@@ -128,13 +141,14 @@ impl From<String> for IndexSearchError {
 pub(crate) enum IndexSearchAttemptError {
     Public(IndexSearchError),
     Unavailable(IndexSearchUnavailable),
+    RepairRequired(IndexSearchRepairRequired),
 }
 
 impl IndexSearchAttemptError {
     pub(crate) fn exit_code(&self) -> i32 {
         match self {
             Self::Public(error) => error.exit_code(),
-            Self::Unavailable(_) => 1,
+            Self::Unavailable(_) | Self::RepairRequired(_) => 1,
         }
     }
 
@@ -142,6 +156,7 @@ impl IndexSearchAttemptError {
         match self {
             Self::Public(error) => error.error_code(),
             Self::Unavailable(_) => Some("SEARCH_UNAVAILABLE"),
+            Self::RepairRequired(_) => Some("INDEX_REPAIR_REQUIRED"),
         }
     }
 
@@ -149,6 +164,7 @@ impl IndexSearchAttemptError {
         match self {
             Self::Public(error) => error.retryable(),
             Self::Unavailable(_) => true,
+            Self::RepairRequired(_) => false,
         }
     }
 
@@ -156,6 +172,7 @@ impl IndexSearchAttemptError {
         match self {
             Self::Public(error) => error.retry_after_ms(),
             Self::Unavailable(unavailable) => Some(unavailable.retry_after_ms),
+            Self::RepairRequired(_) => None,
         }
     }
 
@@ -165,6 +182,10 @@ impl IndexSearchAttemptError {
             Self::Unavailable(_) => IndexSearchError::Other(
                 "project index search is temporarily unavailable".to_string(),
             ),
+            Self::RepairRequired(required) => IndexSearchError::SearchFailed(IndexSearchFailed {
+                reason: format!("{}; {}", required.reason, required.recovery),
+                affected_scopes: required.affected_scopes,
+            }),
         }
     }
 }
@@ -177,6 +198,11 @@ impl std::fmt::Display for IndexSearchAttemptError {
                 f,
                 "search unavailable: {} (retry in {} ms)",
                 unavailable.reason, unavailable.retry_after_ms,
+            ),
+            Self::RepairRequired(required) => write!(
+                f,
+                "index repair required: {}; {}",
+                required.reason, required.recovery,
             ),
         }
     }
@@ -229,6 +255,10 @@ pub(crate) fn search_project_index_attempt(
     if query.is_empty() {
         return Ok(ProjectIndexSearchOutcome::default());
     }
+    // Issue #4145 AC-1: both the GUI blocking-pool caller and the `search`
+    // JSON operation funnel through here, so one guard measures the search
+    // route end to end, early returns included.
+    let _perf_route = crate::perf::RouteTimer::start(crate::perf::PerfRoute::Search);
     // One absolute attempt budget covers runtime ensure/provisioning, its
     // cross-process lock, every health probe, repair polling, and the final
     // runner. Nested callers retain an earlier ambient deadline.
@@ -270,7 +300,7 @@ pub(crate) fn search_project_index_attempt(
     let per_scope_limit = per_scope_limit(effective_scopes.len());
     let worktree_hash_arg = file_worktree.as_ref().map(|worktree| worktree.hash.clone());
     let run_batch = || -> Result<Value, IndexSearchAttemptError> {
-        match run_batch_scope_search(
+        run_batch_scope_search(
             &repo_search_root,
             repo_hash.as_str(),
             &effective_scopes,
@@ -278,24 +308,28 @@ pub(crate) fn search_project_index_attempt(
             query,
             per_scope_limit,
             match_mode,
-        ) {
-            Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => {
-                let broken = not_ready
-                    .affected_scopes
-                    .iter()
-                    .map(|scope| (scope.clone(), "not-ready".to_string()))
-                    .collect::<Vec<_>>();
-                queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
-                Err(IndexSearchError::NotReady(not_ready).into())
-            }
-            outcome => outcome,
-        }
+        )
     };
 
     let repair_deadline = Duration::from_millis(search_repair_wait_ms());
     let started = std::time::Instant::now();
-    let mut payload = run_batch()?;
-    let mut broken = broken_scopes(&payload);
+    let mut payload = None;
+    let mut broken = match run_batch() {
+        Ok(initial) => {
+            if let Some(required) = operator_repair_required(&initial) {
+                return Err(IndexSearchAttemptError::RepairRequired(required));
+            }
+            let broken = broken_scopes(&initial);
+            payload = Some(initial);
+            broken
+        }
+        Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => not_ready
+            .affected_scopes
+            .into_iter()
+            .map(|scope| (scope, "not-ready".to_string()))
+            .collect(),
+        Err(error) => return Err(error),
+    };
     if !broken.is_empty() {
         // FR-388: missing / corrupt scopes never degrade into a silent
         // empty success. FR-097 (T-IDX-417): every caller queues the
@@ -314,25 +348,62 @@ pub(crate) fn search_project_index_attempt(
                 return Err(build_not_ready_error(&broken, elapsed.as_millis() as u64).into());
             }
             let remaining = repair_deadline - elapsed;
-            sleep_with_attempt_deadline(remaining.min(Duration::from_secs(1)))?;
+            if sleep_with_attempt_deadline(remaining.min(Duration::from_secs(1))).is_err() {
+                return Err(
+                    build_not_ready_error(&broken, started.elapsed().as_millis() as u64).into(),
+                );
+            }
             // PR #3301 review: poll repair progress through the model-free
             // status action; the full batch search (one model load) runs
             // only after the broken scopes report healthy again.
-            if broken_scopes_still_unhealthy(
+            let still_unhealthy = match broken_scopes_still_unhealthy(
                 &repo_search_root,
                 repo_hash.as_str(),
                 &broken,
                 worktree_hash_arg.as_deref(),
-            )? {
+            ) {
+                Ok(value) => value,
+                Err(_error)
+                    if gwt_core::operation_deadline::current()
+                        .is_some_and(|deadline| deadline <= Instant::now()) =>
+                {
+                    return Err(build_not_ready_error(
+                        &broken,
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .into());
+                }
+                Err(error) => return Err(error),
+            };
+            if still_unhealthy {
                 continue;
             }
-            payload = run_batch()?;
-            broken = broken_scopes(&payload);
-            if broken.is_empty() {
-                break;
+            match run_batch() {
+                Ok(next) => {
+                    if let Some(required) = operator_repair_required(&next) {
+                        return Err(IndexSearchAttemptError::RepairRequired(required));
+                    }
+                    broken = broken_scopes(&next);
+                    payload = Some(next);
+                    if broken.is_empty() {
+                        break;
+                    }
+                }
+                Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => {
+                    broken = not_ready
+                        .affected_scopes
+                        .into_iter()
+                        .map(|scope| (scope, "not-ready".to_string()))
+                        .collect();
+                }
+                Err(error) => return Err(error),
             }
+            queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
         }
     }
+    let payload = payload.ok_or_else(|| {
+        search_unavailable_error("project index search completed without a payload")
+    })?;
 
     // FR-387 stale-while-revalidate: verified results return immediately;
     // one refresh is queued per stale scope (the coordinator coalesces
@@ -436,6 +507,42 @@ fn broken_scopes(payload: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Scope stop states the runner holds until an explicit `index.repair`
+/// (Issue #4205). It refuses every queued repair while they hold, so waiting
+/// for one only burns the attempt deadline (Issue #3866).
+const OPERATOR_REPAIR_REASONS: &[&str] = &["cancelled", "repair_stopped"];
+
+const OPERATOR_REPAIR_RECOVERY: &str = "run the `index.repair` JSON operation to clear the \
+     stop state and rebuild; `index.status` shows each scope's reason";
+
+/// Extract the scopes in an operator stop state from the batch payload.
+fn operator_repair_required(payload: &Value) -> Option<IndexSearchRepairRequired> {
+    let stopped: Vec<(&String, &str)> = payload
+        .get("scopes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(scope, status)| {
+            let reason = status.get("reason").and_then(Value::as_str)?;
+            OPERATOR_REPAIR_REASONS
+                .contains(&reason)
+                .then_some((scope, reason))
+        })
+        .collect();
+    if stopped.is_empty() {
+        return None;
+    }
+    Some(IndexSearchRepairRequired {
+        reason: stopped
+            .iter()
+            .map(|(scope, reason)| format!("{scope} index is {reason}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+        affected_scopes: stopped.iter().map(|(scope, _)| (*scope).clone()).collect(),
+        recovery: OPERATOR_REPAIR_RECOVERY.to_string(),
+    })
+}
+
 /// Light repair-progress probe (PR #3301 review): checks the broken scopes
 /// through the model-free `status` action so the repair wait does not pay a
 /// model load per poll. Fails closed: any probe error keeps waiting.
@@ -445,16 +552,7 @@ fn broken_scopes_still_unhealthy(
     broken: &[(String, String)],
     worktree_hash: Option<&str>,
 ) -> Result<bool, IndexSearchAttemptError> {
-    let mut args = vec![
-        gwt_core::runtime::project_index_runner_path().into_os_string(),
-        OsString::from("--action"),
-        OsString::from("status"),
-        OsString::from("--repo-hash"),
-        OsString::from(repo_hash),
-    ];
-    if let Some(hash) = worktree_hash {
-        args.extend([OsString::from("--worktree-hash"), OsString::from(hash)]);
-    }
+    let args = repair_status_probe_args(repo_hash, broken, worktree_hash);
     let output = match gwt_core::process_console::spawn_logged_blocking(
         &gwt_core::process_console::ProcessConsoleHub::new(),
         gwt_core::process_console::ProcessKind::IndexRunner,
@@ -470,9 +568,14 @@ fn broken_scopes_still_unhealthy(
                 "project index status probe unavailable",
             ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(search_unavailable_error("project index search timed out"));
-        }
+        // Issue #4033: a probe the attempt deadline cut short has not proven
+        // the scope healthy, so report it as still broken and let the caller's
+        // own deadline check return the typed `INDEX_NOT_READY`. Surfacing it
+        // as a distinct failure made the error *type* depend on whether the
+        // reaper happened to return a few microseconds before or after the
+        // deadline instant — on a loaded runner that flipped a passing search
+        // contract into an unrelated failure.
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return Ok(true),
         Err(_) => {
             return Err(search_unavailable_error(
                 "project index status probe unavailable",
@@ -483,23 +586,53 @@ fn broken_scopes_still_unhealthy(
         return Ok(true);
     };
     let status = payload.get("status").cloned().unwrap_or(Value::Null);
-    Ok(broken.iter().any(|(scope, _)| {
-        let ready = status
-            .get(scope.as_str())
-            .map(|entry| {
-                let healthy = entry
-                    .get("healthy")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let repair_required = entry
-                    .get("repair_required")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                healthy && !repair_required
-            })
-            .unwrap_or(false);
-        !ready
-    }))
+    Ok(broken
+        .iter()
+        .any(|(scope, _)| !scope_probe_reports_ready(status.get(scope.as_str()))))
+}
+
+/// Decide whether one `status` entry proves the scope can be searched again.
+///
+/// Issue #4132: `healthy` alone is too strict. The issues scope reports
+/// `healthy: false` as soon as the Issue cache moves ahead of the built index,
+/// which every `issue.create` / `issue.comment` on the host does — including
+/// ones that land while this repair is running. Such a store is internally
+/// consistent and search classifies it `stale` (serve it, queue a refresh), so
+/// waiting for `healthy` again would burn the whole repair deadline and return
+/// `INDEX_NOT_READY` for an index that answers queries.
+fn scope_probe_reports_ready(entry: Option<&Value>) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    let flag = |name: &str| entry.get(name).and_then(Value::as_bool).unwrap_or(false);
+    flag("healthy") || flag("source_drift")
+}
+
+fn repair_status_probe_args(
+    repo_hash: &str,
+    broken: &[(String, String)],
+    worktree_hash: Option<&str>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        gwt_core::runtime::project_index_runner_path().into_os_string(),
+        OsString::from("--action"),
+        OsString::from("status"),
+        OsString::from("--repo-hash"),
+        OsString::from(repo_hash),
+    ];
+    if let Some(hash) = worktree_hash {
+        args.extend([OsString::from("--worktree-hash"), OsString::from(hash)]);
+    }
+    if broken
+        .iter()
+        .any(|(scope, _)| matches!(scope.as_str(), "files" | "files-docs"))
+    {
+        args.extend([
+            OsString::from("--file-index-protocol"),
+            OsString::from("v2"),
+        ]);
+    }
+    args
 }
 
 fn build_not_ready_error(broken: &[(String, String)], waited_ms: u64) -> IndexSearchError {
@@ -640,16 +773,25 @@ fn queue_scope_rebuilds(
     let repair_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
         .unwrap_or_else(|| project_root.to_path_buf());
     let repair_repo_root = dunce::canonicalize(&repair_repo_root).unwrap_or(repair_repo_root);
+    let mut scheduled = HashSet::new();
     for (scope_name, _) in scopes {
-        let Some(rebuild_scope) = rebuild_scope_for_name(scope_name) else {
+        let Some(mut rebuild_scope) = rebuild_scope_for_name(scope_name) else {
             continue;
+        };
+        let scope_label = if matches!(scope_name.as_str(), "files" | "files-docs") {
+            rebuild_scope = crate::index_worker::IndexRebuildScope::Files;
+            "files".to_string()
+        } else {
+            scope_name.clone()
         };
         let project_root = project_root.to_path_buf();
         let worktree = rebuild_scope
             .requires_worktree_hash()
             .then(|| worktree_hash.map(str::to_string))
             .flatten();
-        let scope_label = scope_name.clone();
+        if !scheduled.insert((scope_label.clone(), worktree.clone())) {
+            continue;
+        }
         let key = RepairKey {
             repo_root: repair_repo_root.clone(),
             scope: scope_label.clone(),
@@ -846,6 +988,36 @@ fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptErro
     })
 }
 
+/// Claim the host-wide heavy lease for one query encode (FR-417).
+///
+/// Admission shares the search attempt's absolute deadline. If the slot is
+/// unavailable, return the existing retryable error without starting model
+/// work alongside the current holder.
+fn acquire_search_heavy_lease(
+    repo_hash: &str,
+    worktree_hash: Option<&str>,
+) -> Result<gwt_core::index_coordinator::HeavyLease, IndexSearchAttemptError> {
+    let deadline = gwt_core::operation_deadline::ensure_remaining("search heavy admission")
+        .map_err(|_| search_unavailable_error("search admission deadline expired"))?;
+    let timeout = deadline.map_or(INTERACTIVE_SEARCH_ADMISSION_DEADLINE, |deadline| {
+        INTERACTIVE_SEARCH_ADMISSION_DEADLINE
+            .min(deadline.saturating_duration_since(Instant::now()))
+    });
+    let coordinator = IndexCoordinator::open_default()
+        .map_err(|_| search_unavailable_error("search coordinator unavailable"))?;
+    let key = TargetKey::search(repo_hash, worktree_hash);
+    coordinator
+        .acquire_interactive_search_heavy(&key, timeout)
+        .map_err(|error| {
+            tracing::debug!(
+                target: "gwt::index",
+                %error,
+                "search heavy admission failed"
+            );
+            search_unavailable_error("search heavy lease unavailable")
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_batch_scope_search(
     project_root: &Path,
@@ -865,6 +1037,12 @@ fn run_batch_scope_search(
         limit,
         match_mode,
     );
+    // FR-417 (T-IDX-437 / AS-30): `search-multi` encodes the query with the
+    // same model a build loads, so it is an ordinary claimant of the
+    // host-wide heavy lease — not an exception to it. Registering as a
+    // pending interactive claimant is also what makes a running background
+    // build hand the lease back at its next 16-document checkpoint.
+    let _heavy = acquire_search_heavy_lease(repo_hash, worktree_hash)?;
     // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
     // shared process lifecycle boundary — captured output without terminal
     // forwarding, one hard deadline, and full process-tree termination and
@@ -990,6 +1168,10 @@ fn batch_scope_search_command_args(
     if let Some(hash) = worktree_hash {
         args.push(OsString::from("--worktree-hash"));
         args.push(OsString::from(hash));
+    }
+    if scopes.iter().any(|scope| is_file_scope(*scope)) {
+        args.push(OsString::from("--file-index-protocol"));
+        args.push(OsString::from("v2"));
     }
     args
 }
@@ -1964,6 +2146,124 @@ mod tests {
     }
 
     #[test]
+    fn repaired_scope_is_ready_even_when_the_source_cache_already_moved_on() {
+        // Issue #4132: the repair wait polls `status`, whose `healthy` flag
+        // goes false the moment the Issue cache outgrows the rebuilt index —
+        // which a concurrent `issue.create` does within seconds on a busy
+        // host. The scope is searchable again (search classifies it `stale`),
+        // so the wait must end instead of burning the deadline and returning
+        // INDEX_NOT_READY for a store that answers queries.
+        assert!(
+            scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": true,
+                "reason": "count_mismatch",
+            }))),
+            "a rebuilt index that merely trails its source is ready to search"
+        );
+        assert!(
+            !scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": false,
+                "reason": "count_mismatch",
+            }))),
+            "a store that contradicts its own manifest is still unrepaired"
+        );
+        assert!(
+            scope_probe_reports_ready(Some(&json!({"healthy": true}))),
+            "a healthy scope is ready"
+        );
+        assert!(
+            !scope_probe_reports_ready(None),
+            "a scope the probe did not report has not been proven repaired"
+        );
+    }
+
+    #[test]
+    fn repair_status_probe_args_request_v2_for_file_scopes() {
+        // T-IDX-431 RED: the repair recheck must use the same explicit v2
+        // selector as the search that admitted Files / FilesDocs repair.
+        let cases = [
+            vec![("files".to_string(), "missing".to_string())],
+            vec![("files-docs".to_string(), "corrupt".to_string())],
+            vec![
+                ("issues".to_string(), "missing".to_string()),
+                ("files".to_string(), "corrupt".to_string()),
+                ("files-docs".to_string(), "missing".to_string()),
+            ],
+        ];
+
+        for broken in cases {
+            let args = repair_status_probe_args("repo-hash", &broken, Some("wt-hash"));
+
+            assert_eq!(
+                args.windows(2)
+                    .filter(|pair| pair[0] == "--file-index-protocol" && pair[1] == "v2")
+                    .count(),
+                1,
+                "file-scope repair status argv must contain one v2 pair: {args:?}"
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| {
+                        arg.as_os_str() == std::ffi::OsStr::new("--file-index-protocol")
+                    })
+                    .count(),
+                1,
+                "protocol flag must appear exactly once: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--action" && pair[1] == "status"),
+                "repair recheck must remain a status action: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--repo-hash" && pair[1] == "repo-hash"),
+                "repair recheck must retain the repository hash: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--worktree-hash" && pair[1] == "wt-hash"),
+                "repair recheck must retain the worktree hash: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_status_probe_args_keep_non_file_only_rechecks_legacy() {
+        // The flag must be gated by the broken scope set. Adding it to every
+        // status action would silently change the legacy/default Python API.
+        let broken = vec![
+            ("issues".to_string(), "missing".to_string()),
+            ("specs".to_string(), "corrupt".to_string()),
+        ];
+        let args = repair_status_probe_args("repo-hash", &broken, Some("wt-hash"));
+
+        assert!(
+            !args.iter().any(|arg| arg == "--file-index-protocol"),
+            "issues/specs-only repair status must retain legacy/default argv: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--action" && pair[1] == "status"),
+            "repair recheck must remain a status action: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--repo-hash" && pair[1] == "repo-hash"),
+            "repair recheck must retain the repository hash: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--worktree-hash" && pair[1] == "wt-hash"),
+            "repair recheck must retain the worktree hash: {args:?}"
+        );
+    }
+
+    #[test]
     fn broken_scopes_extracts_missing_issue_and_corrupt_spec_states() {
         // T-IDX-416 (SPEC #1939 Phase 70d, bundled-required by SPEC #3170
         // FR-097): the Knowledge Bridge consumer scopes classify exactly like
@@ -2413,6 +2713,44 @@ mod tests {
         assert!(!message.contains('\u{1b}'));
         assert!(!message.contains("ghp_"));
         assert!(message.len() < RUNNER_DIAGNOSTIC_MAX_BYTES);
+    }
+
+    /// Issue #3866 AC-3: `cancelled` and `repair_stopped` hold until an
+    /// explicit `index.repair` (Issue #4205), so a search must not treat them
+    /// as a retryable wait.
+    #[test]
+    fn operator_stop_states_require_explicit_repair_instead_of_a_retry_wait() {
+        for reason in ["cancelled", "repair_stopped"] {
+            let payload = serde_json::json!({
+                "ok": true,
+                "scopes": {
+                    "issues": {"state": "corrupt", "reason": reason},
+                    "specs": {"state": "missing", "reason": "empty_collection"},
+                },
+            });
+            let required = operator_repair_required(&payload)
+                .expect("an operator stop state must not enter the repair wait");
+            assert_eq!(required.affected_scopes, vec!["issues".to_string()]);
+            assert!(required.reason.contains(reason), "{required:?}");
+            assert!(required.recovery.contains("index.repair"), "{required:?}");
+
+            let attempt = IndexSearchAttemptError::RepairRequired(required);
+            assert!(!attempt.retryable());
+            assert_eq!(attempt.retry_after_ms(), None);
+            assert_eq!(attempt.error_code(), Some("INDEX_REPAIR_REQUIRED"));
+            let public = attempt.into_public();
+            assert!(!public.retryable());
+            let IndexSearchError::SearchFailed(failed) = public else {
+                panic!("public callers must see the non-retryable failure");
+            };
+            assert!(failed.reason.contains("index.repair"), "{failed:?}");
+        }
+
+        let repairable = serde_json::json!({
+            "ok": true,
+            "scopes": {"issues": {"state": "corrupt", "reason": "count_mismatch"}},
+        });
+        assert!(operator_repair_required(&repairable).is_none());
     }
 
     #[test]

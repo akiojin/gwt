@@ -62,16 +62,14 @@ fn expected_existing_hook_output(
         ExistingHookDecision::Allow => None,
         ExistingHookDecision::GithubWorkflowBlock => {
             Some(HookOutput::pre_tool_use_permission(
-                "🚫 Direct GitHub workflow CLI commands are not allowed",
+                "🚫 Direct GitHub workflow mutations are not allowed",
                 format!(
-                    "Use the gwt workflow surfaces instead of direct `gh issue`, `gh pr`, `gh run`, or workflow-focused `gh api` commands.\n\n\
+                    "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
-- read: JSON operations `issue.view`, `issue.comments`, `issue.linked_prs`\n\
-- write: JSON operations `issue.create`, `issue.comment`\n\
-- PR workflow: JSON operations `pr.current`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
-- PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
-- Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
-- discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.merge`, `pr.review_threads.reply_and_resolve`\n\
+- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
+Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
                 ),
             ))
@@ -190,7 +188,7 @@ fn semantic_classifier_covers_shell_target_and_effect_matrix() {
             RepositoryTarget::ManagedCurrent,
             "gh.pr.view",
             GovernanceEffect::Observe,
-            ExistingHookDecision::GithubWorkflowBlock,
+            ExistingHookDecision::Allow,
         ),
         (
             "touch notes.tmp".to_string(),
@@ -239,7 +237,7 @@ fn semantic_classifier_covers_shell_target_and_effect_matrix() {
             RepositoryTarget::ManagedCurrent,
             "gh.pr.merge",
             GovernanceEffect::Protected,
-            ExistingHookDecision::Allow,
+            ExistingHookDecision::GithubWorkflowBlock,
         ),
         (
             "gh release create v1.0.0 --notes done".to_string(),
@@ -413,7 +411,7 @@ fn semantic_observation_preserves_existing_block_bash_decisions() {
 
     let merge = "gh pr merge 1949";
     assert_eq!(classify(merge).effect, GovernanceEffect::Protected);
-    allow(merge);
+    block(merge);
 
     let destructive = "git worktree remove ../old-work";
     assert_eq!(classify(destructive).effect, GovernanceEffect::Protected);
@@ -708,23 +706,80 @@ fn blocks_git_dir_override_env_vars() {
 }
 
 #[test]
-fn blocks_workflow_focused_github_cli_commands() {
-    block("gh issue view 1942");
+fn allows_github_workflow_reads() {
+    for (category, verbs) in [
+        ("issue", &["view", "list", "status"][..]),
+        (
+            "pr",
+            &[
+                "view",
+                "list",
+                "checks",
+                "diff",
+                "status",
+                "reviews",
+                "review-threads",
+            ][..],
+        ),
+        ("run", &["view", "list", "watch"][..]),
+    ] {
+        for verb in verbs {
+            allow(&format!("gh {category} {verb}"));
+        }
+    }
+    allow("env GH_TOKEN=test gh issue view 1942");
+    allow("gh api repos/akiojin/gwt/issues/1942");
+    allow("gh api /repos/akiojin/gwt/issues/1942/comments");
+    allow("gh api -X GET repos/akiojin/gwt/pulls/1949");
+    allow("gh api --method=GET repos/akiojin/gwt/actions/runs/123456789");
+    allow("gh api repos/akiojin/gwt/actions/jobs/123456789");
+    allow("gh api repos/akiojin/gwt/check-runs/123456789");
+    allow("gh api repos/akiojin/gwt/check-suites/123456789");
+    allow("gh api graphql -f query='query { repository(owner:\"akiojin\", name:\"gwt\") { issue(number:1942) { id } } }'");
+    allow("gh api graphql -f query='query { repository(owner:\"akiojin\", name:\"gwt\") { pullRequest(number:1949) { id } } }'");
+}
+
+#[test]
+fn blocks_github_workflow_mutations() {
+    for (category, verbs) in [
+        (
+            "issue",
+            &["create", "comment", "close", "reopen", "edit", "delete"][..],
+        ),
+        (
+            "pr",
+            &[
+                "create", "edit", "ready", "draft", "comment", "merge", "close", "review", "reopen",
+            ][..],
+        ),
+        ("run", &["rerun", "cancel", "delete"][..]),
+    ] {
+        for verb in verbs {
+            block(&format!("gh {category} {verb}"));
+        }
+    }
     block("gh issue create --title \"fix: issue\" --body \"details\"");
     block("gh issue comment 1942 --body \"done\"");
-    block("gh pr view 1949");
     block("gh pr create --base main --head feature/x --title test --body body");
-    block("gh pr ready 1949");
-    block("gh pr draft 1949");
-    block("gh pr checks 1949");
-    block("gh run view 123456789");
-    block("env GH_TOKEN=test gh issue view 1942");
-    block("gh api repos/akiojin/gwt/issues/1942");
-    block("gh api /repos/akiojin/gwt/issues/1942/comments");
-    block("gh api repos/akiojin/gwt/pulls/1949");
-    block("gh api repos/akiojin/gwt/actions/runs/123456789");
-    block("gh api graphql -f query='query { repository(owner:\"akiojin\", name:\"gwt\") { issue(number:1942) { id } } }'");
-    block("gh api graphql -f query='query { repository(owner:\"akiojin\", name:\"gwt\") { pullRequest(number:1949) { id } } }'");
+    block("gh pr ready 1949 --undo");
+    block("gh pr merge --auto 1949");
+    block("gh pr merge --disable-auto 1949");
+    block("gh pr -R akiojin/gwt merge 1949");
+    block("gh --repo=akiojin/gwt issue close 1942");
+    block("env GH_TOKEN=test gh issue edit 1942 --title updated");
+    for method in ["POST", "PATCH", "PUT", "DELETE"] {
+        block(&format!("gh api -X {method} repos/akiojin/gwt/issues/1942"));
+    }
+    block("gh api repos/akiojin/gwt/issues/1942/comments -f body=updated");
+    block("gh api graphql -f query='mutation { closeIssue(input: {issueId:\"id\"}) { clientMutationId } }'");
+}
+
+#[test]
+fn github_workflow_policy_normalizes_executable_names() {
+    for executable in ["/usr/bin/gh", "gh.exe", "./bin/gh", "./bin/gh.exe"] {
+        allow(&format!("{executable} pr view 1949"));
+        block(&format!("{executable} pr edit 1949 --title updated"));
+    }
 }
 
 #[test]
@@ -749,25 +804,43 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
     // surfaces, so the canonical alternatives and the blocked command
     // must all land inside it — otherwise the LLM/user only sees the
     // short rule name and has no recovery path.
-    let decision = block_bash_policy::evaluate_bash_command("gh pr view 1949", &root())
-        .expect("workflow gh command must block");
+    let decision =
+        block_bash_policy::evaluate_bash_command("gh pr edit 1949 --title updated", &root())
+            .expect("workflow gh mutation must block");
     let visible = decision.permission_decision_reason();
 
     for required in [
-        "GitHub workflow CLI",
-        "issue.view",
-        "pr.view",
+        "GitHub workflow mutations",
+        "GitHub reads may use direct `gh` commands",
+        "JSON-envelope operations",
+        "issue.edit",
+        "pr.edit",
+        "pr.merge",
         "pr.ready",
         "pr.draft",
-        "actions.logs",
-        "gwt-search",
-        "Blocked command: gh pr view 1949",
+        "actions.rerun",
+        "Blocked command: gh pr edit 1949 --title updated",
     ] {
         assert!(
             visible.contains(required),
             "{required:?} missing from permission_decision_reason: {visible}"
         );
     }
+}
+
+#[test]
+fn github_workflow_cli_blocks_gh_pr_merge_in_favor_of_json_operation() {
+    let decision = block_bash_policy::evaluate_bash_command("gh pr merge 1949", &root())
+        .expect("gh pr merge must block");
+    let visible = decision.permission_decision_reason();
+    assert!(
+        visible.contains("pr.merge"),
+        "block message must name the canonical merge operation: {visible}"
+    );
+    assert!(
+        visible.contains("Blocked command: gh pr merge 1949"),
+        "{visible}"
+    );
 }
 
 #[test]
@@ -805,11 +878,6 @@ fn allows_non_workflow_github_cli_commands() {
     allow("gh release list");
     allow("gh api user");
     allow("gh api graphql -f query='query { viewer { login } }'");
-    // The gwt-manage-pr Deliver flow depends on `gh pr merge` staying allowed:
-    // it is the documented transport exception with no JSON operation.
-    allow("gh pr merge --auto 1949");
-    allow("gh pr merge --disable-auto 1949");
-    allow("gh pr merge 1949");
 }
 
 #[test]
