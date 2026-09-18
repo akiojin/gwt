@@ -21951,6 +21951,59 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         .join(format!("{predecessor_session_id}.toml"));
     let predecessor_session_bytes = fs::read(&predecessor_session_path).expect("old Session bytes");
 
+    let mut predecessor_active = sample_active_agent_session("tab-1", &window_id);
+    predecessor_active.session_id = predecessor_session_id.to_string();
+    predecessor_active.branch_name = "work/issue-2359".to_string();
+    predecessor_active.worktree_path = repo.clone();
+    save_workspace_launch_projection(
+        &repo,
+        &predecessor_active,
+        Some("origin/develop"),
+        Some(owner.number),
+        Some(owner),
+        None,
+        WorkspaceLaunchProjectionKind::StartWork,
+        &HashSet::from([predecessor_session_id.to_string()]),
+    )
+    .expect("publish predecessor Work");
+    let predecessor_work =
+        gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+            &repo,
+            &repo,
+            |projection, _, _| {
+                let mut other_host = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Update,
+                    projection.id.clone(),
+                    Utc::now(),
+                );
+                other_host.execution_container = Some(
+                    gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                        branch: Some(predecessor_active.branch_name.clone()),
+                        worktree_path: Some(PathBuf::from("E:\\gwt\\work\\issue-2359")),
+                        pr_number: None,
+                        pr_url: None,
+                        pr_state: None,
+                    },
+                );
+                let event = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Discard,
+                    projection.id.clone(),
+                    Utc::now(),
+                );
+                Ok((projection.id.clone(), vec![other_host, event]))
+            },
+        )
+        .expect("discard predecessor Work");
+    let predecessor_work_snapshot =
+        gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .into_iter()
+            .find(|work| work.id == predecessor_work)
+            .expect("discarded predecessor Work");
+    assert_eq!(predecessor_work_snapshot.execution_containers.len(), 2);
+
     let mut candidate =
         gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     candidate.id = candidate_session_id.to_string();
@@ -22065,6 +22118,69 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         fs::read(predecessor_session_path).expect("old Session readback"),
         predecessor_session_bytes,
         "fresh activation must not rewrite the predecessor Session",
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        works
+            .work_items
+            .iter()
+            .find(|work| work.id == predecessor_work),
+        Some(&predecessor_work_snapshot),
+        "fresh activation must preserve the discarded Work and its Session membership",
+    );
+    let successor = works
+        .work_items
+        .iter()
+        .find(|work| {
+            work.agents
+                .iter()
+                .any(|agent| agent.session_id == candidate_session_id)
+        })
+        .expect("fresh Session belongs to a successor Work");
+    assert_ne!(successor.id, predecessor_work);
+    assert!(!successor.discarded);
+    assert!(successor.related_work_item_ids.contains(&predecessor_work));
+    save_workspace_launch_projection(
+        &repo,
+        runtime.active_agent_sessions.get(&window_id).unwrap(),
+        None,
+        Some(owner.number),
+        Some(owner),
+        None,
+        WorkspaceLaunchProjectionKind::Resume {
+            created_by_start_work: true,
+        },
+        &HashSet::from([candidate_session_id.to_string()]),
+    )
+    .expect("retry must reuse the same successor Work");
+    assert!(
+        save_workspace_launch_projection(
+            &repo,
+            &predecessor_active,
+            None,
+            Some(owner.number),
+            Some(owner),
+            None,
+            WorkspaceLaunchProjectionKind::Resume {
+                created_by_start_work: true
+            },
+            &HashSet::from([predecessor_session_id.to_string()]),
+        )
+        .is_err(),
+        "a discarded predecessor Session cannot be moved to its successor"
+    );
+    let retry_works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry_works.work_items.len(), 2);
+    assert_eq!(
+        retry_works
+            .work_items
+            .iter()
+            .find(|work| work.id == predecessor_work),
+        Some(&predecessor_work_snapshot)
     );
 }
 

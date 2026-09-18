@@ -5235,12 +5235,94 @@ fn workspace_backfill_event(
     event
 }
 
+/// Resolve the current Work lifetime without changing the branch's canonical
+/// identity. Missing Work history retains the canonical ID for initial launch.
+/// A malformed successor leaves its terminal predecessor authoritative; callers
+/// creating a successor must also refuse an occupied successor ID.
+pub fn current_work_id(
+    projection: &WorkItemsProjection,
+    project_root: &Path,
+    branch: Option<&str>,
+    worktree_path: Option<&Path>,
+) -> Option<String> {
+    let canonical_id = canonical_work_id(project_root, branch, worktree_path)?;
+    Some(
+        current_canonical_work_item(projection, &canonical_id)
+            .map(|item| item.id.clone())
+            .unwrap_or(canonical_id),
+    )
+}
+
+fn current_canonical_work_item<'a>(
+    projection: &'a WorkItemsProjection,
+    canonical_id: &str,
+) -> Option<&'a WorkItem> {
+    let mut current = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == canonical_id)?;
+    // Follow identities and provenance, never recency: late predecessor
+    // heartbeats remain part of its history and cannot make it current again.
+    for _ in 0..projection.work_items.len() {
+        if !current.discarded {
+            break;
+        }
+        let successor_id = successor_work_id(&current.id);
+        let mut candidates = projection
+            .work_items
+            .iter()
+            .filter(|item| item.id == successor_id);
+        let Some(successor) = candidates.next() else {
+            break;
+        };
+        if candidates.next().is_some()
+            || !successor.related_work_item_ids.contains(&current.id)
+            || !successor.events.iter().any(|event| {
+                event.kind == WorkEventKind::Start
+                    && event.related_work_item_id.as_deref() == Some(current.id.as_str())
+            })
+            // Owner display normalization may arrive on either Work first;
+            // its arrival order must not change lineage. This read-only
+            // equivalence does not authorize a reverse owner mutation.
+            || !(current.owner == successor.owner
+                || can_upgrade_work_owner(current.owner.as_deref(), successor.owner.as_deref())
+                || can_upgrade_work_owner(successor.owner.as_deref(), current.owner.as_deref()))
+            || successor.execution_containers.is_empty()
+            || !successor.execution_containers.iter().all(|container| {
+                current.execution_containers.iter().any(|predecessor| {
+                    container
+                        .branch
+                        .as_deref()
+                        .map(canonical_work_branch_identity)
+                        == predecessor
+                            .branch
+                            .as_deref()
+                            .map(canonical_work_branch_identity)
+                        && container
+                            .worktree_path
+                            .as_deref()
+                            .map(canonical_worktree_identity)
+                            == predecessor
+                                .worktree_path
+                                .as_deref()
+                                .map(canonical_worktree_identity)
+                })
+            })
+        {
+            break;
+        }
+        current = successor;
+    }
+    Some(current)
+}
+
 /// #3065: find the Work item that owns a given execution container. The
 /// match mirrors the backfill coverage rule: canonical work id, canonical
 /// branch identity (`origin/x` == `x`), or canonical worktree path. Used to
 /// source the Workspace Resume context from the resumed Work itself instead
 /// of the repo-shared current projection (whose identity may belong to a
-/// different Work).
+/// different Work). A canonical Work's validated successor chain takes
+/// precedence over container-matching historical rows.
 pub fn find_work_item_for_container<'a>(
     projection: &'a WorkItemsProjection,
     project_root: &Path,
@@ -5249,9 +5331,15 @@ pub fn find_work_item_for_container<'a>(
 ) -> Option<&'a WorkItem> {
     let branch = branch.map(str::trim).filter(|value| !value.is_empty());
     let canonical_id = canonical_work_id(project_root, branch, worktree_path);
+    if let Some(current) = canonical_id
+        .as_deref()
+        .and_then(|id| current_canonical_work_item(projection, id))
+    {
+        return Some(current);
+    }
     let branch_identity = branch.map(canonical_work_branch_identity);
     let worktree_identity = worktree_path.map(canonical_worktree_identity);
-    projection.work_items.iter().find(|item| {
+    let matched = projection.work_items.iter().find(|item| {
         canonical_id
             .as_deref()
             .is_some_and(|work_id| item.id == work_id)
@@ -5267,7 +5355,14 @@ pub fn find_work_item_for_container<'a>(
                         .is_some_and(|existing| canonical_worktree_identity(existing) == identity)
                 })
             })
-    })
+    })?;
+    // A path-only lookup derives a worktree ID, while branch-backed history
+    // uses the branch ID. Resolve that same lifetime after the legacy match.
+    current_canonical_work_item(
+        projection,
+        &workspace_group_key_for_item(project_root, matched),
+    )
+    .or(Some(matched))
 }
 
 /// SPEC-2359 Phase W-15 (FR-379/FR-380): reconcile locally existing worktrees
