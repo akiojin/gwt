@@ -725,6 +725,35 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         Ok(value)
     }
 
+    fn label_rest_mutation(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: Value,
+        operation: &str,
+    ) -> OwnerMutationResult<()> {
+        self.admit(&REST_BUDGET_ARGS)
+            .map_err(OwnerMutationError::PreSubmit)?;
+        let result = self.owner_rest_mutation(
+            method,
+            path,
+            body,
+            &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+            operation,
+        );
+        match result {
+            Ok(_) => self
+                .settle(&REST_BUDGET_ARGS, Ok(()))
+                .map_err(OwnerMutationError::PreSubmit),
+            Err(OwnerMutationError::PreSubmit(error)) => self
+                .settle(&REST_BUDGET_ARGS, Err(error))
+                .map_err(OwnerMutationError::PreSubmit),
+            Err(OwnerMutationError::RemoteOutcomeUnknown(error)) => self
+                .settle(&REST_BUDGET_ARGS, Err(error))
+                .map_err(OwnerMutationError::RemoteOutcomeUnknown),
+        }
+    }
+
     fn owner_rest_mutation(
         &self,
         method: HttpMethod,
@@ -1994,6 +2023,37 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("create_issue json: {e}")))?;
         parse_rest_issue(&value)
+    }
+
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        self.label_rest_mutation(
+            HttpMethod::Post,
+            &format!(
+                "/repos/{}/{}/issues/{}/labels",
+                self.owner, self.repo, number.0
+            ),
+            json!({ "labels": labels }),
+            "add issue labels",
+        )
+    }
+
+    fn remove_label_mutation(&self, number: IssueNumber, label: &str) -> OwnerMutationResult<()> {
+        self.label_rest_mutation(
+            HttpMethod::Delete,
+            &format!(
+                "/repos/{}/{}/issues/{}/labels/{}",
+                self.owner,
+                self.repo,
+                number.0,
+                encode_path_segment(label)
+            ),
+            Value::Null,
+            "remove issue label",
+        )
     }
 
     fn set_labels(

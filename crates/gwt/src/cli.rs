@@ -58,7 +58,7 @@ use std::{io, path::PathBuf};
 
 pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
-pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
+pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;
