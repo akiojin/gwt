@@ -101,27 +101,38 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
         let Some(command_name) = tokens.first().copied() else {
             continue;
         };
-        if command_name != "gh" {
+        if normalize_command_name(command_name) != "gh" {
             continue;
         }
 
-        if let Some(subcommand) = tokens.get(1).copied() {
+        let mut args = tokens[1..].iter().copied();
+        if let Some(subcommand) = next_gh_workflow_word(&mut args) {
+            let verb = next_gh_workflow_word(&mut args);
             match subcommand {
                 "auth" | "repo" | "release" => continue,
-                "issue" if is_blocked_issue_subcommand(tokens.get(2).copied()) => {
+                "issue" if is_blocked_issue_subcommand(verb) => {
                     return Some(github_workflow_block_decision(command));
                 }
-                "pr" if is_blocked_pr_subcommand(tokens.get(2).copied()) => {
+                "pr" if is_blocked_pr_subcommand(verb) => {
                     return Some(github_workflow_block_decision(command));
                 }
-                "run" if is_blocked_run_subcommand(tokens.get(2).copied()) => {
-                    return Some(github_workflow_block_decision(command));
-                }
-                "api" if is_workflow_api_command(&segment, &tokens) => {
+                "run" if is_blocked_run_subcommand(verb) => {
                     return Some(github_workflow_block_decision(command));
                 }
                 _ => {}
             }
+        }
+    }
+    None
+}
+
+/// The inherited repository flag may precede either the category or its verb.
+fn next_gh_workflow_word<'a>(args: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    while let Some(arg) = args.next() {
+        if matches!(arg, "-R" | "--repo") {
+            args.next();
+        } else if !arg.starts_with("--repo=") && !arg.starts_with("-R") {
+            return Some(arg);
         }
     }
     None
@@ -201,11 +212,8 @@ fn is_pr_ci_polling_segment(segment: &str) -> bool {
 
 fn normalize_command_name(token: &str) -> String {
     let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
-    Path::new(token)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(token)
-        .to_string()
+    let name = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    name.strip_suffix(".exe").unwrap_or(name).to_string()
 }
 
 fn long_pr_ci_polling_sleep_block_decision(command: &str) -> HookOutput {
@@ -221,7 +229,10 @@ Blocked command: {command}"
 }
 
 fn is_blocked_issue_subcommand(subcommand: Option<&str>) -> bool {
-    matches!(subcommand, Some("view" | "create" | "comment"))
+    matches!(
+        subcommand,
+        Some("create" | "comment" | "close" | "reopen" | "edit" | "delete")
+    )
 }
 
 fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
@@ -232,50 +243,47 @@ fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
     matches!(
         subcommand,
         Some(
-            "view"
-                | "list"
-                | "create"
+            "create"
                 | "edit"
                 | "ready"
                 | "draft"
                 | "comment"
-                | "checks"
-                | "reviews"
-                | "review-threads"
+                | "merge"
+                | "close"
+                | "review"
+                | "reopen"
         )
     )
 }
 
 fn is_blocked_run_subcommand(subcommand: Option<&str>) -> bool {
-    matches!(subcommand, Some("view"))
+    matches!(subcommand, Some("rerun" | "cancel" | "delete"))
 }
 
 fn github_workflow_block_decision(command: &str) -> HookOutput {
     HookOutput::pre_tool_use_permission(
-        "\u{1F6AB} Direct GitHub workflow CLI commands are not allowed",
+        "\u{1F6AB} Direct GitHub workflow mutations are not allowed",
         format!(
-            "Use the gwt workflow surfaces instead of direct `gh issue`, `gh pr`, `gh run`, or workflow-focused `gh api` commands.\n\n\
+            "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
-- read: JSON operations `issue.view`, `issue.comments`, `issue.linked_prs`\n\
-- write: JSON operations `issue.create`, `issue.comment`\n\
-- PR workflow: JSON operations `pr.current`, `pr.list`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
-- PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
-- Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
+- Merges: gwtd has no merge operation. The repository's merge automation or a human merges; hold a pending merge with `pr.draft`\n\
 - Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
-- discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
+Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
         ),
     )
 }
 
 /// SPEC-3248 P10 (T-212/T-217 core): method-aware GitHub mutation-sink
-/// classification. The workflow-endpoint block above routes issue/PR/run
-/// reads to the gwtd operations; this classifier blocks WRITES to the
+/// classification. Workflow CLI verbs are handled above; this classifier
+/// is the single API write decision and blocks WRITES to the
 /// GitHub API regardless of endpoint family — `gh api` with a mutating
 /// method (explicit `-X`/`--method` or field-implied POST), `gh release`
 /// mutation subcommands, GraphQL mutation documents, and `curl` mutations
-/// against a GitHub API host. Read-only calls outside the workflow
-/// endpoints stay available. `git push` remains the sanctioned PR handoff
+/// against a GitHub API host. Read-only calls, including workflow
+/// endpoints, stay available. `git push` remains the sanctioned PR handoff
 /// path (classified as a mutation sink but policed by the PR gates, not
 /// here). Approved wrapper intents and `hub` coverage are T-217 follow-ups.
 fn evaluate_github_mutation_sinks(command: &str) -> Option<HookOutput> {
@@ -670,39 +678,6 @@ fn is_env_assignment(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn is_workflow_api_command(segment: &str, tokens: &[&str]) -> bool {
-    let Some(target) = gh_api_target(tokens) else {
-        return false;
-    };
-
-    if target == "graphql" {
-        let lowered = segment.to_ascii_lowercase();
-        return lowered.contains("issue(")
-            || lowered.contains("issues(")
-            || lowered.contains("updateissue")
-            || lowered.contains("closeissue")
-            || lowered.contains("reopenissue")
-            || lowered.contains("pullrequest(")
-            || lowered.contains("pullrequests(")
-            || lowered.contains("reviews(")
-            || lowered.contains("reviewthreads")
-            || lowered.contains("workflowrun")
-            || lowered.contains("workflowruns")
-            || lowered.contains("checkrun")
-            || lowered.contains("checkruns")
-            || lowered.contains("checksuite")
-            || lowered.contains("checksuites");
-    }
-
-    let lowered = target.to_ascii_lowercase();
-    lowered.contains("/issues")
-        || lowered.contains("/pulls")
-        || lowered.contains("/actions/runs")
-        || lowered.contains("/actions/jobs")
-        || lowered.contains("/check-runs")
-        || lowered.contains("/check-suites")
-}
-
 fn gh_api_target<'a>(tokens: &'a [&'a str]) -> Option<&'a str> {
     let mut i = 2;
     while i < tokens.len() {
@@ -758,6 +733,38 @@ mod agent_gh_ledger_tests {
             1
         );
     }
+
+    #[test]
+    fn read_only_gh_executable_variants_are_allowed_and_accounted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        for (command, resource, source) in [
+            ("gh issue view 4309", "graphql", "agent gh issue view"),
+            ("/usr/bin/gh pr diff 4309", "graphql", "agent gh pr diff"),
+            ("gh.exe run watch 123", "core", "agent gh run watch"),
+            (
+                "./bin/gh api repos/o/r/issues",
+                "core",
+                "agent gh api repos",
+            ),
+            (
+                "gh api graphql -f query='query { viewer { login } }'",
+                "graphql",
+                "agent gh api graphql",
+            ),
+        ] {
+            assert!(
+                evaluate_bash_command(command, temp.path()).is_none(),
+                "{command}"
+            );
+            record_agent_gh_spend(command, &ledger);
+            let snapshot = ledger.snapshot(chrono::Utc::now());
+            assert_eq!(
+                snapshot.local[resource].sources_last_minute[source], 1,
+                "{command}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -802,8 +809,7 @@ mod tests {
     }
 
     // SPEC-3248 P10 (T-212/T-217 core): GitHub API mutations are blocked
-    // regardless of endpoint family; reads outside the workflow endpoints
-    // stay available.
+    // regardless of endpoint family; reads stay available.
     #[test]
     fn blocks_mutating_gh_api_and_allows_reads() {
         for command in [

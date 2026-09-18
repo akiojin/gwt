@@ -19,11 +19,13 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -42,10 +44,27 @@ pub const HOT_PROJECTION_ENTRY_LIMIT: usize = 500;
 pub const EVENT_SEGMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MIGRATION_MARKER_FILE_NAME: &str = ".migration-complete";
 const EVENT_MANIFEST_VERSION: u32 = 1;
+const EXACT_LEGACY_IMPORT_INFLIGHT_FILE_NAME: &str = "events.exact-import.inflight.jsonl";
+const EXACT_LEGACY_IMPORT_JOURNAL_FILE_NAME: &str = "events.exact-import.journal.json";
+const EXACT_LEGACY_IMPORT_JOURNAL_VERSION: u32 = 1;
 
 #[cfg(test)]
 thread_local! {
     static FAIL_NEXT_EVENT_MANIFEST_WRITE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static PROMPT_BOARD_READ_TEST_COUNTERS: std::cell::RefCell<PromptBoardReadTestCounters> =
+        const { std::cell::RefCell::new(PromptBoardReadTestCounters::new()) };
+    static FAIL_NEXT_EXACT_LEGACY_CLEANUP: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static FAIL_NEXT_EXACT_LEGACY_TARGET_PUBLISH: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static FAIL_EXACT_LEGACY_TARGET_DIR_SYNCS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static FAIL_NEXT_EXACT_LEGACY_JOURNAL_CLEANUP_DIR_SYNC: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
 }
@@ -53,6 +72,71 @@ thread_local! {
 #[cfg(test)]
 fn fail_next_event_manifest_write() {
     FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptBoardReadTestCounters {
+    coordination_root_resolutions: usize,
+    legacy_discovery_processes: usize,
+    history_materializations: usize,
+    event_decodes: usize,
+}
+
+#[cfg(test)]
+impl PromptBoardReadTestCounters {
+    const fn new() -> Self {
+        Self {
+            coordination_root_resolutions: 0,
+            legacy_discovery_processes: 0,
+            history_materializations: 0,
+            event_decodes: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+fn reset_prompt_board_read_test_counters() {
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        *counters.borrow_mut() = PromptBoardReadTestCounters::new();
+    });
+}
+
+#[cfg(test)]
+fn prompt_board_read_test_counters() -> PromptBoardReadTestCounters {
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| *counters.borrow())
+}
+
+#[cfg(test)]
+thread_local! {
+    static COORDINATION_GIT_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Issue #4406: count the Git processes a Board read starts, so tests can pin
+/// that a steady-state read starts none.
+fn note_coordination_git_spawn() {
+    #[cfg(test)]
+    COORDINATION_GIT_SPAWNS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn fail_next_exact_legacy_cleanup() {
+    FAIL_NEXT_EXACT_LEGACY_CLEANUP.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn fail_next_exact_legacy_target_publish() {
+    FAIL_NEXT_EXACT_LEGACY_TARGET_PUBLISH.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn fail_exact_legacy_target_dir_syncs(count: usize) {
+    FAIL_EXACT_LEGACY_TARGET_DIR_SYNCS.with(|remaining| remaining.set(count));
+}
+
+#[cfg(test)]
+fn fail_next_exact_legacy_journal_cleanup_dir_sync() {
+    FAIL_NEXT_EXACT_LEGACY_JOURNAL_CLEANUP_DIR_SYNC.with(|fail| fail.set(true));
 }
 
 /// Who authored a Board entry: the human operator, an agent session, or
@@ -80,6 +164,18 @@ pub enum BoardEntryKind {
     Blocked,
     Handoff,
     Decision,
+}
+
+/// Structural form of the worktree that originated a Board entry.
+///
+/// This is presentation and recovery provenance, not an Intake / Execution
+/// behavioral lane (SPEC-1921 FR-196).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoardWorktreeForm {
+    Ephemeral,
+    BranchBacked,
+    Unknown,
 }
 
 impl std::str::FromStr for BoardEntryKind {
@@ -243,6 +339,17 @@ where
     Ok(normalize_board_audience(value))
 }
 
+fn deserialize_optional_trimmed_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(trimmed_or_none(Option::<String>::deserialize(
+        deserializer,
+    )?))
+}
+
 pub fn normalize_board_audience(values: Vec<String>) -> Vec<String> {
     normalize_audience(values)
 }
@@ -305,6 +412,16 @@ pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bo
             .any(|mention| match_keys.iter().any(|key| key == &mention.typed_key()))
 }
 
+/// The worktree form a Board post came from (SPEC-1974 FR-063).
+///
+/// This is *provenance*, not a behavioural lane: it records the shape of the
+/// worktree the posting session was launched into, so a post made from a
+/// branchless ephemeral worktree stays identifiable after that worktree is
+/// gone. The vocabulary is Issue #3384's canonical worktree-form wording, and
+/// the type is closed on purpose — the retired Intake / Execution action lanes
+/// (SPEC #3245 Stage C) cannot be reintroduced through this field.
+pub type BoardOriginWorktreeForm = BoardWorktreeForm;
+
 /// One immutable post on the shared coordination Board. Appended by agents
 /// and the user via `board.post`, persisted to the repo-local event log
 /// (`.gwt/coordination/`), and projected into [`BoardProjection`] for the UI.
@@ -348,6 +465,14 @@ pub struct BoardEntry {
     pub origin_session_id: Option<String>,
     #[serde(default)]
     pub origin_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_worktree_form: Option<BoardWorktreeForm>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_trimmed_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub origin_recovery_id: Option<String>,
     #[serde(default)]
     pub target_owners: Vec<String>,
     #[serde(default)]
@@ -379,6 +504,16 @@ impl BoardEntry {
 
     pub fn with_origin_agent_id(mut self, value: impl Into<String>) -> Self {
         self.origin_agent_id = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_worktree_form(mut self, value: BoardWorktreeForm) -> Self {
+        self.origin_worktree_form = Some(value);
+        self
+    }
+
+    pub fn with_origin_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_recovery_id = trimmed_or_none(Some(value.into()));
         self
     }
 
@@ -425,6 +560,10 @@ impl BoardEntry {
         self.audience = normalize_board_audience(std::mem::take(&mut self.audience));
     }
 
+    fn normalize_recovery_origin(&mut self) {
+        self.origin_recovery_id = trimmed_or_none(self.origin_recovery_id.take());
+    }
+
     pub fn with_audience_workspace(mut self, value: impl Into<String>) -> Self {
         let trimmed = value.into().trim().to_string();
         if !trimmed.is_empty() && !self.audience.iter().any(|existing| existing == &trimmed) {
@@ -463,12 +602,84 @@ impl BoardEntry {
             origin_branch: None,
             origin_session_id: None,
             origin_agent_id: None,
+            origin_worktree_form: None,
+            origin_recovery_id: None,
             target_owners: Vec::new(),
             mentions: Vec::new(),
             audience: Vec::new(),
             body_html: None,
         }
     }
+}
+
+pub const BOARD_PAYLOAD_DIGEST_VERSION: u32 = 1;
+
+/// Return the versioned digest of a Board entry's semantic payload.
+///
+/// The canonical payload includes display, routing, and origin semantics. It
+/// deliberately excludes the caller-supplied entry identity, generated
+/// timestamps, and derived HTML so a retry can reproduce the same logical
+/// append without reproducing generated values (SPEC-1921 FR-196).
+pub fn board_entry_payload_digest(entry: &BoardEntry) -> Result<String> {
+    #[derive(Serialize)]
+    struct CanonicalBoardPayloadV1<'a> {
+        version: u32,
+        author_kind: &'a AuthorKind,
+        author: &'a str,
+        kind: &'a BoardEntryKind,
+        body: &'a str,
+        title: &'a Option<String>,
+        title_summary: &'a Option<String>,
+        state: &'a Option<String>,
+        parent_id: &'a Option<String>,
+        // Preserve existing v1 digests when no resolution targets were supplied.
+        #[serde(skip_serializing_if = "<[String]>::is_empty")]
+        resolves_entry_ids: &'a [String],
+        related_topics: &'a [String],
+        related_owners: &'a [String],
+        origin_branch: &'a Option<String>,
+        origin_session_id: &'a Option<String>,
+        origin_agent_id: &'a Option<String>,
+        origin_worktree_form: &'a Option<BoardWorktreeForm>,
+        origin_recovery_id: Option<&'a str>,
+        target_owners: &'a [String],
+        mentions: &'a [BoardMention],
+        audience: Vec<String>,
+    }
+
+    let origin_recovery_id = entry
+        .origin_recovery_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let payload = CanonicalBoardPayloadV1 {
+        version: BOARD_PAYLOAD_DIGEST_VERSION,
+        author_kind: &entry.author_kind,
+        author: &entry.author,
+        kind: &entry.kind,
+        body: &entry.body,
+        title: &entry.title,
+        title_summary: &entry.title_summary,
+        state: &entry.state,
+        parent_id: &entry.parent_id,
+        resolves_entry_ids: &entry.resolves_entry_ids,
+        related_topics: &entry.related_topics,
+        related_owners: &entry.related_owners,
+        origin_branch: &entry.origin_branch,
+        origin_session_id: &entry.origin_session_id,
+        origin_agent_id: &entry.origin_agent_id,
+        origin_worktree_form: &entry.origin_worktree_form,
+        origin_recovery_id,
+        target_owners: &entry.target_owners,
+        mentions: &entry.mentions,
+        audience: normalize_board_audience(entry.audience.clone()),
+    };
+    let canonical_bytes = serde_json::to_vec(&payload).map_err(json_error)?;
+    Ok(format!(
+        "v{}:sha256:{}",
+        BOARD_PAYLOAD_DIGEST_VERSION,
+        hex::encode(Sha256::digest(canonical_bytes))
+    ))
 }
 
 pub fn normalize_audience(values: Vec<String>) -> Vec<String> {
@@ -494,6 +705,8 @@ pub struct BoardOrigin {
     pub branch: String,
     pub session_id: String,
     pub agent_id: String,
+    pub worktree_form: Option<BoardWorktreeForm>,
+    pub recovery_id: String,
 }
 
 impl BoardOrigin {
@@ -506,7 +719,19 @@ impl BoardOrigin {
             branch: branch.into(),
             session_id: session_id.into(),
             agent_id: agent_id.into(),
+            worktree_form: None,
+            recovery_id: String::new(),
         }
+    }
+
+    pub fn with_worktree_form(mut self, value: BoardWorktreeForm) -> Self {
+        self.worktree_form = Some(value);
+        self
+    }
+
+    pub fn with_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.recovery_id = value.into();
+        self
     }
 }
 
@@ -606,6 +831,8 @@ impl BoardEntryDraft {
         entry.origin_branch = blank_to_none(&self.origin.branch);
         entry.origin_session_id = blank_to_none(&self.origin.session_id);
         entry.origin_agent_id = blank_to_none(&self.origin.agent_id);
+        entry.origin_worktree_form = self.origin.worktree_form;
+        entry.origin_recovery_id = blank_to_none(&self.origin.recovery_id);
         Ok(entry)
     }
 }
@@ -745,6 +972,27 @@ mod board_entry_draft_tests {
     }
 
     #[test]
+    fn finalize_keeps_branchless_ephemeral_recovery_origin_and_drops_blank_recovery_id() {
+        let mut d = draft("body");
+        d.origin = BoardOrigin::new("  ", "session-1", "agent-a")
+            .with_worktree_form(BoardWorktreeForm::Ephemeral)
+            .with_recovery_id(" recovery-1 ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.origin_branch, None);
+        assert_eq!(
+            entry.origin_worktree_form,
+            Some(BoardWorktreeForm::Ephemeral)
+        );
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-1"));
+
+        let mut blank = draft("body");
+        blank.origin =
+            BoardOrigin::new("branch", "session-1", "agent-a").with_recovery_id(" \n\t ");
+        let entry = blank.finalize().expect("finalize");
+        assert_eq!(entry.origin_recovery_id, None);
+    }
+
+    #[test]
     fn finalize_defaults_leave_optional_fields_unset() {
         let entry = draft("body").finalize().expect("finalize");
         assert_eq!(entry.title, None);
@@ -758,7 +1006,31 @@ mod board_entry_draft_tests {
         assert_eq!(entry.origin_branch, None);
         assert_eq!(entry.origin_session_id, None);
         assert_eq!(entry.origin_agent_id, None);
+        assert_eq!(entry.origin_worktree_form, None);
+        assert_eq!(entry.origin_recovery_id, None);
         assert_eq!(entry.state, None);
+    }
+
+    #[test]
+    fn finalize_keeps_the_worktree_form_and_drops_a_blank_recovery_id() {
+        // SPEC-1974 FR-063: the worktree form and the recovery identity travel
+        // with the rest of the origin, and a blank recovery id is dropped the
+        // same way a blank branch is.
+        let mut d = draft("body");
+        d.origin = BoardOrigin::new("  ", "session-1", "agent-a")
+            .with_worktree_form(BoardOriginWorktreeForm::Ephemeral)
+            .with_recovery_id("   ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(
+            entry.origin_worktree_form,
+            Some(BoardOriginWorktreeForm::Ephemeral)
+        );
+        assert_eq!(entry.origin_recovery_id, None);
+
+        let mut d = draft("body");
+        d.origin = BoardOrigin::default().with_recovery_id("  recovery-7 ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-7"));
     }
 }
 
@@ -812,6 +1084,86 @@ pub struct BoardHistoryPage {
     pub has_more_before: bool,
 }
 
+/// One immutable Board materialization for the prompt reminder hot path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptBoardRead {
+    pub recent_entries: Vec<BoardEntry>,
+    pub has_recent_own_status: bool,
+    pub latest_own_status_at: Option<DateTime<Utc>>,
+}
+
+pub struct PromptBoardReadRequest<'a> {
+    pub diff_since: DateTime<Utc>,
+    pub scope: &'a BoardAudienceScope,
+    pub status_author: &'a str,
+    pub status_kind: &'a BoardEntryKind,
+    pub status_since: DateTime<Utc>,
+}
+
+impl PromptBoardRead {
+    pub fn from_scoped_history(
+        history: Vec<BoardEntry>,
+        diff_since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Self {
+        Self::from_history(
+            history,
+            diff_since,
+            Some(scope),
+            status_author,
+            status_kind,
+            status_since,
+        )
+    }
+
+    pub fn from_channel_history(
+        history: Vec<BoardEntry>,
+        diff_since: DateTime<Utc>,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Self {
+        Self::from_history(
+            history,
+            diff_since,
+            None,
+            status_author,
+            status_kind,
+            status_since,
+        )
+    }
+
+    fn from_history(
+        history: Vec<BoardEntry>,
+        diff_since: DateTime<Utc>,
+        scope: Option<&BoardAudienceScope>,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Self {
+        let latest_own_status_at = history
+            .iter()
+            .filter(|entry| entry.author == status_author && entry.kind == *status_kind)
+            .map(|entry| entry.updated_at)
+            .max();
+        Self {
+            has_recent_own_status: latest_own_status_at
+                .is_some_and(|updated_at| updated_at > status_since),
+            recent_entries: history
+                .into_iter()
+                .filter(|entry| entry.updated_at > diff_since)
+                .filter(|entry| {
+                    scope.is_none_or(|scope| board_entry_visible_for_scope(entry, scope))
+                })
+                .collect(),
+            latest_own_status_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct EventSegmentManifest {
     version: u32,
@@ -819,6 +1171,11 @@ struct EventSegmentManifest {
     #[serde(default)]
     segments: Vec<EventSegmentMeta>,
     updated_at: DateTime<Utc>,
+}
+
+struct PreparedCoordinationRoot {
+    path: PathBuf,
+    manifest: EventSegmentManifest,
 }
 
 impl EventSegmentManifest {
@@ -889,6 +1246,60 @@ impl BoardPostOutcome {
     }
 }
 
+/// Whether this exact append call materialized a new event or acknowledged an
+/// already-materialized event with the same semantic payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardExactAppendDisposition {
+    Appended,
+    Replayed,
+}
+
+/// Durable acknowledgement returned by the exact recovery append path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardExactAppendReceipt {
+    pub entry_id: String,
+    pub payload_digest: String,
+    pub disposition: BoardExactAppendDisposition,
+    /// A derived manifest/projection refresh can fail after the event fsync.
+    /// The receipt remains a successful committed acknowledgement and exposes
+    /// the refresh error so callers do not retry as though the append failed.
+    pub refresh_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardExactAppendConflictKind {
+    PayloadMismatch,
+    DuplicateIdentity,
+}
+
+/// Details of a deterministic Board identity conflict.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Board entry {entry_id} exact append conflict: {kind:?}")]
+pub struct BoardExactAppendConflict {
+    pub entry_id: String,
+    pub kind: BoardExactAppendConflictKind,
+    pub attempted_payload_digest: String,
+    pub existing_payload_digests: Vec<String>,
+}
+
+/// Failure surface for the recovery-specific exact append API.
+#[derive(Debug, thiserror::Error)]
+pub enum BoardExactAppendError {
+    #[error(transparent)]
+    Conflict(#[from] BoardExactAppendConflict),
+    #[error("exact Board recovery append is unsupported by this provider")]
+    Unsupported,
+    #[error(transparent)]
+    Storage(#[from] GwtError),
+}
+
+pub type BoardExactAppendResult<T> = std::result::Result<T, BoardExactAppendError>;
+
+enum BoardExactAppendDecision {
+    Receipt(BoardExactAppendReceipt),
+    Conflict(BoardExactAppendConflict),
+}
+
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
     coordination_project_dir(worktree_root)
         .unwrap_or_else(|| legacy_coordination_dir(worktree_root))
@@ -920,8 +1331,12 @@ fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
 
 pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
     if let Some(project_dir) = coordination_project_dir(worktree_root) {
-        let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
-        migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        // Issue #4406: discovery runs `git worktree list`, which scales with
+        // the worktree count; once migrated there is nothing left to find.
+        if !coordination_migration_marker_path(&project_dir).exists() {
+            let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
+            migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        }
     }
 
     let dir = coordination_dir(worktree_root);
@@ -936,6 +1351,17 @@ pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn ensure_repo_local_files_for_exact(worktree_root: &Path) -> Result<()> {
+    if let Some(project_dir) = coordination_project_dir(worktree_root) {
+        let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
+        migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+    }
+
+    let dir = coordination_dir(worktree_root);
+    std::fs::create_dir_all(&dir)?;
+    ensure_segment_storage_without_legacy_import(&dir)
 }
 
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -1114,7 +1540,213 @@ pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<Coordinatio
 pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
     let mut entry = entry;
     entry.normalize_audience();
+    entry.normalize_recovery_origin();
     append_event_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
+}
+
+/// Append a caller-identified recovery entry exactly once.
+///
+/// Legacy import, segmented-history identity scan, duplicate arbitration, and
+/// any new append all run while holding the same deadline-aware coordination
+/// lock. Normal [`post_entry_outcome`] behavior remains unchanged.
+pub fn post_entry_exact(
+    worktree_root: &Path,
+    mut entry: BoardEntry,
+) -> BoardExactAppendResult<BoardExactAppendReceipt> {
+    entry.normalize_audience();
+    entry.normalize_recovery_origin();
+    entry.body_html = None;
+    let entry_id = entry.id.clone();
+    let attempted_payload_digest = board_entry_payload_digest(&entry)?;
+
+    let decision = with_coordination_lock(worktree_root, || {
+        ensure_repo_local_files_for_exact(worktree_root)?;
+        let coordination_root = coordination_dir(worktree_root);
+        let imported_legacy = import_late_legacy_event_log_exact_locked(&coordination_root)?;
+        let projection_refresh_error = refresh_exact_storage_locked(worktree_root, imported_legacy)
+            .err()
+            .map(|error| error.to_string());
+        let matching_entries = load_board_entries_from_segments_root(&coordination_root)?
+            .into_iter()
+            .filter(|existing| existing.id == entry_id)
+            .collect::<Vec<_>>();
+        let existing_payload_digests = matching_entries
+            .iter()
+            .map(board_entry_payload_digest)
+            .collect::<Result<Vec<_>>>()?;
+
+        if matching_entries.len() > 1 {
+            return Ok(BoardExactAppendDecision::Conflict(
+                BoardExactAppendConflict {
+                    entry_id,
+                    kind: BoardExactAppendConflictKind::DuplicateIdentity,
+                    attempted_payload_digest,
+                    existing_payload_digests,
+                },
+            ));
+        }
+
+        if let Some(existing_payload_digest) = existing_payload_digests.first() {
+            if existing_payload_digest != &attempted_payload_digest {
+                return Ok(BoardExactAppendDecision::Conflict(
+                    BoardExactAppendConflict {
+                        entry_id,
+                        kind: BoardExactAppendConflictKind::PayloadMismatch,
+                        attempted_payload_digest,
+                        existing_payload_digests,
+                    },
+                ));
+            }
+
+            return Ok(BoardExactAppendDecision::Receipt(BoardExactAppendReceipt {
+                entry_id,
+                payload_digest: attempted_payload_digest,
+                disposition: BoardExactAppendDisposition::Replayed,
+                refresh_error: projection_refresh_error,
+            }));
+        }
+
+        let outcome = append_event_after_legacy_import_locked_outcome(
+            worktree_root,
+            &CoordinationEvent::MessageAppended { entry },
+            imported_legacy && projection_refresh_error.is_some(),
+        )?;
+        let refresh_error = match outcome {
+            BoardPostOutcome::Refreshed(_) => None,
+            BoardPostOutcome::CommittedWithoutSnapshot { refresh_error, .. } => Some(refresh_error),
+        };
+        Ok(BoardExactAppendDecision::Receipt(BoardExactAppendReceipt {
+            entry_id,
+            payload_digest: attempted_payload_digest,
+            disposition: BoardExactAppendDisposition::Appended,
+            refresh_error,
+        }))
+    })
+    .map_err(BoardExactAppendError::Storage)?;
+
+    match decision {
+        BoardExactAppendDecision::Receipt(receipt) => Ok(receipt),
+        BoardExactAppendDecision::Conflict(conflict) => {
+            Err(BoardExactAppendError::Conflict(conflict))
+        }
+    }
+}
+
+/// What a deterministic (caller-identified) Board append settled to
+/// (SPEC-1974 FR-064).
+///
+/// All three are answers, not failures: they map onto the durable intent states
+/// a recovery store tracks (FR-067). An `Err` from
+/// [`post_entry_deterministic`] means the storage attempt itself failed and the
+/// intent stays pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardDeterministicOutcome {
+    /// The identity was new; this call materialized it.
+    Appended(BoardPostOutcome),
+    /// The identity was already on the Board carrying this exact payload, so
+    /// nothing was written. A retry after a lost response lands here.
+    AlreadyMaterialized { entry_id: String },
+    /// The identity is already on the Board carrying a *different* payload.
+    /// Refused with zero mutation: reusing an identity for other content would
+    /// make the id meaningless as a retry key.
+    Conflicted { entry_id: String },
+}
+
+/// Append a Board post under a caller-supplied deterministic identity
+/// (SPEC-1974 FR-064).
+///
+/// The identity, the existence check, and the append all happen under the same
+/// exclusive coordination lock, so a post materializes exactly zero or one
+/// times no matter how many times a crashed or disconnected caller replays it.
+///
+/// The lookup reads the segment log rather than the hot projection, so an
+/// identity that has aged out of the projection is still recognized as
+/// materialized.
+pub fn post_entry_deterministic(
+    worktree_root: &Path,
+    entry: BoardEntry,
+) -> Result<BoardDeterministicOutcome> {
+    let mut entry = entry;
+    entry.id = entry.id.trim().to_string();
+    if entry.id.is_empty() {
+        return Err(GwtError::Other(
+            "a deterministic Board append requires a caller-supplied entry id".to_string(),
+        ));
+    }
+    entry.normalize_audience();
+
+    with_coordination_lock(worktree_root, || {
+        ensure_repo_local_files(worktree_root)?;
+        let coordination_root = coordination_dir(worktree_root);
+        if let Some(existing) = find_board_entry_in_segments(&coordination_root, &entry.id)? {
+            let entry_id = existing.id.clone();
+            return Ok(if same_board_payload(&existing, &entry) {
+                BoardDeterministicOutcome::AlreadyMaterialized { entry_id }
+            } else {
+                BoardDeterministicOutcome::Conflicted { entry_id }
+            });
+        }
+        append_event_locked_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
+            .map(BoardDeterministicOutcome::Appended)
+    })
+}
+
+/// Whether two posts sharing a deterministic id carry the same authored intent.
+///
+/// `created_at` / `updated_at` are excluded deliberately: a caller that crashed
+/// before it learned the append's fate rebuilds the entry on restart and can
+/// never reproduce the original clock reading, so comparing them would turn
+/// every legitimate replay into a conflict. `body_html` is render-only and
+/// never persisted. Everything the caller actually authored is compared.
+fn same_board_payload(left: &BoardEntry, right: &BoardEntry) -> bool {
+    // Destructured rather than field-by-field so that adding a field to
+    // `BoardEntry` fails to compile here instead of silently dropping out of
+    // the identity comparison.
+    let BoardEntry {
+        id: _,
+        created_at: _,
+        updated_at: _,
+        body_html: _,
+        author_kind,
+        author,
+        kind,
+        body,
+        title,
+        title_summary,
+        state,
+        parent_id,
+        resolves_entry_ids,
+        related_topics,
+        related_owners,
+        origin_branch,
+        origin_session_id,
+        origin_agent_id,
+        origin_worktree_form,
+        origin_recovery_id,
+        target_owners,
+        mentions,
+        audience,
+    } = left;
+
+    author_kind == &right.author_kind
+        && author == &right.author
+        && kind == &right.kind
+        && body == &right.body
+        && title == &right.title
+        && title_summary == &right.title_summary
+        && state == &right.state
+        && parent_id == &right.parent_id
+        && resolves_entry_ids == &right.resolves_entry_ids
+        && related_topics == &right.related_topics
+        && related_owners == &right.related_owners
+        && origin_branch == &right.origin_branch
+        && origin_session_id == &right.origin_session_id
+        && origin_agent_id == &right.origin_agent_id
+        && origin_worktree_form == &right.origin_worktree_form
+        && origin_recovery_id == &right.origin_recovery_id
+        && target_owners == &right.target_owners
+        && mentions == &right.mentions
+        && audience == &right.audience
 }
 
 pub fn append_event(
@@ -1129,6 +1761,12 @@ fn append_event_outcome(
     event: &CoordinationEvent,
 ) -> Result<BoardPostOutcome> {
     with_coordination_lock(worktree_root, || {
+        if exact_legacy_import_transaction_pending(&coordination_dir(worktree_root))? {
+            return Err(GwtError::Other(
+                "exact Board legacy import recovery must complete before a normal append"
+                    .to_string(),
+            ));
+        }
         ensure_repo_local_files(worktree_root)?;
         append_event_locked_outcome(worktree_root, event)
     })
@@ -1189,6 +1827,15 @@ fn append_event_locked_outcome(
 ) -> Result<BoardPostOutcome> {
     let coordination_root = coordination_dir(worktree_root);
     let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
+    append_event_after_legacy_import_locked_outcome(worktree_root, event, imported_legacy)
+}
+
+fn append_event_after_legacy_import_locked_outcome(
+    worktree_root: &Path,
+    event: &CoordinationEvent,
+    imported_legacy: bool,
+) -> Result<BoardPostOutcome> {
+    let coordination_root = coordination_dir(worktree_root);
     let entry_id = match event {
         CoordinationEvent::MessageAppended { entry } => entry.id.clone(),
     };
@@ -1260,6 +1907,23 @@ fn repair_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> 
     Ok(snapshot)
 }
 
+fn refresh_exact_storage_locked(worktree_root: &Path, force_rebuild: bool) -> Result<()> {
+    let coordination_root = coordination_dir(worktree_root);
+    let manifest = load_and_repair_event_manifest_locked(&coordination_root)?;
+    let projection_path = coordination_board_projection_path(worktree_root);
+    let projection: BoardProjection = match load_json_or_default(&projection_path) {
+        Ok(projection) => projection,
+        Err(_) => {
+            repair_snapshot_locked(worktree_root)?;
+            return Ok(());
+        }
+    };
+    if force_rebuild || projection_needs_rebuild(&projection, &manifest) {
+        repair_snapshot_locked(worktree_root)?;
+    }
+    Ok(())
+}
+
 pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSnapshot> {
     if !event_path.exists() {
         File::create(event_path)?;
@@ -1299,6 +1963,7 @@ fn build_hot_projection(
 ) -> BoardProjection {
     for entry in &mut entries {
         entry.normalize_audience();
+        entry.normalize_recovery_origin();
     }
     entries.sort_by_key(|entry| entry.created_at);
     let total_entries = entries.len();
@@ -1322,6 +1987,7 @@ fn build_hot_projection(
 fn normalize_board_projection(projection: &mut BoardProjection) {
     for entry in &mut projection.entries {
         entry.normalize_audience();
+        entry.normalize_recovery_origin();
     }
 }
 
@@ -1337,6 +2003,118 @@ pub fn load_snapshot_for_scope(
     Ok(CoordinationSnapshot {
         board: build_hot_projection(filter_board_entries_for_scope(entries, scope), Utc::now()),
     })
+}
+
+/// Issue #4406: a Board view filtered to one audience scope, together with the
+/// hot-projection position it was derived from, so the next refresh can apply
+/// only what was posted since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedBoardView {
+    pub scope: BoardAudienceScope,
+    pub board: BoardProjection,
+    source_total_entries: usize,
+    source_newest_entry_id: Option<String>,
+}
+
+/// How [`refresh_scoped_board_view`] produced its view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedBoardRefresh {
+    /// Nothing was posted since the previous view.
+    Unchanged,
+    /// Only the posts since the previous view were applied.
+    Appended,
+    /// The view was rebuilt from the full history.
+    Rebuilt,
+}
+
+impl ScopedBoardView {
+    fn derived_from(
+        scope: &BoardAudienceScope,
+        board: BoardProjection,
+        hot: &BoardProjection,
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            board,
+            source_total_entries: hot.total_entries,
+            source_newest_entry_id: hot.newest_entry_id.clone(),
+        }
+    }
+}
+
+/// Refresh a scoped Board view (Issue #4406).
+///
+/// A scoped view is the newest [`HOT_PROJECTION_ENTRY_LIMIT`] entries visible
+/// to the scope, which can reach past the hot projection, so building one
+/// reads the whole history. Posts only append, though: when the hot projection
+/// holds exactly the entries posted since `previous`, those are applied to it
+/// and the history is not read again. Anything else — a first load, another
+/// scope, a backdated entry, more posts than the hot projection keeps — is
+/// rebuilt from the history.
+pub fn refresh_scoped_board_view(
+    worktree_root: &Path,
+    scope: &BoardAudienceScope,
+    previous: Option<ScopedBoardView>,
+) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+    let hot = load_snapshot(worktree_root)?.board;
+    if let Some(previous) = previous.filter(|previous| previous.scope == *scope) {
+        if let Some(appended) = entries_posted_since(
+            &hot,
+            previous.source_total_entries,
+            previous.source_newest_entry_id.as_deref(),
+        ) {
+            if appended.is_empty() {
+                return Ok((previous, ScopedBoardRefresh::Unchanged));
+            }
+            let mut board = previous.board;
+            // A rebuild reads the history after the hot projection, so it can
+            // already hold a post that the hot projection now reports as new.
+            let visible = appended
+                .iter()
+                .filter(|entry| board_entry_visible_for_scope(entry, scope))
+                .filter(|entry| !board.entries.iter().any(|known| known.id == entry.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            board.total_entries += visible.len();
+            board.entries.extend(visible);
+            let excess = board
+                .entries
+                .len()
+                .saturating_sub(HOT_PROJECTION_ENTRY_LIMIT);
+            board.entries.drain(..excess);
+            board.has_more_before = board.total_entries > board.entries.len();
+            board.oldest_entry_id = board.entries.first().map(|entry| entry.id.clone());
+            board.newest_entry_id = board.entries.last().map(|entry| entry.id.clone());
+            board.updated_at = hot.updated_at;
+            let view = ScopedBoardView::derived_from(scope, board, &hot);
+            return Ok((view, ScopedBoardRefresh::Appended));
+        }
+    }
+    let board = if *scope == BoardAudienceScope::All {
+        hot.clone()
+    } else {
+        load_snapshot_for_scope(worktree_root, scope)?.board
+    };
+    let view = ScopedBoardView::derived_from(scope, board, &hot);
+    Ok((view, ScopedBoardRefresh::Rebuilt))
+}
+
+/// The hot-projection entries posted after the entry `previous_newest`, or
+/// `None` when they are not exactly the `hot.total_entries - previous_total`
+/// posts made since (a backdated entry, or more posts than the hot projection
+/// keeps).
+fn entries_posted_since<'a>(
+    hot: &'a BoardProjection,
+    previous_total: usize,
+    previous_newest: Option<&str>,
+) -> Option<&'a [BoardEntry]> {
+    let posted = hot.total_entries.checked_sub(previous_total)?;
+    let start = match previous_newest {
+        Some(id) => hot.entries.iter().position(|entry| entry.id == id)? + 1,
+        None => 0,
+    };
+    let since = &hot.entries[start..];
+    (since.len() == posted).then_some(since)
 }
 
 fn load_json_or_default<T>(path: &Path) -> Result<T>
@@ -1362,13 +2140,44 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
     Some(gwt_project_dir_for_repo_path(&repo_root).join("coordination"))
 }
 
+/// Issue #4406: every coordination path helper resolves the repository root,
+/// and each resolution used to start `git rev-parse`. A worktree path keeps
+/// its repository, so a successful resolution is cached for the process; a
+/// failed one is not, so a directory that becomes a repository later is seen.
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    // Issue #3777 AC-1: counted per call, not per cache miss — the property
+    // under test is that the prompt hot path asks for the root once.
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        counters.borrow_mut().coordination_root_resolutions += 1;
+    });
+
+    static RESOLVED: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, PathBuf>>> =
+        std::sync::OnceLock::new();
+    let cache = RESOLVED.get_or_init(Default::default);
+    if let Some(repo_root) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(worktree_root)
+    {
+        return Some(repo_root.clone());
+    }
+    let repo_root = resolve_coordination_repo_root(worktree_root)?;
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(worktree_root.to_path_buf(), repo_root.clone());
+    Some(repo_root)
+}
+
+fn resolve_coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
     // Issue #3629 AC-1/AC-2: a workspace-home layout root cannot resolve
     // through git — skip the guaranteed exit-128 spawn and use the child
     // bare repository directly.
     if !crate::paths::git_repository_discovery_possible(worktree_root) {
         return coordination_child_bare_repo(worktree_root);
     }
+    note_coordination_git_spawn();
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree_root);
@@ -1457,6 +2266,17 @@ fn initial_event_manifest() -> EventSegmentManifest {
 }
 
 fn ensure_segment_storage(coordination_root: &Path) -> Result<()> {
+    ensure_segment_storage_with_legacy_import(coordination_root, true)
+}
+
+fn ensure_segment_storage_without_legacy_import(coordination_root: &Path) -> Result<()> {
+    ensure_segment_storage_with_legacy_import(coordination_root, false)
+}
+
+fn ensure_segment_storage_with_legacy_import(
+    coordination_root: &Path,
+    import_legacy: bool,
+) -> Result<()> {
     std::fs::create_dir_all(coordination_root)?;
     let manifest_path = coordination_events_manifest_path_from_root(coordination_root);
     let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
@@ -1472,7 +2292,7 @@ fn ensure_segment_storage(coordination_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if legacy_events_path.exists() {
+    if import_legacy && legacy_events_path.exists() {
         migrate_legacy_event_log_to_segments(coordination_root)?;
         return Ok(());
     }
@@ -1556,7 +2376,20 @@ fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<Even
 
 fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     let repo_root = coordination_repo_root(worktree_root);
-    let list_root = repo_root.as_deref().unwrap_or(worktree_root);
+    discover_legacy_coordination_dirs_with_repo_root(worktree_root, repo_root.as_deref())
+}
+
+fn discover_legacy_coordination_dirs_with_repo_root(
+    worktree_root: &Path,
+    repo_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        counters.borrow_mut().legacy_discovery_processes += 1;
+    });
+
+    let list_root = repo_root.unwrap_or(worktree_root);
+    note_coordination_git_spawn();
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["worktree", "list", "--porcelain"])
         .current_dir(list_root);
@@ -1576,7 +2409,6 @@ fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     };
     dirs.push(legacy_coordination_dir(worktree_root));
     if let Some(repo_root) = repo_root
-        .as_deref()
         .filter(|root| is_bare_git_dir(root))
         .and_then(Path::parent)
     {
@@ -1589,6 +2421,29 @@ fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     dirs.sort();
     dirs.dedup();
     dirs
+}
+
+fn prepare_coordination_read_root(worktree_root: &Path) -> Result<PreparedCoordinationRoot> {
+    let repo_root = coordination_repo_root(worktree_root);
+    let path = if let Some(repo_root) = repo_root.as_deref() {
+        let project_dir = gwt_project_dir_for_repo_path(repo_root).join("coordination");
+        if !coordination_migration_marker_path(&project_dir).exists() {
+            let legacy_dirs =
+                discover_legacy_coordination_dirs_with_repo_root(worktree_root, Some(repo_root));
+            migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        }
+        project_dir
+    } else {
+        legacy_coordination_dir(worktree_root)
+    };
+    prepare_coordination_read_root_at(path)
+}
+
+fn prepare_coordination_read_root_at(path: PathBuf) -> Result<PreparedCoordinationRoot> {
+    std::fs::create_dir_all(&path)?;
+    ensure_segment_storage(&path)?;
+    let manifest = load_event_manifest_from_dir(&path)?;
+    Ok(PreparedCoordinationRoot { path, manifest })
 }
 
 fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf]) -> Result<()> {
@@ -1809,6 +2664,17 @@ fn load_event_manifest_from_dir(coordination_root: &Path) -> Result<EventSegment
     }
 }
 
+fn load_and_repair_event_manifest_locked(coordination_root: &Path) -> Result<EventSegmentManifest> {
+    let path = coordination_events_manifest_path_from_root(coordination_root);
+    let manifest: EventSegmentManifest = load_json_or_default(&path)?;
+    if !event_manifest_needs_rebuild(coordination_root, &manifest)? {
+        return Ok(manifest);
+    }
+    let repaired = rebuild_event_manifest_from_segments(coordination_root)?;
+    write_event_manifest(coordination_root, &repaired)?;
+    Ok(repaired)
+}
+
 fn event_manifest_needs_rebuild(
     coordination_root: &Path,
     manifest: &EventSegmentManifest,
@@ -1863,6 +2729,15 @@ fn legacy_event_log_needs_import(coordination_root: &Path) -> Result<bool> {
     Ok(legacy_path.metadata()?.len() > 0)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ExactLegacyImportJournal {
+    version: u32,
+    source_digest: String,
+    target_digest: String,
+    target_file: String,
+    entries: usize,
+}
+
 fn import_late_legacy_event_log_locked(coordination_root: &Path) -> Result<bool> {
     let legacy_path = coordination_legacy_events_path_from_root(coordination_root);
     if !legacy_path.exists() {
@@ -1871,7 +2746,6 @@ fn import_late_legacy_event_log_locked(coordination_root: &Path) -> Result<bool>
 
     let mut legacy_events = load_legacy_board_events_from_path(&legacy_path)?;
     legacy_events.sort_by_key(coordination_event_timestamp);
-
     let mut seen_entry_ids = load_board_entries_from_segments_root(coordination_root)?
         .into_iter()
         .map(|entry| entry.id)
@@ -1882,11 +2756,350 @@ fn import_late_legacy_event_log_locked(coordination_root: &Path) -> Result<bool>
         if !seen_entry_ids.insert(entry_id) {
             continue;
         }
-        append_event_to_segments_root(coordination_root, &event, EVENT_SEGMENT_MAX_BYTES)?;
+        match append_event_to_segments_root_outcome(
+            coordination_root,
+            &event,
+            EVENT_SEGMENT_MAX_BYTES,
+        )? {
+            EventAppendOutcome::ManifestUpdated(_) => {}
+            EventAppendOutcome::CommittedWithoutManifest { error } => {
+                return Err(GwtError::Other(error));
+            }
+        }
         imported = true;
     }
     std::fs::remove_file(legacy_path)?;
     Ok(imported)
+}
+
+fn import_late_legacy_event_log_exact_locked(coordination_root: &Path) -> Result<bool> {
+    import_late_legacy_event_log_exact_transaction_locked(coordination_root)
+}
+
+// Exact import is a small durable bulk transaction. The fixed inflight name
+// makes a pre-journal rename recoverable; the journal identifies the one
+// dedicated segment that may be replayed without collapsing genuine duplicate
+// occurrences from the source or pre-existing history.
+fn import_late_legacy_event_log_exact_transaction_locked(coordination_root: &Path) -> Result<bool> {
+    let legacy_path = coordination_legacy_events_path_from_root(coordination_root);
+    let inflight_path = exact_legacy_import_inflight_path(coordination_root);
+    let journal_path = exact_legacy_import_journal_path(coordination_root);
+    let mut imported = false;
+
+    loop {
+        let journal_exists = journal_path.try_exists()?;
+        let inflight_exists = inflight_path.try_exists()?;
+        if !journal_exists && !inflight_exists {
+            if !legacy_path.try_exists()? {
+                return Ok(imported);
+            }
+            std::fs::rename(&legacy_path, &inflight_path)?;
+            sync_coordination_directory(coordination_root)?;
+        }
+
+        let journal = if journal_path.try_exists()? {
+            load_exact_legacy_import_journal(&journal_path)?
+        } else {
+            prepare_exact_legacy_import_journal(coordination_root, &inflight_path, &journal_path)?
+        };
+        validate_exact_legacy_import_target_file(&journal.target_file)?;
+
+        let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+        std::fs::create_dir_all(&segments_dir)?;
+        let target_path = segments_dir.join(&journal.target_file);
+        let source_target_bytes = if inflight_path.try_exists()? {
+            Some(exact_legacy_import_target_bytes(&inflight_path, &journal)?)
+        } else {
+            None
+        };
+        if target_path.try_exists()? {
+            verify_exact_legacy_import_target(&target_path, &journal)?;
+        } else {
+            let target_bytes = source_target_bytes.as_deref().ok_or_else(|| {
+                GwtError::Other(
+                    "exact Board legacy import target and source are missing".to_string(),
+                )
+            })?;
+            publish_exact_legacy_import_target(&segments_dir, &target_path, target_bytes)?;
+        }
+        seal_exact_legacy_import_target(&segments_dir, &journal.target_file)?;
+        sync_exact_legacy_target_directory(&segments_dir)?;
+
+        remove_exact_legacy_import_inflight(&inflight_path)?;
+        sync_coordination_directory(coordination_root)?;
+        std::fs::remove_file(&journal_path)?;
+        sync_exact_legacy_journal_cleanup_directory(coordination_root)?;
+        imported = true;
+    }
+}
+
+fn exact_legacy_import_inflight_path(coordination_root: &Path) -> PathBuf {
+    coordination_root.join(EXACT_LEGACY_IMPORT_INFLIGHT_FILE_NAME)
+}
+
+fn exact_legacy_import_journal_path(coordination_root: &Path) -> PathBuf {
+    coordination_root.join(EXACT_LEGACY_IMPORT_JOURNAL_FILE_NAME)
+}
+
+fn exact_legacy_import_transaction_pending(coordination_root: &Path) -> Result<bool> {
+    Ok(
+        exact_legacy_import_inflight_path(coordination_root).try_exists()?
+            || exact_legacy_import_journal_path(coordination_root).try_exists()?,
+    )
+}
+
+fn prepare_exact_legacy_import_journal(
+    coordination_root: &Path,
+    inflight_path: &Path,
+    journal_path: &Path,
+) -> Result<ExactLegacyImportJournal> {
+    if !inflight_path.is_file() {
+        return Err(GwtError::Other(
+            "exact Board legacy import source is missing".to_string(),
+        ));
+    }
+    let source_bytes = std::fs::read(inflight_path)?;
+    let events = sorted_legacy_events(inflight_path)?;
+    let target_bytes = serialized_event_lines(&events)?;
+    let journal = ExactLegacyImportJournal {
+        version: EXACT_LEGACY_IMPORT_JOURNAL_VERSION,
+        source_digest: exact_import_digest(&source_bytes),
+        target_digest: exact_import_digest(&target_bytes),
+        target_file: next_exact_legacy_import_segment_file(coordination_root)?,
+        entries: events.len(),
+    };
+    write_atomic_json(journal_path, &journal)?;
+    sync_coordination_directory(coordination_root)?;
+    Ok(journal)
+}
+
+fn load_exact_legacy_import_journal(path: &Path) -> Result<ExactLegacyImportJournal> {
+    let raw = std::fs::read(path)?;
+    let journal: ExactLegacyImportJournal = serde_json::from_slice(&raw).map_err(json_error)?;
+    if journal.version != EXACT_LEGACY_IMPORT_JOURNAL_VERSION {
+        return Err(GwtError::Other(
+            "unsupported exact Board legacy import journal version".to_string(),
+        ));
+    }
+    Ok(journal)
+}
+
+fn exact_legacy_import_target_bytes(
+    inflight_path: &Path,
+    journal: &ExactLegacyImportJournal,
+) -> Result<Vec<u8>> {
+    if !inflight_path.is_file() {
+        return Err(GwtError::Other(
+            "exact Board legacy import target and source are missing".to_string(),
+        ));
+    }
+    let source_bytes = std::fs::read(inflight_path)?;
+    if exact_import_digest(&source_bytes) != journal.source_digest {
+        return Err(GwtError::Other(
+            "exact Board legacy import source digest mismatch".to_string(),
+        ));
+    }
+    let events = sorted_legacy_events(inflight_path)?;
+    if events.len() != journal.entries {
+        return Err(GwtError::Other(
+            "exact Board legacy import source entry count mismatch".to_string(),
+        ));
+    }
+    let target_bytes = serialized_event_lines(&events)?;
+    if exact_import_digest(&target_bytes) != journal.target_digest {
+        return Err(GwtError::Other(
+            "exact Board legacy import target digest mismatch".to_string(),
+        ));
+    }
+    Ok(target_bytes)
+}
+
+fn verify_exact_legacy_import_target(
+    target_path: &Path,
+    journal: &ExactLegacyImportJournal,
+) -> Result<()> {
+    let target_bytes = std::fs::read(target_path)?;
+    if exact_import_digest(&target_bytes) != journal.target_digest {
+        return Err(GwtError::Other(
+            "exact Board legacy import published target digest mismatch".to_string(),
+        ));
+    }
+    let events = load_events_from_path(target_path)?;
+    if events.len() != journal.entries {
+        return Err(GwtError::Other(
+            "exact Board legacy import published target entry count mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn sorted_legacy_events(path: &Path) -> Result<Vec<CoordinationEvent>> {
+    let mut events = load_legacy_board_events_from_path(path)?;
+    events.sort_by_key(coordination_event_timestamp);
+    Ok(events)
+}
+
+fn serialized_event_lines(events: &[CoordinationEvent]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for event in events {
+        bytes.extend(serialized_event_line(event)?);
+    }
+    Ok(bytes)
+}
+
+fn exact_import_digest(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn next_exact_legacy_import_segment_file(coordination_root: &Path) -> Result<String> {
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    std::fs::create_dir_all(&segments_dir)?;
+    let max_index = std::fs::read_dir(&segments_dir)?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter_map(|name| {
+            name.strip_suffix(".jsonl")
+                .and_then(|stem| stem.parse::<usize>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    let next_index = max_index
+        .checked_add(1)
+        .ok_or_else(|| GwtError::Other("Board event segment index overflow".to_string()))?;
+    Ok(segment_file_name(next_index))
+}
+
+fn validate_exact_legacy_import_target_file(file: &str) -> Result<()> {
+    let Some(stem) = file.strip_suffix(".jsonl") else {
+        return Err(GwtError::Other(
+            "invalid exact Board legacy import target".to_string(),
+        ));
+    };
+    let index = stem
+        .parse::<usize>()
+        .map_err(|_| GwtError::Other("invalid exact Board legacy import target".to_string()))?;
+    if index == 0 || segment_file_name(index) != file {
+        return Err(GwtError::Other(
+            "invalid exact Board legacy import target".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn seal_exact_legacy_import_target(segments_dir: &Path, target_file: &str) -> Result<()> {
+    let target_index = target_file
+        .strip_suffix(".jsonl")
+        .and_then(|stem| stem.parse::<usize>().ok())
+        .ok_or_else(|| GwtError::Other("invalid exact Board legacy import target".to_string()))?;
+    let successor_index = target_index
+        .checked_add(1)
+        .ok_or_else(|| GwtError::Other("Board event segment index overflow".to_string()))?;
+    let successor_path = segments_dir.join(segment_file_name(successor_index));
+    if successor_path.try_exists()? {
+        if !successor_path.is_file() {
+            return Err(GwtError::Other(
+                "invalid exact Board legacy import successor".to_string(),
+            ));
+        }
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(successor_path)?
+            .sync_all()?;
+    } else {
+        let successor = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(successor_path)?;
+        successor.sync_all()?;
+    }
+    Ok(())
+}
+
+fn publish_exact_legacy_import_target(
+    segments_dir: &Path,
+    target_path: &Path,
+    bytes: &[u8],
+) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_EXACT_LEGACY_TARGET_PUBLISH.with(|fail| fail.replace(false)) {
+        return Err(GwtError::Other(
+            "injected exact legacy target publish failure".to_string(),
+        ));
+    }
+    let temp_path = segments_dir.join(format!(
+        ".exact-import.tmp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let publish_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::hard_link(&temp_path, target_path)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temp_path);
+    publish_result
+}
+
+fn sync_exact_legacy_target_directory(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_EXACT_LEGACY_TARGET_DIR_SYNCS.with(|remaining| {
+        let current = remaining.get();
+        if current == 0 {
+            false
+        } else {
+            remaining.set(current - 1);
+            true
+        }
+    }) {
+        return Err(GwtError::Other(
+            "injected exact legacy target directory sync failure".to_string(),
+        ));
+    }
+    sync_coordination_directory(path)
+}
+
+fn sync_exact_legacy_journal_cleanup_directory(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_EXACT_LEGACY_JOURNAL_CLEANUP_DIR_SYNC.with(|fail| fail.replace(false)) {
+        return Err(GwtError::Other(
+            "injected exact legacy journal cleanup directory sync failure".to_string(),
+        ));
+    }
+    sync_coordination_directory(path)
+}
+
+fn remove_exact_legacy_import_inflight(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_EXACT_LEGACY_CLEANUP.with(|fail| fail.replace(false)) {
+        return Err(GwtError::Other(
+            "injected exact legacy cleanup failure".to_string(),
+        ));
+    }
+    if path.try_exists()? {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_coordination_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_coordination_directory(_path: &Path) -> Result<()> {
+    // Match the repository's existing durable-writer compatibility boundary:
+    // Rust does not expose a portable directory fsync on non-Unix platforms.
+    // File contents are still synced before atomic publication.
+    Ok(())
 }
 
 fn projection_needs_rebuild(projection: &BoardProjection, manifest: &EventSegmentManifest) -> bool {
@@ -1971,15 +3184,47 @@ fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
         return Ok(Vec::new());
     }
     let file = OpenOptions::new().read(true).open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut events = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        loop {
+            crate::operation_deadline::ensure_remaining("Board event read")?;
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+            let consumed = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            line.extend_from_slice(&available[..consumed]);
+            reader.consume(consumed);
+            if line.last() == Some(&b'\n') {
+                break;
+            }
+        }
+        if line.is_empty() {
+            break;
+        }
+        crate::operation_deadline::ensure_remaining("Board event decode")?;
+        let line = std::str::from_utf8(&line).map_err(|error| {
+            GwtError::Other(format!(
+                "invalid UTF-8 in Board event log {}: {error}",
+                path.display()
+            ))
+        })?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         let mut event: CoordinationEvent = serde_json::from_str(trimmed).map_err(json_error)?;
+        crate::operation_deadline::ensure_remaining("Board event decode")?;
+        #[cfg(test)]
+        PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+            counters.borrow_mut().event_decodes += 1;
+        });
         normalize_coordination_event(&mut event);
         events.push(event);
     }
@@ -2019,7 +3264,10 @@ fn load_legacy_board_events_from_path(path: &Path) -> Result<Vec<CoordinationEve
 
 fn normalize_coordination_event(event: &mut CoordinationEvent) {
     match event {
-        CoordinationEvent::MessageAppended { entry } => entry.normalize_audience(),
+        CoordinationEvent::MessageAppended { entry } => {
+            entry.normalize_audience();
+            entry.normalize_recovery_origin();
+        }
     }
 }
 
@@ -2061,10 +3309,31 @@ fn coordination_event_entry_id(event: &CoordinationEvent) -> &str {
 
 fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(json_error)?;
-    write_atomic(path, &bytes)
+    write_atomic_with_durability(path, &bytes, CoordinationDurability::FlushToDevice)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Like [`write_atomic_json`] but without waiting for the storage device.
+///
+/// Issue #3777: `sync_all` is the only device-blocking call in the write, and
+/// every ballooning stage in the Windows p95 failures was a durable write while
+/// no read or pure-compute stage ever was. Reserve this for state the next
+/// event rewrites anyway; the rename still publishes the file whole.
+fn write_atomic_json_unflushed<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(json_error)?;
+    write_atomic_with_durability(path, &bytes, CoordinationDurability::RenameOnly)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinationDurability {
+    FlushToDevice,
+    RenameOnly,
+}
+
+fn write_atomic_with_durability(
+    path: &Path,
+    bytes: &[u8],
+    durability: CoordinationDurability,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| GwtError::Other(format!("path has no parent: {}", path.display())))?;
@@ -2081,31 +3350,76 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut file = File::create(&tmp_path)?;
         file.write_all(bytes)?;
         file.write_all(b"\n")?;
-        file.sync_all()?;
+        if durability == CoordinationDurability::FlushToDevice {
+            file.sync_all()?;
+        }
     }
     replace_path_with_temp(path, &tmp_path)
+}
+
+// The retry schedule only runs on Windows; the unit tests below keep it
+// honest on every platform, so the non-Windows build keeps the definitions
+// without complaining that nothing calls them.
+/// Longest a single atomic-replace retry may sleep.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPLACE_RETRY_MAX_DELAY: Duration = Duration::from_millis(25);
+/// Longest the whole retry schedule may sleep when no ambient deadline applies.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPLACE_RETRY_MAX_TOTAL: Duration = Duration::from_millis(500);
+
+/// Backoff delays for retrying an atomic replace, newest-first and never
+/// summing past `budget`.
+///
+/// Issue #3777: this used to be a flat 25ms repeated 20 times. A sharing
+/// violation that cleared in a few milliseconds still cost a full 25ms, and a
+/// contended `reminders` write measured 111.8ms on Windows against 5-6ms for
+/// the sibling atomic writes that have no retry loop at all — four sleeps'
+/// worth. UserPromptSubmit runs its whole hook under a 200ms deadline, so the
+/// schedule starts at 1ms and stops at whatever budget the caller has left.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn replace_retry_delays(budget: Duration) -> impl Iterator<Item = Duration> {
+    let mut remaining = budget;
+    let mut delay = Duration::from_millis(1);
+    std::iter::from_fn(move || {
+        if remaining.is_zero() {
+            return None;
+        }
+        let next = delay.min(remaining);
+        remaining -= next;
+        delay = (delay * 2).min(REPLACE_RETRY_MAX_DELAY);
+        Some(next)
+    })
+}
+
+/// The retry budget for one atomic replace: whatever the ambient operation
+/// deadline leaves, capped so a caller without a deadline still gives up.
+#[cfg_attr(any(not(windows), test), allow(dead_code))]
+fn replace_retry_budget() -> Duration {
+    let ceiling = REPLACE_RETRY_MAX_TOTAL;
+    match crate::operation_deadline::current() {
+        Some(deadline) => deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(ceiling),
+        None => ceiling,
+    }
 }
 
 fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
-        const MAX_RETRIES: usize = 20;
-        const SLEEP_MS: u64 = 25;
-
-        for attempt in 0..MAX_RETRIES {
+        let mut delays = replace_retry_delays(replace_retry_budget());
+        loop {
             match try_replace_path_with_temp(path, tmp_path) {
                 Ok(()) => return Ok(()),
-                Err(err)
-                    if err.kind() == std::io::ErrorKind::PermissionDenied
-                        && attempt + 1 < MAX_RETRIES =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err.into());
+                    };
+                    std::thread::sleep(delay);
                 }
                 Err(err) => return Err(err.into()),
             }
         }
-
-        unreachable!("Windows retry loop should always return or error");
     }
 
     #[cfg(not(windows))]
@@ -2115,16 +3429,16 @@ fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
     }
 }
 
+/// Replace `path` with `tmp_path`.
+///
+/// Issue #3777: this used to unlink `path` first on Windows. That is both
+/// unnecessary — `fs::rename` maps to `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING`, and the sibling atomic writers in
+/// `gwt_github::cache` and `gwt-agent` overwrite the same way on Windows all
+/// day — and harmful: it opened a window where the file did not exist at all,
+/// and the extra unlink is what kept losing the race with a concurrent reader
+/// and driving the retry loop above.
 fn try_replace_path_with_temp(path: &Path, tmp_path: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    if path.exists() {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-    }
-
     std::fs::rename(tmp_path, path)
 }
 
@@ -2142,6 +3456,10 @@ fn json_error(err: serde_json::Error) -> GwtError {
 pub struct RemindersState {
     #[serde(default)]
     pub last_injected_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_own_status_checked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_own_status_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_reminded_kind: HashMap<String, DateTime<Utc>>,
     /// SPEC-2359 Phase U-9 (FR-178): the `title_summary` value observed
@@ -2194,6 +3512,43 @@ fn reminders_path(worktree_root: &Path, agent_session_id: &str) -> PathBuf {
     reminders_dir(worktree_root).join(format!("{agent_session_id}.json"))
 }
 
+fn migrated_project_coordination_root(
+    worktree_root: &Path,
+    _repo_hash: Option<&str>,
+) -> Option<PathBuf> {
+    // A persisted Session hash can predate an origin change. Resolve the
+    // current common repository from local files for both Board and sidecar
+    // reads, without the git subprocess used by coordination_repo_root.
+    let repository_path = worktree_root
+        .ancestors()
+        .find(|path| {
+            path.join(".git").exists()
+                || (path.join("HEAD").is_file() && path.join("config").is_file())
+        })
+        .unwrap_or(worktree_root);
+    let common_dir = crate::repo_hash::repository_common_dir(repository_path)?;
+    let repo_root = if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+        common_dir.parent()?
+    } else {
+        &common_dir
+    };
+    let root = gwt_project_dir_for_repo_path(repo_root).join("coordination");
+    coordination_migration_marker_path(&root)
+        .is_file()
+        .then_some(root)
+}
+
+fn reminders_path_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+) -> PathBuf {
+    migrated_project_coordination_root(worktree_root, repo_hash)
+        .unwrap_or_else(|| coordination_dir(worktree_root))
+        .join("reminders")
+        .join(format!("{agent_session_id}.json"))
+}
+
 /// Load reminder state for the given agent session. Returns a default state
 /// when no sidecar file exists yet.
 pub fn load_reminders_state(
@@ -2201,6 +3556,18 @@ pub fn load_reminders_state(
     agent_session_id: &str,
 ) -> Result<RemindersState> {
     load_json_or_default(&reminders_path(worktree_root, agent_session_id))
+}
+
+pub fn load_reminders_state_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+) -> Result<RemindersState> {
+    load_json_or_default(&reminders_path_for_repo_hash(
+        worktree_root,
+        repo_hash,
+        agent_session_id,
+    ))
 }
 
 /// Atomically persist reminder state for the given agent session.
@@ -2216,22 +3583,56 @@ pub fn write_reminders_state(
     write_atomic_json(&path, state)
 }
 
+pub fn write_reminders_state_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+    state: &RemindersState,
+) -> Result<()> {
+    let path = reminders_path_for_repo_hash(worktree_root, repo_hash, agent_session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Issue #3777: this sidecar only throttles how often a reminder repeats and
+    // the next intent boundary rewrites it, so it must not make the prompt wait
+    // for the storage device.
+    write_atomic_json_unflushed(&path, state)
+}
+
 /// Return Board entries whose `updated_at` is strictly later than `since`,
 /// sorted chronologically (same ordering as the projection).
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
     ensure_repo_local_files(worktree_root)?;
     let coordination_root = coordination_dir(worktree_root);
     let manifest = load_event_manifest_from_dir(&coordination_root)?;
-    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    load_entries_since_from_prepared(
+        &PreparedCoordinationRoot {
+            path: coordination_root,
+            manifest,
+        },
+        since,
+    )
+}
+
+fn load_entries_since_from_prepared(
+    prepared: &PreparedCoordinationRoot,
+    since: DateTime<Utc>,
+) -> Result<Vec<BoardEntry>> {
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        counters.borrow_mut().history_materializations += 1;
+    });
+
+    let segments_dir = coordination_events_segments_dir_from_root(&prepared.path);
     let mut entries = Vec::new();
-    for segment in manifest.segments {
+    for segment in &prepared.manifest.segments {
         if segment
             .max_updated_at
             .is_some_and(|max_updated_at| max_updated_at <= since)
         {
             continue;
         }
-        let path = segments_dir.join(segment.file);
+        let path = segments_dir.join(&segment.file);
         for event in load_events_from_path(&path)? {
             let CoordinationEvent::MessageAppended { entry } = event;
             if entry.updated_at > since {
@@ -2265,6 +3666,77 @@ pub fn has_recent_post_by(
     Ok(load_entries_since(worktree_root, threshold)?
         .iter()
         .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
+}
+
+pub fn load_prompt_reminder(
+    worktree_root: &Path,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let prepared = prepare_coordination_read_root(worktree_root)?;
+    load_prompt_reminder_from_prepared(
+        &prepared,
+        diff_since,
+        scope,
+        status_author,
+        status_kind,
+        status_since,
+    )
+}
+
+pub fn load_prompt_reminder_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let prepared = migrated_project_coordination_root(worktree_root, repo_hash)
+        .map(prepare_coordination_read_root_at)
+        .transpose()?;
+    let Some(prepared) = prepared else {
+        return load_prompt_reminder(
+            worktree_root,
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        );
+    };
+    load_prompt_reminder_from_prepared(
+        &prepared,
+        diff_since,
+        scope,
+        status_author,
+        status_kind,
+        status_since,
+    )
+}
+
+fn load_prompt_reminder_from_prepared(
+    prepared: &PreparedCoordinationRoot,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let history_since = diff_since.min(status_since);
+    let history = load_entries_since_from_prepared(prepared, history_since)?;
+    Ok(PromptBoardRead::from_scoped_history(
+        history,
+        diff_since,
+        scope,
+        status_author,
+        status_kind,
+        status_since,
+    ))
 }
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
@@ -2358,6 +3830,15 @@ pub fn load_entries_before_for_scope(
     })
 }
 
+/// Recovery-delivery guarantee advertised independently from normal Board
+/// posting. Remote providers remain unsupported until they can preserve the
+/// deterministic identity and exact acknowledgement contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardRecoveryCapability {
+    Unsupported,
+    ExactAcknowledgement,
+}
+
 /// Backend that serves the coordination Board (SPEC-2959).
 ///
 /// The trait mirrors the existing free-function read/write surface so that
@@ -2377,6 +3858,52 @@ pub trait BoardProvider {
     ) -> Result<BoardPostOutcome> {
         self.post_entry(worktree_root, entry)
             .map(BoardPostOutcome::Refreshed)
+    }
+    /// Advertise recovery-specific delivery semantics. Normal posting is
+    /// intentionally independent from this capability.
+    fn recovery_capability(&self) -> BoardRecoveryCapability {
+        BoardRecoveryCapability::Unsupported
+    }
+    /// Append a recovery entry with deterministic exact acknowledgement.
+    /// Providers without that guarantee fail closed before any normal post or
+    /// local fallback can occur.
+    fn post_recovery_entry_exact(
+        &self,
+        _worktree_root: &Path,
+        _entry: BoardEntry,
+    ) -> BoardExactAppendResult<BoardExactAppendReceipt> {
+        Err(BoardExactAppendError::Unsupported)
+    }
+
+    /// Whether this provider can store a caller-supplied deterministic entry id
+    /// and report back an exact acknowledgement for it (SPEC-1974 FR-069).
+    ///
+    /// Defaults to `false`. A provider proves the capability by implementing
+    /// [`post_entry_deterministic`](Self::post_entry_deterministic) and saying
+    /// so here; anything that has not is treated as unable, which is the safe
+    /// direction. Callers holding a durable intent read this *before* they
+    /// attempt delivery, so an unsupported Board leaves the intent pending
+    /// rather than producing an acknowledgement nobody can honour.
+    fn supports_deterministic_identity(&self) -> bool {
+        false
+    }
+    /// Append under a caller-supplied deterministic identity (SPEC-1974 FR-064).
+    ///
+    /// The default refuses (FR-069). Appending here anyway would either
+    /// duplicate the post the next time the caller retried, or acknowledge an
+    /// identity the provider cannot recognize again — and falling back to the
+    /// local log would report a delivery that never reached the remote Board.
+    fn post_entry_deterministic(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardDeterministicOutcome> {
+        let _ = (worktree_root, entry);
+        Err(GwtError::Other(
+            "this Board provider cannot preserve a caller-supplied deterministic entry id; \
+             refusing the append rather than risking a duplicate post or a false acknowledgement"
+                .to_string(),
+        ))
     }
     /// Load the hot projection snapshot.
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot>;
@@ -2407,6 +3934,41 @@ pub trait BoardProvider {
         kind: &BoardEntryKind,
         within: chrono::Duration,
     ) -> Result<bool>;
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        diff_since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Result<PromptBoardRead> {
+        let history_since = diff_since.min(status_since);
+        let history = self.load_entries_since(worktree_root, history_since)?;
+        Ok(PromptBoardRead::from_scoped_history(
+            history,
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        ))
+    }
+    fn load_prompt_reminder_for_repo_hash(
+        &self,
+        worktree_root: &Path,
+        _repo_hash: Option<&str>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        self.load_prompt_reminder(
+            worktree_root,
+            request.diff_since,
+            request.scope,
+            request.status_author,
+            request.status_kind,
+            request.status_since,
+        )
+    }
     /// Whether an entry with `entry_id` exists.
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool>;
     /// Load a page of older entries before `before_entry_id`.
@@ -2424,6 +3986,19 @@ pub trait BoardProvider {
         limit: usize,
         scope: &BoardAudienceScope,
     ) -> Result<BoardHistoryPage>;
+    /// Refresh a scoped view after a Board change (Issue #4406). Providers
+    /// without an append-only local history rebuild it every time.
+    fn refresh_scoped_board_view(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+        _previous: Option<ScopedBoardView>,
+    ) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+        let hot = self.load_snapshot(worktree_root)?.board;
+        let board = self.load_snapshot_for_scope(worktree_root, scope)?.board;
+        let view = ScopedBoardView::derived_from(scope, board, &hot);
+        Ok((view, ScopedBoardRefresh::Rebuilt))
+    }
 }
 
 /// Filesystem-backed Board provider (offline, default).
@@ -2446,8 +4021,43 @@ impl BoardProvider for LocalProvider {
         post_entry_outcome(worktree_root, entry)
     }
 
+    fn recovery_capability(&self) -> BoardRecoveryCapability {
+        BoardRecoveryCapability::ExactAcknowledgement
+    }
+
+    fn post_recovery_entry_exact(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> BoardExactAppendResult<BoardExactAppendReceipt> {
+        post_entry_exact(worktree_root, entry)
+    }
+
+    /// The event log stores whatever id the caller supplies and can look it up
+    /// again, so the local Board honours deterministic identity (FR-069).
+    fn supports_deterministic_identity(&self) -> bool {
+        true
+    }
+
+    fn post_entry_deterministic(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardDeterministicOutcome> {
+        post_entry_deterministic(worktree_root, entry)
+    }
+
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
         load_snapshot(worktree_root)
+    }
+
+    fn refresh_scoped_board_view(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+        previous: Option<ScopedBoardView>,
+    ) -> Result<(ScopedBoardView, ScopedBoardRefresh)> {
+        refresh_scoped_board_view(worktree_root, scope, previous)
     }
 
     fn load_snapshot_for_scope(
@@ -2485,6 +4095,42 @@ impl BoardProvider for LocalProvider {
         has_recent_post_by(worktree_root, author, kind, within)
     }
 
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        diff_since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Result<PromptBoardRead> {
+        load_prompt_reminder(
+            worktree_root,
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        )
+    }
+
+    fn load_prompt_reminder_for_repo_hash(
+        &self,
+        worktree_root: &Path,
+        repo_hash: Option<&str>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        load_prompt_reminder_for_repo_hash(
+            worktree_root,
+            repo_hash,
+            request.diff_since,
+            request.scope,
+            request.status_author,
+            request.status_kind,
+            request.status_since,
+        )
+    }
+
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
         board_entry_exists(worktree_root, entry_id)
     }
@@ -2519,6 +4165,102 @@ mod tests {
     use crate::paths::gwt_project_dir_for_repo_path;
     use crate::test_support::{env_lock, ScopedEnvVar};
 
+    /// Issue #3777: on Windows the atomic-replace retry slept a flat 25ms up to
+    /// 20 times, so one contended `reminders` write could spend 500ms while
+    /// UserPromptSubmit runs under a 200ms budget — it measured 111.8ms against
+    /// 5-6ms for the sibling writes that have no retry loop. The schedule now
+    /// starts small and never outlives the ambient deadline.
+    #[test]
+    fn replace_retry_schedule_starts_small_and_grows() {
+        let delays = replace_retry_delays(Duration::from_millis(500)).collect::<Vec<_>>();
+        assert_eq!(
+            delays.first().copied(),
+            Some(Duration::from_millis(1)),
+            "the first retry must not cost more than the operation it retries"
+        );
+        // The final delay is truncated to whatever budget is left, so growth is
+        // monotonic over every delay that was not cut short.
+        let grown = &delays[..delays.len() - 1];
+        assert!(
+            grown.windows(2).all(|pair| pair[1] >= pair[0]),
+            "delays must grow monotonically: {delays:?}"
+        );
+        assert!(
+            delays.last().copied().unwrap_or_default() <= REPLACE_RETRY_MAX_DELAY,
+            "the truncated final delay must still respect the cap: {delays:?}"
+        );
+        assert!(
+            delays.iter().all(|delay| *delay <= REPLACE_RETRY_MAX_DELAY),
+            "no single delay may exceed the cap: {delays:?}"
+        );
+        assert!(
+            delays.iter().sum::<Duration>() <= Duration::from_millis(500),
+            "the schedule must fit the budget it was given: {delays:?}"
+        );
+    }
+
+    #[test]
+    fn replace_retry_schedule_is_empty_without_budget() {
+        assert_eq!(replace_retry_delays(Duration::ZERO).count(), 0);
+    }
+
+    #[test]
+    fn replace_retry_schedule_fits_a_prompt_sized_budget() {
+        // The UserPromptSubmit deadline leaves far less than 500ms by the time
+        // the reminder sidecar is written; the schedule must not overrun it.
+        let budget = Duration::from_millis(40);
+        let delays = replace_retry_delays(budget).collect::<Vec<_>>();
+        assert!(!delays.is_empty(), "a 40ms budget still allows retries");
+        assert!(
+            delays.iter().sum::<Duration>() <= budget,
+            "schedule {delays:?} overran the {budget:?} budget"
+        );
+    }
+
+    fn recovery_entry() -> BoardEntry {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "durable recovery update",
+            Some("running".to_string()),
+            Some("parent-entry".to_string()),
+            vec!["recovery".to_string()],
+            vec!["SPEC-1921".to_string()],
+        )
+        .with_title("Recovery delivery")
+        .with_title_summary("Board recovery")
+        .with_target_owner("session:session-1")
+        .with_mention(BoardMention::new(
+            BoardMentionTargetKind::Session,
+            "session-1",
+        ))
+        .with_audience(vec!["workspace-1"])
+        .with_origin_branch("work/issue-1974")
+        .with_origin_session_id("session-1")
+        .with_origin_agent_id("codex")
+        .with_origin_worktree_form(BoardWorktreeForm::BranchBacked)
+        .with_origin_recovery_id("recovery-1");
+        entry.id = "recovery-entry-1".to_string();
+        entry.created_at = Utc.with_ymd_and_hms(2026, 8, 9, 0, 0, 0).unwrap();
+        entry.updated_at = entry.created_at;
+        entry
+    }
+
+    fn persisted_segment_bytes(worktree_root: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut segments = std::fs::read_dir(coordination_events_segments_dir(worktree_root))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                (entry.path().extension().and_then(|value| value.to_str()) == Some("jsonl"))
+                    .then(|| (name, std::fs::read(entry.path()).unwrap()))
+            })
+            .collect::<Vec<_>>();
+        segments.sort_by(|left, right| left.0.cmp(&right.0));
+        segments
+    }
+
     #[test]
     fn committed_operation_result_wins_over_unlock_failure() {
         let result = arbitrate_coordination_lock_result(
@@ -2543,6 +4285,835 @@ mod tests {
             result,
             Err(GwtError::Other(message)) if message == "operation failed"
         ));
+    }
+
+    #[test]
+    fn board_worktree_form_uses_canonical_wire_values() {
+        for (form, wire) in [
+            (BoardWorktreeForm::Ephemeral, "ephemeral"),
+            (BoardWorktreeForm::BranchBacked, "branch-backed"),
+            (BoardWorktreeForm::Unknown, "unknown"),
+        ] {
+            assert_eq!(serde_json::to_value(form).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<BoardWorktreeForm>(wire.into()).unwrap(),
+                form
+            );
+        }
+    }
+
+    #[test]
+    fn board_entry_recovery_origin_round_trips_and_legacy_defaults_to_none() {
+        let entry = recovery_entry();
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+        assert_eq!(encoded["origin_worktree_form"], "branch-backed");
+        assert_eq!(encoded["origin_recovery_id"], "recovery-1");
+        let decoded: BoardEntry = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.origin_worktree_form,
+            Some(BoardWorktreeForm::BranchBacked)
+        );
+        assert_eq!(decoded.origin_recovery_id.as_deref(), Some("recovery-1"));
+
+        let legacy: BoardEntry = serde_json::from_value(serde_json::json!({
+            "id": "legacy-entry",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry",
+            "created_at": "2026-08-09T00:00:00Z",
+            "updated_at": "2026-08-09T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(legacy.origin_worktree_form, None);
+        assert_eq!(legacy.origin_recovery_id, None);
+    }
+
+    #[test]
+    fn board_payload_digest_is_versioned_semantic_and_normalizes_audience() {
+        let entry = recovery_entry();
+        let digest = board_entry_payload_digest(&entry).unwrap();
+        assert!(digest.starts_with("v1:sha256:"));
+
+        let mut generated_only = entry.clone();
+        generated_only.id = "another-id".to_string();
+        generated_only.created_at += chrono::Duration::hours(1);
+        generated_only.updated_at += chrono::Duration::hours(2);
+        generated_only.body_html = Some("<p>derived</p>".to_string());
+        generated_only.audience = vec![" workspace-1 ".to_string(), "workspace-1".to_string()];
+        assert_eq!(
+            board_entry_payload_digest(&generated_only).unwrap(),
+            digest,
+            "identity, timestamps, derived HTML, and audience formatting are non-semantic"
+        );
+
+        let mut display_change = entry.clone();
+        display_change.title = Some("Different title".to_string());
+        assert_ne!(board_entry_payload_digest(&display_change).unwrap(), digest);
+
+        let mut routing_change = entry.clone();
+        routing_change.audience = vec!["workspace-2".to_string()];
+        assert_ne!(board_entry_payload_digest(&routing_change).unwrap(), digest);
+
+        let mut resolution_change = entry.clone();
+        resolution_change.resolves_entry_ids = vec!["blocked-entry".to_string()];
+        assert_ne!(
+            board_entry_payload_digest(&resolution_change).unwrap(),
+            digest
+        );
+
+        let mut origin_change = entry;
+        origin_change.origin_worktree_form = Some(BoardWorktreeForm::Ephemeral);
+        assert_ne!(board_entry_payload_digest(&origin_change).unwrap(), digest);
+    }
+
+    #[test]
+    fn exact_post_appends_once_and_replays_same_semantic_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+
+        let appended = post_entry_exact(dir.path(), entry.clone()).unwrap();
+        assert_eq!(appended.entry_id, entry.id);
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert_eq!(
+            appended.payload_digest,
+            board_entry_payload_digest(&entry).unwrap()
+        );
+        assert_eq!(appended.refresh_error, None);
+
+        let mut replay = entry.clone();
+        replay.created_at += chrono::Duration::days(1);
+        replay.updated_at += chrono::Duration::days(1);
+        replay.body_html = Some("<p>not persisted</p>".to_string());
+        replay.audience = vec![" workspace-1 ".to_string(), "workspace-1".to_string()];
+        let replayed = post_entry_exact(dir.path(), replay).unwrap();
+        assert_eq!(replayed.entry_id, entry.id);
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(replayed.payload_digest, appended.payload_digest);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn exact_post_does_not_persist_derived_body_html() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = recovery_entry();
+        entry.body_html = Some("<p>derived-recovery-html-must-not-persist</p>".to_string());
+
+        post_entry_exact(dir.path(), entry).unwrap();
+
+        let segment_bytes = std::fs::read_dir(coordination_events_segments_dir(dir.path()))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|item| {
+                item.path().extension().and_then(|value| value.to_str()) == Some("jsonl")
+            })
+            .map(|item| std::fs::read_to_string(item.path()).unwrap())
+            .collect::<String>();
+        let projection_bytes =
+            std::fs::read_to_string(coordination_board_projection_path(dir.path())).unwrap();
+
+        for persisted in [&segment_bytes, &projection_bytes] {
+            assert!(!persisted.contains("derived-recovery-html-must-not-persist"));
+            assert!(!persisted.contains("body_html"));
+        }
+    }
+
+    #[test]
+    fn normal_post_body_html_persistence_remains_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = recovery_entry();
+        entry.id = "normal-entry-with-derived-html".to_string();
+        entry.body_html = Some("<p>normal-post-derived-html</p>".to_string());
+
+        post_entry(dir.path(), entry).unwrap();
+
+        let segments = persisted_segment_bytes(dir.path());
+        let segment_bytes = segments
+            .iter()
+            .flat_map(|(_, bytes)| bytes.iter().copied())
+            .collect::<Vec<_>>();
+        let projection_bytes =
+            std::fs::read(coordination_board_projection_path(dir.path())).unwrap();
+        for persisted in [&segment_bytes, &projection_bytes] {
+            let persisted = String::from_utf8_lossy(persisted);
+            assert!(persisted.contains("normal-post-derived-html"));
+            assert!(persisted.contains("body_html"));
+        }
+    }
+
+    #[test]
+    fn exact_post_rejects_same_id_with_different_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+        post_entry_exact(dir.path(), entry.clone()).unwrap();
+
+        let mut changed = entry.clone();
+        changed.body = "mutated payload".to_string();
+        let error = post_entry_exact(dir.path(), changed).unwrap_err();
+        match error {
+            BoardExactAppendError::Conflict(conflict) => {
+                assert_eq!(conflict.entry_id, entry.id);
+                assert_eq!(conflict.kind, BoardExactAppendConflictKind::PayloadMismatch);
+                assert_eq!(conflict.existing_payload_digests.len(), 1);
+                assert_ne!(
+                    conflict.attempted_payload_digest,
+                    conflict.existing_payload_digests[0]
+                );
+            }
+            other => panic!("expected payload conflict, got {other}"),
+        }
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_rejects_pre_existing_duplicate_identity_even_for_same_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        let event = CoordinationEvent::MessageAppended {
+            entry: entry.clone(),
+        };
+        append_event_to_segments(dir.path(), &event, EVENT_SEGMENT_MAX_BYTES).unwrap();
+        append_event_to_segments(dir.path(), &event, EVENT_SEGMENT_MAX_BYTES).unwrap();
+
+        let error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+        match error {
+            BoardExactAppendError::Conflict(conflict) => {
+                assert_eq!(conflict.entry_id, entry.id);
+                assert_eq!(
+                    conflict.kind,
+                    BoardExactAppendConflictKind::DuplicateIdentity
+                );
+                assert_eq!(conflict.existing_payload_digests.len(), 2);
+                assert!(conflict
+                    .existing_payload_digests
+                    .iter()
+                    .all(|digest| digest == &conflict.attempted_payload_digest));
+            }
+            other => panic!("expected duplicate identity conflict, got {other}"),
+        }
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_preserves_segmented_and_late_legacy_same_id_for_duplicate_arbitration() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        append_event_to_segments(
+            dir.path(),
+            &CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            },
+            EVENT_SEGMENT_MAX_BYTES,
+        )
+        .unwrap();
+        load_snapshot(dir.path()).unwrap();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+
+        let error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoardExactAppendError::Conflict(BoardExactAppendConflict {
+                kind: BoardExactAppendConflictKind::DuplicateIdentity,
+                ..
+            })
+        ));
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_preserves_same_id_occurrences_within_late_legacy_log() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[
+                CoordinationEvent::MessageAppended {
+                    entry: entry.clone(),
+                },
+                CoordinationEvent::MessageAppended {
+                    entry: entry.clone(),
+                },
+            ],
+        );
+
+        let error = post_entry_exact(dir.path(), entry).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoardExactAppendError::Conflict(BoardExactAppendConflict {
+                kind: BoardExactAppendConflictKind::DuplicateIdentity,
+                ..
+            })
+        ));
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_does_not_duplicate_fsynced_late_legacy_import_on_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+        fail_next_event_manifest_write();
+
+        let first = post_entry_exact(dir.path(), entry.clone())
+            .expect("fsynced legacy import must not surface as retryable storage failure");
+
+        assert_eq!(first.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(!coordination_events_path(dir.path()).exists());
+        let second = post_entry_exact(dir.path(), entry).unwrap();
+        assert_eq!(second.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_replays_after_legacy_segment_publish_before_cleanup_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+        fail_next_exact_legacy_cleanup();
+
+        let first_error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+        assert!(matches!(first_error, BoardExactAppendError::Storage(_)));
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+
+        let replayed = post_entry_exact(dir.path(), entry).unwrap();
+
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert!(!exact_legacy_import_inflight_path(&coordination_dir(dir.path())).exists());
+        assert!(!exact_legacy_import_journal_path(&coordination_dir(dir.path())).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.total_entries, 1);
+    }
+
+    #[test]
+    fn exact_post_retries_target_directory_sync_before_source_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+        fail_exact_legacy_target_dir_syncs(2);
+
+        let first_error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+        assert!(matches!(first_error, BoardExactAppendError::Storage(_)));
+
+        let retry_error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+        assert!(matches!(retry_error, BoardExactAppendError::Storage(_)));
+        let coordination_root = coordination_dir(dir.path());
+        assert!(exact_legacy_import_inflight_path(&coordination_root).exists());
+        assert!(exact_legacy_import_journal_path(&coordination_root).exists());
+
+        let replayed = post_entry_exact(dir.path(), entry).unwrap();
+
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_seals_import_target_before_journal_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let recovery = recovery_entry();
+        let legacy_path = coordination_events_path(dir.path());
+        write_events(
+            &legacy_path,
+            &[CoordinationEvent::MessageAppended {
+                entry: recovery.clone(),
+            }],
+        );
+        let source_bytes = std::fs::read(&legacy_path).unwrap();
+        fail_next_exact_legacy_journal_cleanup_dir_sync();
+
+        let first_error = post_entry_exact(dir.path(), recovery.clone()).unwrap_err();
+
+        assert!(matches!(first_error, BoardExactAppendError::Storage(_)));
+        let coordination_root = coordination_dir(dir.path());
+        assert!(!exact_legacy_import_inflight_path(&coordination_root).exists());
+        assert!(!exact_legacy_import_journal_path(&coordination_root).exists());
+        let (target_file, target_bytes) = persisted_segment_bytes(dir.path())
+            .into_iter()
+            .find(|(_, bytes)| !bytes.is_empty())
+            .expect("published exact import target");
+
+        let mut normal = recovery_entry();
+        normal.id = "normal-after-journal-cleanup-response-loss".to_string();
+        normal.body = "normal append must use the sealed successor".to_string();
+        post_entry(dir.path(), normal).unwrap();
+
+        let restored_journal = ExactLegacyImportJournal {
+            version: EXACT_LEGACY_IMPORT_JOURNAL_VERSION,
+            source_digest: exact_import_digest(&source_bytes),
+            target_digest: exact_import_digest(&target_bytes),
+            target_file: target_file.clone(),
+            entries: 1,
+        };
+        write_atomic_json(
+            &exact_legacy_import_journal_path(&coordination_root),
+            &restored_journal,
+        )
+        .unwrap();
+        sync_coordination_directory(&coordination_root).unwrap();
+
+        let replayed = post_entry_exact(dir.path(), recovery).unwrap();
+
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(
+            std::fs::read(coordination_events_segments_dir(dir.path()).join(&target_file)).unwrap(),
+            target_bytes
+        );
+        let manifest = load_event_manifest(dir.path()).unwrap();
+        assert_ne!(manifest.active_segment, target_file);
+        assert_eq!(manifest.total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_resumes_legacy_inflight_before_journal_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        let coordination_root = coordination_dir(dir.path());
+        let legacy_path = coordination_events_path(dir.path());
+        let inflight_path = exact_legacy_import_inflight_path(&coordination_root);
+        write_events(
+            &legacy_path,
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+        std::fs::rename(&legacy_path, &inflight_path).unwrap();
+        sync_coordination_directory(&coordination_root).unwrap();
+
+        let replayed = post_entry_exact(dir.path(), entry).unwrap();
+
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(!inflight_path.exists());
+        assert!(!exact_legacy_import_journal_path(&coordination_root).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_finishes_published_import_after_inflight_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        let coordination_root = coordination_dir(dir.path());
+        let legacy_path = coordination_events_path(dir.path());
+        let inflight_path = exact_legacy_import_inflight_path(&coordination_root);
+        let journal_path = exact_legacy_import_journal_path(&coordination_root);
+        write_events(
+            &legacy_path,
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+        std::fs::rename(&legacy_path, &inflight_path).unwrap();
+        sync_coordination_directory(&coordination_root).unwrap();
+        let journal =
+            prepare_exact_legacy_import_journal(&coordination_root, &inflight_path, &journal_path)
+                .unwrap();
+        let target_bytes = exact_legacy_import_target_bytes(&inflight_path, &journal).unwrap();
+        let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+        publish_exact_legacy_import_target(
+            &segments_dir,
+            &segments_dir.join(&journal.target_file),
+            &target_bytes,
+        )
+        .unwrap();
+        std::fs::remove_file(&inflight_path).unwrap();
+        sync_coordination_directory(&coordination_root).unwrap();
+
+        let replayed = post_entry_exact(dir.path(), entry).unwrap();
+
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(!journal_path.exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn normal_post_fails_closed_before_exact_target_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let recovery = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: recovery.clone(),
+            }],
+        );
+        fail_next_exact_legacy_target_publish();
+        post_entry_exact(dir.path(), recovery.clone()).unwrap_err();
+
+        let mut normal = recovery_entry();
+        normal.id = "normal-before-exact-target-publish".to_string();
+        normal.body = "normal append while exact target is pending".to_string();
+        let coordination_root = coordination_dir(dir.path());
+        let inflight_path = exact_legacy_import_inflight_path(&coordination_root);
+        let journal_path = exact_legacy_import_journal_path(&coordination_root);
+        let segments_before = persisted_segment_bytes(dir.path());
+        let manifest_before = std::fs::read(coordination_events_manifest_path(dir.path())).unwrap();
+        let inflight_before = std::fs::read(&inflight_path).unwrap();
+        let journal_before = std::fs::read(&journal_path).unwrap();
+
+        let error = post_entry(dir.path(), normal.clone()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("exact Board legacy import recovery"));
+        assert_eq!(persisted_segment_bytes(dir.path()), segments_before);
+        assert_eq!(
+            std::fs::read(coordination_events_manifest_path(dir.path())).unwrap(),
+            manifest_before
+        );
+        assert_eq!(std::fs::read(&inflight_path).unwrap(), inflight_before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+
+        let replayed = post_entry_exact(dir.path(), recovery).unwrap();
+        let snapshot = post_entry(dir.path(), normal).unwrap();
+
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(snapshot.board.total_entries, 2);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn normal_post_fails_closed_after_exact_target_publish_before_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let recovery = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: recovery.clone(),
+            }],
+        );
+        fail_next_exact_legacy_cleanup();
+        post_entry_exact(dir.path(), recovery.clone()).unwrap_err();
+
+        let mut normal = recovery_entry();
+        normal.id = "normal-after-exact-target-publish".to_string();
+        normal.body = "normal append while exact cleanup is pending".to_string();
+        let coordination_root = coordination_dir(dir.path());
+        let inflight_path = exact_legacy_import_inflight_path(&coordination_root);
+        let journal_path = exact_legacy_import_journal_path(&coordination_root);
+        let segments_before = persisted_segment_bytes(dir.path());
+        let manifest_before = std::fs::read(coordination_events_manifest_path(dir.path())).unwrap();
+        let inflight_before = std::fs::read(&inflight_path).unwrap();
+        let journal_before = std::fs::read(&journal_path).unwrap();
+
+        let error = post_entry(dir.path(), normal.clone()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("exact Board legacy import recovery"));
+        assert_eq!(persisted_segment_bytes(dir.path()), segments_before);
+        assert_eq!(
+            std::fs::read(coordination_events_manifest_path(dir.path())).unwrap(),
+            manifest_before
+        );
+        assert_eq!(std::fs::read(&inflight_path).unwrap(), inflight_before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+
+        let replayed = post_entry_exact(dir.path(), recovery).unwrap();
+        let snapshot = post_entry(dir.path(), normal).unwrap();
+
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(snapshot.board.total_entries, 2);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn normal_post_still_deduplicates_late_legacy_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+        post_entry(dir.path(), entry.clone()).unwrap();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended { entry }],
+        );
+        let mut next = recovery_entry();
+        next.id = "normal-post-after-legacy-duplicate".to_string();
+        next.body = "normal post remains legacy compatible".to_string();
+
+        let snapshot = post_entry(dir.path(), next).unwrap();
+
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(snapshot.board.total_entries, 2);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+    }
+
+    #[test]
+    fn exact_post_imports_late_legacy_identity_before_replay_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+
+        let receipt = post_entry_exact(dir.path(), entry.clone()).unwrap();
+
+        assert_eq!(receipt.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].id, entry.id);
+    }
+
+    #[test]
+    fn exact_post_uses_durable_bulk_import_for_legacy_only_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+        fail_next_exact_legacy_target_publish();
+
+        let first_error = post_entry_exact(dir.path(), entry.clone()).unwrap_err();
+
+        assert!(matches!(first_error, BoardExactAppendError::Storage(_)));
+        let coordination_root = coordination_dir(dir.path());
+        assert!(exact_legacy_import_inflight_path(&coordination_root).exists());
+        assert!(exact_legacy_import_journal_path(&coordination_root).exists());
+        let replayed = post_entry_exact(dir.path(), entry).unwrap();
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_rejects_journal_target_unrelated_to_present_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut existing = recovery_entry();
+        existing.id = "pre-existing-segment-entry".to_string();
+        existing.body = "pre-existing segment payload".to_string();
+        post_entry(dir.path(), existing).unwrap();
+
+        let coordination_root = coordination_dir(dir.path());
+        let legacy_path = coordination_events_path(dir.path());
+        let inflight_path = exact_legacy_import_inflight_path(&coordination_root);
+        let journal_path = exact_legacy_import_journal_path(&coordination_root);
+        let mut legacy = recovery_entry();
+        legacy.id = "legacy-source-entry".to_string();
+        legacy.body = "legacy source payload must not be lost".to_string();
+        write_events(
+            &legacy_path,
+            &[CoordinationEvent::MessageAppended { entry: legacy }],
+        );
+        std::fs::rename(&legacy_path, &inflight_path).unwrap();
+        sync_coordination_directory(&coordination_root).unwrap();
+
+        let manifest = load_event_manifest(dir.path()).unwrap();
+        let target_file = manifest.active_segment;
+        let target_path = coordination_events_segments_dir(dir.path()).join(&target_file);
+        let target_bytes = std::fs::read(&target_path).unwrap();
+        let source_bytes = std::fs::read(&inflight_path).unwrap();
+        let forged = ExactLegacyImportJournal {
+            version: EXACT_LEGACY_IMPORT_JOURNAL_VERSION,
+            source_digest: exact_import_digest(&source_bytes),
+            target_digest: exact_import_digest(&target_bytes),
+            target_file,
+            entries: 1,
+        };
+        write_atomic_json(&journal_path, &forged).unwrap();
+        sync_coordination_directory(&coordination_root).unwrap();
+        let segments_before = persisted_segment_bytes(dir.path());
+        let mut attempted = recovery_entry();
+        attempted.id = "new-exact-attempt".to_string();
+
+        let error = post_entry_exact(dir.path(), attempted).unwrap_err();
+
+        assert!(matches!(error, BoardExactAppendError::Storage(_)));
+        assert!(inflight_path.exists());
+        assert!(journal_path.exists());
+        assert_eq!(persisted_segment_bytes(dir.path()), segments_before);
+    }
+
+    #[test]
+    fn exact_post_repairs_unrelated_late_legacy_projection_before_new_append() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let mut legacy = recovery_entry();
+        legacy.id = "unrelated-legacy-entry".to_string();
+        legacy.body = "unrelated late legacy payload".to_string();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: legacy.clone(),
+            }],
+        );
+        let entry = recovery_entry();
+
+        let receipt = post_entry_exact(dir.path(), entry.clone()).unwrap();
+
+        assert_eq!(receipt.disposition, BoardExactAppendDisposition::Appended);
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.total_entries, 2);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![legacy.id.as_str(), entry.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn exact_post_repairs_late_legacy_projection_before_conflict_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let existing = recovery_entry();
+        append_event_to_segments(
+            dir.path(),
+            &CoordinationEvent::MessageAppended {
+                entry: existing.clone(),
+            },
+            EVENT_SEGMENT_MAX_BYTES,
+        )
+        .unwrap();
+        load_snapshot(dir.path()).unwrap();
+
+        let mut legacy = recovery_entry();
+        legacy.id = "unrelated-late-legacy-conflict".to_string();
+        legacy.body = "late legacy payload before conflict".to_string();
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: legacy.clone(),
+            }],
+        );
+        let mut attempted = existing.clone();
+        attempted.body = "different payload".to_string();
+
+        let error = post_entry_exact(dir.path(), attempted).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BoardExactAppendError::Conflict(BoardExactAppendConflict {
+                kind: BoardExactAppendConflictKind::PayloadMismatch,
+                ..
+            })
+        ));
+        let repaired_projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(repaired_projection.total_entries, 2);
+        assert_eq!(
+            repaired_projection
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![existing.id.as_str(), legacy.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn exact_post_scans_identity_across_all_event_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+        let entry = recovery_entry();
+        append_event_to_segments(
+            dir.path(),
+            &CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            },
+            128,
+        )
+        .unwrap();
+        for idx in 0..3 {
+            let mut filler = recovery_entry();
+            filler.id = format!("filler-{idx}");
+            filler.body = format!("filler-{idx}-{}", "x".repeat(256));
+            append_event_to_segments(
+                dir.path(),
+                &CoordinationEvent::MessageAppended { entry: filler },
+                128,
+            )
+            .unwrap();
+        }
+        assert!(load_event_manifest(dir.path()).unwrap().segments.len() > 1);
+
+        let receipt = post_entry_exact(dir.path(), entry).unwrap();
+
+        assert_eq!(receipt.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 4);
+    }
+
+    #[test]
+    fn concurrent_exact_retries_append_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(dir.path().to_path_buf());
+        let entry = Arc::new(recovery_entry());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let root = Arc::clone(&root);
+            let entry = Arc::clone(&entry);
+            handles.push(thread::spawn(move || {
+                post_entry_exact(root.as_path(), (*entry).clone()).unwrap()
+            }));
+        }
+
+        let receipts = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| { receipt.disposition == BoardExactAppendDisposition::Appended })
+                .count(),
+            1
+        );
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| { receipt.disposition == BoardExactAppendDisposition::Replayed })
+                .count(),
+            7
+        );
+        assert_eq!(
+            load_event_manifest(root.as_path()).unwrap().total_entries(),
+            1
+        );
     }
 
     #[test]
@@ -2622,6 +5193,28 @@ mod tests {
     }
 
     #[test]
+    fn local_provider_advertises_and_delegates_exact_recovery_append() {
+        let provider = LocalProvider;
+        let dir = tempfile::tempdir().unwrap();
+        let entry = recovery_entry();
+
+        assert_eq!(
+            provider.recovery_capability(),
+            BoardRecoveryCapability::ExactAcknowledgement
+        );
+        let appended = provider
+            .post_recovery_entry_exact(dir.path(), entry.clone())
+            .unwrap();
+        let replayed = provider
+            .post_recovery_entry_exact(dir.path(), entry)
+            .unwrap();
+
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
     fn post_entry_outcome_reports_commit_when_projection_refresh_fails() {
         let dir = tempfile::tempdir().unwrap();
         load_snapshot(dir.path()).unwrap();
@@ -2693,6 +5286,83 @@ mod tests {
         assert_eq!(repaired.board.entries.len(), 1);
         assert_eq!(repaired.board.entries[0].id, entry_id);
         assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+    }
+
+    #[test]
+    fn exact_post_receipt_preserves_commit_when_manifest_refresh_fails_after_event_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = recovery_entry();
+        fail_next_event_manifest_write();
+
+        let appended = post_entry_exact(dir.path(), entry.clone())
+            .expect("fsynced exact event must return a committed receipt");
+
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert!(appended
+            .refresh_error
+            .as_deref()
+            .is_some_and(|error| error.contains("manifest")));
+        let stale_manifest: EventSegmentManifest = serde_json::from_str(
+            &std::fs::read_to_string(coordination_events_manifest_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stale_manifest.total_entries(), 0);
+
+        let replayed = post_entry_exact(dir.path(), entry).unwrap();
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        let persisted_manifest: EventSegmentManifest = serde_json::from_str(
+            &std::fs::read_to_string(coordination_events_manifest_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_manifest.total_entries(), 1);
+        assert_eq!(persisted_manifest.segments.len(), 1);
+        assert_eq!(persisted_manifest.segments[0].entries, 1);
+        assert_eq!(
+            persisted_manifest.segments[0].bytes,
+            coordination_events_segments_dir(dir.path())
+                .join(&persisted_manifest.segments[0].file)
+                .metadata()
+                .unwrap()
+                .len()
+        );
+        let repaired_projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        assert_eq!(repaired_projection.entries.len(), 1);
+        assert_eq!(repaired_projection.total_entries, 1);
+    }
+
+    #[test]
+    fn exact_post_receipt_preserves_commit_when_projection_refresh_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let projection_path = coordination_board_projection_path(dir.path());
+        std::fs::remove_file(&projection_path).unwrap();
+        std::fs::create_dir(&projection_path).unwrap();
+        let entry = recovery_entry();
+
+        let appended = post_entry_exact(dir.path(), entry.clone())
+            .expect("projection refresh failure must not hide the committed append");
+
+        assert_eq!(appended.disposition, BoardExactAppendDisposition::Appended);
+        assert!(appended.refresh_error.is_some());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
+
+        let replayed_while_blocked = post_entry_exact(dir.path(), entry.clone()).unwrap();
+        assert_eq!(
+            replayed_while_blocked.disposition,
+            BoardExactAppendDisposition::Replayed
+        );
+        assert!(replayed_while_blocked.refresh_error.is_some());
+
+        std::fs::remove_dir(&projection_path).unwrap();
+
+        let replayed = post_entry_exact(dir.path(), entry.clone()).unwrap();
+        assert_eq!(replayed.disposition, BoardExactAppendDisposition::Replayed);
+        assert!(replayed.refresh_error.is_none());
+        let repaired_projection: BoardProjection = load_json_or_default(&projection_path).unwrap();
+        assert_eq!(repaired_projection.entries.len(), 1);
+        assert_eq!(repaired_projection.entries[0].id, entry.id);
     }
 
     #[test]
@@ -4224,6 +6894,573 @@ mod tests {
         }
     }
 
+    fn write_prompt_board_fixture(coordination_root: &Path, events: &[CoordinationEvent]) -> u64 {
+        let segment_file = initial_segment_file_name();
+        let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+        std::fs::create_dir_all(&segments_dir).unwrap();
+        let segment_path = segments_dir.join(&segment_file);
+        let mut file = std::fs::File::create(&segment_path).unwrap();
+        let mut segment = EventSegmentMeta {
+            file: segment_file.clone(),
+            entries: 0,
+            bytes: 0,
+            first_created_at: None,
+            last_created_at: None,
+            max_updated_at: None,
+            first_entry_id: None,
+            last_entry_id: None,
+        };
+        for event in events {
+            let bytes = serialized_event_line(event).unwrap();
+            file.write_all(&bytes).unwrap();
+            update_segment_meta(&mut segment, event, bytes.len() as u64);
+        }
+        file.flush().unwrap();
+        let stored_bytes = segment.bytes;
+        write_event_manifest(
+            coordination_root,
+            &EventSegmentManifest {
+                version: EVENT_MANIFEST_VERSION,
+                active_segment: segment_file,
+                segments: vec![segment],
+                updated_at: Utc::now(),
+            },
+        )
+        .unwrap();
+        stored_bytes
+    }
+
+    #[test]
+    fn prompt_board_read_materializes_large_history_once_for_every_local_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination_root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 7, 24, 0, 0, 0).unwrap();
+        let status_since = base;
+        let diff_since = base + chrono::Duration::seconds(400);
+        let large_payload = "x".repeat(9 * 1024);
+        let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
+
+        let mut target = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            format!("recent status outside hot projection {large_payload}"),
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["workspace-other"]);
+        target.id = "target-status".to_string();
+        target.created_at = base + chrono::Duration::seconds(1);
+        target.updated_at = target.created_at;
+        events.push(CoordinationEvent::MessageAppended { entry: target });
+
+        for index in 1..=HOT_PROJECTION_ENTRY_LIMIT {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Claude",
+                BoardEntryKind::Status,
+                format!("filler-{index:04} {large_payload}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{index:04}");
+            entry.created_at = base + chrono::Duration::seconds(index as i64);
+            entry.updated_at = entry.created_at;
+            entry.audience = match index % 3 {
+                0 => Vec::new(),
+                1 => vec!["workspace-current".to_string()],
+                _ => vec!["workspace-other".to_string()],
+            };
+            events.push(CoordinationEvent::MessageAppended { entry });
+        }
+
+        let stored_bytes = write_prompt_board_fixture(&coordination_root, &events);
+        assert!(
+            stored_bytes > 4 * 1024 * 1024,
+            "fixture must exceed the production-size threshold"
+        );
+
+        let cases = [
+            (BoardAudienceScope::All, 100),
+            (BoardAudienceScope::Broadcast, 33),
+            (
+                BoardAudienceScope::Workspace("workspace-current".to_string()),
+                66,
+            ),
+        ];
+        for (scope, expected_entries) in cases {
+            reset_prompt_board_read_test_counters();
+            let read = load_prompt_reminder(
+                dir.path(),
+                diff_since,
+                &scope,
+                "Codex",
+                &BoardEntryKind::Status,
+                status_since,
+            )
+            .unwrap();
+
+            assert_eq!(read.recent_entries.len(), expected_entries);
+            assert!(read.has_recent_own_status);
+            assert!(read
+                .recent_entries
+                .iter()
+                .all(|entry| entry.updated_at > diff_since));
+            assert!(!read
+                .recent_entries
+                .iter()
+                .any(|entry| entry.id == "entry-0400"));
+            let counters = prompt_board_read_test_counters();
+            assert_eq!(
+                (counters.history_materializations, counters.event_decodes),
+                (1, events.len()),
+                "one prompt read must materialize and decode history exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_board_read_checks_the_operation_deadline_while_decoding_a_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination_root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 8, 29, 0, 0, 0).unwrap();
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "deadline fixture",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = base;
+        entry.updated_at = base;
+        write_prompt_board_fixture(
+            &coordination_root,
+            &[CoordinationEvent::MessageAppended { entry }],
+        );
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+
+        let error = load_prompt_reminder(
+            dir.path(),
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        )
+        .expect_err("an expired Board deadline must stop segment decoding");
+
+        assert!(error.to_string().contains("deadline expired"), "{error}");
+    }
+
+    #[test]
+    fn prompt_board_read_uses_one_segment_snapshot_even_when_hot_projection_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination_root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 7, 24, 0, 0, 0).unwrap();
+        let mut entries = Vec::new();
+        for index in 1..=3 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                if index == 3 { "Codex" } else { "Claude" },
+                BoardEntryKind::Status,
+                format!("status-{index}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{index}");
+            entry.created_at = base + chrono::Duration::seconds(index);
+            entry.updated_at = entry.created_at;
+            entries.push(entry);
+        }
+        let events = entries
+            .iter()
+            .cloned()
+            .map(|entry| CoordinationEvent::MessageAppended { entry })
+            .collect::<Vec<_>>();
+        write_prompt_board_fixture(&coordination_root, &events);
+        write_atomic_json(
+            &coordination_root.join(BOARD_PROJECTION_FILE_NAME),
+            &build_hot_projection(entries, base + chrono::Duration::seconds(4)),
+        )
+        .unwrap();
+        reset_prompt_board_read_test_counters();
+
+        let read = load_prompt_reminder(
+            dir.path(),
+            base + chrono::Duration::seconds(10),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            base,
+        )
+        .unwrap();
+
+        assert!(read.recent_entries.is_empty());
+        assert!(read.has_recent_own_status);
+        assert_eq!(
+            read.latest_own_status_at,
+            Some(base + chrono::Duration::seconds(3))
+        );
+        let counters = prompt_board_read_test_counters();
+        assert_eq!(counters.history_materializations, 1);
+        assert_eq!(counters.event_decodes, events.len());
+    }
+
+    #[test]
+    fn prompt_board_read_uses_one_prepared_root_and_skips_migrated_git_discovery() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        ensure_repo_local_files(&repo).unwrap();
+        let project_dir = gwt_project_dir_for_repo_path(&repo).join("coordination");
+        assert!(coordination_migration_marker_path(&project_dir).exists());
+        reset_prompt_board_read_test_counters();
+
+        let _ = load_prompt_reminder(
+            &repo,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        )
+        .unwrap();
+
+        let counters = prompt_board_read_test_counters();
+        assert_eq!(
+            (
+                counters.coordination_root_resolutions,
+                counters.legacy_discovery_processes,
+                counters.history_materializations,
+            ),
+            (1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn prompt_board_read_uses_session_repo_hash_without_git_root_resolution() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        ensure_repo_local_files(&repo).unwrap();
+        let project_dir = gwt_project_dir_for_repo_path(&repo);
+        let repo_hash = project_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        reset_prompt_board_read_test_counters();
+
+        let _ = load_prompt_reminder_for_repo_hash(
+            &repo,
+            Some(repo_hash),
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        )
+        .unwrap();
+
+        let counters = prompt_board_read_test_counters();
+        assert_eq!(
+            (
+                counters.coordination_root_resolutions,
+                counters.legacy_discovery_processes,
+                counters.history_materializations,
+            ),
+            (0, 0, 1)
+        );
+    }
+
+    #[test]
+    fn prompt_reminder_state_uses_session_repo_hash_without_git_root_resolution() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        ensure_repo_local_files(&repo).unwrap();
+        let project_dir = gwt_project_dir_for_repo_path(&repo);
+        let repo_hash = project_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap();
+        let expected = RemindersState {
+            last_injected_at: DateTime::<Utc>::from_timestamp(42, 0),
+            ..RemindersState::default()
+        };
+        reset_prompt_board_read_test_counters();
+
+        write_reminders_state_for_repo_hash(&repo, Some(repo_hash), "session-1", &expected)
+            .unwrap();
+        let actual =
+            load_reminders_state_for_repo_hash(&repo, Some(repo_hash), "session-1").unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            prompt_board_read_test_counters().coordination_root_resolutions,
+            0
+        );
+    }
+
+    #[test]
+    fn prompt_reminder_stale_repo_hash_keeps_board_and_sidecar_in_current_scope() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/old/repo.git",
+            ],
+        );
+        ensure_repo_local_files(&repo).unwrap();
+        let stale_hash = crate::paths::project_scope_hash(&repo);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.com/current/repo.git",
+            ],
+        );
+        ensure_repo_local_files(&repo).unwrap();
+        let expected = RemindersState {
+            last_injected_at: DateTime::<Utc>::from_timestamp(42, 0),
+            ..RemindersState::default()
+        };
+        write_reminders_state(&repo, "session-1", &expected).unwrap();
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "current scope",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        post_entry(&repo, entry.clone()).unwrap();
+        let since = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let board = load_prompt_reminder_for_repo_hash(
+            &repo,
+            Some(stale_hash.as_str()),
+            since,
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            since,
+        )
+        .unwrap();
+        assert_eq!(board.recent_entries, vec![entry]);
+        assert!(board.has_recent_own_status);
+        assert_eq!(
+            load_reminders_state_for_repo_hash(&repo, Some(stale_hash.as_str()), "session-1",)
+                .unwrap(),
+            expected
+        );
+        let nested = repo.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            migrated_project_coordination_root(&nested, Some(stale_hash.as_str())),
+            migrated_project_coordination_root(&repo, Some(stale_hash.as_str())),
+            "nested cwd must use the same read-only resolver, without git fallback",
+        );
+        let bare = repo.join("cache/repo.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        run_git(&bare, &["init", "--bare", "--quiet"]);
+        ensure_repo_local_files(&bare).unwrap();
+        assert_eq!(
+            migrated_project_coordination_root(&bare, Some(stale_hash.as_str())),
+            Some(coordination_dir(&bare)),
+            "a nested bare repository must not inherit the outer repository scope",
+        );
+        let updated = RemindersState {
+            last_injected_at: Some(Utc::now()),
+            ..expected
+        };
+        write_reminders_state_for_repo_hash(
+            &repo,
+            Some(stale_hash.as_str()),
+            "session-1",
+            &updated,
+        )
+        .unwrap();
+        assert_eq!(load_reminders_state(&repo, "session-1").unwrap(), updated);
+    }
+
+    #[test]
+    fn steady_state_board_reads_start_no_git_process() {
+        // Issue #4406: every GUI Board refresh used to run `git rev-parse`
+        // per path helper plus `git worktree list` over every worktree, even
+        // after the legacy migration had completed.
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        load_snapshot(&repo).unwrap();
+        assert!(coordination_migration_marker_path(&coordination_dir(&repo)).exists());
+
+        COORDINATION_GIT_SPAWNS.with(|count| count.set(0));
+        for _ in 0..3 {
+            load_snapshot(&repo).unwrap();
+        }
+        load_snapshot_for_scope(&repo, &BoardAudienceScope::Workspace("w".to_string())).unwrap();
+
+        assert_eq!(COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get), 0);
+    }
+
+    fn scoped_seed_entry(body: String, audience: &str) -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec![audience])
+    }
+
+    fn entry_ids(board: &BoardProjection) -> Vec<&str> {
+        board
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn scoped_board_refresh_after_a_post_never_rescans_history_at_any_board_size() {
+        // Issue #4406 AC-2: the per-post cost of a scoped Board refresh must
+        // not grow with the Board size. A refresh after a post is served from
+        // the bounded hot projection; only a cold start rescans the history.
+        let scope = BoardAudienceScope::Workspace("workspace-a".to_string());
+        for total in [500_usize, 2_000, 5_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = Utc::now() - chrono::Duration::hours(2);
+            let events = (0..total)
+                .map(|idx| {
+                    let audience = if idx % 2 == 0 {
+                        "workspace-a"
+                    } else {
+                        "workspace-b"
+                    };
+                    let mut entry = scoped_seed_entry(format!("seed {idx}"), audience);
+                    entry.created_at = base + chrono::Duration::milliseconds(idx as i64);
+                    entry.updated_at = entry.created_at;
+                    CoordinationEvent::MessageAppended { entry }
+                })
+                .collect::<Vec<_>>();
+            write_events(&coordination_events_path(dir.path()), &events);
+
+            let (view, refresh) = refresh_scoped_board_view(dir.path(), &scope, None).unwrap();
+            assert_eq!(refresh, ScopedBoardRefresh::Rebuilt, "board size {total}");
+            let (mut view, refresh) =
+                refresh_scoped_board_view(dir.path(), &scope, Some(view)).unwrap();
+            assert_eq!(refresh, ScopedBoardRefresh::Unchanged, "board size {total}");
+
+            for post in 0..4 {
+                let audience = if post % 2 == 0 {
+                    "workspace-a"
+                } else {
+                    "workspace-b"
+                };
+                post_entry(
+                    dir.path(),
+                    scoped_seed_entry(format!("live {post}"), audience),
+                )
+                .unwrap();
+                let (next, refresh) =
+                    refresh_scoped_board_view(dir.path(), &scope, Some(view)).unwrap();
+                assert_eq!(
+                    refresh,
+                    ScopedBoardRefresh::Appended,
+                    "board size {total}, post {post}"
+                );
+                let full = load_snapshot_for_scope(dir.path(), &scope).unwrap().board;
+                assert_eq!(
+                    entry_ids(&next.board),
+                    entry_ids(&full),
+                    "board size {total}"
+                );
+                assert_eq!(next.board.total_entries, full.total_entries);
+                assert_eq!(next.board.has_more_before, full.has_more_before);
+                view = next;
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_board_refresh_rebuilds_when_the_scope_changes_or_history_is_backdated() {
+        let dir = tempfile::tempdir().unwrap();
+        post_entry(
+            dir.path(),
+            scoped_seed_entry("a".to_string(), "workspace-a"),
+        )
+        .unwrap();
+        let scope_a = BoardAudienceScope::Workspace("workspace-a".to_string());
+        let scope_b = BoardAudienceScope::Workspace("workspace-b".to_string());
+        let (view, _) = refresh_scoped_board_view(dir.path(), &scope_a, None).unwrap();
+
+        let (_, refresh) =
+            refresh_scoped_board_view(dir.path(), &scope_b, Some(view.clone())).unwrap();
+        assert_eq!(refresh, ScopedBoardRefresh::Rebuilt);
+
+        let mut backdated = scoped_seed_entry("backdated".to_string(), "workspace-a");
+        backdated.created_at = Utc::now() - chrono::Duration::days(30);
+        backdated.updated_at = backdated.created_at;
+        post_entry(dir.path(), backdated).unwrap();
+        let (next, refresh) = refresh_scoped_board_view(dir.path(), &scope_a, Some(view)).unwrap();
+        assert_eq!(refresh, ScopedBoardRefresh::Rebuilt);
+        let full = load_snapshot_for_scope(dir.path(), &scope_a).unwrap().board;
+        assert_eq!(entry_ids(&next.board), entry_ids(&full));
+    }
+
     #[test]
     fn load_entries_since_returns_only_newer_entries() {
         let dir = tempfile::tempdir().unwrap();
@@ -5216,5 +8453,285 @@ mod tests {
         }))
         .unwrap();
         assert!(entry.resolves_entry_ids.is_empty());
+    }
+
+    // --- SPEC-1974 Phase 14R: worktree origin + deterministic identity ------
+
+    /// A post that carries a caller-supplied durable identity, the way a
+    /// recovery intent replays one.
+    fn identified_entry(id: &str, body: &str) -> BoardEntry {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        entry.id = id.to_string();
+        entry
+    }
+
+    #[test]
+    fn a_board_entry_carries_its_worktree_origin_and_recovery_identity() {
+        // FR-063: origin metadata is additive and survives the event log.
+        let entry = identified_entry("intent-1", "body")
+            .with_origin_worktree_form(BoardOriginWorktreeForm::Ephemeral)
+            .with_origin_recovery_id("recovery-7");
+
+        let roundtripped: BoardEntry =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+
+        assert_eq!(
+            roundtripped.origin_worktree_form,
+            Some(BoardOriginWorktreeForm::Ephemeral)
+        );
+        assert_eq!(
+            roundtripped.origin_recovery_id.as_deref(),
+            Some("recovery-7")
+        );
+    }
+
+    #[test]
+    fn worktree_origin_speaks_the_worktree_form_vocabulary_not_a_lane() {
+        // FR-063 with Issue #3384's vocabulary: the wire values name a worktree
+        // form. `intake` was a behavioural lane and is not a form, so it must
+        // not resolve back into the domain.
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::Ephemeral).unwrap(),
+            serde_json::json!("ephemeral")
+        );
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::BranchBacked).unwrap(),
+            serde_json::json!("branch-backed")
+        );
+        assert_eq!(
+            serde_json::to_value(BoardOriginWorktreeForm::Unknown).unwrap(),
+            serde_json::json!("unknown")
+        );
+        assert!(
+            serde_json::from_value::<BoardOriginWorktreeForm>(serde_json::json!("intake")).is_err(),
+            "a behavioural lane must not deserialize as a worktree form"
+        );
+    }
+
+    #[test]
+    fn a_legacy_entry_without_origin_metadata_does_not_gain_the_new_keys() {
+        // FR-063 additive compatibility: entries written before this contract
+        // load unchanged, and rewriting them does not invent the new fields.
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy body",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z",
+            "origin_branch": "work/issue-1",
+        });
+
+        let entry: BoardEntry = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(entry.origin_worktree_form, None);
+        assert_eq!(entry.origin_recovery_id, None);
+
+        let rewritten = serde_json::to_value(&entry).unwrap();
+        assert!(rewritten.get("origin_worktree_form").is_none());
+        assert!(rewritten.get("origin_recovery_id").is_none());
+        assert_eq!(rewritten["origin_branch"], legacy["origin_branch"]);
+    }
+
+    #[test]
+    fn a_deterministic_identity_materializes_exactly_once_across_retries() {
+        // FR-064: the response to the first append can be lost, so the retry
+        // has to be a no-op rather than a second post.
+        let dir = tempfile::tempdir().unwrap();
+
+        let first =
+            post_entry_deterministic(dir.path(), identified_entry("intent-1", "the post")).unwrap();
+        assert!(matches!(first, BoardDeterministicOutcome::Appended(_)));
+
+        let retry =
+            post_entry_deterministic(dir.path(), identified_entry("intent-1", "the post")).unwrap();
+        assert!(matches!(
+            retry,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+
+        let entries = load_snapshot(dir.path()).unwrap().board.entries;
+        assert_eq!(entries.len(), 1, "a retry must not append a second time");
+    }
+
+    #[test]
+    fn a_replayed_intent_matches_even_though_its_timestamps_are_regenerated() {
+        // FR-065 replay: a crash-restarted retry rebuilds the entry, so it can
+        // never reproduce the original `created_at`. Identity is the caller's
+        // id plus the authored payload, not the moment of construction.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry_deterministic(dir.path(), identified_entry("intent-2", "same intent")).unwrap();
+
+        let mut replay = identified_entry("intent-2", "same intent");
+        replay.created_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        replay.updated_at = replay.created_at;
+
+        let outcome = post_entry_deterministic(dir.path(), replay).unwrap();
+        assert!(matches!(
+            outcome,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn reusing_a_deterministic_identity_for_a_different_payload_conflicts() {
+        // FR-064: the same id with different content is a different post. It is
+        // refused as a conflict and the Board is left exactly as it was.
+        let dir = tempfile::tempdir().unwrap();
+        post_entry_deterministic(dir.path(), identified_entry("intent-3", "original")).unwrap();
+
+        let outcome =
+            post_entry_deterministic(dir.path(), identified_entry("intent-3", "rewritten"))
+                .unwrap();
+        assert!(matches!(
+            outcome,
+            BoardDeterministicOutcome::Conflicted { .. }
+        ));
+
+        let entries = load_snapshot(dir.path()).unwrap().board.entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].body, "original",
+            "a conflicting retry must not overwrite the materialized post"
+        );
+    }
+
+    #[test]
+    fn a_deterministic_append_without_a_caller_identity_is_refused() {
+        // FR-064: without a caller-supplied id there is nothing to be
+        // idempotent about, so the append fails closed instead of inventing one.
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = post_entry_deterministic(dir.path(), identified_entry("   ", "body"));
+
+        assert!(outcome.is_err());
+        assert!(load_snapshot(dir.path()).unwrap().board.entries.is_empty());
+    }
+
+    #[test]
+    fn the_local_provider_declares_and_honors_deterministic_identity() {
+        // FR-069: the filesystem provider can preserve a caller-supplied id, so
+        // it declares the capability and the retry is idempotent through it.
+        let provider = LocalProvider;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(provider.supports_deterministic_identity());
+
+        provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-4", "body"))
+            .unwrap();
+        let retry = provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-4", "body"))
+            .unwrap();
+
+        assert!(matches!(
+            retry,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_provider_that_cannot_preserve_identity_fails_closed() {
+        // FR-069: the trait default refuses. Appending anyway would either
+        // duplicate the post on the next retry or report an acknowledgement the
+        // provider never made, and falling back to the local log would fake a
+        // delivery that never reached the remote Board.
+        struct IdentityBlindProvider;
+
+        impl BoardProvider for IdentityBlindProvider {
+            fn post_entry(
+                &self,
+                worktree_root: &Path,
+                entry: BoardEntry,
+            ) -> Result<CoordinationSnapshot> {
+                LocalProvider.post_entry(worktree_root, entry)
+            }
+            fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
+                LocalProvider.load_snapshot(worktree_root)
+            }
+            fn load_snapshot_for_scope(
+                &self,
+                worktree_root: &Path,
+                scope: &BoardAudienceScope,
+            ) -> Result<CoordinationSnapshot> {
+                LocalProvider.load_snapshot_for_scope(worktree_root, scope)
+            }
+            fn load_entries_since(
+                &self,
+                worktree_root: &Path,
+                since: DateTime<Utc>,
+            ) -> Result<Vec<BoardEntry>> {
+                LocalProvider.load_entries_since(worktree_root, since)
+            }
+            fn load_entries_since_for_scope(
+                &self,
+                worktree_root: &Path,
+                since: DateTime<Utc>,
+                scope: &BoardAudienceScope,
+            ) -> Result<Vec<BoardEntry>> {
+                LocalProvider.load_entries_since_for_scope(worktree_root, since, scope)
+            }
+            fn has_recent_post_by(
+                &self,
+                worktree_root: &Path,
+                author: &str,
+                kind: &BoardEntryKind,
+                within: chrono::Duration,
+            ) -> Result<bool> {
+                LocalProvider.has_recent_post_by(worktree_root, author, kind, within)
+            }
+            fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
+                LocalProvider.board_entry_exists(worktree_root, entry_id)
+            }
+            fn load_entries_before(
+                &self,
+                worktree_root: &Path,
+                before_entry_id: Option<&str>,
+                limit: usize,
+            ) -> Result<BoardHistoryPage> {
+                LocalProvider.load_entries_before(worktree_root, before_entry_id, limit)
+            }
+            fn load_entries_before_for_scope(
+                &self,
+                worktree_root: &Path,
+                before_entry_id: Option<&str>,
+                limit: usize,
+                scope: &BoardAudienceScope,
+            ) -> Result<BoardHistoryPage> {
+                LocalProvider.load_entries_before_for_scope(
+                    worktree_root,
+                    before_entry_id,
+                    limit,
+                    scope,
+                )
+            }
+        }
+
+        let provider = IdentityBlindProvider;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!provider.supports_deterministic_identity());
+
+        let refusal =
+            provider.post_entry_deterministic(dir.path(), identified_entry("intent-5", "body"));
+
+        assert!(refusal.is_err());
+        assert!(
+            provider
+                .load_snapshot(dir.path())
+                .unwrap()
+                .board
+                .entries
+                .is_empty(),
+            "a refused deterministic append must not leave a local fallback post"
+        );
     }
 }

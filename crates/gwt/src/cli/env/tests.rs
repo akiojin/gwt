@@ -40,6 +40,7 @@ fn sample_pr_status() -> PrStatus {
     PrStatus {
         number: 128,
         title: "Enforce coverage".to_string(),
+        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://github.com/akiojin/gwt/pull/128".to_string(),
         created_at: None,
@@ -80,7 +81,10 @@ fn main() -> ExitCode {
 let args: Vec<String> = env::args().skip(1).collect();
 match args.as_slice() {
     [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
-        println!("{}", pr_json("12", "Current PR"));
+        let mut pr = pr_json("12", "Current PR");
+        pr.pop();
+        pr.push_str(r#", "headRefName":"feature/coverage", "headRepositoryOwner":{"login":"akiojin"}, "headRepository":{"name":"gwt"}}"#);
+        println!("{pr}");
         ExitCode::SUCCESS
     }
     [pr, view, number, repo_flag, _, json_flag, ..]
@@ -930,6 +934,22 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
 #[test]
 fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
     with_fake_gh(|repo_path| {
+        for args in [
+            vec!["init", "-b", "feature/coverage"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/akiojin/gwt.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("initialize current PR identity")
+                .success());
+        }
         let cache_root = repo_path.join(".cache");
         let mut env = DefaultCliEnv::new_with_client_factory_and_cache_root(
             "akiojin",
@@ -1078,7 +1098,7 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
         .set_labels(created.number, &["chore".to_string()])
         .expect("set labels");
     client_ref
-        .set_state(created.number, gwt_github::IssueState::Closed)
+        .set_state(created.number, gwt_github::IssueState::Closed, None)
         .expect("set state");
 
     let specs = client_ref
@@ -1117,6 +1137,29 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
 /// `execution.adopt` with no ambient session is a genuine governance refusal
 /// that needs no fixture, so this exercises the real dispatch path end to end
 /// rather than the classifier in isolation.
+#[test]
+fn dispatch_does_not_escalate_a_pm_pane_governance_refusal() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let home = tempfile::tempdir().expect("home");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&home.path().join("repo"));
+    fs::create_dir_all(&worktree).expect("PM worktree");
+    let mut env = TestEnv::new(worktree.clone());
+    env.stdin = r#"{"schema_version":1,"operation":"execution.adopt","params":{"reason":"crash recovery"}}"#
+        .to_string();
+
+    assert_ne!(dispatch(&mut env, &["gwtd".to_string()]), 0);
+    assert!(
+        gwt_core::coordination::load_open_escalations(&worktree)
+            .expect("read the escalation index")
+            .is_empty(),
+        "a PM refusal must not escalate back to the PM"
+    );
+}
+
 #[test]
 fn dispatch_escalates_a_governance_refusal_to_the_board() {
     let _env_lock = crate::env_test_lock()

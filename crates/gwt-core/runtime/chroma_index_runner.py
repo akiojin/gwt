@@ -649,7 +649,7 @@ def action_index(project_root: str, db_path: str) -> dict:
 
     start = time.monotonic()
 
-    client = chromadb.PersistentClient(path=str(db))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db))
     code_collection = client.get_or_create_collection(
         name=CODE_COLLECTION,
         metadata={"hnsw:space": "cosine"},
@@ -769,7 +769,7 @@ def _search_file_collection(db_path: str, query: str, n_results: int, collection
     if not db.is_dir():
         return {"ok": False, "error": f"Index not found at {db}"}
 
-    client = chromadb.PersistentClient(path=str(db))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db))
     try:
         collection = _load_file_collection(client, collection_name)
     except Exception:
@@ -1065,7 +1065,7 @@ def action_index_issues(project_root: str, db_path: str) -> dict:
     except (json.JSONDecodeError, ValueError) as exc:
         return {"ok": False, "error": f"Failed to parse gh output: {exc}"}
 
-    client = chromadb.PersistentClient(path=str(db))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db))
     collection = client.get_or_create_collection(
         name="issues",
         metadata={"hnsw:space": "cosine"},
@@ -1135,7 +1135,7 @@ def action_search_issues(db_path: str, query: str, n_results: int = 10) -> dict:
             )
         return {"ok": False, "error": f"Index not found at {db}"}
 
-    client = chromadb.PersistentClient(path=str(db))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db))
     try:
         collection = client.get_collection("issues")
     except Exception:
@@ -1180,7 +1180,7 @@ def action_index_specs(project_root: str, db_path: str) -> dict:
     specs_dir = root / "specs"
     spec_dirs = sorted(specs_dir.glob("SPEC-*")) if specs_dir.is_dir() else []
 
-    client = chromadb.PersistentClient(path=str(db))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db))
     collection = client.get_or_create_collection(
         name="specs",
         metadata={"hnsw:space": "cosine"},
@@ -1263,7 +1263,7 @@ def action_search_specs(db_path: str, query: str, n_results: int = 10) -> dict:
             )
         return {"ok": False, "error": f"Index not found at {db}"}
 
-    client = chromadb.PersistentClient(path=str(db))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db))
     try:
         collection = client.get_collection("specs")
     except Exception:
@@ -1301,7 +1301,7 @@ def action_status(db_path: str) -> dict:
     if not db.is_dir():
         return {"ok": True, "indexed": False, "totalFiles": 0}
 
-    client = chromadb.PersistentClient(path=str(db))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db))
     total_code = 0
     total_docs = 0
     indexed = False
@@ -1928,12 +1928,55 @@ class E5EmbeddingFunction:
         return False
 
 
+class IndexStorePathError(RuntimeError):
+    """The index store has no path chromadb can persist HNSW files under."""
+
+
+def _windows_short_path(text: str) -> str:
+    """8.3 alias of an existing Windows path, or `text` when none exists."""
+    import ctypes
+    from ctypes import wintypes
+
+    get_short_path = ctypes.windll.kernel32.GetShortPathNameW
+    get_short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short_path.restype = wintypes.DWORD
+    size = get_short_path(text, None, 0)
+    if size == 0:
+        return text
+    buffer = ctypes.create_unicode_buffer(size)
+    if get_short_path(text, buffer, size) == 0:
+        return text
+    return buffer.value
+
+
+def _chroma_store_path(db_path: Path) -> str:
+    """Path to hand `chromadb.PersistentClient` for an existing store.
+
+    Issue #4205: on Windows chromadb's HNSW layer silently fails to write and
+    load its `.bin` files under a non-ASCII directory (a Japanese user-profile
+    name puts every store there). The build still counts correctly in-process,
+    but every later process reads the collection as unloadable, so the index
+    looks empty and is rebuilt forever. Use the ASCII 8.3 alias instead, and
+    refuse loudly when the volume has none rather than build an unreadable
+    store.
+    """
+    text = str(db_path)
+    if os.name != "nt" or text.isascii():
+        return text
+    short = _windows_short_path(text)
+    if not short.isascii():
+        raise IndexStorePathError(
+            f"index store path has no ASCII alias for chromadb HNSW files: {text}"
+        )
+    return short
+
+
 def _make_chroma_collection(db_path: Path, collection_name: str):
     """Create or open a chroma collection wired with the e5 embedding fn."""
     import chromadb  # type: ignore
 
     db_path.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(db_path))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     ef = E5EmbeddingFunction()
     return client, client.get_or_create_collection(
         name=collection_name,
@@ -1968,7 +2011,7 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
     """Open an existing collection without silently creating a new one."""
     import chromadb  # type: ignore
 
-    client = chromadb.PersistentClient(path=str(db_path))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     ef = E5EmbeddingFunction()
     try:
         collection = client.get_collection(
@@ -1986,7 +2029,7 @@ def _make_file_index_v2_collection(db_path: Path, collection_name: str):
     import chromadb  # type: ignore
 
     db_path.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(db_path))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     try:
         collection = client.get_or_create_collection(
             name=collection_name,
@@ -2003,7 +2046,7 @@ def _open_file_index_v2_collection(db_path: Path, collection_name: str):
     """Open a v2 collection; query vectors must be encoded explicitly."""
     import chromadb  # type: ignore
 
-    client = chromadb.PersistentClient(path=str(db_path))
+    client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     try:
         collection = client.get_collection(
             name=collection_name,

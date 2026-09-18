@@ -86,6 +86,13 @@ pub trait CliEnv {
     ) -> io::Result<crate::cli::pr::PrQuarantineContext>;
     fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus>;
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus>;
+    /// SPEC #3835 AC-15: merge the base branch into the PR head. A conflict is
+    /// a `Conflicted` outcome, not an error — the PM has to tell "GitHub
+    /// refused because it would conflict" apart from "the call broke".
+    fn update_pr_branch(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::types::PrUpdateBranchResult>;
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;
     fn fetch_pr_reviews(&mut self, number: u64) -> io::Result<Vec<PrReview>>;
     fn fetch_pr_review_threads(&mut self, number: u64) -> io::Result<Vec<PrReviewThread>>;
@@ -192,8 +199,23 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
         &self,
         number: IssueNumber,
         state: gwt_github::client::IssueState,
+        reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
-        self.inner.set_state(number, state)
+        self.inner.set_state(number, state, reason)
+    }
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.inner.add_labels_mutation(number, labels)
+    }
+    fn remove_label_mutation(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.inner.remove_label_mutation(number, label)
     }
     fn list_spec_issues(
         &self,

@@ -192,7 +192,7 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
 pub(super) struct PreparedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
@@ -222,7 +222,7 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         _ => (None, None, None),
     };
     PreparedOutbound {
-        payload: serde_json::to_string(event).expect("backend event json"),
+        payload: Arc::from(serde_json::to_string(event).expect("backend event json")),
         kind,
         coalesce_key,
         repair_pane_id,
@@ -280,12 +280,12 @@ pub(super) fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbou
             );
         }
     }
-    prepared.payload = serde_json::to_string(&payload).expect("backend event json");
+    prepared.payload = Arc::from(serde_json::to_string(&payload).expect("backend event json"));
     prepared
 }
 
 struct QueuedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
@@ -300,6 +300,11 @@ struct ClientQueueState {
     /// `terminal_snapshot` was serialized at, per pane. A `terminal_output`
     /// at or below it is already part of that snapshot and must not follow it.
     snapshot_stream_seq: HashMap<String, u64>,
+    /// Issue #4206: panes whose streamed output has a hole in it. A chunk the
+    /// client never received carried the cursor moves the following chunks
+    /// position themselves against, so the surviving suffix is unusable until
+    /// a snapshot re-establishes the screen. Cleared by that snapshot.
+    torn_panes: std::collections::HashSet<String>,
     dropped_lossy: u64,
     dead: bool,
     close_frame: Option<ClientCloseFrame>,
@@ -348,6 +353,9 @@ impl ClientQueue {
         if Self::superseded_by_snapshot(&state, message) {
             return false;
         }
+        if Self::withheld_from_torn_pane(&mut state, message) {
+            return false;
+        }
         // Snapshot-class kinds without a coalesce key (file trees, resume acks,
         // release notes) must not replace each other by kind alone — different
         // windows would clobber one another. They get lossless append semantics
@@ -369,6 +377,7 @@ impl ClientQueue {
                 }
             }
             QueueClass::SnapshotLatest => {
+                Self::heal_torn_pane(&mut state, message);
                 Self::record_snapshot_position(&mut state, message);
                 if let Some(entry) = state.entries.iter_mut().find(|entry| {
                     entry.kind == message.kind && entry.coalesce_key == message.coalesce_key
@@ -390,6 +399,10 @@ impl ClientQueue {
                     state.dropped_lossy += 1;
                     if let Some(pane) = &message.repair_pane_id {
                         state.dirty_panes.insert(pane.clone());
+                        // Issue #4206: the hole starts here. Everything the
+                        // pane streams from now on is positioned against a
+                        // screen the client will never have.
+                        state.torn_panes.insert(pane.clone());
                     }
                     return false;
                 }
@@ -436,6 +449,39 @@ impl ClientQueue {
             .is_some_and(|snapshot_seq| seq <= *snapshot_seq)
     }
 
+    /// Issue #4206: hold back a torn pane's stream. Once a chunk is dropped
+    /// under queue pressure the client's screen and the pane's byte stream
+    /// have diverged, and every later chunk positions its text against the
+    /// state the missing one produced — writing it paints unrelated output
+    /// across whatever occupies those cells instead. The pane is re-marked
+    /// dirty so the drain loop keeps asking for the snapshot that heals it;
+    /// without that a pane whose first repair failed would never recover.
+    fn withheld_from_torn_pane(state: &mut ClientQueueState, message: &PreparedOutbound) -> bool {
+        let Some(pane) = &message.repair_pane_id else {
+            return false;
+        };
+        if !state.torn_panes.contains(pane) {
+            return false;
+        }
+        state.dropped_lossy += 1;
+        state.dirty_panes.insert(pane.clone());
+        true
+    }
+
+    /// Issue #4206: a snapshot replaces the client's screen wholesale, so it
+    /// closes the pane's hole regardless of whether the stream position that
+    /// produced it is known.
+    fn heal_torn_pane(state: &mut ClientQueueState, message: &PreparedOutbound) {
+        if message.kind != "terminal_snapshot" {
+            return;
+        }
+        let Some(pane) = &message.terminal_pane else {
+            return;
+        };
+        state.torn_panes.remove(pane);
+        state.dirty_panes.remove(pane);
+    }
+
     /// Issue #4095: remember the snapshot's stream position and drop every
     /// queued chunk of the same pane it already contains — including chunks
     /// queued after an older snapshot whose slot this one is about to reuse.
@@ -476,7 +522,7 @@ impl ClientQueue {
             Vec::new()
         };
         Some(DrainStep::Message {
-            payload: entry.payload,
+            payload: entry.payload.to_string(),
             repair_panes,
         })
     }
@@ -763,6 +809,60 @@ impl ClientHub {
             }
         }
     }
+
+    /// Issue #3777: enqueue a background-serialized Active Work snapshot
+    /// without reserializing its large Work/event graph on the tao thread.
+    pub(super) fn dispatch_prepared_active_work(&self, payload: Arc<str>, target: DispatchTarget) {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+            let clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients
+                .iter()
+                .map(|(id, registration)| {
+                    (
+                        id.clone(),
+                        registration.queue.clone(),
+                        registration.receives_broadcasts,
+                    )
+                })
+                .collect()
+        };
+        let kind = "active_work_projection";
+        let prepared = PreparedOutbound {
+            payload,
+            kind,
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: queue_class_for_kind(kind),
+            // Not a PTY event: it belongs to no terminal pane and carries no
+            // position in a pane's output stream (Issue #4095).
+            terminal_pane: None,
+            stream_seq: None,
+        };
+        let mut dead_clients = Vec::new();
+        for (client_id, queue, receives_broadcasts) in snapshot {
+            let selected = match &target {
+                DispatchTarget::Broadcast => receives_broadcasts,
+                DispatchTarget::Client(target_id) => target_id == &client_id,
+            };
+            if selected && queue.enqueue(&prepared) {
+                dead_clients.push(client_id);
+            }
+        }
+        if !dead_clients.is_empty() {
+            let mut clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for client_id in dead_clients {
+                if let Some(registration) = clients.remove(&client_id) {
+                    registration.queue.close();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -868,6 +968,12 @@ pub(crate) enum AgentFrontendRequest {
         request_id: Option<String>,
         responder: Option<AgentSelfCloseResponder>,
     },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
+    },
     SendInput {
         text: String,
     },
@@ -890,6 +996,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
+            Self::RecoverRestoredWindow { .. } => {
+                formatter.write_str("AgentFrontendRequest::RecoverRestoredWindow(<redacted>)")
+            }
             Self::SendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
             }
@@ -908,6 +1017,7 @@ impl AgentFrontendRequest {
         matches!(
             self,
             Self::CloseWindow { .. }
+                | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }
                 | Self::PmSendInput { .. }
                 | Self::IssueMonitorScanNow { .. }
@@ -1443,6 +1553,56 @@ struct AgentCapabilityRegistry {
     inner: Arc<RwLock<AgentCapabilityRegistryState>>,
 }
 
+struct AgentAdoptionPublisher<'a> {
+    registry: &'a AgentCapabilityRegistry,
+    grant: &'a AgentCapabilityGrant,
+    guard: Option<std::sync::RwLockWriteGuard<'a, AgentCapabilityRegistryState>>,
+    published: Option<gwt_agent::SessionExecutionBinding>,
+}
+
+impl gwt::cli::execution_state::ExecutionAdoptionPublisher for AgentAdoptionPublisher<'_> {
+    fn acquire(&mut self) -> std::io::Result<()> {
+        // The durable coordinator invokes this only after owner and Session
+        // leases. Never hold the registry while waiting for those leases.
+        let guard = self
+            .registry
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !AgentCapabilityRegistry::grant_is_current_in_state(&guard, self.grant)
+            || guard
+                .manual_handoff_reservations
+                .values()
+                .any(|reservation| {
+                    self.grant.principal().active_execution_binding() == Some(&reservation.binding)
+                })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "agent capability changed or is reserved before adoption; no authority was updated",
+            ));
+        }
+        self.guard = Some(guard);
+        Ok(())
+    }
+
+    fn publish(&mut self, binding: gwt_agent::SessionExecutionBinding) {
+        // Issue #4443 AC-10: publication without a held guard means the
+        // transaction never acquired this grant. Dropping the publication is a
+        // refusal the caller reports; panicking here reached the agent as an
+        // opaque `500 code=internal` from the adoption handler instead.
+        let Some(mut guard) = self.guard.take() else {
+            return;
+        };
+        let mut principal = self.grant.principal().clone();
+        principal.execution_authority = AgentExecutionAuthority::Active(Box::new(binding.clone()));
+        guard
+            .principals_by_token
+            .insert(self.grant.token.clone(), principal);
+        self.published = Some(binding);
+    }
+}
+
 impl AgentCapabilityRegistry {
     fn preflight_issue(&self, project_root: &Path, session_id: &str) -> Result<(), String> {
         let principal = AgentSessionPrincipal::new(project_root, session_id)?;
@@ -1849,6 +2009,46 @@ impl AgentCapabilityRegistry {
         expected_binding: &gwt_agent::SessionExecutionBinding,
     ) -> Result<(), String> {
         self.promote_to_active(token, expected_binding, true, true)
+    }
+
+    fn adopt_execution(
+        &self,
+        grant: &AgentCapabilityGrant,
+        request: gwt::AgentExecutionAdoptionRequest,
+    ) -> Result<gwt::AgentExecutionAdoptionReceipt, AgentWorkspaceUpdateError> {
+        let principal = grant.principal();
+        let binding = principal.active_execution_binding().ok_or_else(|| AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+            "execution.adopt requires a bound Host capability; use execution.continue for an unbound Session",
+        ))?;
+        let mut publisher = AgentAdoptionPublisher {
+            registry: self,
+            grant,
+            guard: None,
+            published: None,
+        };
+        gwt::adopt_authenticated_execution(
+            principal.canonical_project_root(),
+            principal.session_id(),
+            binding,
+            request,
+            &mut publisher,
+        )?;
+        // Issue #4443 AC-10: a success that published no binding leaves the
+        // capability registry behind the durable record, so there is no receipt
+        // to return. Report it as the conflict it is — the `.expect()` that
+        // stood here panicked inside `spawn_blocking` and the handler's
+        // `Err(_)` arm answered `500 code=internal`.
+        let published = publisher.published.ok_or_else(|| {
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                "Host adoption settled the durable record but published no capability binding; run JSON operation `execution.status` and follow its `available_recoveries` before retrying",
+            )
+        })?;
+        Ok(gwt::AgentExecutionAdoptionReceipt {
+            schema_version: 1,
+            execution_binding: published,
+        })
     }
 
     fn promote_to_active(
@@ -2766,6 +2966,10 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
             "/internal/execution-continuation",
             post(execution_continuation_handler),
         )
+        .route(
+            "/internal/execution-adoption",
+            post(execution_adoption_handler),
+        )
         .route("/internal/workspace-update", post(workspace_update_handler))
         .route(
             "/internal/work-terminalization",
@@ -3190,10 +3394,10 @@ async fn workspace_update_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
 
@@ -3228,11 +3432,10 @@ async fn workspace_update_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host workspace mutation task failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host workspace mutation task failed before a response was produced".to_string(),
+            ),
         ),
     }
 }
@@ -3245,10 +3448,10 @@ async fn work_terminalization_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
 
@@ -3283,11 +3486,10 @@ async fn work_terminalization_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host Work terminalization task failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host Work terminalization task failed before a response was produced".to_string(),
+            ),
         ),
     }
 }
@@ -3300,10 +3502,10 @@ async fn build_abort_terminalization_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
 
@@ -3338,11 +3540,10 @@ async fn build_abort_terminalization_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host build abort mutation task failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host build abort mutation task failed before a response was produced".to_string(),
+            ),
         ),
     }
 }
@@ -3368,10 +3569,10 @@ async fn execution_binding_probe_handler(
     let Some(principal) = agent_capability_principal(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
     // This route authorizes agent-initiated producing mutation. Prepared
@@ -3405,11 +3606,46 @@ async fn execution_binding_probe_handler(
         }
         Err(_) => workspace_update_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::Internal,
-                message: "Host execution binding probe failed before a response was produced"
-                    .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host execution binding probe failed before a response was produced".to_string(),
+            ),
+        ),
+    }
+}
+
+async fn execution_adoption_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<gwt::AgentExecutionAdoptionRequest>,
+) -> Response {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid",
+            ),
+        );
+    };
+    let project_root = grant.principal().canonical_project_root().to_path_buf();
+    let capabilities = state.agent_capabilities.clone();
+    match tokio::task::spawn_blocking(move || capabilities.adopt_execution(&grant, request)).await {
+        Ok(Ok(receipt)) => {
+            state
+                .proxy
+                .send(UserEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            workspace_update_error_response(workspace_update_error_status(error.code), error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::Internal,
+                "Host adoption failed; inspect execution.status before retrying",
+            ),
         ),
     }
 }
@@ -3422,10 +3658,10 @@ async fn execution_continuation_handler(
     let Some(grant) = agent_capability_grant(&headers, &state) else {
         return workspace_update_error_response(
             StatusCode::UNAUTHORIZED,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
-                message: "agent capability is missing or invalid".to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
         );
     };
     let project_root = grant.principal().canonical_project_root().to_path_buf();
@@ -3446,11 +3682,10 @@ async fn execution_continuation_handler(
         Err(_) => {
             return workspace_update_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                AgentWorkspaceUpdateError {
-                    code: AgentWorkspaceUpdateErrorCode::Internal,
-                    message: "Host continuation task failed before a response was produced"
-                        .to_string(),
-                },
+                AgentWorkspaceUpdateError::new(
+                    AgentWorkspaceUpdateErrorCode::Internal,
+                    "Host continuation task failed before a response was produced".to_string(),
+                ),
             );
         }
     };
@@ -3465,12 +3700,11 @@ async fn execution_continuation_handler(
     {
         return workspace_update_error_response(
             StatusCode::CONFLICT,
-            AgentWorkspaceUpdateError {
-                code: AgentWorkspaceUpdateErrorCode::TransactionConflict,
-                message:
-                    "agent capability changed before continuation authority could be published"
-                        .to_string(),
-            },
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                "agent capability changed before continuation authority could be published"
+                    .to_string(),
+            ),
         );
     }
     state
@@ -3484,15 +3718,16 @@ fn execution_binding_error_response(diagnostic_reason: &'static str) -> Response
         reason = diagnostic_reason,
         "Host-managed operation rejected an execution binding"
     );
-    workspace_update_error_response(
-        StatusCode::CONFLICT,
-        AgentWorkspaceUpdateError {
-            code: AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
-            message:
-                "Execution binding is missing, stale, or no longer current; relaunch the Session before retrying"
-                    .to_string(),
-        },
-    )
+    // Issue #4443 AC-2: `authority_mismatch` is the refusal agents got stuck
+    // on, and "relaunch the Session" is not something an agent can do. Name the
+    // diagnosis operation it can run, whose `available_recoveries` resolves to
+    // the exact next operation for this record.
+    let mut error = AgentWorkspaceUpdateError::new(
+        AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch,
+        "Execution binding is missing, stale, or no longer current; run JSON operation `execution.status` and follow its `available_recoveries`, or relaunch the Session",
+    );
+    error.diagnostic_reason = Some(diagnostic_reason.into());
+    workspace_update_error_response(StatusCode::CONFLICT, error)
 }
 
 #[derive(Serialize)]
@@ -3500,6 +3735,14 @@ struct AgentWorkspaceUpdateErrorResponse {
     code: AgentWorkspaceUpdateErrorCode,
     reason: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_reason: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mismatched_fields: Vec<String>,
+    /// Issue #4443 AC-2: the route out, as canonical operation names the agent
+    /// bridge is allowed to surface.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recovery_operations: Vec<String>,
 }
 
 fn workspace_update_error_response(
@@ -3522,6 +3765,9 @@ fn workspace_update_error_response(
             code: error.code,
             reason,
             message: error.message,
+            diagnostic_reason: error.diagnostic_reason,
+            mismatched_fields: error.mismatched_fields,
+            recovery_operations: error.recovery_operations,
         }),
     )
         .into_response()
@@ -3564,6 +3810,19 @@ impl AgentPaneSessionScope {
                     && self.grant.principal().authorizes_producing_mutation() =>
             {
                 Some(AgentFrontendRequest::SendInput { text })
+            }
+            FrontendEvent::RecoverRestoredWindow {
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } if self.allowed_window_ids.contains(&id) => {
+                Some(AgentFrontendRequest::RecoverRestoredWindow {
+                    id,
+                    session_id,
+                    child_pid,
+                    child_started_at,
+                })
             }
             FrontendEvent::PmPaneSendInput {
                 operation_id,
@@ -3947,6 +4206,7 @@ async fn client_session_with_scope(
             maybe_message = receiver.next() => {
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
+                        let received_at = Instant::now();
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
@@ -3964,6 +4224,7 @@ async fn client_session_with_scope(
                                             &client_id,
                                             &input_seq,
                                             event,
+                                            received_at,
                                         );
                                     }
                                     Some(ScopedFrontendRequest::AgentPmRefusal {
@@ -4255,13 +4516,32 @@ fn handle_frontend_message(
     client_id: &str,
     input_seq: &AtomicU64,
     event: FrontendEvent,
+    received_at: Instant,
 ) {
     let (id, data) = match event {
         FrontendEvent::TerminalInput { id, data } => (id, data),
+        FrontendEvent::StartupFirstFrame { navigation_ms } => {
+            gwt::perf::startup::first_frame(navigation_ms);
+            // Keep the shell/event-loop readiness acknowledgement separate
+            // from the paint observation when restore is still draining.
+            state.proxy.send(UserEvent::Frontend {
+                client_id: client_id.to_string(),
+                event: FrontendEvent::StartupFirstFrame { navigation_ms },
+                received_at,
+            });
+            return;
+        }
+        FrontendEvent::StartupTerminalReady { id } => {
+            // Input uses this WebSocket fast path too: an unrelated event-loop
+            // backlog must not inflate the time at which keys can reach the PTY.
+            gwt::perf::startup::terminal_ready(&id);
+            return;
+        }
         other => {
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
                 event: other,
+                received_at,
             });
             return;
         }
@@ -4285,7 +4565,7 @@ fn handle_frontend_message(
     );
 
     let pty_handle = match state.pty_writers.read() {
-        Ok(guard) => guard.get(&id).cloned(),
+        Ok(guard) => guard.get(&id).map(|pty| (pty.clone(), guard.len())),
         Err(_error) => {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -4301,7 +4581,7 @@ fn handle_frontend_message(
 
     let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
     let mut resolution_marked = false;
-    if let Some(pty) = pty_handle {
+    if let Some((pty, pty_writer_count)) = pty_handle {
         if approval_resolution {
             // `EventLoopProxy::send_event` completes the tao channel enqueue
             // synchronously. Enqueue the causal marker before the PTY write so
@@ -4315,14 +4595,14 @@ fn handle_frontend_message(
         let write_started = Instant::now();
         match pty.write_input(data.as_bytes()) {
             Ok(()) => {
-                tracing::debug!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write",
-                    client_id = %client_id,
+                let completed_at = Instant::now();
+                log_terminal_input_completion(
+                    client_id,
                     seq,
-                    window_id = %id,
-                    write_us = write_started.elapsed().as_micros() as u64,
-                    "terminal_input written to PTY via WS fast-path"
+                    &id,
+                    completed_at.duration_since(write_started).as_micros() as u64,
+                    completed_at.duration_since(received_at).as_millis() as u64,
+                    pty_writer_count,
                 );
                 if had_unsent && !pty.has_unsent_user_input() {
                     state
@@ -4359,7 +4639,7 @@ fn handle_frontend_message(
         );
     }
 
-    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data);
+    forward_terminal_input_to_event_loop(state, client_id, id.clone(), data, received_at);
     tracing::debug!(
         target: "gwt_input_trace",
         stage = "ws_dispatch",
@@ -4376,11 +4656,48 @@ fn forward_terminal_input_to_event_loop(
     client_id: &str,
     id: String,
     data: String,
+    received_at: Instant,
 ) {
     state.proxy.send(UserEvent::Frontend {
         client_id: client_id.to_string(),
         event: FrontendEvent::TerminalInput { id, data },
+        received_at,
     });
+}
+
+fn log_terminal_input_completion(
+    client_id: &str,
+    seq: u64,
+    window_id: &str,
+    write_us: u64,
+    elapsed_ms: u64,
+    pty_writer_count: usize,
+) {
+    if elapsed_ms >= crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt_input_trace",
+            stage = "fast_path_write",
+            client_id,
+            seq,
+            window_id,
+            write_us,
+            elapsed_ms,
+            pty_writer_count,
+            "terminal_input receive-to-PTY latency exceeded budget"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt_input_trace",
+            stage = "fast_path_write",
+            client_id,
+            seq,
+            window_id,
+            write_us,
+            elapsed_ms,
+            pty_writer_count,
+            "terminal_input written to PTY via WS fast-path"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4460,7 +4777,7 @@ mod tests {
         pin::Pin,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
         task::{Context, Poll},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use axum::extract::ws::Message as AxumMessage;
@@ -5402,6 +5719,33 @@ mod tests {
     /// pane inside its own project scope, and the close reply kind must pass
     /// the outbound filter so the caller hears the outcome.
     #[test]
+    fn agent_pane_scope_limits_recovery_to_project_windows() {
+        let project = tempfile::tempdir().expect("project");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let principal = AgentSessionPrincipal::new(project.path(), "pm-session")
+            .expect("observation principal");
+        let mut scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        scope.allowed_window_ids.insert("owned-window".to_string());
+        let request = |id: &str| {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": id, "session_id": "restored-session",
+                "child_pid": 123, "child_started_at": 456
+            }))
+            .expect("recovery request")
+        };
+
+        assert!(scope
+            .filter_inbound(request("owned-window"))
+            .is_some_and(
+                |request| request.mutates_host_state() && !request.requires_producing_authority()
+            ));
+        assert!(scope.filter_inbound(request("foreign-window")).is_none());
+    }
+
+    #[test]
     fn agent_pane_scope_allows_observation_grant_close_and_passes_close_result() {
         let project = tempfile::tempdir().expect("project tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
@@ -6013,19 +6357,21 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{ "id": window_id }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{ "id": window_id }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6195,24 +6541,26 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{
-                                "id": window_id,
-                                "preset": "agent",
-                                "status": "idle",
-                                "session_id": "target-session"
-                            }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{
+                                    "id": window_id,
+                                    "preset": "agent",
+                                    "status": "idle",
+                                    "session_id": "target-session"
+                                }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6462,21 +6810,23 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": {
-                                "windows": [{ "id": "tab-owned::agent-1" }]
-                            }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": {
+                                    "windows": [{ "id": "tab-owned::agent-1" }]
+                                }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -7386,6 +7736,338 @@ mod tests {
     }
 
     #[test]
+    fn execution_adoption_synchronizes_host_binding_before_terminal_work_update() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/adoption"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/adoption.git",
+            ],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            assert!(gwt_core::process::run_git_logged(&args, Some(&repo))
+                .unwrap()
+                .status
+                .success());
+        }
+        let repo = dunce::canonicalize(repo).unwrap();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4278,
+        };
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/adoption", gwt_agent::AgentId::Codex);
+        session.id = "adoption-successor".into();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            "adoption-predecessor",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let before = gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        };
+        session.set_execution_binding(Some(before.clone())).unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+        let runtime = Runtime::new().unwrap();
+        let (proxy, _) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue_bound(&repo, &session.id, before.clone())
+            .unwrap();
+        let _bridge_url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &target.url);
+        let _bridge_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, &target.token);
+        let mut env = gwt::cli::TestEnv::new(repo.clone());
+        let code = gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Execution(gwt::cli::execution_state::ExecutionCommand::Adopt {
+                reason: "recover the previous execution".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        let client = reqwest::blocking::Client::new();
+        let mut url = reqwest::Url::parse(&target.url).unwrap();
+        url.set_path("/internal/execution-adoption");
+        let request = serde_json::json!({"schema_version":1, "claimed_session_id":session.id, "reason":"recover the previous execution"});
+        let adopted = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        )
+        .unwrap();
+        let after = adopted.execution_binding.unwrap();
+        assert_ne!(after.identity, before.identity);
+        assert_eq!(
+            after.capability_generation,
+            before.capability_generation + 1
+        );
+        assert_eq!(
+            issuer.active_execution_binding_for_token(&target.token),
+            Some(after.clone())
+        );
+        let replay = client
+            .post(url.clone())
+            .bearer_auth(&target.token)
+            .json(&request)
+            .send()
+            .unwrap();
+        assert_eq!(
+            replay.status(),
+            HttpStatusCode::OK,
+            "{}",
+            replay.text().unwrap()
+        );
+        assert_eq!(
+            issuer.active_execution_binding_for_token(&target.token),
+            Some(after.clone())
+        );
+
+        let result = gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Workspace(gwt::cli::WorkspaceCommand::Ensure {
+                agent_session: session.id.clone(),
+                title_summary: "Host adoption synchronization".into(),
+                current_focus: None,
+                spec: None,
+                issue: Some(owner.number),
+                topic: None,
+                boundary: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(result, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        url.set_path("/internal/workspace-update");
+        let response = client
+            .post(url)
+            .bearer_auth(&target.token)
+            .json(&serde_json::json!({
+                "schema_version":1, "claimed_session_id":session.id,
+                "observation":gwt::observe_agent_runtime(&repo).unwrap(),
+                "intent":{"status_category":"done"}
+            }))
+            .send()
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            HttpStatusCode::OK,
+            "{}",
+            response.text().unwrap()
+        );
+        server.shutdown();
+    }
+
+    /// Issue #4443 AC-10 / AC-2: no request may drive the adoption bridge to
+    /// `http_status=500 code=internal`, the shape the PM recorded when #3697's
+    /// 409 turned into a 500 in the same session. A caller-input refusal answers
+    /// `400 invalid_request`, and a state refusal answers `409` carrying the
+    /// operation the agent can actually run.
+    #[test]
+    fn execution_adoption_refuses_without_an_internal_server_error() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "work/legacy-adoption"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/legacy-adoption.git",
+            ],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            assert!(gwt_core::process::run_git_logged(&args, Some(&repo))
+                .unwrap()
+                .status
+                .success());
+        }
+        let repo = dunce::canonicalize(repo).unwrap();
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: 4443,
+        };
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/legacy-adoption", gwt_agent::AgentId::Codex);
+        session.id = "legacy-adoption-successor".into();
+        session.project_state_root = Some(repo.clone());
+        session.linked_issue_number = Some(owner.number);
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner.kind,
+            owner.number,
+            "legacy-adoption-predecessor",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        gwt::cli::execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            gwt::cli::execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: owner.number,
+            identity: gwt::cli::execution_state::current_execution_binding(&repo, owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        };
+        session
+            .set_execution_binding(Some(binding.clone()))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        // The dead host left the flat record behind without its owner
+        // generation ledger: the state the relaunched Session inherits.
+        let trusted = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("trusted store for the fixture worktree");
+        let owners = trusted
+            .parent()
+            .expect("trusted store root")
+            .join("execution-owners");
+        assert!(owners.is_dir(), "fixture never wrote an owner ledger");
+        std::fs::remove_dir_all(&owners).unwrap();
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session.id);
+        let runtime = Runtime::new().unwrap();
+        let (proxy, _) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue_bound(&repo, &session.id, binding.clone())
+            .unwrap();
+        let client = reqwest::blocking::Client::new();
+        let mut url = reqwest::Url::parse(&target.url).unwrap();
+        url.set_path("/internal/execution-adoption");
+        let adopt = |reason: &str| {
+            let response = client
+                .post(url.clone())
+                .bearer_auth(&target.token)
+                .json(&serde_json::json!({
+                    "schema_version": 1,
+                    "claimed_session_id": session.id,
+                    "reason": reason,
+                }))
+                .send()
+                .unwrap();
+            (response.status(), response.text().unwrap())
+        };
+
+        // A reserved-namespace reason is a caller input error. It used to reach
+        // the CLI guard and come back as an opaque `500 code=internal`.
+        let (status, body) = adopt("gwt:execution-recovery:v1:forged");
+        assert_ne!(
+            status,
+            HttpStatusCode::INTERNAL_SERVER_ERROR,
+            "a caller input error answered as an unhandled exception: {body}"
+        );
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST, "{body}");
+
+        // The inherited record refuses on state, and the refusal must name the
+        // operation this agent can run to get out of it.
+        let (status, body) = adopt("recover the dead host's record");
+        assert_ne!(
+            status,
+            HttpStatusCode::INTERNAL_SERVER_ERROR,
+            "a state refusal answered as an unhandled exception: {body}"
+        );
+        assert_eq!(status, HttpStatusCode::CONFLICT, "{body}");
+        let refusal = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_eq!(
+            refusal["recovery_operations"],
+            serde_json::json!(["execution.repair"]),
+            "the refusal names no recovery operation: {body}"
+        );
+
+        // AC-2: the route out must survive the agent-side bridge client, which
+        // previously reported only `code=` and `bridge_reason=`.
+        let bridge_target = gwt::HookForwardTarget {
+            url: target.url.clone(),
+            token: target.token.clone(),
+        };
+        let bridged = gwt::daemon_runtime::send_execution_adoption_via_agent_bridge(
+            &bridge_target,
+            &gwt::AgentExecutionAdoptionRequest {
+                schema_version: 1,
+                claimed_session_id: session.id.clone(),
+                reason: "recover the dead host's record".into(),
+            },
+            &session,
+        )
+        .expect_err("the inherited record refuses adoption");
+        assert!(
+            bridged.contains("execution.repair"),
+            "the agent-visible refusal dropped the Host's recovery route: {bridged}"
+        );
+        assert!(
+            !binding.identity.generation_id.is_empty(),
+            "fixture binding is structurally valid"
+        );
+        server.shutdown();
+    }
+
+    #[test]
     fn execution_binding_probe_fences_an_older_host_with_the_durable_capability_epoch() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -7674,6 +8356,24 @@ mod tests {
 
         let stale = probe(&target_a);
         assert_eq!(stale.status(), HttpStatusCode::CONFLICT);
+        let diagnostic: serde_json::Value = stale.json().expect("stale binding diagnostic");
+        assert_eq!(
+            diagnostic["diagnostic_reason"],
+            "session_binding_identity_mismatch"
+        );
+        assert_eq!(
+            diagnostic["mismatched_fields"],
+            serde_json::json!(["capability_generation"])
+        );
+        let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+        let before_adopt = std::fs::read(&session_path).unwrap();
+        let mut adoption_url = reqwest::Url::parse(&target_a.url).unwrap();
+        adoption_url.set_path("/internal/execution-adoption");
+        let rejected_adopt = client.post(adoption_url).bearer_auth(&target_a.token)
+            .json(&serde_json::json!({"schema_version":1,"claimed_session_id":session.id,"reason":"stale Host must not recover itself"}))
+            .send().unwrap();
+        assert_eq!(rejected_adopt.status(), HttpStatusCode::CONFLICT);
+        assert_eq!(std::fs::read(&session_path).unwrap(), before_adopt);
         let current = probe(&target_b);
         assert_eq!(current.status(), HttpStatusCode::OK);
         let receipt: gwt::AgentExecutionBindingProbeReceipt =
@@ -8111,12 +8811,14 @@ mod tests {
     #[test]
     fn handle_frontend_message_forwards_non_terminal_events_to_proxy() {
         let (state, events) = sample_server_state();
+        let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             FrontendEvent::FrontendReady,
+            received_at,
         );
 
         let recorded = events
@@ -8124,14 +8826,35 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady }]
-                if client_id == "client-1"
+            [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady, received_at: forwarded_at }]
+                if client_id == "client-1" && *forwarded_at == received_at
         ));
+    }
+
+    #[test]
+    fn terminal_input_timing_warns_only_for_slow_successful_write() {
+        let output = crate::tests::capture_timing_warnings(|| {
+            super::log_terminal_input_completion("client-1", 7, "window-1", 1000, 30, 9);
+            super::log_terminal_input_completion("client-1", 8, "window-1", 1000, 29, 9);
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("timing JSON"))
+            .collect();
+        assert_eq!(logs.len(), 1, "29ms must not warn; 30ms must warn");
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["stage"], "fast_path_write");
+        assert_eq!(fields["elapsed_ms"], 30);
+        assert_eq!(fields["write_us"], 1000);
+        assert_eq!(fields["pty_writer_count"], 9);
+        assert_eq!(fields["seq"], 7);
+        assert!(fields.get("data").is_none());
     }
 
     #[test]
     fn handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing() {
         let (state, events) = sample_server_state();
+        let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
             &state,
@@ -8141,6 +8864,7 @@ mod tests {
                 id: "tab-1::shell-1".to_string(),
                 data: "ls\n".to_string(),
             },
+            received_at,
         );
 
         let recorded = events
@@ -8148,10 +8872,11 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
-            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data } }]
+            [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data }, received_at: forwarded_at }]
                 if client_id == "client-1"
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
+                    && *forwarded_at == received_at
         ));
     }
 
@@ -8185,6 +8910,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "1\r".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8236,6 +8962,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "1\r".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8245,6 +8972,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "\u{1b}[A".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8254,6 +8982,7 @@ mod tests {
                 id: "tab-1::agent-1".to_string(),
                 data: "x".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8296,6 +9025,7 @@ mod tests {
                 id: "tab-1::pm-window".to_string(),
                 data: "実行されてい".to_string(),
             },
+            Instant::now(),
         );
         handle_frontend_message(
             &state,
@@ -8305,6 +9035,7 @@ mod tests {
                 id: "tab-1::pm-window".to_string(),
                 data: "ますか？\r".to_string(),
             },
+            Instant::now(),
         );
 
         let recorded = events
@@ -8407,6 +9138,33 @@ mod tests {
             retryable: true,
             retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
         }
+    }
+
+    #[test]
+    fn prepared_active_work_enqueue_reuses_the_background_payload_allocation() {
+        let queue = ClientQueue::default();
+        let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
+        let prepared = PreparedOutbound {
+            payload: payload.clone(),
+            kind: "active_work_projection",
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: QueueClass::IdempotentLatest,
+            terminal_pane: None,
+            stream_seq: None,
+        };
+
+        assert!(!queue.enqueue(&prepared));
+
+        let state = queue
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued = state.entries.front().expect("queued Active Work payload");
+        assert!(
+            Arc::ptr_eq(&queued.payload, &payload),
+            "tao-side enqueue must retain the background Arc instead of cloning 4 MB"
+        );
     }
 
     #[test]
@@ -8880,6 +9638,159 @@ mod tests {
                 "terminal_output:chunk-3".to_string(),
             ]
         );
+    }
+
+    // Issue #4206 AC-1 / AC-2: a dropped chunk tears the pane's byte stream.
+    // Every later chunk of that pane positions its text relative to the screen
+    // the dropped one produced, so delivering the surviving suffix paints at
+    // offsets that never existed — two legitimate outputs of the same stream
+    // crossing inside one line. The pane must stay silent from the drop until
+    // a snapshot re-baselines the client screen.
+    #[test]
+    fn client_queue_withholds_torn_pane_output_until_a_snapshot_rebaselines_it() {
+        let queue = ClientQueue::default();
+        let torn = "tab-1::agent-7";
+        let healthy = "tab-1::agent-8";
+
+        // Saturate with unrelated lossless traffic so the pane's own delivery
+        // is the only terminal_* content under test.
+        for index in 0..LOSSY_HIGH_WATER {
+            queue.enqueue(&prepare_outbound(&lossless_error(&format!("fill-{index}"))));
+        }
+        queue.enqueue(&terminal_output_at(torn, "dropped", 1));
+        // Room again: the queue would accept this pane's next chunk, and
+        // before Issue #4206 it did.
+        let _ = queue.try_next();
+        queue.enqueue(&terminal_output_at(torn, "post-hole", 2));
+        queue.enqueue(&terminal_output_at(healthy, "unaffected", 2));
+
+        assert_eq!(
+            drained_terminal_events(&queue),
+            vec!["terminal_output:unaffected".to_string()],
+            "a torn pane stays silent until repaired; other panes are untouched"
+        );
+
+        queue.enqueue(&terminal_snapshot_at(torn, "repair", 3));
+        queue.enqueue(&terminal_output_at(torn, "rebaselined", 4));
+
+        assert_eq!(
+            drained_terminal_events(&queue),
+            vec![
+                "terminal_snapshot:repair".to_string(),
+                "terminal_output:rebaselined".to_string(),
+            ],
+            "the repair snapshot re-baselines the screen and the stream resumes"
+        );
+    }
+
+    // Issue #4206 AC-1: withholding must not strand a pane. While torn, the
+    // pane stays scheduled for repair so the drain loop keeps asking the event
+    // loop for a snapshot instead of leaving the display frozen forever.
+    #[test]
+    fn client_queue_keeps_requesting_repair_while_a_pane_stays_torn() {
+        let queue = ClientQueue::default();
+        let pane = "tab-1::agent-7";
+
+        for index in 0..LOSSY_HIGH_WATER {
+            queue.enqueue(&prepare_outbound(&lossless_error(&format!("fill-{index}"))));
+        }
+        queue.enqueue(&terminal_output_at(pane, "dropped", 1));
+        let (_, first_repairs) = drain_all(&queue);
+        assert_eq!(first_repairs, vec![pane.to_string()]);
+
+        // The repair snapshot never materialized (contended pane lock, empty
+        // screen). The next withheld chunk must re-arm the request.
+        queue.enqueue(&terminal_output_at(pane, "still-torn", 2));
+        queue.enqueue(&prepare_outbound(&lossless_error("carrier")));
+        let (_, second_repairs) = drain_all(&queue);
+        assert_eq!(
+            second_repairs,
+            vec![pane.to_string()],
+            "a still-torn pane is re-scheduled for repair, never left blank"
+        );
+    }
+
+    // Issue #4206 AC-3: the reported corruption needed a saturated host — the
+    // WebView stopped draining under CPU pressure while writers kept
+    // producing. Reproduce that shape (concurrent writers against a drain that
+    // runs behind them) and assert the property that actually protects the
+    // screen: what a client receives for a pane is always an unbroken prefix
+    // of what that pane produced. A gap is the corruption.
+    #[test]
+    fn client_queue_delivers_gap_free_pane_prefixes_under_concurrent_saturation() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        const WRITERS: u64 = 4;
+        const CHUNKS_PER_WRITER: u64 = 4_000;
+
+        let queue = Arc::new(ClientQueue::default());
+        let writers_done = Arc::new(AtomicBool::new(false));
+
+        let writers = (0..WRITERS)
+            .map(|writer| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    let pane = format!("tab-1::agent-{writer}");
+                    for index in 0..CHUNKS_PER_WRITER {
+                        queue.enqueue(&terminal_output_at(&pane, &format!("{index}"), index + 1));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // A drain that keeps falling behind: the queue oscillates around the
+        // high-water mark, so panes tear and the queue then has room again.
+        let drainer = {
+            let queue = Arc::clone(&queue);
+            let writers_done = Arc::clone(&writers_done);
+            std::thread::spawn(move || {
+                let mut delivered: HashMap<String, Vec<u64>> = HashMap::new();
+                loop {
+                    let Some(DrainStep::Message { payload, .. }) = queue.try_next() else {
+                        if writers_done.load(AtomicOrdering::Relaxed) {
+                            break;
+                        }
+                        std::thread::yield_now();
+                        continue;
+                    };
+                    let value: serde_json::Value =
+                        serde_json::from_str(&payload).expect("outbound payload json");
+                    if value.get("kind").and_then(serde_json::Value::as_str)
+                        != Some("terminal_output")
+                    {
+                        continue;
+                    }
+                    let pane = value["id"].as_str().expect("pane id").to_string();
+                    let index = value["data_base64"]
+                        .as_str()
+                        .expect("chunk label")
+                        .parse::<u64>()
+                        .expect("chunk index");
+                    delivered.entry(pane).or_default().push(index);
+                    std::thread::yield_now();
+                }
+                delivered
+            })
+        };
+
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        writers_done.store(true, AtomicOrdering::Relaxed);
+        let delivered = drainer.join().expect("drain thread");
+
+        assert!(
+            queue.dropped_lossy() > 0,
+            "the test must actually saturate the queue"
+        );
+        for (pane, indices) in &delivered {
+            let expected = (0..indices.len() as u64).collect::<Vec<_>>();
+            assert_eq!(
+                indices, &expected,
+                "{pane} received a torn stream: a gap means later chunks painted \
+                 against a screen state the client never saw"
+            );
+        }
     }
 
     // SPEC-2359 W-17 (FR-394): kinds missing from BACKEND_EVENT_POLICIES are

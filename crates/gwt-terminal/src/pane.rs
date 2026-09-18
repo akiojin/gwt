@@ -1,4 +1,4 @@
-//! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
+//! Terminal pane: integrates PTY handle + vt100 parser.
 
 use std::{
     collections::HashMap,
@@ -12,7 +12,6 @@ use std::{
 
 use crate::{
     pty::{PendingPty, PtyHandle, SpawnConfig},
-    scrollback::{ScrollbackLine, ScrollbackStorage},
     TerminalError,
 };
 
@@ -115,7 +114,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-/// A terminal pane integrating PTY, vt100 parser, and scrollback.
+/// A terminal pane integrating PTY and vt100 parser.
 ///
 /// `pty` is wrapped in an `Arc` so that callers who only need to write input
 /// or query process state can hold a lock-free clone without contending with
@@ -126,7 +125,6 @@ pub struct Pane {
     id: String,
     pty: Arc<PtyHandle>,
     parser: vt100::Parser,
-    scrollback: ScrollbackStorage,
     status: PaneStatus,
     /// Direct child pid captured at spawn. Kept separately because the pid is
     /// no longer reliably readable from the handle once the child is reaped,
@@ -135,12 +133,6 @@ pub struct Pane {
     /// Exit receipt captured on the `Running` → exited transition, which
     /// happens exactly once per pane (Issue #3341).
     last_exit: Option<PaneExit>,
-    /// Accumulator for incomplete lines from raw PTY output. Holds raw bytes
-    /// (including SGR escape sequences) until a `\n` boundary is reached, then
-    /// the completed line is split off and pushed into `scrollback` with both
-    /// a plain-text rendering and the original byte stream so SGR formatting
-    /// can be replayed later (SPEC-1919 FR-003j).
-    line_buf: Vec<u8>,
     /// Stream position of the last PTY chunk folded into `parser`
     /// (Issue #4095), drawn from the process-wide [`NEXT_OUTPUT_SEQ`]. A
     /// snapshot taken at position `n` already contains every chunk of this
@@ -180,11 +172,9 @@ impl PendingPane {
             id: self.id,
             pty,
             parser: vt100::Parser::new(self.rows, self.cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT),
-            scrollback: ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY),
             status: PaneStatus::Running,
             child_pid,
             last_exit: None,
-            line_buf: Vec::new(),
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
         })
@@ -261,17 +251,14 @@ impl Pane {
         let pty = Arc::new(PtyHandle::spawn(config)?);
         let child_pid = pty.process_id();
         let parser = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-        let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);
 
         Ok(Self {
             id,
             pty,
             parser,
-            scrollback,
             status: PaneStatus::Running,
             child_pid,
             last_exit: None,
-            line_buf: Vec::new(),
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
         })
@@ -316,11 +303,13 @@ impl Pane {
         Arc::clone(&self.pty)
     }
 
-    /// Feed raw bytes from PTY output through the vt100 parser and scrollback.
+    /// Feed raw bytes from PTY output through the vt100 parser.
     ///
-    /// The vt100 parser is the single source of truth for terminal screen state.
-    /// Completed lines (delimited by `\n`) are also captured into the scrollback
-    /// ring buffer for history access.
+    /// The vt100 parser is the single source of truth for terminal screen
+    /// state, history included: its bounded scrollback is what
+    /// [`Self::snapshot_bytes`] replays. Nothing else retains output
+    /// (Issue #4234: a raw line store that no reader consumed used to grow
+    /// without bound on output that never reached a `\n`).
     pub fn process_bytes(&mut self, data: &[u8]) {
         // Update vt100 screen state
         self.parser.process(data);
@@ -336,22 +325,6 @@ impl Pane {
             // A string sequence this long is not one the PTY split; treat it
             // as abandoned rather than letting the tail grow unbounded.
             self.incomplete_escape_tail.clear();
-        }
-
-        // Capture raw bytes for scrollback. SGR escape sequences (CSI ... m)
-        // never contain `\n`, so byte-level newline splitting preserves both
-        // the visible text and the SGR formatting in `formatted`.
-        self.line_buf.extend_from_slice(data);
-
-        while let Some(pos) = self.line_buf.iter().position(|b| *b == b'\n') {
-            let raw: Vec<u8> = self.line_buf.drain(..pos).collect();
-            self.line_buf.drain(..1); // consume the '\n'
-            let text = String::from_utf8_lossy(&raw).into_owned();
-            self.scrollback.push_line(ScrollbackLine {
-                text,
-                formatted: raw,
-                wrapped: false,
-            });
         }
     }
 
@@ -391,16 +364,6 @@ impl Pane {
         snapshot
     }
 
-    /// Get scrollback lines from the ring buffer.
-    pub fn scrollback_lines(&self, start: usize, count: usize) -> Vec<&ScrollbackLine> {
-        self.scrollback.get_lines(start, count)
-    }
-
-    /// Total number of lines in scrollback.
-    pub fn scrollback_len(&self) -> usize {
-        self.scrollback.len()
-    }
-
     /// Get the current pane status.
     pub fn status(&self) -> &PaneStatus {
         &self.status
@@ -431,8 +394,8 @@ impl Pane {
                 self.last_exit = Some(exit);
                 // Issue #4142: the exited-transition is the last moment the
                 // master and writer descriptors mean anything. A pane kept on
-                // screen for recovery diagnostics renders from `parser` and
-                // `scrollback`, not from the PTY, so holding them only spends
+                // screen for recovery diagnostics renders from `parser`, not
+                // from the PTY, so holding them only spends
                 // the process-wide `RLIMIT_NOFILE` budget every other pane
                 // needs. The output thread's reader clone is separate and
                 // still drains to EOF.
@@ -566,8 +529,7 @@ mod tests {
     use crate::test_util::self_terminate_command;
     use crate::test_util::{
         answer_cursor_position_query, echo_command, exit_code_command, lock_pty_test,
-        read_until_contains, read_with_timeout, sleep_command, stdin_echo_command, success_command,
-        TestCommand,
+        read_until_contains, sleep_command, stdin_echo_command, success_command, TestCommand,
     };
 
     /// Collect the fields of every `gwt.process.summary` event emitted while
@@ -686,6 +648,65 @@ mod tests {
         .expect("Pane creation failed")
     }
 
+    /// Issue #4234 AC-2 / AC-4: a pane retains only its parsed screen. Output
+    /// that never reaches a `\n` boundary (alternate-screen redraws, CR-only
+    /// progress) used to accumulate byte for byte in a write-only line buffer
+    /// for the life of the pane.
+    #[test]
+    fn output_without_newlines_is_not_retained_by_the_pane() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-no-newline-retention", 3, sleep_command("60"));
+        // Warm the parser: the first chunks grow the vt100 grid and the
+        // escape-tail buffer, which are legitimately retained.
+        let progress = "\r\x1b[2Kprogress 12345 of 99999 ......".repeat(100);
+        pane.process_bytes(progress.as_bytes());
+
+        let before = crate::test_util::thread_live_heap_bytes();
+        let fed_bytes = progress.len() * 4096;
+        for _ in 0..4096 {
+            pane.process_bytes(progress.as_bytes());
+        }
+        let retained = crate::test_util::thread_live_heap_bytes() - before;
+
+        assert!(
+            retained < (fed_bytes / 64) as isize,
+            "pane retained {retained} bytes after {fed_bytes} bytes of newline-free output; \
+             the parsed screen is the only state a pane may keep"
+        );
+        let _ = pane.kill();
+    }
+
+    /// Issue #4234 AC-3 / AC-4: opening panes, streaming output through them
+    /// and dropping them returns the heap to where it started. The first pane
+    /// warms process-wide state (PTY runtime, thread-locals) and is excluded
+    /// from the baseline.
+    #[test]
+    fn panes_opened_and_closed_return_the_heap_to_baseline() {
+        let _pty_guard = lock_pty_test();
+        let line = format!("\x1b[32m{}\x1b[0m\r\n", "x".repeat(200));
+        let burst = line.repeat(64);
+        let stream_pane = |id: &str| {
+            let mut pane = test_pane_with_rows(id, 3, sleep_command("60"));
+            for _ in 0..512 {
+                pane.process_bytes(burst.as_bytes());
+            }
+            let _ = pane.kill();
+            drop(pane);
+        };
+        stream_pane("test-heap-baseline-warmup");
+
+        let baseline = crate::test_util::thread_live_heap_bytes();
+        for round in 0..3 {
+            stream_pane(&format!("test-heap-baseline-{round}"));
+        }
+        let retained = crate::test_util::thread_live_heap_bytes() - baseline;
+
+        assert!(
+            retained.abs() < 256 * 1024,
+            "heap drifted by {retained} bytes after opening and closing 3 panes"
+        );
+    }
+
     #[test]
     fn test_pane_creation() {
         let _pty_guard = lock_pty_test();
@@ -693,7 +714,6 @@ mod tests {
 
         assert_eq!(pane.id(), "test-1");
         assert_eq!(pane.status(), &PaneStatus::Running);
-        assert_eq!(pane.scrollback_len(), 0);
     }
 
     #[test]
@@ -1303,8 +1323,7 @@ mod tests {
 
         // Three rows plus 5,000 additional CRLF advances produce 5,001
         // historical rows. Parsed history must evict the first one at the
-        // snapshot replay boundary, while the legacy raw-line store retains
-        // all completed lines under its independent 10,000-line policy.
+        // snapshot replay boundary.
         for line in 1..=SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + 3 {
             pane.process_bytes(format!("line-{line:04}\r\n").as_bytes());
         }
@@ -1315,12 +1334,6 @@ mod tests {
             SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
             "Pane parsed history must be bounded at the snapshot replay limit"
         );
-        assert_eq!(
-            pane.scrollback_len(),
-            SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + 3,
-            "raw scrollback storage keeps its independent compatibility capacity"
-        );
-
         let mut replay = vt100::Parser::new(3, 80, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
         replay.process(&pane.snapshot_bytes());
         let replay_oldest = screen_at_oldest_scrollback(replay.screen());
@@ -1442,7 +1455,8 @@ mod tests {
         answer_cursor_position_query(pane.pty());
 
         let reader = pane.reader().expect("reader failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output =
+            read_until_contains(reader, Duration::from_secs(5), "vt100-test").expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("vt100-test"),

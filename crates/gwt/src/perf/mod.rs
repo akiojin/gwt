@@ -4,6 +4,7 @@ mod record;
 pub mod route;
 pub mod self_budget;
 pub mod smoothing;
+pub mod startup;
 mod store;
 pub mod summary;
 
@@ -20,7 +21,7 @@ pub use record::{PerfRecord, PerfStream, PerfUnit, PerfViolationDetails};
 pub use budget::PerfBudgets;
 pub use global::{
     install, install_appending_to_established_log_from_settings, install_from_settings,
-    is_installed, record_operation, record_route, RouteTimer,
+    is_installed, record_operation, record_route, record_route_phase, RoutePhaseClock, RouteTimer,
 };
 pub use route::PerfRoute;
 
@@ -81,6 +82,13 @@ impl PerfSink {
     pub fn append(&mut self, record: &PerfRecord) -> io::Result<()> {
         match self.store.as_mut() {
             Some(store) => store.append(record),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn append_budgeted(&mut self, record: &PerfRecord, budget: f64) -> io::Result<()> {
+        match self.store.as_mut() {
+            Some(store) => store.append_budgeted(record, budget),
             None => Ok(()),
         }
     }
