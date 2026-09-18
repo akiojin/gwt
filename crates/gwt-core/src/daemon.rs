@@ -601,7 +601,11 @@ pub fn persist_endpoint(path: &Path, endpoint: &DaemonEndpoint) -> Result<()> {
     ensure_dir(parent)?;
     let payload = serde_json::to_vec_pretty(endpoint)
         .map_err(|e| GwtError::Other(format!("serialize daemon endpoint failed: {e}")))?;
-    fs::write(path, payload)?;
+    // Issue #3911: a plain write leaves the descriptor existing but empty
+    // between create and fill, and the heal loop's readers check for the path
+    // before parsing it — that gap is what fails them with "EOF while parsing
+    // a value" on a loaded host.
+    crate::atomic_file::write_atomic(path, &payload)?;
     Ok(())
 }
 

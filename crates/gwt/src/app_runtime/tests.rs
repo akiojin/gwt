@@ -34810,6 +34810,11 @@ fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("auto-resume");
     run_git(
         &repo,
@@ -34833,8 +34838,13 @@ fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
         ("session-auto-one", "native-session-one"),
         ("session-auto-two", "native-session-two"),
     ] {
-        let mut session =
-            gwt_agent::Session::new(&worktree, "work/auto-resume", gwt_agent::AgentId::Codex);
+        let worktree = temp.path().join("worktrees").join(session_id);
+        let branch = format!("work/{session_id}");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
+        );
+        let mut session = gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = Some(native_session_id.to_string());
         session.restore_window_on_startup = true;
@@ -34868,7 +34878,7 @@ fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
         .count();
     assert_eq!(
         agent_windows, 2,
-        "all exact-resumable sessions for a worktree should restart"
+        "exact-resumable sessions in distinct worktrees should restart"
     );
 }
 
@@ -34887,6 +34897,11 @@ fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_ta
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("linked-resume");
     run_git(
         &repo,
@@ -34966,6 +34981,11 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("unclosed-resume");
     run_git(
         &repo,
@@ -35132,6 +35152,11 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("queued-auto-resume");
     run_git(
         &repo,
@@ -35468,6 +35493,11 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let protected_worktree = temp.path().join("worktrees").join("protected-restore");
     let protected_unknown_worktree = temp
         .path()
@@ -35917,6 +35947,11 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("open-project-resume");
     run_git(
         &repo,
@@ -36010,6 +36045,11 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("family-restore");
     run_git(
         &repo,
@@ -36076,7 +36116,13 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
             gwt_agent::AgentId::Codex,
         ),
     ] {
-        let mut session = gwt_agent::Session::new(&worktree, "work/family-restore", agent_id);
+        let worktree = temp.path().join("worktrees").join(session_id);
+        let branch = format!("work/{session_id}");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
+        );
+        let mut session = gwt_agent::Session::new(&worktree, &branch, agent_id);
         session.id = session_id.to_string();
         session.agent_session_id = Some(native_id.to_string());
         session.restore_window_on_startup = true;
@@ -36315,6 +36361,11 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("centered-stack");
     run_git(
         &repo,
@@ -36338,8 +36389,13 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
         .into_iter()
         .enumerate()
     {
-        let mut session =
-            gwt_agent::Session::new(&worktree, "work/centered-stack", gwt_agent::AgentId::Codex);
+        let worktree = temp.path().join("worktrees").join(native_session_id);
+        let branch = format!("work/{native_session_id}");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
+        );
+        let mut session = gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
         session.id = format!("session-centered-stack-{index}");
         session.agent_session_id = Some(native_session_id.to_string());
         session.restore_window_on_startup = true;
@@ -36393,6 +36449,11 @@ fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("restore-flag");
     run_git(
         &repo,
@@ -36706,6 +36767,11 @@ fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("legacy-restore");
     run_git(
         &repo,
@@ -36825,6 +36891,11 @@ fn app_runtime_bootstrap_auto_resumes_same_repo_worktree_session_from_restored_p
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("same-repo-session");
     run_git(
         &repo,
@@ -37058,6 +37129,11 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("auto-resume-guard");
     run_git(
         &repo,
@@ -37087,11 +37163,13 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
         ("session-stale", "native-stale", 60 * 60 * 48_i64),
     ];
     for (session_id, native_session_id, age_secs) in cases {
-        let mut session = gwt_agent::Session::new(
-            &worktree,
-            "work/auto-resume-guard",
-            gwt_agent::AgentId::Codex,
+        let worktree = temp.path().join("worktrees").join(session_id);
+        let branch = format!("work/{session_id}");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
         );
+        let mut session = gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = Some(native_session_id.to_string());
         session.restore_window_on_startup = true;
@@ -44803,6 +44881,14 @@ fn app_runtime_provider_quota_fallback_persists_the_reported_provider() {
                 issue_number: 42,
                 window_id: window_id.to_string(),
             }],
+            // Issue #4366: one refusal alone no longer forms a hold, so the
+            // reported provider is already held; the fallback must extend
+            // *that* provider's hold to the reported reset, never the saved
+            // profile's.
+            provider_quota_holds: std::collections::BTreeMap::from([(
+                "codex".to_string(),
+                "2099-08-21T00:00:00Z".to_string(),
+            )]),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
@@ -47476,11 +47562,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         done_tx.send(events).expect("return GUI events");
     });
 
-    let marker_deadline = Instant::now() + Duration::from_secs(2);
-    while !gh_marker.exists() && Instant::now() < marker_deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(gh_marker.exists(), "GUI reached the fake live fetch");
+    wait_for_path("GUI reached the fake live fetch", &gh_marker);
     assert!(
         done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
         "GUI writer must not complete while the transaction lock remains held"
@@ -51434,6 +51516,75 @@ fn app_runtime_issue_monitor_configure_profile_previews_the_pool_head_replacemen
     assert_eq!(
         saved_summary, previewed_summary,
         "the previewed summary must be the one the Monitor reports after the save"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_configure_profile_shows_the_saved_head_while_it_is_held() {
+    // Issue #4366 AC-6: a hold on the saved head's provider must not change
+    // what Agent Settings shows. The form used to open on the launch choice,
+    // which skips held providers — so it read as the fallback agent, and
+    // saving it unchanged replaced the operator's head with that fallback.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    // The saved head carries a non-default reasoning level, so the profile the
+    // form is filled from shows in what an unchanged save would write.
+    let mut saved_head = pool_profile("codex");
+    saved_head.model = Some("gpt-6-astra".to_string());
+    saved_head.reasoning = Some("high".to_string());
+    seeded.set_launch_profile_pool(vec![saved_head, pool_profile("claude")]);
+    seeded
+        .provider_quota_holds
+        .insert("codex".to_string(), "2099-01-01T00:00:00Z".to_string());
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed held pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    let impact = view
+        .issue_monitor_pool_impact
+        .as_ref()
+        .expect("Agent Settings previews its effect on the candidate pool");
+    assert_eq!(
+        impact.agent_id, "codex",
+        "the form opens on the saved head, not on the held fallback: {impact:?}"
+    );
+    assert_eq!(
+        impact.replaced_agent_id, None,
+        "saving the form unchanged must not switch the saved head to the fallback: {impact:?}"
+    );
+    // The agent picker follows the installed agents in this environment, so
+    // the profile the form was filled from shows in what the save would
+    // write: an unchanged save must leave the saved pool exactly as it is.
+    let saved_summary =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), seeded)
+            .status_view()
+            .launch_profile_summary;
+    assert_eq!(
+        impact.resulting_summary, saved_summary,
+        "the form must open on the saved head's own model and reasoning: {impact:?}"
     );
 }
 
@@ -57466,6 +57617,11 @@ fn planned_orphan_intake_path_is_not_queued_for_auto_resume_while_prune_is_block
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
 
     let planned_parent = temp.path().join("planned");
     let retained_parent = temp.path().join("retained");
@@ -62606,6 +62762,15 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     session.restore_window_on_startup = true;
     session.update_status(gwt_agent::AgentStatus::Stopped);
     session.save(&runtime.sessions_dir).expect("save session");
+    // Reopened #4143 AC-5/8: the exemption rests on the registration, not on
+    // the path. Sitting in the canonical PM worktree is not yet being the
+    // resident PM, so until the store names this Session the landed-branch
+    // gate refuses it like any other landed checkout.
+    assert_eq!(
+        runtime.restore_admission(&session, &repo, None),
+        Err(super::startup::RestoreRefusal::LandedWorktree),
+        "a canonical PM path alone does not authorize a landed restore"
+    );
     gwt::pm_registry::try_register_pm(
         &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
         pm_registration_fixture("session-own-pm", &own_pm_worktree),
@@ -71979,6 +72144,11 @@ fn app_runtime_startup_auto_resume_refuses_closed_issue_window_and_disables_rest
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("terminal-restore");
     run_git(
         &repo,
@@ -72554,6 +72724,10 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (worktree, mut runtime) = update_resume_fixture(temp.path(), "work/update-resume");
+    run_git(
+        &worktree,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let current_version = env!("CARGO_PKG_VERSION");
     let marker = update_resume_marker_for(&worktree, current_version);
     assert_eq!(
@@ -72860,6 +73034,297 @@ fn codex_managed_config_follows_path_codex_not_launch_target() {
 // used to persist an empty `Launch failed before PTY started.` pane into the
 // next generation.
 // ---------------------------------------------------------------------------
+
+/// Reopened #4143 AC-5/7/8: a landed branch must not spend a PTY even
+/// when diagnostic retention would keep its stopped placeholder.
+#[test]
+fn startup_restore_refuses_landed_worktree_before_launch() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let tab = restore_fixture_tab(
+        "tab-landed",
+        &repo,
+        &[("agent-landed".into(), "session-landed".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-landed"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-landed",
+        &repo,
+        Some("native-landed"),
+        Some(4143),
+    );
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        4143,
+        "session-landed",
+        "$gwt-execute #4143",
+        false,
+    )
+    .expect("materialize fixture Work");
+    assert!(matches!(
+        gwt::cli::execution_state::settle(
+            &repo,
+            "session-landed",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .expect("settle fixture Work"),
+        gwt::cli::execution_state::SettleResult::Settled(_)
+    ));
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+        runtime.startup_auto_resume_ready_events(canvas_bounds());
+    });
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    assert_eq!(
+        restore_admission_refusals(&logs)
+            .get("session-landed")
+            .map(String::as_str),
+        Some("landed_worktree")
+    );
+    let summary = restore_admission_summary(&logs);
+    assert_eq!(
+        summary.fields.get("suppressed").map(String::as_str),
+        Some("1")
+    );
+    assert!(summary
+        .fields
+        .get("reasons")
+        .unwrap()
+        .contains("landed_worktree=1"));
+    // An unlinked conversation has no terminal Work fact, but its landed
+    // checkout still must not restart automatically.
+    let mut unlinked = gwt_agent::Session::new(&repo, "work/landed", gwt_agent::AgentId::Codex);
+    unlinked.agent_session_id = Some("native-unlinked-landed".into());
+    assert_eq!(
+        runtime.restore_admission(&unlinked, &repo, None),
+        Err(super::startup::RestoreRefusal::LandedWorktree)
+    );
+}
+
+#[test]
+fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let mut tab = restore_fixture_tab(
+        "tab-landed",
+        &repo,
+        &[
+            ("empty".into(), "session-empty".into()),
+            ("diagnostic".into(), "session-diagnostic".into()),
+            ("error".into(), "session-error".into()),
+        ],
+    );
+    tab.workspace
+        .set_status("error", WindowProcessStatus::Error);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-landed"));
+    for id in ["session-empty", "session-diagnostic", "session-error"] {
+        save_restore_fixture_session(&runtime.sessions_dir, id, &repo, Some(id), None);
+    }
+    runtime.window_details.insert(
+        combined_window_id("tab-landed", "diagnostic"),
+        "The previous launch failed; inspect its diagnostic.".into(),
+    );
+
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    let windows = &runtime
+        .tab("tab-landed")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(
+        windows.len(),
+        2,
+        "only the empty landed placeholder disappears"
+    );
+    assert!(windows.iter().all(|window| window.id != "empty"));
+    assert_eq!(
+        windows
+            .iter()
+            .find(|window| window.id == "error")
+            .unwrap()
+            .status,
+        WindowProcessStatus::Error
+    );
+    let empty = gwt_agent::Session::load(&runtime.sessions_dir.join("session-empty.toml"))
+        .expect("load removed session");
+    assert!(!empty.restore_window_on_startup);
+    runtime.restore_open_project_windows("tab-landed");
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(runtime
+        .window_details
+        .contains_key(&combined_window_id("tab-landed", "diagnostic")));
+}
+
+#[test]
+fn open_project_empty_landed_cleanup_preserves_same_session_diagnostic_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = restore_fixture_tab(
+        "tab-landed",
+        &repo,
+        &[
+            ("diagnostic".into(), "session-shared".into()),
+            ("empty".into(), "session-shared".into()),
+        ],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-landed"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-shared",
+        &repo,
+        Some("native-shared"),
+        None,
+    );
+    runtime.window_details.insert(
+        combined_window_id("tab-landed", "diagnostic"),
+        "Retained failure details".into(),
+    );
+    runtime.restore_open_project_windows("tab-landed");
+    let windows = &runtime
+        .tab("tab-landed")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(windows.len(), 1);
+    assert_eq!(
+        windows[0].id, "diagnostic",
+        "remove the exact empty window, not another window sharing its Session"
+    );
+}
+
+#[test]
+fn startup_restore_queues_only_one_session_per_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let tab = restore_fixture_tab(
+        "tab-duplicate",
+        &repo,
+        &[
+            ("agent-a".into(), "session-a".into()),
+            ("agent-b".into(), "session-b".into()),
+        ],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-duplicate"));
+    for id in ["session-a", "session-b"] {
+        save_restore_fixture_session(&runtime.sessions_dir, id, &repo, Some(id), None);
+    }
+    let logs = capture_tracing_events(|| {
+        runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    });
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    assert!(restore_admission_refusals(&logs)
+        .values()
+        .any(|reason| reason == "worktree_already_restoring"));
+    // Opening the same project while startup restore is queued must not
+    // start a second process for that worktree.
+    runtime.restore_open_project_windows("tab-duplicate");
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+}
+
+#[test]
+fn restore_admits_worktree_with_unlanded_commits() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    run_git(&repo, &["commit", "--allow-empty", "-m", "unlanded work"]);
+    let runtime = sample_runtime(temp.path(), vec![], None);
+    let mut session = gwt_agent::Session::new(&repo, "work/live", gwt_agent::AgentId::Codex);
+    session.agent_session_id = Some("native-live".into());
+    assert_eq!(runtime.restore_admission(&session, &repo, None), Ok(()));
+}
+
+#[test]
+fn restore_closed_diagnostic_keeps_placeholder_without_spawning() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let tab = restore_fixture_tab(
+        "tab-closed",
+        &repo,
+        &[("agent-closed".into(), "session-closed".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-closed"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-closed",
+        &repo,
+        Some("native-closed"),
+        Some(4143),
+    );
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            merged_issues: vec![4143],
+            ..Default::default()
+        },
+    )
+    .expect("merged owner");
+    let path = runtime.sessions_dir.join("session-closed.toml");
+    let mut session = gwt_agent::Session::load(&path).unwrap();
+    session.status = gwt_agent::AgentStatus::Interrupted;
+    session.save(&runtime.sessions_dir).unwrap();
+    assert_eq!(
+        runtime.restore_admission(&session, &repo, Some("tab-closed::agent-closed")),
+        Err(super::startup::RestoreRefusal::ClosedWorkDiagnostic)
+    );
+    runtime.restore_open_project_windows("tab-closed");
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+}
+
+#[test]
+fn restore_pending_worktree_reservation_ends_when_window_closes() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let tab = restore_fixture_tab(
+        "tab-pending",
+        &repo,
+        &[("agent-pending".into(), "session-pending".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-pending"));
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-pending",
+        &repo,
+        Some("native-pending"),
+        None,
+    );
+    let session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-pending.toml")).unwrap();
+    let window = combined_window_id("tab-pending", "agent-pending");
+    runtime
+        .pending_auto_resume_sources
+        .insert(window.clone(), session.id.clone());
+    assert_eq!(
+        runtime.restore_admission(&session, &repo, None),
+        Err(super::startup::RestoreRefusal::WorktreeAlreadyRestoring)
+    );
+    runtime.close_window_after_issue_monitor_finalize_events(&window);
+    assert_eq!(runtime.restore_admission(&session, &repo, None), Ok(()));
+}
 
 fn restore_fixture_tab(
     tab_id: &str,
@@ -74012,8 +74477,15 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-scale"));
     for (session_id, native_id, linked_issue) in &fixtures {
-        let mut session =
-            gwt_agent::Session::new(&worktree, "work/restore-scale", gwt_agent::AgentId::Codex);
+        // Each live Work owns its own worktree. Reopened AC-6 intentionally
+        // refuses multiple conversations that target the same worktree.
+        let session_worktree = temp.path().join(session_id);
+        fs::create_dir_all(&session_worktree).expect("session worktree");
+        let mut session = gwt_agent::Session::new(
+            &session_worktree,
+            "work/restore-scale",
+            gwt_agent::AgentId::Codex,
+        );
         session.id = session_id.clone();
         session.agent_session_id = native_id.clone();
         session.linked_issue_number = *linked_issue;
@@ -74095,6 +74567,11 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    // Restore remains eligible only while this checkout has unlanded work.
+    run_git(
+        &repo,
+        &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
+    );
     let worktree = temp.path().join("worktrees").join("restore-failure");
     run_git(
         &repo,
@@ -74131,8 +74608,13 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
     };
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-failure"));
     for session_id in session_ids {
-        let mut session =
-            gwt_agent::Session::new(&worktree, "work/restore-failure", gwt_agent::AgentId::Codex);
+        let worktree = temp.path().join("worktrees").join(session_id);
+        let branch = format!("work/{session_id}");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
+        );
+        let mut session = gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = Some(format!("native-{session_id}"));
         session.restore_window_on_startup = true;

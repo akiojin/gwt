@@ -177,6 +177,47 @@ test("Issue Monitor panel presents and clears the quota-hold provider and reset"
   assert.match(quotaHoldText, /Reset 2026-09-04T09:30:00Z/i);
 });
 
+// Issue #4366 AC-6 / AC-6b: a hold never rewrites the saved settings line; the
+// launch target and its reason render on their own line, and only while held.
+test("Issue Monitor keeps the saved agent settings and shows the held fallback separately", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const settings = body.querySelector(".knowledge-monitor-settings-copy");
+  const effective = body.querySelector(".knowledge-monitor-effective-copy");
+  assert.ok(effective, "the effective launch line has its own element");
+  const saved = {
+    enabled: true,
+    state: "active",
+    queue_len: 1,
+    active_count: 1,
+    max_active_agents: 1,
+    launch_profile_source: "saved",
+    launch_profile_summary: "codex / gpt-5 / high",
+  };
+
+  surface.applyIssueMonitorStatus({
+    ...saved,
+    effective_launch_profile: {
+      index: 1,
+      agent_id: "claude",
+      summary: "claude / opus / high",
+      reason: "codex held until 2026-09-21T08:41:00Z; re-verification launch at 2026-09-15T10:00:00Z",
+    },
+  });
+
+  assert.equal(settings.textContent, "Agent settings Saved: codex / gpt-5 / high");
+  assert.equal(effective.hidden, false);
+  assert.match(effective.textContent, /^Launching with claude \/ opus \/ high/);
+  assert.match(effective.textContent, /codex held until 2026-09-21T08:41:00Z/);
+  assert.match(effective.textContent, /re-verification launch at 2026-09-15T10:00:00Z/);
+
+  surface.applyIssueMonitorStatus(saved);
+
+  assert.equal(settings.textContent, "Agent settings Saved: codex / gpt-5 / high");
+  assert.equal(effective.hidden, true);
+  assert.equal(effective.textContent, "");
+});
+
 test("Issue Monitor renders the JSON gui_status contract and follows updated limits", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
