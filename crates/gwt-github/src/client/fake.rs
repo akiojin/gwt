@@ -695,6 +695,48 @@ impl IssueClient for FakeIssueClient {
         Ok(snapshot)
     }
 
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        self.take_issue_patch_fault()
+            .map_err(OwnerMutationError::PreSubmit)?;
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "add_labels", &number.to_string());
+        let issue = state
+            .issues
+            .get_mut(&number)
+            .ok_or(OwnerMutationError::PreSubmit(ApiError::NotFound(number)))?;
+        for label in labels {
+            if !issue.labels.contains(label) {
+                issue.labels.push(label.clone());
+            }
+        }
+        issue.updated_at = self.tick();
+        Ok(())
+    }
+
+    fn remove_label_mutation(&self, number: IssueNumber, label: &str) -> OwnerMutationResult<()> {
+        self.take_issue_patch_fault()
+            .map_err(OwnerMutationError::PreSubmit)?;
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "remove_label", &number.to_string());
+        let issue = state
+            .issues
+            .get_mut(&number)
+            .ok_or(OwnerMutationError::PreSubmit(ApiError::NotFound(number)))?;
+        issue.labels.retain(|existing| existing != label);
+        issue.updated_at = self.tick();
+        Ok(())
+    }
+
     fn set_labels(
         &self,
         number: IssueNumber,

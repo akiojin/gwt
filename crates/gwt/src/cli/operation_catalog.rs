@@ -242,6 +242,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "issue.label",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.linked_prs",
         aliases: &["issue.linked-prs"],
     },

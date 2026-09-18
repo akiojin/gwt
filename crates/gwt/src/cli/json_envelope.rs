@@ -7,8 +7,8 @@ use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 use super::{
     memory::MemoryAddCommand, perf::PerfCommand, workflow::WorkflowBypassMode, ActionsCommand,
     CliCommand, CliEnv, CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand,
-    IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
-    SkillStateAction, WorkflowCommand, WorkspaceCommand,
+    IndexCommand, IndexScope, IssueCommand, IssueLabelAction, MemoryCommand, PaneCommand,
+    PrCommand, SearchCommand, SkillStateAction, WorkflowCommand, WorkspaceCommand,
 };
 use super::{verification_lease::VerificationLeaseCommand, BoardCommand, BoardPostCommand};
 
@@ -365,6 +365,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .map(|_| optional_string_vec(params, "labels"))
                 .transpose()?,
         }),
+        "issue.label" => issue_label(params)?,
         "issue.close" => CliCommand::Issue(IssueCommand::Close {
             number: required_u64(params, "number")?,
             reason: issue_close_reason(params)?,
@@ -1052,6 +1053,49 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         command,
         declared_block,
     })
+}
+
+fn issue_label(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(
+        params,
+        &[
+            "number",
+            "action",
+            "labels",
+            "confirm_queue",
+            "confirm_design_gate",
+            "confirm_auto_merge",
+        ],
+        "issue.label",
+    )?;
+    let action = match required_string(params, "action")?.as_str() {
+        "add" => IssueLabelAction::Add,
+        "remove" => IssueLabelAction::Remove,
+        _ => {
+            return Err(CliParseError::InvalidValue {
+                flag: "action",
+                reason: "expected add or remove",
+            })
+        }
+    };
+    let labels = optional_string_vec(params, "labels")?;
+    if labels.is_empty() {
+        return Err(CliParseError::MissingFlag("labels"));
+    }
+    if matches!(action, IssueLabelAction::Remove) && labels.len() != 1 {
+        return Err(CliParseError::InvalidValue {
+            flag: "labels",
+            reason: "remove accepts exactly one label",
+        });
+    }
+    Ok(CliCommand::Issue(IssueCommand::Label {
+        number: required_u64(params, "number")?,
+        action,
+        labels,
+        confirm_queue: optional_bool(params, "confirm_queue")?.unwrap_or(false),
+        confirm_design_gate: optional_bool(params, "confirm_design_gate")?.unwrap_or(false),
+        confirm_auto_merge: optional_bool(params, "confirm_auto_merge")?.unwrap_or(false),
+    }))
 }
 
 fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -4143,6 +4187,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn issue_label_accepts_directional_params_and_rejects_invalid_shapes() {
+        for action in ["add", "remove"] {
+            assert!(matches!(
+                ok(
+                    "issue.label",
+                    json!({"number":7,"action":action,"labels":["bug"]})
+                ),
+                CliCommand::Issue(_)
+            ));
+        }
+        for params in [
+            json!({"number":7,"action":"remove","labels":["bug","hold"]}),
+            json!({"number":7,"action":"add","labels":[]}),
+            json!({"number":7,"action":"replace","labels":["bug"]}),
+            json!({"number":7,"action":"add","labels":["bug"],"confirm_auto_merge":"true"}),
+        ] {
+            let _ = err("issue.label", params);
+        }
     }
 
     /// SPEC #4249 FR-001: `issue.close` / `issue.reopen` need only `number`;
