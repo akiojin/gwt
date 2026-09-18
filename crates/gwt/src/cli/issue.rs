@@ -6,12 +6,13 @@ use std::{
 
 use gwt_github::{
     cache::{write_atomic, CacheGeneration, ValidatedCacheEntry, ValidationReceiptRenewal},
-    client::ApiError,
+    client::{ApiError, OwnerMutationError, OwnerMutationResult},
     Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError,
 };
 
 use crate::cli::{
-    CliEnv, CliParseError, IssueCommand, IssueMonitorPriorityPosition, LinkedPrSummary,
+    CliEnv, CliParseError, IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition,
+    LinkedPrSummary,
 };
 
 fn io_as_api_error(err: io::Error) -> SpecOpsError {
@@ -162,6 +163,23 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::Reopen { number, comment } => {
             run_issue_set_state(env, number, IssueState::Open, None, comment, out)?
         }
+        IssueCommand::Label {
+            number,
+            action,
+            labels,
+            confirm_queue,
+            confirm_design_gate,
+            confirm_auto_merge,
+        } => run_issue_label(
+            env,
+            number,
+            action,
+            labels,
+            confirm_queue,
+            confirm_design_gate,
+            confirm_auto_merge,
+            out,
+        )?,
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
@@ -3219,6 +3237,268 @@ pub(super) fn issue_state_label(state: IssueState) -> &'static str {
     }
 }
 
+fn lifecycle_state_label(state: IssueState) -> &'static str {
+    match state {
+        IssueState::Open => "open",
+        IssueState::Closed => "closed",
+    }
+}
+
+fn lifecycle_current(snapshot: &IssueSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "state": lifecycle_state_label(snapshot.state),
+        "labels": snapshot.labels,
+        "updated_at": snapshot.updated_at.0,
+    })
+}
+
+fn write_lifecycle_noop(out: &mut String, operation: &str, snapshot: &IssueSnapshot) -> i32 {
+    out.push_str(
+        &serde_json::json!({
+            "operation": operation,
+            "number": snapshot.number.0,
+            "status": "ok",
+            "changed": false,
+            "mutation_submitted": false,
+            "retry_performed": false,
+            "current": lifecycle_current(snapshot),
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    0
+}
+
+fn write_lifecycle_refusal(
+    out: &mut String,
+    operation: &str,
+    number: u64,
+    reason: &str,
+    required_operation: Option<&str>,
+    details: serde_json::Value,
+) -> i32 {
+    out.push_str(
+        &serde_json::json!({
+            "operation": operation,
+            "number": number,
+            "status": "refused",
+            "changed": false,
+            "mutation_submitted": false,
+            "reason": reason,
+            "required_operation": required_operation,
+            "details": details,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    1
+}
+
+fn submit_and_verify_issue_lifecycle<E, M, P>(
+    env: &mut E,
+    operation: &str,
+    number: u64,
+    expected: serde_json::Value,
+    mutation: M,
+    target_matches: P,
+    out: &mut String,
+) -> Result<i32, SpecOpsError>
+where
+    E: CliEnv,
+    M: FnOnce(&E::Client) -> OwnerMutationResult<()>,
+    P: FnOnce(&IssueSnapshot) -> bool,
+{
+    let submission_error = match mutation(env.client()) {
+        Ok(()) => None,
+        Err(OwnerMutationError::PreSubmit(error)) => return Err(error.into()),
+        Err(OwnerMutationError::RemoteOutcomeUnknown(error)) => Some(error.to_string()),
+    };
+
+    let current = match refresh_issue_cache(env, IssueNumber(number)) {
+        Ok(entry) => entry.snapshot,
+        Err(error) => {
+            out.push_str(
+                &serde_json::json!({
+                    "operation": operation,
+                    "number": number,
+                    "status": "remote_outcome_unknown",
+                    "changed": serde_json::Value::Null,
+                    "mutation_submitted": true,
+                    "retry_performed": false,
+                    "expected": expected,
+                    "current": serde_json::Value::Null,
+                    "readback_error": error.to_string(),
+                    "submission_error": submission_error,
+                })
+                .to_string(),
+            );
+            out.push('\n');
+            return Ok(1);
+        }
+    };
+
+    if target_matches(&current) {
+        super::intake_outcome::auto_record_issue_operation(
+            env.repo_path(),
+            operation,
+            super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+            number,
+        );
+        out.push_str(
+            &serde_json::json!({
+                "operation": operation,
+                "number": number,
+                "status": "ok",
+                "changed": true,
+                "mutation_submitted": true,
+                "retry_performed": false,
+                "reconciled_after_transport_error": submission_error.is_some(),
+                "current": lifecycle_current(&current),
+            })
+            .to_string(),
+        );
+        out.push('\n');
+        return Ok(0);
+    }
+
+    out.push_str(
+        &serde_json::json!({
+            "operation": operation,
+            "number": number,
+            "status": "remote_outcome_unknown",
+            "changed": serde_json::Value::Null,
+            "mutation_submitted": true,
+            "retry_performed": false,
+            "expected": expected,
+            "current": lifecycle_current(&current),
+            "submission_error": submission_error,
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    Ok(1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_issue_label<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    action: IssueLabelAction,
+    labels: Vec<String>,
+    confirm_queue: bool,
+    confirm_design_gate: bool,
+    confirm_auto_merge: bool,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let issue = IssueNumber(number);
+    let current = refresh_issue_cache(env, issue)?.snapshot;
+    let effective = match action {
+        IssueLabelAction::Add => {
+            let mut effective = Vec::<String>::new();
+            for label in labels {
+                if !current
+                    .labels
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&label))
+                    && !effective
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(&label))
+                {
+                    effective.push(label);
+                }
+            }
+            effective
+        }
+        IssueLabelAction::Remove => current
+            .labels
+            .iter()
+            .find(|existing| existing.eq_ignore_ascii_case(&labels[0]))
+            .cloned()
+            .into_iter()
+            .collect(),
+    };
+    if effective.is_empty() {
+        return Ok(write_lifecycle_noop(out, "issue.label", &current));
+    }
+
+    let dangerous_confirmation = match action {
+        IssueLabelAction::Remove if effective[0].eq_ignore_ascii_case("hold") && !confirm_queue => {
+            Some("confirm_queue")
+        }
+        IssueLabelAction::Remove
+            if effective[0].eq_ignore_ascii_case("gwt-spec") && !confirm_design_gate =>
+        {
+            Some("confirm_design_gate")
+        }
+        IssueLabelAction::Add
+            if effective
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case("auto-merge"))
+                && !confirm_auto_merge =>
+        {
+            Some("confirm_auto_merge")
+        }
+        _ => None,
+    };
+    if let Some(required_confirmation) = dangerous_confirmation {
+        return Ok(write_lifecycle_refusal(
+            out,
+            "issue.label",
+            number,
+            "the requested label direction changes an execution safety boundary",
+            None,
+            serde_json::json!({ "required_confirmation": required_confirmation }),
+        ));
+    }
+    if matches!(action, IssueLabelAction::Add)
+        && effective
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("auto-merge"))
+    {
+        let mut post_labels = current.labels.clone();
+        post_labels.extend(effective.iter().cloned());
+        guard_autonomous_acceptance_block(&post_labels, &current.body)?;
+    }
+
+    let expected_labels = effective.clone();
+    match action {
+        IssueLabelAction::Add => submit_and_verify_issue_lifecycle(
+            env,
+            "issue.label",
+            number,
+            serde_json::json!({ "action": "add", "labels": expected_labels }),
+            |client| client.add_labels_mutation(issue, &effective),
+            move |snapshot| {
+                expected_labels.iter().all(|expected| {
+                    snapshot
+                        .labels
+                        .iter()
+                        .any(|actual| actual.eq_ignore_ascii_case(expected))
+                })
+            },
+            out,
+        ),
+        IssueLabelAction::Remove => {
+            let server_spelling = effective[0].clone();
+            let expected_absent = server_spelling.clone();
+            submit_and_verify_issue_lifecycle(
+                env,
+                "issue.label",
+                number,
+                serde_json::json!({ "action": "remove", "labels": expected_labels }),
+                |client| client.remove_label_mutation(issue, &server_spelling),
+                move |snapshot| {
+                    !snapshot
+                        .labels
+                        .iter()
+                        .any(|actual| actual.eq_ignore_ascii_case(&expected_absent))
+                },
+                out,
+            )
+        }
+    }
+}
+
 /// Issue #3865: update a plain Issue's title / body / labels in place.
 ///
 /// Only the supplied fields are sent. A body update on a `gwt-spec` Issue is
@@ -3242,12 +3522,42 @@ fn run_issue_edit<E: CliEnv>(
         ));
     }
     let issue = IssueNumber(number);
-    let current = load_or_refresh_issue(env, issue, true)?;
+    let current = refresh_issue_cache(env, issue)?;
     // Issue #4392: a body whose SPEC structure cannot be parsed is not
     // section-managed, and issue.spec.edit refuses it; replacing the body
     // here is its repair path.
     let section_managed = current.spec_parse_error.is_none();
     let current = current.snapshot;
+    if let Some(requested) = labels.as_ref() {
+        let contains =
+            |set: &[String], name: &str| set.iter().any(|label| label.eq_ignore_ascii_case(name));
+        let removed_hold = contains(&current.labels, "hold") && !contains(requested, "hold");
+        let removed_spec =
+            contains(&current.labels, "gwt-spec") && !contains(requested, "gwt-spec");
+        let added_auto_merge =
+            !contains(&current.labels, "auto-merge") && contains(requested, "auto-merge");
+        if removed_hold || removed_spec || added_auto_merge {
+            let mut confirmations = Vec::new();
+            if removed_hold {
+                confirmations.push("confirm_queue");
+            }
+            if removed_spec {
+                confirmations.push("confirm_design_gate");
+            }
+            if added_auto_merge {
+                confirmations.push("confirm_auto_merge");
+            }
+            return Ok(write_issue_edit_refusal(
+                out,
+                number,
+                &format!(
+                    "protected lifecycle labels must be changed with issue.label and explicit {}",
+                    confirmations.join(" / ")
+                ),
+            ));
+        }
+    }
+
     if body.is_some()
         && section_managed
         && current
@@ -4715,11 +5025,13 @@ mod tests {
         let (_tmp2, mut plain) = seeded_edit_env(&["bug"]);
         let labelled = run(
             &mut plain,
-            IssueCommand::Edit {
+            IssueCommand::Label {
                 number: 7,
-                title: None,
-                body: None,
-                labels: Some(vec!["bug".to_string(), "auto-merge".to_string()]),
+                action: IssueLabelAction::Add,
+                labels: vec!["auto-merge".to_string()],
+                confirm_queue: false,
+                confirm_design_gate: false,
+                confirm_auto_merge: true,
             },
             &mut out,
         )
@@ -4743,6 +5055,199 @@ mod tests {
         .expect("compliant body is accepted");
         assert_eq!(code, 0, "{out}");
         assert!(fetched(&env, 7).body.contains("AC-1"));
+    }
+
+    fn lifecycle_mutation_calls(env: &crate::cli::TestEnv) -> Vec<String> {
+        env.client
+            .call_log()
+            .into_iter()
+            .filter(|call| call.starts_with("add_labels:") || call.starts_with("remove_label:"))
+            .collect()
+    }
+
+    #[test]
+    fn issue_label_dangerous_directions_are_confirmed_and_deltas_preserve_others() {
+        for (action, label, confirmation) in [
+            (IssueLabelAction::Remove, "HOLD", "confirm_queue"),
+            (IssueLabelAction::Remove, "GWT-SPEC", "confirm_design_gate"),
+            (IssueLabelAction::Add, "AUTO-MERGE", "confirm_auto_merge"),
+        ] {
+            let (_tmp, mut env) = seeded_edit_env(&["hold", "gwt-spec", "bug"]);
+            let mut snapshot = fetched(&env, 7);
+            snapshot.body = "## 受け入れ基準\n- [ ] AC-1: cargo test is GREEN\n".into();
+            env.client.seed(snapshot);
+            for confirmed in [false, true] {
+                let mut out = String::new();
+                let code = run(
+                    &mut env,
+                    IssueCommand::Label {
+                        number: 7,
+                        action,
+                        labels: vec![label.into()],
+                        confirm_queue: confirmed && confirmation == "confirm_queue",
+                        confirm_design_gate: confirmed && confirmation == "confirm_design_gate",
+                        confirm_auto_merge: confirmed && confirmation == "confirm_auto_merge",
+                    },
+                    &mut out,
+                )
+                .expect("label policy produces a structured result");
+                assert_eq!(code, if confirmed { 0 } else { 1 }, "{out}");
+                assert_eq!(lifecycle_mutation_calls(&env).len(), usize::from(confirmed));
+                if !confirmed {
+                    assert!(out.contains(confirmation), "{out}");
+                }
+            }
+            let mut expected = vec!["hold", "gwt-spec", "bug"];
+            match action {
+                IssueLabelAction::Remove => {
+                    expected.retain(|value| !value.eq_ignore_ascii_case(label));
+                }
+                IssueLabelAction::Add => expected.push(label),
+            }
+            assert_eq!(fetched(&env, 7).labels, expected);
+        }
+    }
+
+    #[test]
+    fn issue_label_noop_precedes_dangerous_confirmation() {
+        let (_tmp, mut env) = seeded_edit_env(&["auto-merge", "bug"]);
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Label {
+                number: 7,
+                action: IssueLabelAction::Add,
+                labels: vec!["AUTO-MERGE".to_string()],
+                confirm_queue: false,
+                confirm_design_gate: false,
+                confirm_auto_merge: false,
+            },
+            &mut out,
+        )
+        .expect("already-present label is a no-op");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains(r#""changed":false"#), "{out}");
+        assert!(lifecycle_mutation_calls(&env).is_empty());
+    }
+
+    #[test]
+    fn issue_edit_label_guard_never_uses_throttled_stale_cache() {
+        let (tmp, mut env) = seeded_edit_env(&["bug"]);
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        refresh_issue_cache(&mut env, IssueNumber(7)).expect("cache old labels");
+        env.client
+            .set_labels(IssueNumber(7), &["bug".into(), "hold".into()])
+            .expect("remote receives hold after caching");
+        let now = chrono::Utc::now();
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".into(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(600),
+            },
+            now,
+        );
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::Edit {
+                number: 7,
+                title: None,
+                body: None,
+                labels: Some(vec!["bug".into()]),
+            },
+            &mut out,
+        )
+        .expect("structured refusal");
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("confirm_queue"), "{out}");
+        assert_eq!(fetched(&env, 7).labels, vec!["bug", "hold"]);
+        assert!(!env
+            .client
+            .call_log()
+            .iter()
+            .any(|call| call.starts_with("patch_issue_fields:")));
+    }
+
+    #[test]
+    fn issue_label_readback_reports_response_loss_and_competing_removal_without_retry() {
+        for competing_removal in [false, true] {
+            let (tmp, mut env) = seeded_edit_env(&["bug"]);
+            let mut out = String::new();
+            let code = submit_and_verify_issue_lifecycle(
+                &mut env,
+                "issue.label",
+                7,
+                serde_json::json!({"action":"add","labels":["review"]}),
+                |client| {
+                    client.add_labels_mutation(IssueNumber(7), &["review".into()])?;
+                    if competing_removal {
+                        // Model an independent writer removing the label before readback.
+                        client.set_labels(IssueNumber(7), &["bug".into()]).unwrap();
+                    }
+                    Err(OwnerMutationError::RemoteOutcomeUnknown(ApiError::Network(
+                        "response lost".into(),
+                    )))
+                },
+                |snapshot| snapshot.labels.iter().any(|label| label == "review"),
+                &mut out,
+            )
+            .unwrap();
+            let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(code, i32::from(competing_removal), "{out}");
+            if competing_removal {
+                assert_eq!(result["status"], "remote_outcome_unknown");
+                assert!(result["changed"].is_null());
+            } else {
+                assert_eq!(result["changed"], true);
+                assert_eq!(result["reconciled_after_transport_error"], true);
+            }
+            assert_eq!(result["retry_performed"], false);
+            assert_eq!(lifecycle_mutation_calls(&env).len(), 1);
+            assert_eq!(
+                env.client
+                    .call_log()
+                    .iter()
+                    .filter(|call| call.starts_with("fetch:"))
+                    .count(),
+                1
+            );
+            let cached = Cache::new(tmp.path().to_path_buf())
+                .load_entry(IssueNumber(7))
+                .unwrap();
+            assert_eq!(lifecycle_current(&cached.snapshot), result["current"]);
+        }
+    }
+
+    #[test]
+    fn issue_edit_cannot_bypass_label_safety_confirmations() {
+        for (current, requested, confirmation) in [
+            (vec!["HoLd", "bug"], vec!["bug"], "confirm_queue"),
+            (vec!["gwt-spec", "bug"], vec!["bug"], "confirm_design_gate"),
+            (vec!["bug"], vec!["bug", "AUTO-MERGE"], "confirm_auto_merge"),
+        ] {
+            let (_tmp, mut env) = seeded_edit_env(&current);
+            let mut out = String::new();
+            let code = run(
+                &mut env,
+                IssueCommand::Edit {
+                    number: 7,
+                    title: None,
+                    body: None,
+                    labels: Some(requested.iter().map(|label| label.to_string()).collect()),
+                },
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(code, 1, "{out}");
+            assert!(out.contains(confirmation), "{out}");
+            assert!(!env
+                .client
+                .call_log()
+                .iter()
+                .any(|call| call.starts_with("patch_") || call.starts_with("set_labels")));
+        }
     }
 
     #[test]

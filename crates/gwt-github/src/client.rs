@@ -302,6 +302,24 @@ pub trait IssueClient: Send + Sync {
     fn set_labels(&self, number: IssueNumber, labels: &[String])
         -> Result<IssueSnapshot, ApiError>;
 
+    /// Add labels without replacing unrelated labels. Never automatically retry.
+    fn add_labels_mutation(
+        &self,
+        _number: IssueNumber,
+        _labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "add labels unsupported".into(),
+        )))
+    }
+
+    /// Remove one label without replacing unrelated labels. Never automatically retry.
+    fn remove_label_mutation(&self, _number: IssueNumber, _label: &str) -> OwnerMutationResult<()> {
+        Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "remove label unsupported".into(),
+        )))
+    }
+
     /// Move an Issue between open and closed. `reason` is the GitHub
     /// `state_reason` and is only meaningful when closing (SPEC #4249 FR-001).
     fn set_state(

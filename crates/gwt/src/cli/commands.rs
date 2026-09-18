@@ -4,6 +4,12 @@ pub enum IssueMonitorPriorityPosition {
     Index(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueLabelAction {
+    Add,
+    Remove,
+}
+
 /// SPEC-1942 command model for `issue.*` and `issue.spec.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCommand {
@@ -122,6 +128,14 @@ pub enum IssueCommand {
     Reopen {
         number: u64,
         comment: Option<String>,
+    },
+    Label {
+        number: u64,
+        action: IssueLabelAction,
+        labels: Vec<String>,
+        confirm_queue: bool,
+        confirm_design_gate: bool,
+        confirm_auto_merge: bool,
     },
     Comment {
         number: u64,

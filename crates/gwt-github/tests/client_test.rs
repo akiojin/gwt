@@ -289,3 +289,22 @@ fn red_47_delete_unknown_comment_errors() {
     let err = c.delete_comment(CommentId(99_999)).unwrap_err();
     assert!(matches!(err, ApiError::CommentNotFound(CommentId(99_999))));
 }
+
+#[test]
+fn directional_labels_preserve_unrelated_labels_and_issue_state() {
+    let client = FakeIssueClient::new();
+    let seeded = seed_simple(&client, 42, "title", "body");
+    client
+        .add_labels_mutation(IssueNumber(42), &["new".into(), "gwt-spec".into()])
+        .unwrap();
+    client
+        .remove_label_mutation(IssueNumber(42), "phase/review")
+        .unwrap();
+    let FetchResult::Updated(issue) = client.fetch(IssueNumber(42), None).unwrap() else {
+        panic!("expected updated")
+    };
+    assert_eq!(issue.labels, ["gwt-spec", "new"]);
+    assert_eq!(issue.state, seeded.state);
+    assert_eq!(issue.title, seeded.title);
+    assert_eq!(issue.body, seeded.body);
+}

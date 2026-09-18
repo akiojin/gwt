@@ -140,6 +140,26 @@ impl IssueClient for LazyIssueClient {
         self.resolve()?.set_state(number, state, reason)
     }
 
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .add_labels_mutation(number, labels)
+    }
+
+    fn remove_label_mutation(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .remove_label_mutation(number, label)
+    }
+
     fn list_spec_issues(
         &self,
         filter: &SpecListFilter,
