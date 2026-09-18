@@ -1453,7 +1453,8 @@ impl AppRuntime {
         if let Some(branch) = work_item_branch.as_deref() {
             let agent_sessions = self
                 .session_ledger_cache
-                .borrow_mut()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .load(&self.sessions_dir);
             let project_repo_hash = gwt_core::repo_hash::detect_repo_hash(&project_root);
             let registry = crate::workspace_session_registry::branch_session_registry(
@@ -1924,7 +1925,11 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         let base_branch_name = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
-        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        // Issue #4366 AC-6: the settings form shows what the operator saved.
+        // The launch choice skips held providers, and pre-filling from it made
+        // a hold look like the saved agent had changed — and saving the form
+        // unchanged wrote the fallback over the head.
+        let previous_profiles = self.issue_monitor_saved_head_profiles(&project_root);
         let pool = self.issue_monitor_saved_pool(&project_root);
         let quick_start_root = project_root;
         let quick_start_entries = Vec::new();
@@ -1994,6 +1999,23 @@ impl AppRuntime {
             .profiles
     }
 
+    /// Issue #4366 AC-6: the saved pool head exactly as saved. Unlike the
+    /// launch choice this never skips a held provider, because it is what the
+    /// Agent Settings form shows and writes back.
+    pub(super) fn issue_monitor_saved_head_profiles(
+        &self,
+        project_root: &Path,
+    ) -> gwt::LaunchWizardPreviousProfiles {
+        match self
+            .issue_monitor_saved_pool(project_root)
+            .into_iter()
+            .next()
+        {
+            Some(head) => gwt::LaunchWizardPreviousProfiles::from_profile(Some(head.into())),
+            None => self.issue_monitor_previous_profiles(project_root),
+        }
+    }
+
     /// Issue #4079 AC-2: the saved candidate pool, read once when the Agent
     /// Settings form opens so the wizard can preview the save's effect on it.
     pub(super) fn issue_monitor_saved_pool(
@@ -2025,7 +2047,9 @@ impl AppRuntime {
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let selection = gwt::select_launch_profile(
                     &pool,
-                    &prefs.provider_quota_holds,
+                    // Issue #4366 AC-4: a held provider due its
+                    // re-verification is selectable for that one launch.
+                    &prefs.launch_admission_provider_quota_holds(&now),
                     &[],
                     prefs.launch_usage_threshold_percent,
                     &[],
@@ -2116,6 +2140,18 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
+        // Issue #4378 AC-2: hold deliveries until the startup generation
+        // reaper reports back, so a launch never races a stale generation.
+        if let Some(deferred) = self.deferred_issue_monitor_launches.as_mut() {
+            deferred.push(super::DeferredIssueMonitorLaunch {
+                project_root: project_root.to_path_buf(),
+                issue_number,
+                linked_issue_kind,
+                delivery_id,
+                launch_session_strategy,
+            });
+            return Vec::new();
+        }
         let mut recovery_events = Vec::new();
         if let Some(delivery_id) = delivery_id.as_deref() {
             match self
@@ -3556,6 +3592,7 @@ impl AppRuntime {
             }
             // Issue #3934: a dead Host leaves no fenced proof to carry.
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead
+            | gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
             | gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => None,
         };
         let fingerprint = manual_holder_fingerprint(owner, &predecessor, local_runtime_incarnation);
@@ -3603,6 +3640,12 @@ impl AppRuntime {
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::HostDead => {
                 Ok(super::ManualLaunchGenerationDisposition::Unknown(
                     "The holder's Hosts are all gone but left no runtime exit proof".to_string(),
+                ))
+            }
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited => {
+                Ok(super::ManualLaunchGenerationDisposition::Unknown(
+                    "The holder's PTY process has exited. The next Issue Monitor scan releases its generation; retry after that scan."
+                        .to_string(),
                 ))
             }
             gwt::cli::execution_state::ExactSessionRuntimeDisposition::Unknown => {

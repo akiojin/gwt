@@ -88,6 +88,86 @@ fn work_items_cache_reuses_unchanged_file_and_reparses_on_change() {
 }
 
 #[test]
+fn issue_3777_work_items_cache_evicts_a_closed_project_projection() {
+    let _guard = lock_test_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(&project_root);
+
+    let now = chrono::Utc::now();
+    let mut projection = super::WorkItemsProjection::empty(now);
+    projection.apply_event(sample_work_event("work-3777-evict", now));
+    super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save works.json");
+
+    let mut cache = super::WorkItemsCache::new();
+    let (loaded, _) = cache
+        .load_or_synthesize_shared(&project_root)
+        .expect("load cached projection");
+    let retained = std::sync::Arc::downgrade(&loaded);
+    drop(loaded);
+    assert!(
+        retained.upgrade().is_some(),
+        "the cache owns the parsed projection before project close"
+    );
+
+    assert!(cache.evict(&project_root));
+    assert!(
+        retained.upgrade().is_none(),
+        "eviction must release the parsed projection owned only by the cache"
+    );
+    assert!(
+        !cache.evict(&project_root),
+        "evicting an already-absent project is a no-op"
+    );
+}
+
+#[test]
+fn issue_3777_work_items_cache_does_not_attach_a_newer_signature_to_an_older_projection() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap();
+    record_workspace_work_event(&repo, sample_work_event("work-a", now))
+        .expect("seed projection A");
+
+    let writer_repo = repo.clone();
+    set_after_profiled_work_items_load(move || {
+        record_workspace_work_event(
+            &writer_repo,
+            sample_work_event("work-b", now + chrono::Duration::seconds(1)),
+        )
+        .expect("writer publishes projection B after reader releases the project lock");
+    });
+
+    let mut cache = WorkItemsCache::new();
+    let (first, first_profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("reader returns projection A");
+    assert!(!first_profile.cache_hit);
+    assert_eq!(first.work_items.len(), 1, "first reader owns projection A");
+
+    let (second, second_profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("next reader observes projection B");
+    assert!(
+        !second_profile.cache_hit,
+        "projection A must not be cached with projection B's file signature"
+    );
+    assert_eq!(
+        second.work_items.len(),
+        2,
+        "a cache miss must reload the writer's projection B"
+    );
+}
+
+#[test]
 fn work_items_loader_classifies_malformed_and_incompatible_json() {
     let temp = tempfile::tempdir().expect("tempdir");
     let malformed_path = temp.path().join("malformed.json");
@@ -658,6 +738,45 @@ fn work_items_cache_never_caches_synthesized_fallback() {
         )
         .expect("post-create load");
     assert_eq!(loaded.work_items.len(), 1);
+}
+
+#[test]
+fn issue_3777_profiled_cache_materializes_legacy_only_project_before_first_projection() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let _home = ScopedHome::set(&home);
+
+    let legacy_current = legacy_workspace_projection_path_for_repo_path(&repo);
+    let legacy_works = legacy_workspace_work_items_path_for_repo_path(&repo);
+    let canonical_current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let canonical_works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 1, 0, 0).unwrap();
+    let current = WorkspaceProjection::default_for_project(&repo);
+    let mut works = WorkItemsProjection::empty(now);
+    works.apply_event(sample_work_event("work-legacy-first-projection", now));
+    save_workspace_projection_to_path(&legacy_current, &current).expect("seed legacy current");
+    save_workspace_work_items_projection_to_path(&legacy_works, &works).expect("seed legacy works");
+    assert!(!canonical_current.exists());
+    assert!(!canonical_works.exists());
+
+    let mut cache = WorkItemsCache::new();
+    let (loaded, profile) = cache
+        .load_or_synthesize_shared(&repo)
+        .expect("first profiled load");
+
+    assert!(!profile.cache_hit);
+    assert!(loaded
+        .work_items
+        .iter()
+        .any(|item| item.id == "work-legacy-first-projection"));
+    assert!(canonical_current.is_file());
+    assert!(canonical_works.is_file());
+    assert!(load_workspace_projection_from_path(&canonical_current)
+        .expect("canonical current load")
+        .is_some());
 }
 
 #[test]
@@ -6052,6 +6171,121 @@ fn exact_terminal_confirmation_accepts_repaired_identity_and_unrelated_legacy_cl
         fs::read(&close_path).expect("read preserved pre-repair close payload"),
         close_before
     );
+}
+
+#[test]
+fn session_bound_update_copies_matching_current_pr_metadata() {
+    assert_session_bound_pr_metadata("matching", true, true, false, true);
+}
+
+#[test]
+fn session_bound_update_does_not_copy_foreign_container_pr_metadata() {
+    assert_session_bound_pr_metadata("foreign-branch", false, true, false, false);
+    assert_session_bound_pr_metadata("foreign-path", true, false, false, false);
+}
+
+#[test]
+fn session_bound_update_preserves_existing_pr_metadata_without_current_metadata() {
+    assert_session_bound_pr_metadata("existing", true, true, true, false);
+}
+
+fn assert_session_bound_pr_metadata(
+    label: &str,
+    same_branch: bool,
+    same_path: bool,
+    existing_metadata: bool,
+    expect_copy: bool,
+) {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current");
+    current.git_details = Some(GitDetails {
+        branch: Some(if same_branch {
+            T812_TARGET_BRANCH.to_string()
+        } else {
+            "work/foreign-pr".to_string()
+        }),
+        worktree_path: Some(if same_path {
+            fixture.target.worktree_identity.clone()
+        } else {
+            temp.path().join("foreign-worktree")
+        }),
+        base_branch: None,
+        pr_number: (!existing_metadata).then_some(3697),
+        pr_url: (!existing_metadata)
+            .then(|| "https://github.com/akiojin/gwt/pull/3697".to_string()),
+        pr_state: (!existing_metadata).then(|| "OPEN".to_string()),
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: Utc::now(),
+    });
+    save_workspace_projection_to_path(&fixture.current_path, &current).expect("save PR details");
+    if existing_metadata {
+        let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+            .expect("load target")
+            .expect("target");
+        let container = &mut work_items.work_items[0].execution_containers[0];
+        container.pr_number = Some(3697);
+        container.pr_url = Some("https://github.com/akiojin/gwt/pull/3697".to_string());
+        container.pr_state = Some("OPEN".to_string());
+        save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+            .expect("save existing PR metadata");
+    }
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: None,
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: Some("PR status checked".to_string()),
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("session-bound update");
+
+    let work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load updated Work")
+        .expect("updated Work");
+    let item = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work");
+    let event = item.events.last().expect("update event");
+    assert_eq!(event.kind, WorkEventKind::Update);
+    let expected = expect_copy || existing_metadata;
+    for container in [
+        event.execution_container.as_ref().expect("event container"),
+        &item.execution_containers[0],
+    ] {
+        assert_eq!(container.branch.as_deref(), Some(T812_TARGET_BRANCH));
+        assert_eq!(
+            container.worktree_path.as_deref(),
+            Some(fixture.target.worktree_identity.as_path())
+        );
+        assert_eq!(container.pr_number, expected.then_some(3697), "{label}");
+        assert_eq!(
+            container.pr_url.as_deref(),
+            expected.then_some("https://github.com/akiojin/gwt/pull/3697"),
+            "{label}"
+        );
+        assert_eq!(
+            container.pr_state.as_deref(),
+            expected.then_some("OPEN"),
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -13018,4 +13252,108 @@ fn session_bound_board_store_rejects_reassignment_then_update_authority_escalati
         after == before,
         "rejected in-closure reassignment must preserve current/work/event/journal bytes"
     );
+}
+
+#[test]
+fn issue_3777_runtime_hook_shared_cache_hit_does_not_deep_clone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let current_path = tmp.path().join("current.json");
+    let journal_path = tmp.path().join("journal.jsonl");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let now = chrono::Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    projection.apply_event(sample_work_event("work-3777", now));
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save works.json");
+    let mut cache = WorkItemsCache::new();
+
+    let (first, first_profile) = cache
+        .load_or_synthesize_shared_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            &project_root,
+        )
+        .expect("first shared load");
+    let (second, second_profile) = cache
+        .load_or_synthesize_shared_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            &project_root,
+        )
+        .expect("second shared load");
+
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    assert!(!first_profile.cache_hit);
+    assert!(second_profile.cache_hit);
+}
+
+#[test]
+fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4504),
+        pr_url: Some("https://github.com/example/repo/pull/4504".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut start = WorkEvent::new(WorkEventKind::Start, "delivery-work", now);
+    start.owner = Some("Issue #42".into());
+    start.agent_session_id = Some("delivery-session".into());
+    let mut original = container.clone();
+    original.pr_number = None;
+    original.pr_url = None;
+    original.pr_state = None;
+    start.execution_container = Some(original);
+    projection.apply_event(start);
+    projection.apply_event(WorkEvent::new(WorkEventKind::Done, "delivery-work", now));
+    let mut history = projection.work_items[0].clone();
+    history.id = "removed-worktree".into();
+    history.agents.clear();
+    history.execution_containers[0].worktree_path = Some(tmp.path().join("removed"));
+    projection.work_items.push(history);
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let write = |owner: &str, session: &str| {
+        record_workspace_pr_metadata_for_execution_at(&works, &events, owner, session, &container)
+    };
+    assert!(write("Issue #99", "delivery-session").is_err());
+    assert!(write("Issue #42", "foreign-session").is_err());
+    write("Issue #42", "delivery-session").unwrap();
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = saved
+        .work_items
+        .iter()
+        .find(|item| item.id == "delivery-work")
+        .unwrap();
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+    assert_eq!(item.execution_containers, vec![container.clone()]);
+    assert_eq!(item.events.last().unwrap().kind, WorkEventKind::Pr);
+    assert_eq!(
+        item.events.last().unwrap().execution_container.as_ref(),
+        Some(&container)
+    );
+    assert!(gwt_work_event_shard_path(&events, &item.events.last().unwrap().id).is_file());
+    write("Issue #42", "delivery-session").unwrap();
+    assert_eq!(
+        load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    let mut ambiguous = saved.clone();
+    let mut duplicate = item.clone();
+    duplicate.id = "duplicate-delivery-work".into();
+    ambiguous.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
+    assert!(write("Issue #42", "delivery-session").is_err());
 }

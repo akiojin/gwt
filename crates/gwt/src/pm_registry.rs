@@ -45,17 +45,32 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
      output only if nothing changed and no open PR is CI-RED, CONFLICTED, or escalation_due.";
 
-/// Issue #3776 / SPEC-3431 FR-148: compact reminder shared by the delta
-/// wake, periodic wake, and Stop-gate continuation. The generated gwt-pm
-/// guidance owns the detailed timeout, retry, readback, and lifecycle rules;
-/// this clause only prevents injected prompts from silently restoring direct
-/// long-running execution.
+/// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
+/// and subscribe-ordering reminder for the Stop-gate continuation. The
+/// generated gwt-pm guidance owns the full retry, readback, and lifecycle
+/// rules; this clause keeps every injected prompt aligned on the five-second,
+/// nonblocking path. The two PTY wake prompts carry
+/// [`PM_GWTD_EXECUTION_WAKE_CLAUSE`] instead, for the byte reason documented
+/// there.
 pub const PM_GWTD_EXECUTION_CLAUSE: &str =
     "Keep the PM turn responsive: run only short read-only gwtd operations directly with the \
-     contract's 10-second outer deadline. Delegate `daemon.subscribe`, batch mutations, repeated \
-     `pane.read`, and every long-running or hang-risk operation to exactly one background task or \
-     in-session sub-agent; collect the result only from its task-completion notification, and \
-     never duplicate an operation while it is pending.";
+     contract's 5-second outer deadline. Launch `daemon.subscribe` only as one background task \
+     with `params.timeout_seconds:5`; do not wait for it, and immediately reconcile a fresh \
+     `issue.monitor.status` snapshot. Delegate batch mutations, repeated `pane.read`, and every \
+     long-running or hang-risk operation to exactly one background task or in-session sub-agent; \
+     collect the result only from its task-completion notification, and never duplicate an \
+     operation while it is pending.";
+
+/// Issue #3825 AC-1 / AC-4: the same execution budget for the two PTY wake
+/// prompts. Kept terse on purpose — those prompts must stay under the
+/// 1024-byte PTY canonical queue (#3868), and the wake text already orders the
+/// fresh `issue.monitor.status` reconcile that the full clause spells out, so
+/// only the per-call ceiling and the "never wait on the subscribe" rule need
+/// repeating here.
+pub const PM_GWTD_EXECUTION_WAKE_CLAUSE: &str =
+    "Keep the turn responsive: run gwtd reads directly only within the contract's 5-second outer \
+     deadline; start `daemon.subscribe` with `params.timeout_seconds:5` as a background task and \
+     do not wait for it.";
 
 /// Issue #3767 AC-1〜AC-3: compact steering obligation shared by the delta
 /// wake, the periodic wake, the Stop-gate continuation, and the PM's
@@ -154,6 +169,10 @@ pub fn pm_agent_is_supported(agent_id: &str) -> bool {
 /// Project-scoped PM settings that survive deregistration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmSettings {
+    /// Explicit project-relative policy files copied into gwt-owned PM guidance.
+    /// Mere presence of a repository instruction file never opts it in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_policy_files: Vec<PathBuf>,
     /// FR-002: opt-out flag. Missing field must read as `true` so prefs
     /// written before this field existed keep auto-starting.
     #[serde(default = "default_auto_start")]
@@ -161,8 +180,10 @@ pub struct PmSettings {
     /// FR-026: absent until the user chooses; see [`PmSettings::launch_profile_or_default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<PmLaunchProfile>,
-    /// SPEC-3431 FR-132: resident-loop cycle interval in seconds. Both the
-    /// Stop-gate floor and the subscribe timeout the PM is told to use.
+    /// SPEC-3431 FR-132 / Issue #3825: resident-loop cycle interval in
+    /// seconds. This is the scheduling cadence and the Stop-gate floor only;
+    /// it is never an operation timeout, because a cadence that becomes
+    /// foreground waiting time makes the PM unresponsive to the user.
     /// Missing values default to 60s and effective values are at least 10s.
     #[serde(default = "default_loop_interval_secs")]
     pub loop_interval_secs: u64,
@@ -237,6 +258,7 @@ impl PmLaunchProfile {
 impl Default for PmSettings {
     fn default() -> Self {
         Self {
+            project_policy_files: Vec::new(),
             auto_start: true,
             launch_profile: None,
             loop_interval_secs: default_loop_interval_secs(),
@@ -354,6 +376,8 @@ pub fn pm_delivery_prompt_sha256(prompt: &str) -> String {
     format!("{:x}", Sha256::digest(prompt.as_bytes()))
 }
 
+const PM_DELIVERY_SOURCE: &str = "[gwt PM delivery — not an owner message] ";
+
 pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Result<String> {
     if uuid::Uuid::parse_str(operation_id)
         .ok()
@@ -368,7 +392,7 @@ pub fn protected_pm_delivery_prompt(operation_id: &str, body: &str) -> io::Resul
     }
     let body_sha256 = pm_delivery_prompt_sha256(body);
     Ok(format!(
-        "{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"
+        "{PM_DELIVERY_SOURCE}{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"
     ))
 }
 
@@ -384,7 +408,10 @@ pub fn parse_protected_pm_delivery_prompt(prompt: &str) -> Option<(String, Strin
         .ok()
         .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
         || !is_canonical_sha256(body_sha256)
-        || pm_delivery_prompt_sha256(body) != body_sha256
+        || (pm_delivery_prompt_sha256(body) != body_sha256
+            && body
+                .strip_prefix(PM_DELIVERY_SOURCE)
+                .is_none_or(|body| pm_delivery_prompt_sha256(body) != body_sha256))
     {
         return None;
     }
@@ -634,9 +661,117 @@ pub fn finish_pm_delivery_receipt(
     })
 }
 
+/// Env var carrying the resident PM session's scratch directory into its pane.
+///
+/// Both PM launch paths write it next to `suppress_execution_control` — the
+/// fresh launch in `app_runtime::pm::pm_launch_config` and the restore path in
+/// `app_runtime::launch` — so its presence is coextensive with "this pane is
+/// the resident PM, and therefore owns no Execution Control Record". Issue
+/// #4442 reads it as that marker, exactly as
+/// [`crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV`] marks a review
+/// dispatch window, which is why no launch-path change was needed there.
+pub const GWT_PM_SCRATCH_DIR_ENV: &str = "GWT_PM_SCRATCH_DIR";
+
+/// Pure reader for [`GWT_PM_SCRATCH_DIR_ENV`]: only a non-empty value marks a
+/// PM session, so an empty or whitespace-only value fails closed onto the
+/// ordinary producing-session gates.
+pub fn pm_session_from_env<F>(read: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    read(GWT_PM_SCRATCH_DIR_ENV).is_some_and(|value| !value.trim().is_empty())
+}
+
+/// [`pm_session_from_env`] against the process environment.
+pub fn pm_session_active() -> bool {
+    pm_session_from_env(|name| std::env::var(name).ok())
+}
+
+/// Issue #4442: does this session get the PM's exemption from the Agent
+/// Workspace identity gate?
+///
+/// The resident PM pane is launched with `suppress_execution_control`, so it
+/// owns no Execution Control Record and its authority never leaves
+/// `Inspection`. Both routes to an identity are refused structurally:
+/// `workspace.update` at the execution-binding bridge
+/// (`execution_binding_mismatch`), and `workspace.ensure` earlier still, at the
+/// prerequisite probe — passing `purpose` and `current_focus` does not help,
+/// because the probe fails on the missing binding, not on the arguments.
+/// Demanding the title first would deny Bash, Write, Edit and every `pr.*` /
+/// `board.post` envelope for the whole life of the window, including the
+/// `execution.blocked` the window would need in order to declare that it was
+/// stuck. This is the same trap Issue #3984 removed for review dispatch; the PM
+/// half of it was simply never done.
+///
+/// The absence of an Execution Control Record is required alongside the marker:
+/// a session that holds one can satisfy the gate, so a stale or inherited
+/// marker must never lift it.
+#[must_use]
+pub fn pm_identity_exempt_session(
+    pm_marker_present: bool,
+    execution_control_present: bool,
+) -> bool {
+    pm_marker_present && !execution_control_present
+}
+
+/// [`pm_identity_exempt_session`] against the process environment and the
+/// worktree's trusted store.
+#[must_use]
+pub fn pm_identity_exempt_session_for_worktree(worktree: &Path) -> bool {
+    pm_identity_exempt_session(
+        pm_session_active(),
+        crate::cli::trusted_store::under_trusted_management(worktree),
+    )
+}
+
 /// Canonical worktree for the project's resident PM session.
 pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
+}
+
+/// Instruction discovery directory, separate from the PM's project checkout.
+pub fn pm_runtime_dir_for_pm_worktree(worktree: &Path) -> Option<PathBuf> {
+    is_canonical_pm_worktree(worktree)
+        .then(|| worktree.parent().map(|pm| pm.join("runtime")))
+        .flatten()
+}
+
+/// Create only the runtime node beneath an existing, real PM project store.
+pub fn ensure_pm_runtime_dir_for_pm_worktree(worktree: &Path) -> io::Result<PathBuf> {
+    let runtime = pm_runtime_dir_for_pm_worktree(worktree).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "not a canonical PM worktree")
+    })?;
+    require_pm_runtime_parents(worktree)?;
+    ensure_real_pm_scratch_directory(&runtime, "PM runtime directory")?;
+    Ok(runtime)
+}
+
+fn require_pm_runtime_parents(worktree: &Path) -> io::Result<()> {
+    let pm = worktree
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "PM worktree has no parent"))?;
+    let project = pm.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "PM directory has no project")
+    })?;
+    require_real_pm_scratch_directory(project, "project directory")?;
+    require_real_pm_scratch_directory(pm, "PM directory")?;
+    require_real_pm_scratch_directory(worktree, "PM worktree")
+}
+
+/// Recover project identity from the actual runtime cwd, never from ambient
+/// project environment variables. This changes path resolution, not Session
+/// authority; callers still enforce their existing capability/Session gates.
+pub fn pm_worktree_for_runtime_dir(runtime: &Path) -> Option<PathBuf> {
+    if runtime.file_name()? != std::ffi::OsStr::new("runtime") {
+        return None;
+    }
+    let worktree = runtime.parent()?.join("worktree");
+    if !is_canonical_pm_worktree(&worktree) {
+        return None;
+    }
+    require_pm_runtime_parents(&worktree).ok()?;
+    require_real_pm_scratch_directory(runtime, "PM runtime directory").ok()?;
+    Some(worktree)
 }
 
 /// Project-state directory for PM-authored scratch notes.
@@ -2270,7 +2405,14 @@ pub fn migrate_legacy_pm_scratch_preserving_project_content(worktree: &Path) -> 
     Ok(migrated)
 }
 
-pub const PM_WORKTREE_BASE_REF: &str = "origin/develop";
+/// Resident branch the PM worktree is checked out on (Issue #4448).
+///
+/// The PM worktree used to run detached, so a refresh could repoint HEAD past
+/// the PM's own commits as soon as they were pushed — pushing made them
+/// reachable from `--remotes` and therefore invisible to the detached-only
+/// guard. A branch makes the protection structural: a refresh may only
+/// fast-forward it, so it can gain commits but never lose them.
+pub const PM_WORKTREE_BRANCH: &str = "pm/resident";
 
 /// Result of one serialized PM worktree refresh attempt. A degraded outcome
 /// remains launchable only when a usable worktree was materialized or
@@ -2326,7 +2468,7 @@ fn git_sha(repo: &Path, revision: &str) -> io::Result<Option<String>> {
     Ok((!sha.is_empty()).then_some(sha))
 }
 
-fn detached_worktree_head_sha(worktree: &Path) -> io::Result<Option<String>> {
+fn pm_worktree_head_sha(worktree: &Path) -> io::Result<Option<String>> {
     let dot_git = worktree.join(".git");
     let metadata = match fs::symlink_metadata(&dot_git) {
         Ok(metadata) => metadata,
@@ -2380,21 +2522,61 @@ fn detached_worktree_head_sha(worktree: &Path) -> io::Result<Option<String>> {
     ))
 }
 
-fn fetch_pm_worktree_base(git_root: &Path) -> io::Result<()> {
+fn resolve_pm_worktree_base(git_root: &Path) -> io::Result<String> {
+    let cached = gwt_core::process::run_git_logged(
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+        Some(git_root),
+    )?;
+    if cached.status.success() {
+        if let Some(branch) = String::from_utf8_lossy(&cached.stdout)
+            .trim()
+            .strip_prefix("refs/remotes/origin/")
+            .filter(|branch| !branch.is_empty())
+        {
+            let base_ref = format!("origin/{branch}");
+            if git_sha(git_root, &base_ref)?.is_some() {
+                return Ok(base_ref);
+            }
+        }
+    }
+    let remote = gwt_core::process::run_git_logged(
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        Some(git_root),
+    )?;
+    if !remote.status.success() {
+        return Err(io::Error::other(format!(
+            "resolve PM remote default branch: {}",
+            String::from_utf8_lossy(&remote.stderr).trim()
+        )));
+    }
+    for line in String::from_utf8_lossy(&remote.stdout).lines() {
+        if let Some(branch) = line
+            .strip_prefix("ref: refs/heads/")
+            .and_then(|line| line.strip_suffix("\tHEAD"))
+            .filter(|branch| !branch.is_empty())
+        {
+            return Ok(format!("origin/{branch}"));
+        }
+    }
+    Err(io::Error::other(
+        "origin does not advertise a default branch",
+    ))
+}
+
+fn fetch_pm_worktree_base(git_root: &Path, base_ref: &str) -> io::Result<()> {
+    let branch = base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| io::Error::other(format!("PM base {base_ref} is not a remote branch")))?;
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
     let output = gwt_core::process::run_git_logged(
-        &[
-            "fetch",
-            "origin",
-            "--prune",
-            "+refs/heads/develop:refs/remotes/origin/develop",
-        ],
+        &["fetch", "origin", "--prune", &refspec],
         Some(git_root),
     )?;
     if output.status.success() {
         Ok(())
     } else {
         Err(io::Error::other(format!(
-            "fetch PM base {PM_WORKTREE_BASE_REF}: {}",
+            "fetch PM base {base_ref}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
@@ -2416,12 +2598,13 @@ fn git_behind(repo: &Path, head: Option<&str>, target: Option<&str>) -> Option<u
 fn pm_refresh_failure(
     git_root: &Path,
     worktree: &Path,
+    base_ref: &str,
     target_sha: Option<String>,
     target_observation: PmWorktreeTargetObservation,
     stage: PmWorktreeRefreshFailureStage,
     reason: impl Into<String>,
 ) -> PmWorktreeFreshness {
-    let head_sha = detached_worktree_head_sha(worktree).ok().flatten();
+    let head_sha = pm_worktree_head_sha(worktree).ok().flatten();
     let behind = git_behind(git_root, head_sha.as_deref(), target_sha.as_deref());
     let state = match (&head_sha, &target_sha) {
         (Some(head), Some(target)) if head != target => PmWorktreeFreshnessState::Stale,
@@ -2429,7 +2612,7 @@ fn pm_refresh_failure(
     };
     PmWorktreeFreshness {
         state,
-        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        base_ref: base_ref.to_owned(),
         head_sha,
         target_sha,
         behind,
@@ -2451,6 +2634,23 @@ fn persist_pm_worktree_freshness(
     Ok(())
 }
 
+fn last_pm_worktree_base_ref(project_dir: &Path) -> String {
+    load_pm_prefs(&project_dir.join("project-state/pm.json"))
+        .ok()
+        .and_then(|prefs| prefs.worktree_freshness)
+        .map(|freshness| freshness.base_ref)
+        .unwrap_or_default()
+}
+
+fn pm_base_sha_observation(git_root: &Path, base_ref: &str) -> (Option<String>, Option<String>) {
+    // Local HEAD is a startup fallback, not evidence of a remote target.
+    if base_ref == "HEAD" || base_ref.is_empty() {
+        (None, None)
+    } else {
+        git_sha_observation(git_root, base_ref)
+    }
+}
+
 fn persist_unknown_pm_worktree_failure(
     project_dir: &Path,
     worktree: &Path,
@@ -2459,8 +2659,8 @@ fn persist_unknown_pm_worktree_failure(
 ) -> io::Result<PmWorktreeFreshness> {
     let freshness = PmWorktreeFreshness {
         state: PmWorktreeFreshnessState::Unknown,
-        base_ref: PM_WORKTREE_BASE_REF.to_string(),
-        head_sha: detached_worktree_head_sha(worktree).ok().flatten(),
+        base_ref: last_pm_worktree_base_ref(project_dir),
+        head_sha: pm_worktree_head_sha(worktree).ok().flatten(),
         target_sha: None,
         behind: None,
         target_observation: PmWorktreeTargetObservation::Unavailable,
@@ -2479,7 +2679,7 @@ fn persist_untrusted_pm_worktree_failure(
 ) -> io::Result<PmWorktreeFreshness> {
     let freshness = PmWorktreeFreshness {
         state: PmWorktreeFreshnessState::Unknown,
-        base_ref: PM_WORKTREE_BASE_REF.to_string(),
+        base_ref: last_pm_worktree_base_ref(project_dir),
         head_sha: None,
         target_sha: None,
         behind: None,
@@ -2502,7 +2702,7 @@ fn append_pm_worktree_refresh_failure_reason(
             .worktree_freshness
             .get_or_insert_with(|| PmWorktreeFreshness {
                 state: PmWorktreeFreshnessState::Unknown,
-                base_ref: PM_WORKTREE_BASE_REF.to_string(),
+                base_ref: String::new(),
                 head_sha: None,
                 target_sha: None,
                 behind: None,
@@ -2838,6 +3038,7 @@ fn finish_degraded_pm_refresh(
         let asset_failure = pm_refresh_failure(
             git_root,
             worktree,
+            &freshness.base_ref,
             freshness.target_sha.clone(),
             freshness.target_observation,
             PmWorktreeRefreshFailureStage::ManagedAssets,
@@ -3123,6 +3324,88 @@ fn tracked_pm_work_diagnosis(worktree: &Path) -> String {
     format!("PM worktree has tracked or index changes; {groups}")
 }
 
+/// Decide whether the existing PM worktree may be advanced to `target_sha`,
+/// adopting a still-detached worktree onto the resident branch on the way
+/// (Issue #4448). `None` means a fast-forward loses nothing; `Some` carries the
+/// degradation to report instead of moving HEAD.
+fn pm_resident_branch_advance_failure(
+    manager: &gwt_git::WorktreeManager,
+    worktree: &Path,
+    target_sha: &str,
+    base_ref: &str,
+) -> Option<(PmWorktreeRefreshFailureStage, String)> {
+    use gwt_git::worktree::{ResidentBranchAdoption, ResidentBranchAdvanceSafety};
+
+    // At most one adoption: a worktree still detached afterwards is a
+    // Git-level surprise, not something to retry.
+    for attempt in 0..2 {
+        let safety = match manager.resident_branch_advance_safety(
+            worktree,
+            PM_WORKTREE_BRANCH,
+            target_sha,
+        ) {
+            Ok(safety) => safety,
+            Err(error) => {
+                return Some((PmWorktreeRefreshFailureStage::Inspect, error.to_string()));
+            }
+        };
+        match safety {
+            ResidentBranchAdvanceSafety::Ready => return None,
+            ResidentBranchAdvanceSafety::TrackedOrIndexChanges => {
+                return Some((
+                    PmWorktreeRefreshFailureStage::LocalWork,
+                    tracked_pm_work_diagnosis(worktree),
+                ));
+            }
+            ResidentBranchAdvanceSafety::LocalCommits { head } => {
+                return Some((
+                    PmWorktreeRefreshFailureStage::LocalWork,
+                    format!(
+                        "PM worktree branch {PM_WORKTREE_BRANCH} holds commit {head}, which \
+                         {base_ref} does not contain; refresh keeps it instead of \
+                         rewinding the branch"
+                    ),
+                ));
+            }
+            ResidentBranchAdvanceSafety::ForeignBranch { branch } => {
+                return Some((
+                    PmWorktreeRefreshFailureStage::Inspect,
+                    format!(
+                        "PM worktree HEAD is on {branch}, not the resident branch \
+                         {PM_WORKTREE_BRANCH}"
+                    ),
+                ));
+            }
+            ResidentBranchAdvanceSafety::DetachedHead if attempt > 0 => break,
+            ResidentBranchAdvanceSafety::DetachedHead => {
+                match manager.adopt_resident_branch(worktree, PM_WORKTREE_BRANCH) {
+                    Ok(ResidentBranchAdoption::Adopted) => {}
+                    Ok(ResidentBranchAdoption::RefusedBranchAhead { branch_head }) => {
+                        return Some((
+                            PmWorktreeRefreshFailureStage::LocalWork,
+                            format!(
+                                "PM worktree branch {PM_WORKTREE_BRANCH} holds commit \
+                                 {branch_head}, which the detached HEAD does not contain; refresh \
+                                 keeps both instead of rewinding the branch"
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Some((
+                            PmWorktreeRefreshFailureStage::Repoint,
+                            format!("adopting the resident PM branch failed: {error}"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Some((
+        PmWorktreeRefreshFailureStage::Repoint,
+        format!("PM worktree is still detached after adopting {PM_WORKTREE_BRANCH}"),
+    ))
+}
+
 fn repoint_and_refresh_pm_assets(
     manager: &gwt_git::WorktreeManager,
     worktree: &Path,
@@ -3133,12 +3416,12 @@ fn repoint_and_refresh_pm_assets(
     let result = crate::managed_assets::with_pm_repoint_transaction(worktree, target, || {
         let refresh = (|| {
             // A self-heal writer may have run since the initial preflight.
-            // This lock remains held until checkout and regeneration end.
+            // This lock remains held until the advance and regeneration end.
             normalize_previous_generated_hook_configs(worktree)?;
             manager
-                .repoint_detached(worktree, target)
+                .fast_forward_resident_branch(worktree, target)
                 .map_err(|error| {
-                    io::Error::other(format!("managed artifacts: repoint failed: {error}"))
+                    io::Error::other(format!("managed artifacts: fast-forward failed: {error}"))
                 })?;
             stage = PmWorktreeRefreshFailureStage::ManagedAssets;
             crate::managed_assets::refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
@@ -3147,9 +3430,10 @@ fn repoint_and_refresh_pm_assets(
                 })
         })();
         if let Err(error) = refresh {
-            // Git can advance HEAD and then report failure from post-checkout.
-            // Inspect the actual commit before restoring displaced assets.
-            let rollback = detached_worktree_head_sha(worktree).and_then(|head| {
+            // A blocked fast-forward leaves HEAD alone, but regeneration runs
+            // after the branch has already moved. Inspect the actual commit
+            // before restoring displaced assets.
+            let rollback = pm_worktree_head_sha(worktree).and_then(|head| {
                 if head.as_deref() == Some(old_head) {
                     return Ok(());
                 }
@@ -3160,7 +3444,7 @@ fn repoint_and_refresh_pm_assets(
                 }
                 normalize_previous_generated_hook_configs(worktree)?;
                 manager
-                    .repoint_detached(worktree, old_head)
+                    .reset_resident_branch(worktree, old_head)
                     .map_err(|error| io::Error::other(error.to_string()))
             });
             let mut reason = error.to_string();
@@ -3188,9 +3472,13 @@ fn refresh_pm_worktree_at_locked(
     worktree: &Path,
 ) -> io::Result<PmWorktreeRefreshOutcome> {
     let manager = gwt_git::WorktreeManager::new(git_root);
+    let (base_ref, resolution_error) = match resolve_pm_worktree_base(git_root) {
+        Ok(base_ref) => (base_ref, None),
+        Err(error) => ("HEAD".to_owned(), Some(error)),
+    };
     let existed = worktree.join(".git").exists();
     if worktree.exists() && !existed {
-        let (cached_target, inspect_error) = git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
         let observation = if cached_target.is_some() {
             PmWorktreeTargetObservation::Cached
         } else {
@@ -3206,6 +3494,7 @@ fn refresh_pm_worktree_at_locked(
         let freshness = pm_refresh_failure(
             git_root,
             worktree,
+            &base_ref,
             cached_target,
             observation,
             PmWorktreeRefreshFailureStage::Inspect,
@@ -3221,12 +3510,16 @@ fn refresh_pm_worktree_at_locked(
         match PmGeneratedHookConfigSnapshot::capture(worktree) {
             Ok(snapshot) => Some(snapshot),
             Err(error) => {
-                persist_unknown_pm_worktree_failure(
-                    project_dir,
+                let freshness = pm_refresh_failure(
+                    git_root,
                     worktree,
+                    &base_ref,
+                    None,
+                    PmWorktreeTargetObservation::Unavailable,
                     PmWorktreeRefreshFailureStage::Inspect,
                     error.to_string(),
-                )?;
+                );
+                persist_pm_worktree_freshness(project_dir, &freshness)?;
                 return Err(error);
             }
         }
@@ -3240,8 +3533,7 @@ fn refresh_pm_worktree_at_locked(
                 worktree,
                 generated_hook_snapshot.as_mut(),
             ) {
-                let (cached_target, inspect_error) =
-                    git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+                let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
                 let observation = if cached_target.is_some() {
                     PmWorktreeTargetObservation::Cached
                 } else {
@@ -3254,6 +3546,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     cached_target,
                     observation,
                     PmWorktreeRefreshFailureStage::Inspect,
@@ -3266,8 +3559,7 @@ fn refresh_pm_worktree_at_locked(
                 return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
             }
             if let Err(error) = migrate_legacy_pm_scratch_preserving_project_content(worktree) {
-                let (cached_target, inspect_error) =
-                    git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+                let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
                 let observation = if cached_target.is_some() {
                     PmWorktreeTargetObservation::Cached
                 } else {
@@ -3280,6 +3572,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     cached_target,
                     observation,
                     PmWorktreeRefreshFailureStage::ScratchMigration,
@@ -3289,9 +3582,12 @@ fn refresh_pm_worktree_at_locked(
             }
         }
 
-        if let Err(error) = fetch_pm_worktree_base(git_root) {
-            let (cached_target, inspect_error) =
-                git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let fetch_result = match resolution_error {
+            Some(error) => Err(error),
+            None => fetch_pm_worktree_base(git_root, &base_ref),
+        };
+        if let Err(error) = fetch_result {
+            let (cached_target, inspect_error) = pm_base_sha_observation(git_root, &base_ref);
             let observation = if cached_target.is_some() {
                 PmWorktreeTargetObservation::Cached
             } else {
@@ -3327,6 +3623,7 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         None,
                         observation,
                         PmWorktreeRefreshFailureStage::Fetch,
@@ -3347,6 +3644,7 @@ fn refresh_pm_worktree_at_locked(
                         let freshness = pm_refresh_failure(
                             git_root,
                             worktree,
+                            &base_ref,
                             cached_target,
                             observation,
                             PmWorktreeRefreshFailureStage::Repoint,
@@ -3356,10 +3654,15 @@ fn refresh_pm_worktree_at_locked(
                         return Err(create_error);
                     }
                 }
-                if let Err(create_error) = manager.create_detached(materialization_sha, worktree) {
+                if let Err(create_error) = manager.create_on_resident_branch(
+                    PM_WORKTREE_BRANCH,
+                    materialization_sha,
+                    worktree,
+                ) {
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         cached_target,
                         observation,
                         PmWorktreeRefreshFailureStage::Repoint,
@@ -3372,6 +3675,7 @@ fn refresh_pm_worktree_at_locked(
             let freshness = pm_refresh_failure(
                 git_root,
                 worktree,
+                &base_ref,
                 cached_target,
                 observation,
                 PmWorktreeRefreshFailureStage::Fetch,
@@ -3380,14 +3684,14 @@ fn refresh_pm_worktree_at_locked(
             return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
         }
 
-        let (target_sha, target_inspect_error) =
-            git_sha_observation(git_root, PM_WORKTREE_BASE_REF);
+        let (target_sha, target_inspect_error) = pm_base_sha_observation(git_root, &base_ref);
         let Some(target_sha) = target_sha else {
             let reason = target_inspect_error
-                .unwrap_or_else(|| format!("{} is unavailable after fetch", PM_WORKTREE_BASE_REF));
+                .unwrap_or_else(|| format!("{base_ref} is unavailable after fetch"));
             let freshness = pm_refresh_failure(
                 git_root,
                 worktree,
+                &base_ref,
                 None,
                 PmWorktreeTargetObservation::Unavailable,
                 PmWorktreeRefreshFailureStage::Inspect,
@@ -3403,12 +3707,13 @@ fn refresh_pm_worktree_at_locked(
         };
 
         let old_head = if existed {
-            match detached_worktree_head_sha(worktree) {
+            match pm_worktree_head_sha(worktree) {
                 Ok(head) => head,
                 Err(error) => {
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         Some(target_sha),
                         PmWorktreeTargetObservation::Fresh,
                         PmWorktreeRefreshFailureStage::Inspect,
@@ -3421,29 +3726,13 @@ fn refresh_pm_worktree_at_locked(
             None
         };
         if existed {
-            let safety = manager
-                .detached_repoint_safety(worktree)
-                .map_err(|error| io::Error::other(error.to_string()));
-            let failure = match safety {
-                Ok(gwt_git::worktree::DetachedRepointSafety::Ready) => None,
-                Ok(gwt_git::worktree::DetachedRepointSafety::SymbolicHead { branch }) => Some((
-                    PmWorktreeRefreshFailureStage::Inspect,
-                    format!("PM worktree HEAD is symbolic ({branch})"),
-                )),
-                Ok(gwt_git::worktree::DetachedRepointSafety::TrackedOrIndexChanges) => Some((
-                    PmWorktreeRefreshFailureStage::LocalWork,
-                    tracked_pm_work_diagnosis(worktree),
-                )),
-                Ok(gwt_git::worktree::DetachedRepointSafety::DetachedOnlyCommit) => Some((
-                    PmWorktreeRefreshFailureStage::LocalWork,
-                    "PM worktree has a detached-only commit".to_string(),
-                )),
-                Err(error) => Some((PmWorktreeRefreshFailureStage::Inspect, error.to_string())),
-            };
+            let failure =
+                pm_resident_branch_advance_failure(&manager, worktree, &target_sha, &base_ref);
             if let Some((stage, reason)) = failure {
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     stage,
@@ -3460,6 +3749,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     stage,
@@ -3491,6 +3781,7 @@ fn refresh_pm_worktree_at_locked(
                     let freshness = pm_refresh_failure(
                         git_root,
                         worktree,
+                        &base_ref,
                         Some(target_sha),
                         PmWorktreeTargetObservation::Fresh,
                         PmWorktreeRefreshFailureStage::Repoint,
@@ -3500,17 +3791,42 @@ fn refresh_pm_worktree_at_locked(
                     return Err(error);
                 }
             }
-            if let Err(error) = manager.create_detached(&target_sha, worktree) {
-                let freshness = pm_refresh_failure(
-                    git_root,
-                    worktree,
-                    Some(target_sha),
-                    PmWorktreeTargetObservation::Fresh,
-                    PmWorktreeRefreshFailureStage::Repoint,
-                    error.to_string(),
-                );
-                persist_pm_worktree_freshness(project_dir, &freshness)?;
-                return Err(io::Error::other(error.to_string()));
+            match manager.create_on_resident_branch(PM_WORKTREE_BRANCH, &target_sha, worktree) {
+                Ok(gwt_git::worktree::ResidentBranchMaterialization::AtBase) => {}
+                // A resident branch left behind by an earlier PM worktree may
+                // still carry commits the base has not taken. Adopting it where
+                // it stands keeps them; the caller only learns it is behind.
+                Ok(gwt_git::worktree::ResidentBranchMaterialization::RetainedBranchHead {
+                    head,
+                }) => {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        &base_ref,
+                        Some(target_sha),
+                        PmWorktreeTargetObservation::Fresh,
+                        PmWorktreeRefreshFailureStage::LocalWork,
+                        format!(
+                            "PM worktree branch {PM_WORKTREE_BRANCH} holds commit {head}, which \
+                             {base_ref} does not contain; the worktree adopted the \
+                             branch instead of rewinding it"
+                        ),
+                    );
+                    return finish_degraded_pm_refresh(git_root, project_dir, worktree, freshness);
+                }
+                Err(error) => {
+                    let freshness = pm_refresh_failure(
+                        git_root,
+                        worktree,
+                        &base_ref,
+                        Some(target_sha),
+                        PmWorktreeTargetObservation::Fresh,
+                        PmWorktreeRefreshFailureStage::Repoint,
+                        error.to_string(),
+                    );
+                    persist_pm_worktree_freshness(project_dir, &freshness)?;
+                    return Err(io::Error::other(error.to_string()));
+                }
             }
         }
 
@@ -3521,6 +3837,7 @@ fn refresh_pm_worktree_at_locked(
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     PmWorktreeRefreshFailureStage::ManagedAssets,
@@ -3531,12 +3848,13 @@ fn refresh_pm_worktree_at_locked(
             }
         }
 
-        let observed_head = match detached_worktree_head_sha(worktree) {
+        let observed_head = match pm_worktree_head_sha(worktree) {
             Ok(head) => head,
             Err(error) => {
                 let freshness = pm_refresh_failure(
                     git_root,
                     worktree,
+                    &base_ref,
                     Some(target_sha),
                     PmWorktreeTargetObservation::Fresh,
                     PmWorktreeRefreshFailureStage::Inspect,
@@ -3553,6 +3871,7 @@ fn refresh_pm_worktree_at_locked(
             let freshness = pm_refresh_failure(
                 git_root,
                 worktree,
+                &base_ref,
                 Some(target_sha),
                 PmWorktreeTargetObservation::Fresh,
                 PmWorktreeRefreshFailureStage::Inspect,
@@ -3567,7 +3886,7 @@ fn refresh_pm_worktree_at_locked(
 
         let freshness = PmWorktreeFreshness {
             state: PmWorktreeFreshnessState::Fresh,
-            base_ref: PM_WORKTREE_BASE_REF.to_string(),
+            base_ref,
             head_sha: Some(target_sha.clone()),
             target_sha: Some(target_sha),
             behind: Some(0),
@@ -3829,7 +4148,8 @@ where
             return Ok(PmWorktreeCleanupOutcome::Absent);
         }
         if let Err(error) = migrate_legacy_pm_scratch_preserving_project_content(&worktree) {
-            let (target_sha, inspect_error) = git_sha_observation(&git_root, PM_WORKTREE_BASE_REF);
+            let base_ref = last_pm_worktree_base_ref(&project_dir);
+            let (target_sha, inspect_error) = pm_base_sha_observation(&git_root, &base_ref);
             let observation = if target_sha.is_some() {
                 PmWorktreeTargetObservation::Cached
             } else {
@@ -3842,6 +4162,7 @@ where
             let freshness = pm_refresh_failure(
                 &git_root,
                 &worktree,
+                &base_ref,
                 target_sha,
                 observation,
                 PmWorktreeRefreshFailureStage::ScratchMigration,
@@ -4429,6 +4750,17 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
     })
 }
 
+/// Identify a PM pane across Session replacement without persisting a role flag.
+pub fn pane_is_pm(
+    repo_path: &Path,
+    worktree_path: Option<&Path>,
+    session_id: Option<&str>,
+) -> bool {
+    worktree_path.is_some_and(is_canonical_pm_worktree)
+        || session_id
+            .is_some_and(|id| session_is_registered_pm(&pm_prefs_path_for_repo_path(repo_path), id))
+}
+
 /// SPEC-3431 FR-009: is `session_id` the project's registered PM?
 ///
 /// This is the whole privileged-subject rule. It is deliberately an exact
@@ -4604,6 +4936,11 @@ pub struct PmRepositoryRegistrationView {
     /// Whether this row is the store the report was asked about. A `false` row
     /// is a PM this store cannot see through its own `pm.json`.
     pub is_current_store: bool,
+    /// Issue #4394 AC-4: `false` for a Session that is live, or still
+    /// restorable, in one of this repository's PM worktrees without holding a
+    /// registration. It has no PM authority, yet it can still post to the
+    /// Board, so the PM has to be able to see it and `pm.stop` it.
+    pub registered: bool,
 }
 
 /// Build the repository-scoped rows for `repo_path`'s report.
@@ -4612,7 +4949,13 @@ pub fn pm_repository_registration_views(repo_path: &Path) -> Vec<PmRepositoryReg
         return Vec::new();
     };
     let own_project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
-    pm_registrations_for_repository(&repository_key)
+    let registrations = pm_registrations_for_repository(&repository_key);
+    let unregistered = unregistered_pm_worktree_sessions(
+        &repository_key,
+        &registrations,
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let mut views: Vec<PmRepositoryRegistrationView> = registrations
         .into_iter()
         .map(|record| PmRepositoryRegistrationView {
             is_current_store: record.project_dir == own_project_dir,
@@ -4620,8 +4963,63 @@ pub fn pm_repository_registration_views(repo_path: &Path) -> Vec<PmRepositoryReg
             session_id: record.registration.session_id,
             agent_id: record.registration.agent_id,
             worktree_path: record.registration.worktree_path,
+            registered: true,
         })
-        .collect()
+        .collect();
+    views.extend(unregistered.into_iter().filter_map(|session| {
+        let project_dir = pm_worktree_store_dir(&session.worktree_path)?;
+        Some(PmRepositoryRegistrationView {
+            is_current_store: paths_are_same_store(&project_dir, &own_project_dir),
+            project_dir: project_dir.display().to_string(),
+            session_id: session.id,
+            agent_id: session.agent_id.command().to_string(),
+            worktree_path: session.worktree_path.display().to_string(),
+            registered: false,
+        })
+    }));
+    views
+}
+
+/// Issue #4394 AC-4: Sessions in one of `repository_key`'s PM worktrees that
+/// hold none of `registrations` and are still live or restorable.
+///
+/// Restore used to bring such Sessions back as extra PM windows that neither
+/// `pm.status` nor `pm.stop` could address. Only records naming a PM worktree
+/// path are parsed, so the scan stays cheap on a store with thousands of
+/// stopped Sessions.
+pub fn unregistered_pm_worktree_sessions(
+    repository_key: &Path,
+    registrations: &[PmStoreRegistration],
+    sessions_dir: &Path,
+) -> Vec<gwt_agent::Session> {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<gwt_agent::Session> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter(|path| {
+            fs::read_to_string(path).is_ok_and(|content| {
+                content.contains("pm/worktree") || content.contains("pm\\worktree")
+            })
+        })
+        .filter_map(|path| gwt_agent::Session::load(&path).ok())
+        .filter(|session| {
+            !registrations
+                .iter()
+                .any(|record| record.registration.session_id == session.id)
+                && (session.restore_window_on_startup
+                    || !matches!(
+                        session.status,
+                        gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                    ))
+                && pm_worktree_store_dir(&session.worktree_path).is_some()
+                && pm_repository_key(&session.worktree_path).as_deref() == Some(repository_key)
+        })
+        .collect();
+    sessions.sort_by(|left, right| left.id.cmp(&right.id));
+    sessions
 }
 
 /// Build the `pm.status` report from loaded prefs. The durable-session probe
@@ -4682,6 +5080,42 @@ mod tests {
         }
         assert!(PM_STEERING_CLAUSE.contains("before you judge the cycle unchanged"));
         assert!(PM_STEERING_WAKE_CLAUSE.contains("before judging no change"));
+    }
+
+    /// Issue #3825 AC-1 / AC-4: the terse wake clause and the full Stop-gate
+    /// clause must agree that one resident `daemon.subscribe` blocks for at
+    /// most five seconds and is never awaited. The two wordings differ only in
+    /// length, because one of them rides a 1024-byte PTY queue.
+    #[test]
+    fn execution_clauses_cap_the_resident_subscribe_at_five_seconds() {
+        for clause in [PM_GWTD_EXECUTION_CLAUSE, PM_GWTD_EXECUTION_WAKE_CLAUSE] {
+            for phrase in [
+                "contract's 5-second outer deadline",
+                "`daemon.subscribe`",
+                "`params.timeout_seconds:5`",
+                "background task",
+                "do not wait for it",
+            ] {
+                assert!(
+                    clause.contains(phrase),
+                    "execution clause is missing {phrase}: {clause}"
+                );
+            }
+            assert!(
+                !clause.contains("10-second"),
+                "the superseded ten-second ceiling must not survive: {clause}"
+            );
+            assert!(
+                !clause.contains("`params.timeout_seconds:60`"),
+                "the loop cadence must never become the subscribe budget: {clause}"
+            );
+        }
+        // The wake variant exists only to fit the PTY queue; if it ever grew
+        // past the full clause it would have no reason to exist.
+        assert!(
+            PM_GWTD_EXECUTION_WAKE_CLAUSE.len() < PM_GWTD_EXECUTION_CLAUSE.len(),
+            "the wake clause must stay the terse one"
+        );
     }
 
     #[cfg(unix)]
@@ -4779,7 +5213,7 @@ mod tests {
         mutate_pm_prefs(&prefs_path, |prefs| {
             prefs.worktree_freshness = Some(PmWorktreeFreshness {
                 state: PmWorktreeFreshnessState::Unknown,
-                base_ref: PM_WORKTREE_BASE_REF.to_string(),
+                base_ref: "origin/develop".to_string(),
                 head_sha: None,
                 target_sha: Some("target".to_string()),
                 behind: None,
@@ -5471,6 +5905,62 @@ mod tests {
             !is_pm_worktree(Path::new("/tmp/elsewhere/pm/worktree")),
             "a branch named pm/worktree outside ~/.gwt/projects must not match"
         );
+    }
+
+    #[test]
+    fn pm_runtime_paths_separate_discovery_from_project_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        let runtime = worktree.parent().unwrap().join("runtime");
+        assert_eq!(
+            pm_runtime_dir_for_pm_worktree(&worktree),
+            Some(runtime.clone())
+        );
+        assert_eq!(pm_worktree_for_runtime_dir(&runtime), None);
+        fs::create_dir_all(&worktree).unwrap();
+        assert_eq!(
+            ensure_pm_runtime_dir_for_pm_worktree(&worktree).unwrap(),
+            runtime
+        );
+        assert_eq!(
+            pm_worktree_for_runtime_dir(&runtime),
+            Some(worktree.clone())
+        );
+        assert_eq!(pm_worktree_for_runtime_dir(&worktree), None);
+        assert_eq!(
+            pm_runtime_dir_for_pm_worktree(&home.path().join("pm/worktree")),
+            None
+        );
+        let canonical_runtime = dunce::canonicalize(&runtime).unwrap();
+        assert_eq!(
+            pm_worktree_for_runtime_dir(&canonical_runtime),
+            Some(dunce::canonicalize(&worktree).unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_runtime_paths_reject_symlinked_runtime_and_project() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        fs::create_dir_all(&worktree).unwrap();
+        let runtime = worktree.parent().unwrap().join("runtime");
+        let external = home.path().join("external");
+        fs::create_dir_all(&external).unwrap();
+        symlink(&external, &runtime).unwrap();
+        assert!(ensure_pm_runtime_dir_for_pm_worktree(&worktree).is_err());
+        assert_eq!(pm_worktree_for_runtime_dir(&runtime), None);
+        fs::remove_file(&runtime).unwrap();
+        let project = worktree.parent().unwrap().parent().unwrap();
+        fs::remove_dir_all(project).unwrap();
+        fs::create_dir_all(external.join("pm/worktree")).unwrap();
+        fs::create_dir_all(external.join("pm/runtime")).unwrap();
+        symlink(&external, project).unwrap();
+        assert!(ensure_pm_runtime_dir_for_pm_worktree(&worktree).is_err());
+        assert_eq!(pm_worktree_for_runtime_dir(&runtime), None);
     }
 
     #[test]
@@ -7325,6 +7815,26 @@ mod tests {
 
         assert_eq!(monitor.active_count(), before);
         assert_eq!(monitor.active_count(), 0);
+    }
+
+    #[test]
+    fn pm_delivery_prompt_identifies_its_source_and_preserves_body_hash() {
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "report exact status";
+        let hash = pm_delivery_prompt_sha256(body);
+        let prompt = protected_pm_delivery_prompt(operation_id, body).unwrap();
+        assert!(prompt.contains("PM delivery"), "{prompt}");
+        assert!(prompt.contains("not an owner message"), "{prompt}");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&prompt),
+            Some((operation_id.to_string(), hash.clone()))
+        );
+        assert!(parse_protected_pm_delivery_prompt(&prompt.replace(body, "tampered")).is_none());
+        let legacy = format!("{body} [gwt-delivery:{operation_id}:{hash}]\r");
+        assert_eq!(
+            parse_protected_pm_delivery_prompt(&legacy),
+            Some((operation_id.to_string(), hash))
+        );
     }
 
     #[test]
