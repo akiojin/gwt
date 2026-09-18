@@ -1411,7 +1411,7 @@ fn completed_holder_is_not_reported_as_a_held_lease() {
             .expect("request verification job"),
     );
     guard
-        .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+        .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
         .expect("acquire must not wait behind a completed holder");
 }
 
@@ -1467,7 +1467,7 @@ fn dead_holder_pid_is_not_reported_as_a_held_lease() {
             .expect("request verification job"),
     );
     guard
-        .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+        .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
         .expect("acquire must not wait behind a dead holder");
 }
 
