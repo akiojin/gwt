@@ -2050,6 +2050,184 @@ mod tests {
     }
 
     #[test]
+    fn pr_create_work_shard_delivery_preserves_verification_for_completion() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        let session_id = "session-pr-shard-delivery";
+        let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
+        persist_pr_generation_session(&fixture.repo, session_id, identity);
+        enable_autonomous_pr_session(&fixture.repo, session_id);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let git = |args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&fixture.repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let work_id = gwt_core::workspace_projection::canonical_work_id(
+            &fixture.repo,
+            Some("main"),
+            Some(&fixture.repo),
+        )
+        .unwrap();
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            &work_id,
+            chrono::Utc::now(),
+        );
+        start.title = Some(s("PR shard delivery"));
+        start.agent_session_id = Some(s(session_id));
+        start.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(s("main")),
+                worktree_path: Some(fixture.repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&fixture.repo);
+        projection.id = work_id.clone();
+        gwt_core::workspace_projection::save_workspace_projection(&fixture.repo, &projection)
+            .unwrap();
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start).unwrap();
+        git(&["add", "--", ".gwt/work/events"]);
+        fixture.commit("chore(work): seed canonical Work");
+        fixture.push();
+        crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            session_id,
+            false,
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let mut out = String::new();
+        for command in [
+            crate::cli::verification_record::VerifyCommand::Plan {
+                commands: vec![s("git --version")],
+                derive: false,
+            },
+            crate::cli::verification_record::VerifyCommand::Run {
+                commands: vec![s("git --version")],
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        ] {
+            assert_eq!(
+                crate::cli::verification_record::run(&mut env, command, &mut out).unwrap(),
+                0,
+                "{out}"
+            );
+        }
+        let verified = crate::cli::verification_record::load(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        env.seed_created_pr(seeded_pr());
+        assert_eq!(
+            run(
+                &mut env,
+                PrCommand::CreateBody {
+                    base: s("develop"),
+                    head: None,
+                    title: s("PR shard delivery"),
+                    body: s("User Verification Result: n/a (autonomous)"),
+                    labels: vec![],
+                    draft: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "{out}"
+        );
+        let items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        let pr_event = items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .unwrap()
+            .events
+            .iter()
+            .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Pr)
+            .expect("pr.create must produce the canonical PR metadata shard");
+        assert!(
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &pr_event.id)
+                .is_file()
+        );
+        git(&["add", "--", ".gwt/work/events"]);
+        fixture.commit("chore(work): deliver PR metadata");
+        fixture.push();
+        assert_eq!(
+            crate::cli::verification_record::evaluate_evidence(&fixture.repo, session_id, Some(42)),
+            crate::cli::verification_record::EvidenceStatus::Fresh
+        );
+
+        // A real source change must still refuse completion with this same run.
+        std::fs::write(fixture.repo.join("src.txt"), "changed source\n").unwrap();
+        git(&["add", "--", "src.txt"]);
+        fixture.commit("fix: change source after verification");
+        fixture.push();
+        out.clear();
+        assert_eq!(
+            crate::cli::execution_state::run(
+                &mut env,
+                crate::cli::execution_state::ExecutionCommand::Complete,
+                &mut out
+            )
+            .unwrap(),
+            2,
+            "{out}"
+        );
+        assert!(out.contains("stale"), "{out}");
+        // Restore the fixture's delivery commit, without rerunning verification.
+        git(&["reset", "--hard", "HEAD^"]);
+        git(&["push", "--force", "origin", "main"]);
+        out.clear();
+        assert_eq!(
+            crate::cli::execution_state::run(
+                &mut env,
+                crate::cli::execution_state::ExecutionCommand::Complete,
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "{out}"
+        );
+        let completed = crate::cli::execution_state::load(&fixture.repo)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed
+                .completion_evidence
+                .unwrap()
+                .verification_record_id,
+            verified.record_id
+        );
+        assert_eq!(
+            crate::cli::verification_record::load(&fixture.repo)
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            verified.content_hash
+        );
+    }
+
+    #[test]
     fn pr_create_accepts_completed_lifecycle_receipt_and_handoff_prompt() {
         let _env_lock = crate::env_test_lock()
             .lock()

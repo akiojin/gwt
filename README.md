@@ -219,6 +219,20 @@ gwtd <<'JSON'
 JSON
 ```
 
+`board.show` returns the latest 20 entries visible to the selected workspace or
+session, in chronological order. Set `params.limit` to a nonnegative integer
+(for example, `15`; `0` returns no entries). `params.all: true` selects all
+audiences and removes the default cap, but an explicit `limit` always wins.
+Provider retention still applies: `all` does not load the full historical archive.
+Unknown parameter keys are rejected with the accepted keys listed.
+The existing `board` field is preserved; `page.total_entries` counts the visible
+provider snapshot before the CLI limit, `page.returned_entries` counts returned
+entries, and `page.truncated` indicates clipping by that limit.
+
+Response cost is roughly the entry count times serialized entry size, plus
+metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte cap;
+long posts increase the size, and `all: true` can return hundreds of KiB or more.
+
 Managed hooks and runtime delegation use `gwtd`. On macOS and Linux,
 running JSON operation `daemon.start` brings up a per-project runtime daemon
 (Unix-domain socket IPC) that multi-instance event fan-out depends on

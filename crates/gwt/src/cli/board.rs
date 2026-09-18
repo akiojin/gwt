@@ -25,11 +25,12 @@ use crate::{
 /// SPEC-1942 command model for `board.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
-    /// `board.show` with optional `params.workspace` / `params.all`.
+    /// `board.show` with optional audience filters and latest-entry limit.
     Show {
         json: bool,
         workspace: Option<String>,
         all: bool,
+        limit: Option<usize>,
     },
     /// `board.post` with `params.kind`, `params.body`, and optional audience
     /// fields such as `params.targets`, `params.mentions`, and
@@ -76,10 +77,19 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
             let mut json = false;
             let mut workspace: Option<String> = None;
             let mut all = false;
+            let mut limit = None;
             while let Some(arg) = it.next() {
                 match arg.as_str() {
                     "--json" => json = true,
                     "--all" => all = true,
+                    "--limit" => {
+                        let value = it.next().ok_or(CliParseError::MissingFlag("--limit"))?;
+                        limit = Some(
+                            value
+                                .parse::<usize>()
+                                .map_err(|_| CliParseError::InvalidNumber(value.clone()))?,
+                        );
+                    }
                     "--workspace" => {
                         let Some(value) = it.next() else {
                             return Err(CliParseError::MissingFlag("--workspace"));
@@ -93,6 +103,7 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
                 json,
                 workspace,
                 all,
+                limit,
             })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
@@ -115,6 +126,7 @@ pub(super) fn run<E: CliEnv>(
             json,
             workspace,
             all,
+            limit,
         } => {
             let current_session = current_session_from_env().ok().flatten();
             let scope = if all {
@@ -133,18 +145,37 @@ pub(super) fn run<E: CliEnv>(
                     session_scope
                 }
             };
-            let snapshot = if matches!(scope, BoardAudienceScope::All) {
+            let mut snapshot = if matches!(scope, BoardAudienceScope::All) {
                 load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?
             } else {
                 load_snapshot_for_scope(env.repo_path(), &scope)
                     .map_err(gwt_error_to_spec_ops_error)?
             };
+            let total_entries = snapshot.board.entries.len();
+            let limit = limit.unwrap_or(if all { total_entries } else { 20 });
+            let omitted = total_entries.saturating_sub(limit);
+            snapshot.board.entries.drain(..omitted);
+            snapshot.board.has_more_before |= omitted > 0;
+            snapshot.board.oldest_entry_id = snapshot.board.entries.first().map(|e| e.id.clone());
+            snapshot.board.newest_entry_id = snapshot.board.entries.last().map(|e| e.id.clone());
+            let returned_entries = snapshot.board.entries.len();
             if json {
-                let rendered = serde_json::to_string_pretty(&snapshot)
+                let response = serde_json::json!({
+                    "board": snapshot.board,
+                    "page": {
+                        "total_entries": total_entries,
+                        "returned_entries": returned_entries,
+                        "truncated": omitted > 0,
+                    },
+                });
+                let rendered = serde_json::to_string_pretty(&response)
                     .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
                 out.push_str(&rendered);
                 out.push('\n');
             } else {
+                out.push_str(&format!(
+                    "Board snapshot: {returned_entries}/{total_entries} entries\n"
+                ));
                 render_snapshot(out, &snapshot);
             }
             0
@@ -573,7 +604,7 @@ fn report_resolutions(
         out.push_str(&format!(
             "board escalations not found: {}\n\
              Copy the exact id from the wake prompt or issue.monitor.status. \
-             board.show only lists the latest 500 posts, so a missing Board card does not mean the id is invalid.\n",
+             board.show is bounded (20 posts by default, within the provider retention window), so a missing Board card does not mean the id is invalid.\n",
             unknown.join(", ")
         ));
     }
@@ -1564,6 +1595,7 @@ mod tests {
                 json: true,
                 workspace: None,
                 all: false,
+                limit: None,
             }
         );
     }
@@ -1584,6 +1616,7 @@ mod tests {
                 json: true,
                 workspace: Some("ws-1".into()),
                 all: true,
+                limit: None,
             }
         );
     }
@@ -1622,6 +1655,7 @@ mod tests {
                 json: true,
                 workspace: Some("ws-1".into()),
                 all: false,
+                limit: None,
             },
             &mut out,
         )
@@ -1666,6 +1700,7 @@ mod tests {
                 json: true,
                 workspace: Some("ws-1".into()),
                 all: true,
+                limit: None,
             },
             &mut out,
         )
@@ -1783,6 +1818,7 @@ mod tests {
                 json: false,
                 workspace: Some("workspace-a".into()),
                 all: false,
+                limit: None,
             }
         );
 
@@ -1793,6 +1829,7 @@ mod tests {
                 json: true,
                 workspace: None,
                 all: true,
+                limit: None,
             }
         );
     }
@@ -2717,6 +2754,7 @@ mod tests {
                 json: false,
                 workspace: Some("workspace-a".into()),
                 all: false,
+                limit: None,
             },
             &mut workspace_out,
         )
@@ -2738,6 +2776,7 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: true,
+                limit: None,
             },
             &mut all_out,
         )
@@ -2806,6 +2845,7 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
             },
             &mut out,
         )
@@ -2847,6 +2887,7 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
             },
             &mut out,
         )
@@ -2886,6 +2927,7 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
             },
             &mut out,
         )
@@ -2925,6 +2967,7 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
             },
             &mut out,
         )
@@ -2966,6 +3009,7 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
             },
             &mut out,
         )
