@@ -95,14 +95,20 @@ pub fn plan_managed_git_hooks(worktree: &Path) -> Option<GitHookPlan> {
 ///
 /// A non-empty result means Git is silently skipping those hooks.
 pub fn missing_managed_git_hooks(worktree: &Path) -> Vec<PathBuf> {
-    let Some(plan) = plan_managed_git_hooks(worktree) else {
-        return Vec::new();
-    };
-    plan.hooks
-        .into_iter()
-        .filter(|hook| !hook_is_runnable(&hook.target))
-        .map(|hook| hook.target)
-        .collect()
+    plan_managed_git_hooks(worktree)
+        .map(|plan| plan.missing_hooks())
+        .unwrap_or_default()
+}
+
+impl GitHookPlan {
+    /// Hooks this plan promises that Git cannot run.
+    pub fn missing_hooks(&self) -> Vec<PathBuf> {
+        self.hooks
+            .iter()
+            .filter(|hook| !hook_is_runnable(&hook.target))
+            .map(|hook| hook.target.clone())
+            .collect()
+    }
 }
 
 /// Make every hook `core.hooksPath` promises exist and be runnable.
@@ -155,7 +161,7 @@ fn shim_for(name: &str) -> String {
     )
 }
 
-fn is_managed_hook(path: &Path) -> bool {
+pub fn is_managed_hook(path: &Path) -> bool {
     fs::read_to_string(path).is_ok_and(|content| content.contains(MANAGED_HOOK_MARKER))
 }
 

@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.100.3] - 2026-09-16
+
+### Bug Fixes
+
+- **pm:** PM worktree を常設ブランチ pm/resident で運用する
+- **pm:** 常設ブランチ移行に伴う detached 前提の契約を更新する
+- **gui:** 起動時の window 復元を前回開いていた窓の集合に限定する
+- **gui:** 復元判定が close 側の判定結果を流用するのをやめる
+- **skills:** Ready PR Gate の contract test を Draft 廃止後の文言に合わせる
+
+### Documentation
+
+- **agents:** Draft PR を廃止し常に Ready + auto-merge とする
+
+### Miscellaneous Tasks
+
+- **work:** Issue #4448 の Work event shard を記録
+- **work:** Issue #4448 の PR 作成 Work event shard を記録
+- **work:** Issue #4448 継続世代の Work event shard を記録
+- **work:** #4441 世代の Work イベントを記録する
+
+### Testing
+
+- **gui:** #2942 の age 無視契約を #4441 の freshness 境界に更新する
+
 ## [9.100.2] - 2026-09-16
 
 ### Bug Fixes

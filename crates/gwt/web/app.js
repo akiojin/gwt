@@ -40,6 +40,7 @@
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
+      import { createRecoveryCenterController } from "/recovery-center-modal.js";
       import {
         continueWorkOutcomeNotice,
         createContinueWorkDispatcher,
@@ -442,6 +443,7 @@
       // dropped after the swap completes.
       let socketReceiveDispatcher = null;
       let socketReceiveDispatcherGeneration = 0;
+      let recoveryCenterController = null;
       let reconnectTimer = null;
       let focusedId = null;
       let dragState = null;
@@ -1186,14 +1188,12 @@
         if (!connected) {
           for (const [windowId, state] of branchListStateMap.entries()) {
             let shouldRenderBranches = false;
-            if (
-              failRunningBranchCleanup(
-                windowId,
-                "Connection lost while cleaning up branches",
-              )
-            ) {
-              shouldRenderBranches = true;
-            }
+            // Issue #4433: the cleanup keeps running on the backend, so a
+            // dropped socket must not be painted as a cleanup failure. Mark
+            // the status feed interrupted and re-sync on reconnect instead.
+            // The surface repaints the cleanup owner itself, because a
+            // Workspace-hosted cleanup is not a Branches list render.
+            markRunningBranchCleanupConnectionInterrupted(windowId);
             if (failLoadingBranchesOnConnectionLoss(windowId, state)) {
               shouldRenderBranches = true;
             }
@@ -1247,9 +1247,14 @@
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
+        recoveryCenterController?.reconnect();
         while (pendingMessages.length > 0) {
           socket.send(JSON.stringify(pendingMessages.shift()));
         }
+        // Issue #4433 AC-2: this client has a new client_id, so it missed
+        // every cleanup event emitted while it was away. Re-subscribe to the
+        // operations it still shows as running.
+        syncRunningBranchCleanups();
       }
 
       function handleSocketMessage(event) {
@@ -4697,6 +4702,14 @@
         getActiveWorkProjection: () => activeWorkProjection,
       });
 
+      recoveryCenterController = createRecoveryCenterController({
+        document,
+        modalEl: document.getElementById("recovery-center-modal"),
+        dialogEl: document.querySelector("#recovery-center-modal > .modal-shell"),
+        send,
+        focusBoardEntry,
+      });
+
       function openIssueLaunchWizard(windowId, issueNumber) {
         send({
           kind: "open_issue_launch_wizard",
@@ -4859,6 +4872,8 @@
         renderBranchCleanupModal,
         updateBranchCleanupProgress,
         failRunningBranchCleanup,
+        markRunningBranchCleanupConnectionInterrupted,
+        syncRunningBranchCleanups,
         failLoadingBranchesOnConnectionLoss,
         openWorkspaceCleanup,
         mountBranchesWindow,
@@ -6265,6 +6280,12 @@
           case "log_entry_appended":
             applyBoardLogsReceiveEvent(event);
             break;
+          case "recovery_center_state":
+            recoveryCenterController?.handleState(event);
+            break;
+          case "recovery_center_board_entry":
+            recoveryCenterController?.handleBoardEntry(event);
+            break;
           case "project_board_config":
             // SPEC-2963 FR-030: per-project Board routing → Board window chip.
             applyProjectBoardConfigEventToBoard(event);
@@ -7455,6 +7476,9 @@
             return;
           case "open-issue-monitor":
             focusOrSpawnPreset("issue");
+            return;
+          case "open-recovery-center":
+            recoveryCenterController?.open();
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");

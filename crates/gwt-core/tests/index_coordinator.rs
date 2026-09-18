@@ -21,8 +21,8 @@ use gwt_core::index::broker::{
     RefreshScope, RefreshTarget, RefreshTargetState, REFRESH_INTENT_PROTOCOL_VERSION,
 };
 use gwt_core::index_coordinator::{
-    HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, LeaseEventKind,
-    OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
+    HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, JobStatus,
+    LeaseEventKind, OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
     INTERACTIVE_SEARCH_ADMISSION_DEADLINE, MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS,
 };
 
@@ -1182,6 +1182,173 @@ fn status_recovers_killed_verification_ticket_once() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #4470: a lease whose holder is gone must not read as held
+// ---------------------------------------------------------------------------
+
+/// Publish a holder's target-job state directly, so a test can place the
+/// residue a finished or killed holder leaves behind.
+fn write_holder_state(path: &Path, owner: &OwnerIdentity, status: &str) {
+    fs::create_dir_all(path.parent().expect("state parent")).expect("create state dir");
+    let state = serde_json::json!({
+        "schema_version": COORDINATOR_SCHEMA_VERSION,
+        "epoch": 16,
+        "status": status,
+        "owner": { "pid": owner.pid, "start_id": owner.start_id },
+        "priority": "manual-rebuild",
+        "updated_at_ms": now_ms(),
+    });
+    fs::write(path, serde_json::to_vec(&state).expect("state json")).expect("write state");
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64
+}
+
+/// Write the ticket of a verification holder that took the lease `held_for`
+/// ago with a TTL of `ttl`.
+fn write_verification_ticket(
+    path: &Path,
+    target: &TargetKey,
+    owner: &OwnerIdentity,
+    held_for: Duration,
+    ttl: Duration,
+) {
+    let acquired_at_ms = now_ms().saturating_sub(held_for.as_millis() as u64);
+    let ticket = Ticket {
+        schema_version: COORDINATOR_SCHEMA_VERSION,
+        target: target.file_stem(),
+        priority: JobPriority::ManualRebuild,
+        owner: owner.clone(),
+        acquired_at_ms,
+        lease_id: Some("lease-4470".to_string()),
+        expires_at_ms: Some(acquired_at_ms.saturating_add(ttl.as_millis() as u64)),
+    };
+    fs::write(path, serde_json::to_vec(&ticket).expect("ticket json")).expect("write ticket");
+}
+
+/// A descriptor that keeps `heavy.lock` locked after its holder is gone.
+///
+/// `O_CLOEXEC` closes an inherited lock descriptor at `exec`, not at `fork`,
+/// so a child forked out of a lease holder keeps the `flock` alive for that
+/// window — the coordinator's own release tests measure it. While it lasts,
+/// the kernel probe reads contended although nothing is verifying.
+fn phantom_lock(path: &Path) -> fs::File {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .expect("open heavy lock");
+    FileExt::lock_exclusive(&file).expect("hold the phantom lock");
+    file
+}
+
+/// Issue #4470 AC-1 / AC-4: a holder that published a terminal job status is
+/// finished. Reporting its ticket's TTL remainder as "held" sent waiters into
+/// a 25-minute wait for a lease nobody was using.
+#[test]
+fn completed_holder_is_not_reported_as_a_held_lease() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let key = TargetKey::verification("repo-a", "wt-1");
+    let owner = OwnerIdentity::current();
+    let phantom = phantom_lock(&coordinator.heavy_lock_path());
+    write_verification_ticket(
+        &coordinator.heavy_ticket_path(),
+        &key,
+        &owner,
+        Duration::from_secs(20 * 60),
+        Duration::from_secs(45 * 60),
+    );
+    write_holder_state(&coordinator.target_state_path(&key), &owner, "completed");
+
+    let status = coordinator.heavy_lease_status().expect("read lease status");
+    assert!(
+        !status.held,
+        "a holder that published `completed` must not read as holding the lease: {status:?}"
+    );
+    assert!(status.holder_stale, "{status:?}");
+    assert_eq!(status.holder_job_status, Some(JobStatus::Completed));
+    assert_eq!(
+        status.remaining_ms, None,
+        "residue has no TTL worth waiting out: {status:?}"
+    );
+
+    // The descriptor closes exactly as `exec` closes an inherited one. The
+    // waiter must then take the lease on its first attempt, not after the
+    // ticket's 45-minute TTL lapses.
+    drop(phantom);
+    let guard = expect_owner(
+        coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(5))
+            .expect("request verification job"),
+    );
+    guard
+        .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+        .expect("acquire must not wait behind a completed holder");
+}
+
+/// Issue #4470 AC-2 / AC-4: the holder's PID is the other half. A refusal
+/// naming a process that no longer exists still counted down its full TTL.
+#[test]
+fn dead_holder_pid_is_not_reported_as_a_held_lease() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let key = TargetKey::verification("repo-a", "wt-1");
+    // A reaped process: its PID is gone for good, unlike an invented number.
+    let mut exited = spawn_helper(
+        "exit-now",
+        &[
+            ("GWT_COORD_ROLE", "exit-now".to_string()),
+            arena.coord_env(),
+        ],
+    );
+    let dead_pid = exited.child.id();
+    exited.child.wait().expect("reap the helper");
+    let owner = OwnerIdentity {
+        pid: dead_pid,
+        start_id: "dead-holder".to_string(),
+    };
+    let phantom = phantom_lock(&coordinator.heavy_lock_path());
+    write_verification_ticket(
+        &coordinator.heavy_ticket_path(),
+        &key,
+        &owner,
+        Duration::from_secs(20 * 60),
+        Duration::from_secs(45 * 60),
+    );
+    // Killed mid-run: the job state still says `running`, so liveness is the
+    // only thing that can tell this residue from a working holder.
+    write_holder_state(&coordinator.target_state_path(&key), &owner, "running");
+
+    let status = coordinator.heavy_lease_status().expect("read lease status");
+    assert!(
+        !status.held,
+        "a holder whose process is gone must not read as holding the lease: {status:?}"
+    );
+    assert!(status.holder_stale, "{status:?}");
+    assert_eq!(status.holder_alive, Some(false));
+    assert_eq!(
+        status.remaining_ms, None,
+        "residue has no TTL worth waiting out: {status:?}"
+    );
+
+    drop(phantom);
+    let guard = expect_owner(
+        coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(5))
+            .expect("request verification job"),
+    );
+    guard
+        .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+        .expect("acquire must not wait behind a dead holder");
+}
+
+// ---------------------------------------------------------------------------
 // Issue #4140: a background index job must not starve heavy verification
 // ---------------------------------------------------------------------------
 
@@ -1621,17 +1788,26 @@ fn sustained_interactive_traffic_and_background_index_work_both_progress() {
     wait_for_file(&ready, Duration::from_secs(30));
     let (baseline, _) = read_counter(&ledger);
 
-    // Three full bursts of searches, issued back to back.
+    // Three full bursts with a live background waiter at each release.
+    // The helper drops its pending registration between jobs; its ready
+    // marker alone does not prove sustained contention. Hold each search
+    // lease until that background worker has queued its next attempt.
     let rounds = 3 * MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
     for round in 1..=rounds {
-        coordinator
+        let lease = coordinator
             .acquire_interactive_search_heavy(&search_key, Duration::from_secs(20))
             .unwrap_or_else(|err| {
                 let _ = fs::write(&stop, b"stop");
                 panic!("interactive search {round}/{rounds} must still be served: {err}")
-            })
-            .release()
-            .expect("release search lease");
+            });
+        poll_until(Duration::from_secs(20), || {
+            coordinator
+                .heavy_lease_status()
+                .expect("read queued background waiter")
+                .pending
+                >= 1
+        });
+        lease.release().expect("release search lease");
     }
 
     let (after, _) = read_counter(&ledger);
