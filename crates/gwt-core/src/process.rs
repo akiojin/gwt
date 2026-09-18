@@ -511,15 +511,28 @@ fn hidden_creation_flags() -> u32 {
 /// the calling repo. Apply this helper to a `Command` whose target is
 /// determined by `current_dir` so the invocation stays hermetic.
 pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env_remove("GIT_PREFIX")
-        .env_remove("GIT_NAMESPACE")
-        .env_remove("GIT_COMMON_DIR")
+    for key in GIT_ENV_SCRUB_KEYS {
+        cmd.env_remove(key);
+    }
+    cmd
 }
+
+/// The variables [`scrub_git_env`] removes.
+///
+/// Exposed as data because a caller that builds a child's environment as a
+/// list instead of mutating a [`Command`] — daemon-hosted verification does,
+/// Issue #4409 — has to remove the same set, and a second hand-written copy
+/// would drift.
+pub const GIT_ENV_SCRUB_KEYS: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_COMMON_DIR",
+];
 
 /// Get the version string of a command by running `<cmd> --version`.
 pub fn get_command_version(cmd: &str) -> Result<String> {

@@ -50,7 +50,9 @@ pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
 pub mod pty_start_gate;
+pub mod recovery_delivery;
 pub mod runtime_daemon_events;
+pub mod session_inventory;
 pub mod spec_tasks;
 pub mod start_work;
 pub mod system_settings;
@@ -59,11 +61,15 @@ pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
 pub mod work_notes;
+pub mod worktree;
 pub mod worktree_form;
 pub mod worktree_inventory;
 
 #[cfg(any(test, feature = "test-gh-guard"))]
 mod test_guard;
+
+#[cfg(test)]
+mod recovery_delivery_tests;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
@@ -91,7 +97,8 @@ pub use agent_project_state::{
 };
 pub use branch_cleanup::{
     cleanup_selected_branches, cleanup_selected_branches_with_options,
-    cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,
+    cleanup_selected_branches_with_progress, BranchCleanupOperationSnapshot,
+    BranchCleanupOperationStore, BranchCleanupOptions, BranchCleanupProgressEntry,
     BranchCleanupProgressPhase, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
 pub use branch_list::{
@@ -116,14 +123,16 @@ pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_search::{search_project_index, work_advisory};
 pub use index_worker::{
-    aggregate_current_worktree_index_status_for_path, aggregate_project_index_status_for_path,
-    auto_repair_unhealthy_scopes, auto_repair_unhealthy_targets, build_aggregated_status_view,
-    collect_unhealthy_rebuild_targets, collect_unhealthy_rebuild_targets_for_project_root,
-    default_rebuild_runner, global_aggregated_status_cache, list_worktree_probe_inputs,
-    manual_rebuild_runner, parse_scope_health, rebuild_index_target, AggregatedStatusCache,
-    IndexRebuildRunnerFn, IndexRebuildScope, IndexRebuildSpawner, ProjectIndexScopes,
-    ProjectIndexStatusState, ProjectIndexStatusView, RebuildProgress, RebuildTarget,
-    ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
+    aggregate_current_worktree_index_status_for_path,
+    aggregate_current_worktree_index_status_with_inventory,
+    aggregate_project_index_status_for_path, auto_repair_unhealthy_scopes,
+    auto_repair_unhealthy_targets, build_aggregated_status_view, collect_unhealthy_rebuild_targets,
+    collect_unhealthy_rebuild_targets_for_project_root, default_rebuild_runner,
+    global_aggregated_status_cache, list_worktree_probe_inputs, manual_rebuild_runner,
+    parse_scope_health, rebuild_index_target, AggregatedStatusCache, IndexRebuildRunnerFn,
+    IndexRebuildScope, IndexRebuildSpawner, ProjectIndexScopes, ProjectIndexStatusState,
+    ProjectIndexStatusView, RebuildProgress, RebuildTarget, ScopeHealthView, WorktreeMeta,
+    WorktreeProbeInput, WorktreeProbeOutcome,
 };
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
@@ -169,11 +178,12 @@ pub use issue_monitor::{
     IssueMonitorProviderQuotaHoldRelease, IssueMonitorProviderQuotaPollerWindow,
     IssueMonitorProviderUsageLimitOutcome, IssueMonitorReadiness, IssueMonitorReleasedFailure,
     IssueMonitorRequeueOutcome, IssueMonitorResumeWriterConflictOutcome, IssueMonitorScanDriver,
-    IssueMonitorScanDriverKind, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
-    IssueMonitorStopMismatch, IssueMonitorStopOutcome, IssueMonitorStopTarget,
-    IssueMonitorTerminalWindowFacts, IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl,
-    IssueMonitorUpdateDrainReason, IssueMonitorWaitSummary, IssueMonitorWindowObservation,
-    IssueMonitorWindowSnapshot, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
+    IssueMonitorScanDriverKind, IssueMonitorScanSummary, IssueMonitorState,
+    IssueMonitorStatusSource, IssueMonitorStatusView, IssueMonitorStopMismatch,
+    IssueMonitorStopOutcome, IssueMonitorStopTarget, IssueMonitorTerminalWindowFacts,
+    IssueMonitorUpdateDrain, IssueMonitorUpdateDrainControl, IssueMonitorUpdateDrainReason,
+    IssueMonitorWaitSummary, IssueMonitorWindowObservation, IssueMonitorWindowSnapshot,
+    IssueReadinessFailure, LaunchProfileSelection, LaunchProfileSkip, MergedIssueDelivery,
     MergedIssueSettlement, MergedIssueSettlementAction, MonitorInboxState, NeedsHumanKind,
     PendingIssueMonitorEffect, AUTONOMOUS_WAIT_MAX_SECS, IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS,
     LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION, STRANDED_LAUNCHED_ROW_GRACE_SECS,
@@ -231,7 +241,8 @@ pub use protocol::{
     IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
     ManagedHookHealthView, ManagedHookPendingDiscussionView, ManagedHookPendingGoalView,
     ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView, ProfileEnvEntryView,
-    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RecoveryCenterItemState,
+    RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary, UiTraceEntry,
     UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
     WorkspaceExecutionDiagnosisView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
     WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,

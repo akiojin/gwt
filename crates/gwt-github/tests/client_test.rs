@@ -153,9 +153,11 @@ fn red_39_set_labels_replaces() {
 fn red_40_set_state_transitions() {
     let c = FakeIssueClient::new();
     seed_simple(&c, 7, "x", "b");
-    let closed = c.set_state(IssueNumber(7), IssueState::Closed).unwrap();
+    let closed = c
+        .set_state(IssueNumber(7), IssueState::Closed, None)
+        .unwrap();
     assert_eq!(closed.state, IssueState::Closed);
-    let reopened = c.set_state(IssueNumber(7), IssueState::Open).unwrap();
+    let reopened = c.set_state(IssueNumber(7), IssueState::Open, None).unwrap();
     assert_eq!(reopened.state, IssueState::Open);
 }
 
@@ -182,7 +184,8 @@ fn red_42_list_spec_issues_state_filter() {
     let c = FakeIssueClient::new();
     seed_spec(&c, 1, "a", "phase/done");
     seed_spec(&c, 2, "b", "phase/implementation");
-    c.set_state(IssueNumber(1), IssueState::Closed).unwrap();
+    c.set_state(IssueNumber(1), IssueState::Closed, None)
+        .unwrap();
     let filter = SpecListFilter {
         phase: None,
         state: Some(IssueState::Closed),

@@ -1878,6 +1878,16 @@ where
     ) -> HostRunnerProbeOutcome,
     R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
 {
+    // Issue #4445: a persisted probe success (Issue #4283) is replayed for a
+    // day, so a cache the provider's auto-update broke minutes after the probe
+    // would still be admitted as healthy. Remove it before asking.
+    quarantine_renamed_npx_caches(
+        npx_cache_base.as_deref(),
+        &plan.provenance.official_package,
+        &plan.provenance.resolved_exact_version,
+        repair,
+        report,
+    );
     let mut probe_args = plan.package_prefix.clone();
     probe_args.push("--version".to_string());
     let first = probe(
@@ -3453,6 +3463,214 @@ fn runner_candidate_is_executable_file(candidate: &Path) -> bool {
     {
         true
     }
+}
+
+/// npm `_npx` cache roots whose exact-version `bin` target was renamed away by
+/// the provider's own auto-update (Issue #4445).
+///
+/// Claude Code cannot overwrite the `claude.exe` it is running, so it renames
+/// that file to `claude.exe.old.<epoch millis>` and leaves the cache without
+/// the executable all three npm shims point at. The tree still looks installed
+/// to npx, which reuses it, so every later launch dies inside the shim with a
+/// localized shell message and a bare exit status.
+///
+/// Discovery is a filesystem scan rather than a match on probe output because
+/// a persisted package-probe success (Issue #4283) is replayed for a day: the
+/// launch that dies never produces a failing probe to read.
+pub fn windows_npx_cache_renamed_bin_targets(
+    npx_cache_base: &Path,
+    package: &str,
+    exact_version: &str,
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(npx_cache_base) else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    for entry in entries.flatten() {
+        let root = entry.path();
+        let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        // Quarantined roots are already excluded from npx resolution.
+        if name.starts_with('.') || !root.is_dir() {
+            continue;
+        }
+        let mut package_dir = root.join("node_modules");
+        package_dir.extend(package.split('/'));
+        targets.extend(renamed_package_bin_targets(&package_dir, exact_version));
+    }
+    targets.sort();
+    targets
+}
+
+fn renamed_package_bin_targets(package_dir: &Path, exact_version: &str) -> Vec<PathBuf> {
+    let Ok(raw) = std::fs::read_to_string(package_dir.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    if manifest.get("version").and_then(serde_json::Value::as_str) != Some(exact_version) {
+        return Vec::new();
+    }
+    let relatives: Vec<&str> = match manifest.get("bin") {
+        Some(serde_json::Value::String(value)) => vec![value.as_str()],
+        Some(serde_json::Value::Object(entries)) => entries
+            .values()
+            .filter_map(serde_json::Value::as_str)
+            .collect(),
+        _ => Vec::new(),
+    };
+    relatives
+        .into_iter()
+        .map(|relative| {
+            let mut target = package_dir.to_path_buf();
+            target.extend(relative.split(['/', '\\']).filter(|part| !part.is_empty()));
+            target
+        })
+        .filter(|target| bin_target_was_renamed_away(target))
+        .collect()
+}
+
+/// A `bin` target counts as renamed away only when the executable is gone and
+/// the updater's `<name>.old.<epoch millis>` marker sits beside it. An
+/// interrupted install leaves no marker and stays npm's business.
+fn bin_target_was_renamed_away(target: &Path) -> bool {
+    if target.symlink_metadata().is_ok() {
+        return false;
+    }
+    let (Some(parent), Some(name)) = (
+        target.parent(),
+        target.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return false;
+    };
+    let marker_prefix = format!("{name}.old.");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .and_then(|candidate| candidate.strip_prefix(&marker_prefix))
+            .is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
+            })
+    })
+}
+
+/// Quarantine every cache root the exact launch would reuse whose `bin` target
+/// was renamed away, before the probe is allowed to call the plan healthy.
+///
+/// Best effort by design: a root that cannot be quarantined — the renamed
+/// executable is still mapped by a running process, say — leaves the launch on
+/// the existing probe-and-repair path instead of failing here.
+fn quarantine_renamed_npx_caches<R>(
+    npx_cache_base: Option<&Path>,
+    package: &str,
+    exact_version: &str,
+    repair: &mut R,
+    report: &mut HostRunnerHealthReport,
+) where
+    R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
+{
+    let Some(base) = npx_cache_base else {
+        return;
+    };
+    for missing_binary in windows_npx_cache_renamed_bin_targets(base, package, exact_version) {
+        let Some(npx_root) = npx_cache_root_of(base, &missing_binary) else {
+            continue;
+        };
+        let Some(candidate) = renamed_cache_repair_candidate(base, &npx_root, &missing_binary)
+        else {
+            continue;
+        };
+        report.messages.push(format!(
+            "{} no longer has {}; quarantining the npm npx cache so it reinstalls...",
+            npx_root.display(),
+            missing_binary.display()
+        ));
+        match repair(&candidate) {
+            Ok(()) => report.repaired_npx_cache = true,
+            Err(error) => report.messages.push(format!(
+                "Failed to quarantine npm npx cache at {}: {error}",
+                npx_root.display()
+            )),
+        }
+    }
+}
+
+fn npx_cache_root_of(npx_cache_base: &Path, missing_binary: &Path) -> Option<PathBuf> {
+    let relative = missing_binary.strip_prefix(npx_cache_base).ok()?;
+    let hash = relative.components().next()?;
+    Some(npx_cache_base.join(hash.as_os_str()))
+}
+
+#[cfg(windows)]
+fn renamed_cache_repair_candidate(
+    npx_cache_base: &Path,
+    npx_root: &Path,
+    missing_binary: &Path,
+) -> Option<WindowsNpxCacheRepairCandidate> {
+    let validation =
+        validate_windows_npx_cache_repair_candidate(npx_cache_base, npx_root, missing_binary)
+            .ok()?;
+    Some(WindowsNpxCacheRepairCandidate {
+        npx_root: npx_root.to_path_buf(),
+        missing_binary: missing_binary.to_path_buf(),
+        validation,
+    })
+}
+
+#[cfg(not(windows))]
+fn renamed_cache_repair_candidate(
+    _npx_cache_base: &Path,
+    npx_root: &Path,
+    missing_binary: &Path,
+) -> Option<WindowsNpxCacheRepairCandidate> {
+    Some(WindowsNpxCacheRepairCandidate {
+        npx_root: npx_root.to_path_buf(),
+        missing_binary: missing_binary.to_path_buf(),
+    })
+}
+
+/// Name the executable a failed launch could not find (Issue #4445 AC-2).
+///
+/// A Windows npm shim prints its quoted target path and then the shell's own
+/// "not recognized" message, which is localized while the path is not. Naming
+/// the path turns a `Process exited with status 1` report into a one-step
+/// diagnosis instead of a directory inspection.
+pub fn missing_launcher_binary_detail(tail: &str) -> Option<String> {
+    missing_launcher_binary_detail_with(tail, |candidate| {
+        Path::new(candidate).symlink_metadata().is_ok()
+    })
+}
+
+fn missing_launcher_binary_detail_with(
+    tail: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    tail.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .find(|candidate| is_absolute_windows_executable(candidate) && !exists(candidate))
+        .map(|missing| {
+            format!(
+                "Launcher binary not found: {missing} — the package cache no longer contains the executable its launcher points at."
+            )
+        })
+}
+
+fn is_absolute_windows_executable(candidate: &str) -> bool {
+    let mut characters = candidate.chars();
+    characters
+        .next()
+        .is_some_and(|drive| drive.is_ascii_alphabetic())
+        && characters.next() == Some(':')
+        && matches!(characters.next(), Some('\\' | '/'))
+        && candidate.to_ascii_lowercase().ends_with(".exe")
 }
 
 #[doc(hidden)]
@@ -5683,6 +5901,170 @@ mod tests {
         assert_eq!(
             probes[0], probes[1],
             "repair must retry the same exact plan"
+        );
+    }
+
+    /// The exact on-disk shape this host produces after Claude Code's
+    /// auto-update fails to replace its running executable: the package tree
+    /// and all three npm shims survive, only the `.exe` is renamed away.
+    fn create_claude_npx_cache_fixture(
+        npx_base: &Path,
+        hash: &str,
+        version: &str,
+        rename_executable: bool,
+    ) -> PathBuf {
+        let root = npx_base.join(hash);
+        let package_dir = root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        let bin_dir = package_dir.join("bin");
+        fs::create_dir_all(&bin_dir).expect("create package bin directory");
+        fs::write(
+            package_dir.join("package.json"),
+            format!(
+                r#"{{"name":"@anthropic-ai/claude-code","version":"{version}","bin":{{"claude":"bin/claude.exe"}}}}"#
+            ),
+        )
+        .expect("write package manifest");
+        if rename_executable {
+            fs::write(bin_dir.join("claude.exe.old.1789527470064"), "renamed")
+                .expect("write renamed executable marker");
+        } else {
+            fs::write(bin_dir.join("claude.exe"), "binary").expect("write executable");
+        }
+        let shim_dir = root.join("node_modules").join(".bin");
+        fs::create_dir_all(&shim_dir).expect("create shim directory");
+        for shim in ["claude", "claude.cmd", "claude.ps1"] {
+            fs::write(shim_dir.join(shim), "shim").expect("write npm shim");
+        }
+        root
+    }
+
+    fn claude_bin_target(npx_root: &Path) -> PathBuf {
+        npx_root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin")
+            .join("claude.exe")
+    }
+
+    #[test]
+    fn renamed_cache_scan_reports_the_executable_auto_update_renamed_away() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let broken =
+            create_claude_npx_cache_fixture(&npx_base, "2842f47953679de1", "2.1.272", true);
+
+        let targets = super::windows_npx_cache_renamed_bin_targets(
+            &npx_base,
+            "@anthropic-ai/claude-code",
+            "2.1.272",
+        );
+
+        assert_eq!(targets, vec![claude_bin_target(&broken)]);
+    }
+
+    #[test]
+    fn renamed_cache_scan_ignores_healthy_caches_and_other_versions() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        create_claude_npx_cache_fixture(&npx_base, "0c9f4998b2a03ad4", "2.1.273", false);
+        create_claude_npx_cache_fixture(&npx_base, "3034467137deaaac", "2.1.271", true);
+
+        assert!(
+            super::windows_npx_cache_renamed_bin_targets(
+                &npx_base,
+                "@anthropic-ai/claude-code",
+                "2.1.273",
+            )
+            .is_empty(),
+            "only the requested exact version's broken cache blocks this launch"
+        );
+    }
+
+    #[test]
+    fn exact_package_probe_quarantines_a_renamed_npx_cache_before_probing() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let broken =
+            create_claude_npx_cache_fixture(&npx_base, "2842f47953679de1", "2.1.272", true);
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(temp.path())
+            .version("latest")
+            .build();
+        config.command = temp.path().join("npx.cmd").display().to_string();
+        let plan = ResolvedHostPackagePlan {
+            runner_executable: config.command.clone(),
+            package_prefix: vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@2.1.272".to_string(),
+            ],
+            provenance: ToolRuntimeProvenance {
+                schema_version: ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+                official_package: "@anthropic-ai/claude-code".to_string(),
+                requested_selector: "latest".to_string(),
+                resolved_exact_version: "2.1.272".to_string(),
+                runner_kind: ToolRuntimeRunnerKind::Npx,
+                resolution_reason: ToolRuntimeResolutionReason::RequestedSelector,
+            },
+        };
+        let mut repaired = Vec::new();
+        let mut report = HostRunnerHealthReport::default();
+
+        // A persisted probe success (Issue #4283) still reports health for a
+        // day, so the broken cache must be removed before the probe answers
+        // rather than because of what the probe printed.
+        super::probe_exact_npx_package_plan(
+            &plan,
+            &config,
+            Some(npx_base.clone()),
+            &mut |_kind, _command, _args, _env, _remove_env, _cwd| {
+                HostRunnerProbeOutcome::success()
+            },
+            &mut |candidate| {
+                repaired.push(candidate.npx_root.clone());
+                Ok(())
+            },
+            &mut report,
+        )
+        .expect("a quarantined cache keeps the launch on the exact plan");
+
+        assert_eq!(repaired, vec![broken]);
+        assert!(report.repaired_npx_cache);
+    }
+
+    #[test]
+    fn missing_launcher_detail_names_the_executable_the_shim_points_at() {
+        let missing = r"C:\Users\dev\AppData\Local\npm-cache\_npx\2842f47953679de1\node_modules\.bin\..\@anthropic-ai\claude-code\bin\claude.exe";
+        let tail = format!(
+            "'\"{missing}\"' \u{306f}\u{3001}\u{5185}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{307e}\u{305f}\u{306f}\u{5916}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{3068}\u{3057}\u{3066}\u{8a8d}\u{8b58}\u{3055}\u{308c}\u{3066}\u{3044}\u{307e}\u{305b}\u{3093}\u{3002}"
+        );
+
+        let detail = super::missing_launcher_binary_detail_with(&tail, |_| false)
+            .expect("a quoted missing executable is named");
+
+        assert!(
+            detail.contains(missing),
+            "the diagnosis must name the path that was not found: {detail}"
+        );
+    }
+
+    #[test]
+    fn missing_launcher_detail_stays_silent_without_a_missing_executable() {
+        assert_eq!(
+            super::missing_launcher_binary_detail_with(
+                "'\"C:\\tools\\claude.exe\"' failed",
+                |_| { true }
+            ),
+            None,
+            "an executable that exists is a different failure"
+        );
+        assert_eq!(
+            super::missing_launcher_binary_detail_with("Process exited with status 1", |_| false),
+            None,
+            "an exit status without a quoted path names nothing"
         );
     }
 

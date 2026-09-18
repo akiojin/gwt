@@ -1041,7 +1041,8 @@ const ISSUE_INDEX_SHARED_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// claimants that never register (a raw `cargo test`); a claimant that does
 /// register is served within one [`ISSUE_INDEX_HEAVY_YIELD_POLL`] instead.
 const ISSUE_INDEX_HEAVY_MAX_HOLD: Duration = ISSUE_INDEX_BUILD_TIMEOUT;
-/// How fast the job notices a verification claimant queueing behind it.
+/// How fast the job notices a higher-priority model-lane claimant (a query
+/// encode or manual rebuild) queueing behind it.
 const ISSUE_INDEX_HEAVY_YIELD_POLL: Duration = Duration::from_millis(200);
 
 fn run_coordinated_issue_index(
