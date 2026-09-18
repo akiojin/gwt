@@ -38,6 +38,14 @@ fn spawn_gwtd(home: &Path, cwd: &Path, envelope: &str, extra_env: &[(&str, &Path
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("GWT_SESSION_ID", SESSION)
+        // Issue #4409: this suite is about lease admission and serialization,
+        // not about where verification is hosted. `verify.run` refuses to
+        // spawn in place when its launcher runs at a degraded nice value and
+        // no daemon can take the work, so without this declaration the suite
+        // would pass in CI and in a terminal and fail inside an agent — an
+        // outcome decided by where the test runner was started, not by the
+        // behaviour under test.
+        .env("GWT_VERIFY_SPAWN_HOST", "inherit")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
