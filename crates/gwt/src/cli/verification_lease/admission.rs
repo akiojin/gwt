@@ -180,23 +180,54 @@ fn holder_notice(status: &HeavyLeaseStatus, activity: Option<&HolderActivity>) -
     notice
 }
 
+/// What the coordinator could establish about the holder behind the ticket
+/// (Issue #4470 AC-3). `(pid 54739, 1458s left)` on its own left the waiter
+/// unable to tell a working holder from residue, and the only thing it could
+/// act on — the TTL — was the one number that did not apply to residue.
+fn holder_liveness(status: &HeavyLeaseStatus) -> String {
+    let pid = status
+        .owner
+        .as_ref()
+        .map(|owner| owner.pid.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let liveness = match status.holder_alive {
+        Some(true) => "alive",
+        Some(false) => "gone",
+        None => "liveness unknown",
+    };
+    let job = match status.holder_job_status {
+        Some(job) => format!("job {}", job.as_str()),
+        None => "job status unpublished".to_string(),
+    };
+    format!("pid {pid} {liveness}, {job}")
+}
+
 fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
+    let kind = status
+        .holder_kind
+        .unwrap_or(HeavyHolderKind::Other)
+        .as_str();
+    let target = status.target.as_deref().unwrap_or("unknown target");
+    // Issue #4470 AC-1/AC-2: a ticket whose owner is gone, or which already
+    // published a terminal job status, describes nobody. Waiting out its TTL
+    // is waiting for a process that will never hand anything back.
+    if status.holder_stale {
+        return HolderNotice {
+            detail: format!(
+                "verification lease residue from {kind} {target} ({}) — no live holder, so \
+                 nothing frees at the ticket's TTL",
+                holder_liveness(status)
+            ),
+            retry_after: Some(Duration::ZERO),
+        };
+    }
     if !status.held {
         return HolderNotice {
             detail: "verification lease was contended".to_string(),
             retry_after: None,
         };
     }
-    let kind = status
-        .holder_kind
-        .unwrap_or(HeavyHolderKind::Other)
-        .as_str();
-    let target = status.target.as_deref().unwrap_or("unknown target");
-    let pid = status
-        .owner
-        .as_ref()
-        .map(|owner| owner.pid.to_string())
-        .unwrap_or_else(|| "?".to_string());
+    let holder = holder_liveness(status);
     let progress = match (status.remaining_batches, status.estimated_remaining_ms) {
         (Some(batches), Some(estimate)) => {
             format!(", {batches} batches ≈ {}s", estimate / 1000)
@@ -210,14 +241,14 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
     match status.remaining_ms {
         Some(remaining_ms) => HolderNotice {
             detail: format!(
-                "verification lease held by {kind} {target} (pid {pid}, {}s left{progress})",
+                "verification lease held by {kind} {target} ({holder}, {}s left{progress})",
                 remaining_ms / 1000
             ),
             retry_after,
         },
         None => HolderNotice {
             detail: format!(
-                "verification lease held by {kind} {target} (pid {pid}, no TTL — it releases \
+                "verification lease held by {kind} {target} ({holder}, no TTL — it releases \
                  only when its job finishes{progress})"
             ),
             retry_after,
@@ -253,6 +284,11 @@ fn deferred(
     retry_after: Option<Duration>,
 ) -> SpecOpsError {
     let next = match retry_after {
+        // Issue #4470: nothing is going to lapse — the lease has no live
+        // holder, so the next attempt is the remedy, not a later one.
+        Some(Duration::ZERO) => {
+            "rerun `verify.run` now — the lease it waited for has no live holder".to_string()
+        }
         Some(retry_after) => format!(
             "rerun `verify.run` in about {}s, when the current holder's lease lapses",
             retry_after.as_secs()
@@ -558,6 +594,76 @@ mod tests {
         };
         let notice = holder_notice(&status, Some(&progressing));
         assert!(notice.detail.contains("progressing"), "{}", notice.detail);
+    }
+
+    /// Issue #4470 AC-3: `(pid 54739, 1458s left)` gave a waiter nothing to
+    /// decide with. Every refusal now states whether the holder's process is
+    /// still there and what job status it last published.
+    #[test]
+    fn holder_notice_states_holder_liveness_and_job_status() {
+        let live = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("repo--verification--wt".to_string()),
+                owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                    pid: 36696,
+                    start_id: "start".to_string(),
+                }),
+                remaining_ms: Some(320_000),
+                holder_alive: Some(true),
+                holder_job_status: Some(gwt_core::index_coordinator::JobStatus::Running),
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
+        assert!(live.detail.contains("pid 36696"), "{}", live.detail);
+        assert!(live.detail.contains("alive"), "{}", live.detail);
+        assert!(live.detail.contains("running"), "{}", live.detail);
+        assert!(live.detail.contains("320s left"), "{}", live.detail);
+    }
+
+    /// Issue #4470 AC-1 / AC-2: residue must read as residue. A holder that
+    /// is gone offers no reason to wait, so the refusal says so and points at
+    /// an immediate rerun instead of the ticket's TTL remainder.
+    #[test]
+    fn holder_notice_calls_a_gone_holder_residue_and_retries_at_once() {
+        let stale = holder_notice(
+            &HeavyLeaseStatus {
+                held: false,
+                target: Some("repo--verification--wt".to_string()),
+                owner: Some(gwt_core::index_coordinator::OwnerIdentity {
+                    pid: 54739,
+                    start_id: "start".to_string(),
+                }),
+                holder_alive: Some(false),
+                holder_job_status: Some(gwt_core::index_coordinator::JobStatus::Completed),
+                holder_stale: true,
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
+        assert!(stale.detail.contains("residue"), "{}", stale.detail);
+        assert!(stale.detail.contains("pid 54739"), "{}", stale.detail);
+        assert!(stale.detail.contains("gone"), "{}", stale.detail);
+        assert!(stale.detail.contains("completed"), "{}", stale.detail);
+        assert!(
+            !stale.detail.contains("s left"),
+            "residue must not offer a TTL to wait out: {}",
+            stale.detail
+        );
+        assert_eq!(stale.retry_after, Some(Duration::ZERO));
+
+        let refusal = deferred(
+            Instant::now(),
+            Duration::from_secs(300),
+            &stale.detail,
+            stale.retry_after,
+        )
+        .to_string();
+        assert!(
+            refusal.contains("rerun `verify.run` now"),
+            "a lease with no live holder must be retried immediately: {refusal}"
+        );
     }
 
     /// Issue #4140 AC-3: every refusal carries a concrete next step, so an

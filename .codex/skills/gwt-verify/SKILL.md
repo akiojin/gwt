@@ -495,6 +495,23 @@ execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
 gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
 Issue, PR, or Board state.
 
+`verify.run` reads `params.commands` before it decides whether to admit at
+all (Issue #4196). A matrix is heavy when any command widens past a single
+target — `--workspace`, `--all`, `--all-features`, `--all-targets`,
+`--exclude`, multiple packages or targets, or glob selectors — and only a
+heavy matrix claims the host lease. Unknown commands and value-taking Cargo
+global options are conservatively heavy; `cargo fmt` and `cargo metadata`
+are light. A matrix
+narrowed to one named target (`--test <name>`, `--bin <name>`,
+`--example <name>`), or to `--lib` of an explicit `-p <crate>`, is light: it
+starts immediately and several worktrees may run one at the same time. Bare
+`--lib` is not narrow — this is a virtual workspace, so with no package it
+builds every default member's lib. The run reports which it acted on as
+`verify: scope — light|heavy`, naming the command that forced a heavy
+classification, so you can tell before starting whether the matrix will
+queue. Splitting a heavy matrix into narrower runs is therefore a real way to
+make progress while another worktree holds the lease.
+
 ## Stop Conditions
 
 Stop and surface a blocker to the caller when:

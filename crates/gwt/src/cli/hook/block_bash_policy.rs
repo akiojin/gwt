@@ -267,7 +267,8 @@ fn github_workflow_block_decision(command: &str) -> HookOutput {
             "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.merge`, `pr.review_threads.reply_and_resolve`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
+- Merges: gwtd has no merge operation. The repository's merge automation or a human merges; hold a pending merge with `pr.draft`\n\
 - Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
