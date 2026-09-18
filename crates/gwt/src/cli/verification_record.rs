@@ -1735,7 +1735,15 @@ fn evaluate_work_event_settlement_for_path(
     let (remote, merge_ref, upstream_ref) = match configured_upstream(worktree) {
         Ok(upstream) => upstream,
         Err(UpstreamFailure::Missing) => {
-            return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream);
+            return terminal_work_integration_delivery(
+                worktree,
+                "origin",
+                &head_commit,
+                &event_commit,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::MissingUpstream,
+            ));
         }
         Err(UpstreamFailure::Git) => {
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
@@ -1744,9 +1752,15 @@ fn evaluate_work_event_settlement_for_path(
     let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
         Ok(remote_tip) => remote_tip,
         Err(()) => {
-            return WorkEventSettlementStatus::Blocked(
+            return terminal_work_integration_delivery(
+                worktree,
+                &remote,
+                &head_commit,
+                &event_commit,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
                 WorkEventSettlementBlocker::RemoteReadbackError,
-            );
+            ));
         }
     };
     let head_on_remote = match git_is_ancestor(worktree, &head_commit, &remote_tip) {
@@ -1778,6 +1792,40 @@ fn evaluate_work_event_settlement_for_path(
     }
 }
 
+/// A merged feature branch may already be deleted. For terminal Work only,
+/// fresh remote integration containment proves delivery independently of the
+/// predecessor's receipt or the deleted branch. Call after dirty/pending event
+/// checks; neither a local tracking ref nor a PR's historical state is proof
+/// that this exact HEAD was delivered.
+fn terminal_work_integration_delivery(
+    worktree: &Path,
+    remote: &str,
+    head_commit: &str,
+    event_commit: &str,
+) -> Option<WorkEventSettlementStatus> {
+    if !canonical_work_for_worktree_is_terminal(worktree) {
+        return None;
+    }
+    let mut observed_base = false;
+    for branch in ["develop", "main"] {
+        let Ok(tip) = fetch_upstream_tip(worktree, remote, &format!("refs/heads/{branch}")) else {
+            continue;
+        };
+        observed_base = true;
+        if git_is_ancestor(worktree, head_commit, &tip) == Ok(true) {
+            return Some(WorkEventSettlementStatus::Settled {
+                event_commit: event_commit.to_string(),
+                upstream_ref: format!("{remote}/{branch}"),
+            });
+        }
+    }
+    // A deleted upstream is no longer a mere network warning when the remote
+    // bases were read successfully and prove this HEAD has not landed there.
+    observed_base.then_some(WorkEventSettlementStatus::Blocked(
+        WorkEventSettlementBlocker::CommitNotPushed,
+    ))
+}
+
 /// Whether this worktree's canonical Work has already reached a terminal
 /// lifecycle, which makes a settlement receipt unmintable: the receipt is
 /// written only by a terminal `workspace.update`, that update resolves its
@@ -1788,6 +1836,19 @@ fn evaluate_work_event_settlement_for_path(
 /// infrastructure failure keeps the ordinary receipt requirement rather than
 /// silently waiving it.
 fn canonical_work_for_worktree_is_terminal(worktree: &Path) -> bool {
+    if let Ok(Some(execution)) = execution_state::load(worktree) {
+        match crate::agent_project_state::session_work_is_terminal(
+            worktree,
+            &execution.primary_session_id,
+        ) {
+            Ok(Some(terminal)) => return terminal,
+            Ok(None) => {} // Legacy executions have no durable Session assignment.
+            Err(error) => {
+                tracing::warn!(%error, "assigned Work lifecycle is unreadable");
+                return false;
+            }
+        }
+    }
     let branch = gwt_git::Repository::open(worktree)
         .ok()
         .and_then(|repository| repository.current_branch().ok().flatten());
@@ -1979,6 +2040,11 @@ fn stale_work_event_receipt_description(
         .map_or("legacy (unbound)", |binding| binding.generation_id.as_str());
     let current_generation =
         current_binding.map_or("unknown", |binding| binding.generation_id.as_str());
+    if receipt.execution_binding.is_some() && receipt_generation == current_generation {
+        return format!(
+            "Work event settlement refused: the receipt names the current execution generation `{current_generation}`, but its Session or ledger binding does not authorize this execution. Record an authorized terminal workspace.update for the assigned Work, then commit and push its event before retrying."
+        );
+    }
     format!(
         "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation (receipt `{receipt_generation}`, current generation `{current_generation}`) and the current generation has not recorded its own terminal Work update. Committing or pushing the predecessor's Work event cannot repair this: record this generation's terminal workspace.update for the canonical Work, then commit and push the Work event store before retrying."
     )
@@ -7583,6 +7649,8 @@ mod tests {
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("a foreign receipt Session must fail closed");
         assert!(refusal.contains("generation"), "{refusal}");
+        assert!(!refusal.contains("predecessor"), "{refusal}");
+        assert!(refusal.contains("Session or ledger binding"), "{refusal}");
 
         receipt.session_id = session_id.to_string();
         receipt
@@ -7595,6 +7663,8 @@ mod tests {
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("an arbitrary same-generation receipt head must fail closed");
         assert!(refusal.contains("generation"), "{refusal}");
+        assert!(!refusal.contains("predecessor"), "{refusal}");
+        assert!(refusal.contains("Session or ledger binding"), "{refusal}");
     }
 
     #[test]
@@ -7761,6 +7831,33 @@ mod tests {
             work_event_settlement_refusal(&fixture.repo),
             None,
             "a terminal canonical Work can never re-mint the receipt, so a predecessor              receipt must not refuse a delivered event log",
+        );
+
+        // #4368: delivery survives deletion of the feature upstream after
+        // integration. Read the remote base, not only the old receipt.
+        fixture.git_ok(&["push", "-q", "origin", "HEAD:refs/heads/develop"]);
+        fixture.git_ok(&[
+            "--git-dir",
+            fixture.remote.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/develop",
+        ]);
+        fixture.git_ok(&["push", "-q", "origin", "--delete", "main"]);
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "delivered HEAD on develop must settle after its old upstream disappears"
+        );
+        assert!(load_work_event_settlement_record(&fixture.repo).unwrap().unwrap().status.is_settled(),
+            "remote integration containment must be recorded as delivery, not waived as a readback warning");
+
+        fs::write(fixture.repo.join("src.txt"), "unpublished source\n").unwrap();
+        fixture.git_ok(&["add", "src.txt"]);
+        fixture.commit("fix: not delivered yet");
+        assert!(
+            work_event_settlement_refusal(&fixture.repo).is_some(),
+            "a remote base must not authorize an unpublished source commit"
         );
     }
 
