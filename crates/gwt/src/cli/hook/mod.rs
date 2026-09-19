@@ -287,6 +287,29 @@ pub(crate) fn refresh_managed_assets_for_hook_front_door(
         .map_err(|err| err.to_string())
 }
 
+/// A denial does not park an Issue. Report only the owning Session's observed
+/// phase; missing identity or unreadable preferences cannot establish a park.
+fn parked_owner_issue() -> Option<u64> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    let session = gwt_agent::Session::load_and_migrate(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    let issue = session.linked_issue_number?;
+    let prefs = crate::issue_monitor::load_issue_monitor_prefs(
+        &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&session.worktree_path),
+    )
+    .ok()?;
+    prefs
+        .autonomous_records
+        .iter()
+        .any(|record| {
+            record.issue_number == issue
+                && record.phase == crate::issue_monitor::AutonomousPhase::NeedsHuman
+        })
+        .then_some(issue)
+}
+
 pub fn run_daemon_hook<E: CliEnv>(
     env: &mut E,
     name: &str,
@@ -328,12 +351,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                     // than Claude's hookSpecificOutput JSON envelope.
                     let headline = deny_reason.lines().next().unwrap_or(deny_reason).trim();
                     // Grok truncates the first stderr line to 256 characters.
-                    // Keep the terminal action in that bounded prefix; the
+                    // Keep each gate's recovery in that bounded prefix; the
                     // full provider-neutral detail remains in stdout for
                     // adapters that consume the structured envelope.
-                    let grok_reason = format!(
-                        "{headline}. Stop working on this Issue now if human judgment is still required; it is parked in NeedsHuman."
-                    );
+                    // Name which kind of gate this is, so the agent never has
+                    // to infer a park from a gate it can clear itself.
+                    let grok_reason = match parked_owner_issue() {
+                        Some(issue) => format!(
+                            "{headline}. Issue #{issue} is parked in NeedsHuman: a human must decide before it continues."
+                        ),
+                        None => format!(
+                            "{headline}. This denial does not park the Issue; clear the stated gate and keep working."
+                        ),
+                    };
                     let _ = writeln!(env.stderr(), "{grok_reason}");
                 }
                 Ok(output.exit_code())
