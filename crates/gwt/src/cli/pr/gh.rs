@@ -78,12 +78,13 @@ where
 }
 
 const PR_STATUS_FIELDS: &str =
-    "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
+    "number,title,state,url,headRefName,headRepository,headRepositoryOwner,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
 const PR_LIST_FIELDS: &str = "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,headRepository,headRepositoryOwner";
 
 pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
-    if let Some(branch) = current_branch_name(repo_path)? {
-        let repo = github_remote_owner_and_repo(repo_path);
+    let branch = current_branch_name(repo_path)?;
+    let repo = github_remote_owner_and_repo(repo_path);
+    if let Some(branch) = branch.as_deref() {
         let output = run_gh_in(
             &format!("gh pr list --head {branch}"),
             Some(repo_path),
@@ -91,7 +92,7 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
                 "pr",
                 "list",
                 "--head",
-                branch.as_str(),
+                branch,
                 "--state",
                 "all",
                 "--json",
@@ -102,7 +103,7 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
         )?;
 
         if output.success() {
-            let pr_values = filter_current_repo_head_prs(&output.stdout, &branch, repo.as_ref())?;
+            let pr_values = filter_current_repo_head_prs(&output.stdout, branch, repo.as_ref())?;
             if !pr_values.is_empty() {
                 let filtered_stdout = serde_json::to_string(&pr_values)
                     .map_err(|err| io::Error::other(err.to_string()))?;
@@ -133,6 +134,14 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
         return Err(io::Error::other(format!("gh pr view: {trimmed}")));
     }
 
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    if !branch
+        .as_deref()
+        .is_some_and(|branch| pr_value_matches_current_repo_head(&value, branch, repo.as_ref()))
+    {
+        return Ok(None);
+    }
     let pr = gwt_git::pr_status::parse_pr_status_json(&output.stdout)
         .map_err(|err| io::Error::other(err.to_string()))?;
     Ok(Some(pr))
@@ -1149,6 +1158,29 @@ pub fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn current_pr_fallback_rejects_foreign_fork() {
+        crate::cli::test_support::with_fake_gh("foreign-fork-fallback", |repo| {
+            for args in [
+                vec!["init", "-b", "work/20260507-0808"],
+                vec![
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/akiojin/gwt.git",
+                ],
+            ] {
+                assert!(gwt_core::process::hidden_command("git")
+                    .args(args)
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            assert!(super::fetch_current_pr_via_gh(repo).unwrap().is_none());
+        });
+    }
+
     use super::*;
 
     fn review_thread(is_resolved: bool, is_outdated: bool) -> PrReviewThread {

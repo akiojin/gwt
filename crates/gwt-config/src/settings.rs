@@ -118,6 +118,23 @@ fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Refresh intervals for the shared PR inventory snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrInventoryConfig {
+    pub cache_ttl_secs: u64,
+    pub checks_refresh_secs: u64,
+}
+
+impl Default for PrInventoryConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: 300,
+            checks_refresh_secs: 600,
+        }
+    }
+}
+
 /// Top-level application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -153,6 +170,10 @@ pub struct Settings {
     pub server: ServerConfig,
     /// GitHub API budget throttle knobs (SPEC #4093 FR-007).
     pub github_budget: crate::GitHubBudgetConfig,
+    /// Snapshot and running-check refresh intervals for `pr.list`.
+    pub pr_inventory: PrInventoryConfig,
+    /// Automatic build-artifact reclaim on low disk (Issue #4391).
+    pub build_artifact_gc: crate::BuildArtifactGcConfig,
 }
 
 impl Default for Settings {
@@ -176,6 +197,8 @@ impl Default for Settings {
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
             github_budget: crate::GitHubBudgetConfig::default(),
+            pr_inventory: PrInventoryConfig::default(),
+            build_artifact_gc: crate::BuildArtifactGcConfig::default(),
         }
     }
 }
@@ -548,6 +571,19 @@ debug = true
         assert!(loaded.debug);
         assert_eq!(loaded.default_base_branch, "main");
         assert!(loaded.protected_branches.contains(&"main".to_string()));
+    }
+
+    #[test]
+    fn pr_inventory_intervals_have_defaults_and_roundtrip_overrides() {
+        let defaults = Settings::default().pr_inventory;
+        assert_eq!(defaults.cache_ttl_secs, 300);
+        assert_eq!(defaults.checks_refresh_secs, 600);
+        let settings: Settings =
+            toml::from_str("[pr_inventory]\ncache_ttl_secs = 1200\nchecks_refresh_secs = 1800\n")
+                .unwrap();
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.pr_inventory.cache_ttl_secs, 1200);
+        assert_eq!(restored.pr_inventory.checks_refresh_secs, 1800);
     }
 
     #[test]

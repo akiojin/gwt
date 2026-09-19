@@ -27,6 +27,14 @@ pub struct Issue {
     pub updated_at: Option<String>,
 }
 
+/// Issue rows together with the completeness of the underlying REST read.
+#[derive(Debug, Clone)]
+pub struct IssueListing {
+    pub issues: Vec<Issue>,
+    /// The REST page budget was exhausted, even if filtering PRs reduced the row count.
+    pub capped: bool,
+}
+
 /// File-based cache for GitHub Issues.
 ///
 /// Stores fetched issues under `~/.gwt/cache/issues/<owner>-<repo>.json`.
@@ -102,15 +110,21 @@ fn cache_filename(owner: &str, repo: &str) -> String {
 /// Fetch open issues from GitHub through the paged REST list
 /// (`GET /repos/{owner}/{repo}/issues?state=open`, SPEC #4093 FR-002). Costs at
 /// most [`crate::gh_rest::REST_MAX_PAGES_PER_READ`] REST requests and no
-/// GraphQL; a list of [`GITHUB_ISSUE_LIST_LIMIT`] rows may be incomplete.
+/// GraphQL. Use [`fetch_issue_listing`] when completeness matters: filtering
+/// pull requests can leave a capped read below [`GITHUB_ISSUE_LIST_LIMIT`] rows.
 pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
-    fetch_issues_with(owner, repo, |path| {
+    fetch_issue_listing(owner, repo).map(|listing| listing.issues)
+}
+
+/// Fetch open Issues while retaining the REST page-cap signal.
+pub fn fetch_issue_listing(owner: &str, repo: &str) -> Result<IssueListing> {
+    fetch_issue_listing_with(owner, repo, |path| {
         let hub = gwt_core::process_console::global();
         let output = gwt_core::process_console::spawn_logged_blocking(
             &hub,
             gwt_core::process_console::ProcessKind::Gh,
             "gh",
-            &["api", path],
+            &["api", path, "--include"],
             gwt_core::process_console::SpawnOptions::new("gh api issues"),
         )
         .map_err(|e| e.to_string())?;
@@ -122,18 +136,32 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
     })
 }
 
-/// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path>`.
+/// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path> --include`.
 pub fn fetch_issues_with<F>(owner: &str, repo: &str, fetch: F) -> Result<Vec<Issue>>
 where
     F: FnMut(&str) -> std::result::Result<String, String>,
 {
-    let endpoint = format!("repos/{owner}/{repo}/issues?state=open&sort=updated&direction=desc");
+    fetch_issue_listing_with(owner, repo, fetch).map(|listing| listing.issues)
+}
+
+/// Injectable core of [`fetch_issue_listing`]: `fetch` runs one `gh api <path> --include`.
+pub fn fetch_issue_listing_with<F>(owner: &str, repo: &str, fetch: F) -> Result<IssueListing>
+where
+    F: FnMut(&str) -> std::result::Result<String, String>,
+{
+    // Issue #4231: page by creation order. Sorting by `updated` moves every
+    // Issue edited mid-read to page 1, which shifts a row across a page
+    // boundary unread; the Monitor then treats that open Issue as closed.
+    let endpoint = format!("repos/{owner}/{repo}/issues?state=open&sort=created&direction=desc");
     let pages = crate::gh_rest::read_pages_with(&endpoint, fetch)
         .map_err(|e| GwtError::Git(format!("gh api issues: {e}")))?;
-    Ok(crate::gh_rest::parse_issue_rows(&pages.rows)
-        .into_iter()
-        .map(Issue::from)
-        .collect())
+    Ok(IssueListing {
+        issues: crate::gh_rest::parse_issue_rows(&pages.rows)
+            .into_iter()
+            .map(Issue::from)
+            .collect(),
+        capped: pages.capped,
+    })
 }
 
 impl From<crate::gh_rest::RestIssueRow> for Issue {
@@ -383,16 +411,16 @@ mod tests {
         let mut calls = Vec::new();
         let issues = fetch_issues_with("acme", "widgets", |path| {
             calls.push(path.to_string());
-            Ok(if calls.len() == 1 {
+            Ok(format!("HTTP/2.0 200 OK\n\r\n{}", if calls.len() == 1 {
                 r#"[{"number":42,"title":"Fix bug","state":"open","labels":[{"name":"bug"}],"assignees":[{"login":"alice"}],"body":"b","html_url":"https://github.com/acme/widgets/issues/42","updated_at":"2026-09-01T00:00:00Z"},{"number":43,"title":"PR row","state":"open","pull_request":{"url":"x"}}]"#.to_string()
             } else {
                 "[]".to_string()
-            })
+            }))
         })
         .unwrap();
         assert_eq!(
             calls,
-            ["repos/acme/widgets/issues?state=open&sort=updated&direction=desc&per_page=100&page=1"]
+            ["repos/acme/widgets/issues?state=open&sort=created&direction=desc&per_page=100&page=1"]
         );
         assert_eq!(issues.len(), 1, "pull requests are not issues");
         assert_eq!(issues[0].number, 42);
@@ -409,6 +437,33 @@ mod tests {
             .to_string();
         assert!(failure.contains("gh api issues"), "{failure}");
         assert!(failure.contains("HTTP 502"), "{failure}");
+    }
+
+    #[test]
+    fn fetch_issue_listing_preserves_cap_after_filtering_pull_requests() {
+        let mut requests = 0;
+        let listing = fetch_issue_listing_with("acme", "widgets", |_| {
+            let offset = requests * crate::gh_rest::REST_PAGE_SIZE;
+            requests += 1;
+            let rows = (0..crate::gh_rest::REST_PAGE_SIZE)
+                .map(|index| {
+                    let mut row = serde_json::json!({"number": offset + index + 1});
+                    if index == crate::gh_rest::REST_PAGE_SIZE - 1 {
+                        row["pull_request"] = serde_json::json!({"url": "https://example.test/pr"});
+                    }
+                    row
+                })
+                .collect::<Vec<_>>();
+            Ok(format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/acme/widgets/issues?page={}>; rel=\"next\"\r\n\r\n{}", requests + 1, serde_json::to_string(&rows).unwrap()))
+        })
+        .unwrap();
+
+        assert_eq!(requests, crate::gh_rest::REST_MAX_PAGES_PER_READ);
+        assert_eq!(listing.issues.len(), 990);
+        assert!(
+            listing.capped,
+            "filtering PRs must not erase the REST page cap"
+        );
     }
 
     #[test]

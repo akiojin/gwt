@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,8 +21,8 @@ use gwt_core::index::broker::{
     RefreshScope, RefreshTarget, RefreshTargetState, REFRESH_INTENT_PROTOCOL_VERSION,
 };
 use gwt_core::index_coordinator::{
-    HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, LeaseEventKind,
-    OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
+    HeavyYieldReason, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, JobStatus,
+    LeaseEventKind, OwnerIdentity, TargetKey, Ticket, COORDINATOR_SCHEMA_VERSION,
     INTERACTIVE_SEARCH_ADMISSION_DEADLINE, MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS,
 };
 
@@ -52,11 +52,11 @@ fn run_helper_role(role: &str) {
         let complete_signal = PathBuf::from(required_env("GWT_COORD_SIGNAL2"));
         let broker =
             RefreshBroker::open(&root, Duration::ZERO).expect("helper: open refresh broker");
-        fs::write(&ready, b"ready").expect("helper: write refresh broker ready marker");
+        publish_marker(&ready, b"ready").expect("helper: write refresh broker ready marker");
         poll_until(Duration::from_secs(20), || start_signal.exists());
         let claim = broker.claim_next().expect("helper: claim refresh target");
         write_result(if claim.is_some() { "claimed" } else { "idle" });
-        fs::write(&attempted, b"attempted").expect("helper: write claim attempted marker");
+        publish_marker(&attempted, b"attempted").expect("helper: write claim attempted marker");
         poll_until(Duration::from_secs(20), || complete_signal.exists());
         if let Some(claim) = claim {
             claim.complete().expect("helper: complete refresh target");
@@ -125,7 +125,7 @@ fn run_helper_role(role: &str) {
             let _lease = guard
                 .acquire_heavy_with_ttl(Duration::from_secs(20), ttl)
                 .expect("helper: acquire verification lease");
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             std::thread::sleep(Duration::from_secs(60));
         }
         "own-until-waiters" => {
@@ -137,7 +137,7 @@ fn run_helper_role(role: &str) {
                 .request_job(&key, JobPriority::Background, Duration::from_secs(20))
                 .expect("helper: request job");
             let guard = expect_owner(admission);
-            fs::write(&started, b"started").expect("helper: write started marker");
+            publish_marker(&started, b"started").expect("helper: write started marker");
             poll_until(Duration::from_secs(20), || {
                 guard.waiter_count().expect("helper: waiter count") >= waiters
             });
@@ -156,11 +156,11 @@ fn run_helper_role(role: &str) {
                 .request_job(&key, JobPriority::Background, Duration::from_secs(20))
                 .expect("helper: request job");
             let guard = expect_owner(admission);
-            fs::write(&started, b"started").expect("helper: write started marker");
+            publish_marker(&started, b"started").expect("helper: write started marker");
             poll_until(Duration::from_secs(20), || {
                 guard.waiter_count().expect("helper: waiter count") >= 2
             });
-            fs::write(&saw_two, b"two-waiters").expect("helper: write waiters marker");
+            publish_marker(&saw_two, b"two-waiters").expect("helper: write waiters marker");
             poll_until(Duration::from_secs(20), || {
                 guard.waiter_count().expect("helper: waiter count") <= 1
             });
@@ -203,7 +203,7 @@ fn run_helper_role(role: &str) {
                 JobAdmission::Joined(waiter) => waiter,
                 JobAdmission::Owner(_) => panic!("helper: expected to join, became owner"),
             };
-            fs::write(&joined, b"joined").expect("helper: write joined marker");
+            publish_marker(&joined, b"joined").expect("helper: write joined marker");
             poll_until(Duration::from_secs(20), || signal.exists());
             drop(waiter);
             write_result("departed");
@@ -225,17 +225,18 @@ fn run_helper_role(role: &str) {
             let heavy = guard
                 .acquire_heavy_with_ttl(Duration::from_secs(20), ttl)
                 .expect("helper: acquire issues index heavy lease");
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             let yielded = heavy.hold_while(Duration::from_millis(25), || !stop.exists());
             // Best-effort: a parent that already failed takes its arena with
             // it, and a helper that panics on the missing file would bury the
             // parent's diagnosis under its own.
-            let _ = fs::write(
-                PathBuf::from(required_env("GWT_COORD_RESULT")),
+            let _ = publish_marker(
+                &PathBuf::from(required_env("GWT_COORD_RESULT")),
                 match yielded {
                     Some(reason) => reason.as_str(),
                     None => "job-finished",
-                },
+                }
+                .as_bytes(),
             );
             let deadline = Instant::now() + Duration::from_secs(20);
             while !stop.exists() && Instant::now() < deadline {
@@ -263,9 +264,9 @@ fn run_helper_role(role: &str) {
                     probe,
                     Err(gwt_core::index_coordinator::CoordinatorError::Timeout { .. })
                 );
-                fs::write(
-                    PathBuf::from(required_env("GWT_COORD_MARKER")),
-                    if deferred { "deferred" } else { "overtook" },
+                publish_marker(
+                    &PathBuf::from(required_env("GWT_COORD_MARKER")),
+                    if deferred { "deferred" } else { "overtook" }.as_bytes(),
                 )
                 .expect("helper: report retry outcome");
                 if !deferred {
@@ -293,7 +294,7 @@ fn run_helper_role(role: &str) {
             let _heavy = guard
                 .acquire_heavy(Duration::from_secs(20))
                 .expect("helper: acquire heavy");
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             // Park until the parent kills this process (T-IDX-383 lock owner
             // kill: the kernel must auto-release both locks).
             std::thread::sleep(Duration::from_secs(60));
@@ -329,7 +330,7 @@ fn run_helper_role(role: &str) {
             let lease = guard
                 .acquire_heavy(Duration::from_secs(30))
                 .expect("helper: acquire background heavy lease");
-            fs::write(&granted, b"granted").expect("helper: write granted marker");
+            publish_marker(&granted, b"granted").expect("helper: write granted marker");
             std::thread::sleep(hold);
             lease.release().expect("helper: release background lease");
             guard
@@ -346,7 +347,7 @@ fn run_helper_role(role: &str) {
             let ledger = PathBuf::from(required_env("GWT_COORD_LEDGER"));
             let stop = PathBuf::from(required_env("GWT_COORD_SIGNAL"));
             let ready = PathBuf::from(required_env("GWT_COORD_MARKER"));
-            fs::write(&ready, b"ready").expect("helper: write ready marker");
+            publish_marker(&ready, b"ready").expect("helper: write ready marker");
             while !stop.exists() {
                 let admission = coordinator
                     .request_job(&key, JobPriority::Background, Duration::from_secs(20))
@@ -420,7 +421,7 @@ fn required_env_u64(name: &str) -> u64 {
 
 fn write_result(content: &str) {
     let path = PathBuf::from(required_env("GWT_COORD_RESULT"));
-    fs::write(path, content).expect("helper: write result");
+    publish_marker(&path, content.as_bytes()).expect("helper: write result");
 }
 
 // ---------------------------------------------------------------------------
@@ -470,8 +471,25 @@ fn locked_append_line(path: &Path, line: &str) {
     fs2::FileExt::unlock(&file).expect("unlock order log");
 }
 
+/// Reads a file its writer maintains under an fs2 lock, taking the same lock.
+///
+/// Issue #4360: the ledgers above are rewritten (truncate then refill) or
+/// appended to while the writer holds the exclusive lock, so an unlocked
+/// reader can catch the file empty or half-written. `None` means the writer
+/// has not created it yet, which is a real "nothing recorded" answer — unlike
+/// a torn read, which the shared lock now makes unobservable.
+fn read_locked(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    fs2::FileExt::lock_shared(&file).expect("lock ledger for reading");
+    let mut raw = String::new();
+    let mut handle = &file;
+    handle.read_to_string(&mut raw).expect("read ledger");
+    fs2::FileExt::unlock(&file).expect("unlock ledger");
+    Some(raw)
+}
+
 fn read_lines(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
+    read_locked(path)
         .unwrap_or_default()
         .lines()
         .map(str::to_string)
@@ -479,8 +497,7 @@ fn read_lines(path: &Path) -> Vec<String> {
 }
 
 fn read_counter(path: &Path) -> (i64, i64) {
-    let raw = fs::read_to_string(path).unwrap_or_default();
-    parse_counter(&raw)
+    parse_counter(&read_locked(path).unwrap_or_default())
 }
 
 fn parse_counter(raw: &str) -> (i64, i64) {
@@ -505,15 +522,117 @@ fn poll_until(deadline: Duration, mut done: impl FnMut() -> bool) {
     panic!("poll_until timed out after {deadline:?}");
 }
 
-fn wait_for_file(path: &Path, deadline: Duration) {
+/// Publishes a cross-process marker or result so that its appearance and its
+/// content become the same instant (Issue #4360).
+///
+/// This is the shared [`gwt_core::atomic_file::write_atomic`] primitive under
+/// a name that says what a marker is for; the daemon endpoint descriptor and
+/// the verification lease release channel publish through the same function.
+fn publish_marker(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    gwt_core::atomic_file::write_atomic(path, content)
+}
+
+/// Waits until `path` holds readable, complete content and returns it.
+///
+/// Every marker and result this suite publishes is non-empty, so an empty read
+/// is an unfinished write rather than a value (Issue #4360). Returning it as
+/// `""` is what turned the race into `left: "" / right: "cap-reached"`, so the
+/// reader keeps waiting instead and fails loudly when the content never lands.
+fn read_when_published(path: &Path, deadline: Duration) -> String {
     let start = Instant::now();
-    while start.elapsed() < deadline {
-        if path.exists() {
-            return;
+    loop {
+        if let Ok(content) = fs::read_to_string(path) {
+            if !content.is_empty() {
+                return content;
+            }
         }
+        assert!(
+            start.elapsed() < deadline,
+            "file {} was not published within {deadline:?}",
+            path.display()
+        );
         std::thread::sleep(POLL);
     }
-    panic!("file {} did not appear within {deadline:?}", path.display());
+}
+
+/// Waits for a marker whose content carries no information beyond "it
+/// happened". It still waits for the published content rather than for mere
+/// existence, so callers cannot observe a half-written marker.
+fn wait_for_file(path: &Path, deadline: Duration) {
+    read_when_published(path, deadline);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4360: cross-process marker publication must be all-or-nothing
+// ---------------------------------------------------------------------------
+
+/// AC-1 (writer side): a reader that observes the destination must never find
+/// it existing yet empty. `fs::write` truncates first and fills afterwards, so
+/// the gap between those two steps is exactly the window a loaded host widens.
+#[test]
+fn publish_marker_never_exposes_an_empty_destination() {
+    let arena = TestArena::new();
+    let path = arena.path("published-marker");
+    let observed = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+
+    let observer = {
+        let path = path.clone();
+        let observed = Arc::clone(&observed);
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let mut empty_reads = 0_u64;
+            while !done.load(Ordering::Relaxed) {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    observed.store(true, Ordering::Relaxed);
+                    if content.is_empty() {
+                        empty_reads += 1;
+                    }
+                }
+            }
+            empty_reads
+        })
+    };
+
+    for turn in 0..2_000 {
+        publish_marker(&path, format!("turn-{turn}").as_bytes()).expect("publish marker");
+    }
+    done.store(true, Ordering::Relaxed);
+    let empty_reads = observer.join().expect("observer thread");
+
+    assert!(
+        observed.load(Ordering::Relaxed),
+        "the observer never managed to read the marker, so the run proves nothing"
+    );
+    assert_eq!(
+        empty_reads, 0,
+        "a published marker must never be observable as an existing empty file"
+    );
+}
+
+/// AC-2 (reader side): an existing-but-empty file is an unfinished write, not
+/// a value. The reader keeps waiting for the content instead of handing an
+/// empty string to the assertion.
+#[test]
+fn read_when_published_waits_out_an_existing_but_empty_file() {
+    let arena = TestArena::new();
+    let path = arena.path("late-content");
+    fs::write(&path, b"").expect("create the half-written destination");
+
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            publish_marker(&path, b"cap-reached").expect("publish late content");
+        })
+    };
+
+    assert_eq!(
+        read_when_published(&path, Duration::from_secs(10)),
+        "cap-reached",
+        "an existing but empty file must not be read as a finished value"
+    );
+    writer.join().expect("writer thread");
 }
 
 struct HelperSpawn {
@@ -602,6 +721,8 @@ fn write_stale_ticket(path: &Path, target: &TargetKey, pid: u32, start_id: &str)
         acquired_at_ms: 0,
         lease_id: None,
         expires_at_ms: None,
+        holder_nice: None,
+        holder_spawn_host: None,
     };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create ticket dir");
@@ -735,12 +856,16 @@ fn freed_heavy_lease_travels_the_queue_in_arrival_order() {
     // third must defer even though neither earlier claimant is polling yet.
     let third = spawn_queued("third", "wt-a");
     let third_retry = arena.path("retry-third");
-    wait_for_file(&third_retry, Duration::from_secs(20));
-    assert_eq!(fs::read_to_string(third_retry).unwrap(), "deferred");
+    assert_eq!(
+        read_when_published(&third_retry, Duration::from_secs(20)),
+        "deferred"
+    );
     let second = spawn_queued("second", "wt-b");
     let second_retry = arena.path("retry-second");
-    wait_for_file(&second_retry, Duration::from_secs(20));
-    assert_eq!(fs::read_to_string(second_retry).unwrap(), "deferred");
+    assert_eq!(
+        read_when_published(&second_retry, Duration::from_secs(20)),
+        "deferred"
+    );
     assert!(read_lines(&order).is_empty());
 
     let first = spawn_queued("first", "wt-c");
@@ -1100,6 +1225,7 @@ fn killed_verification_owner_releases_lease_before_ttl_expiry() {
     let _ = parked.child.wait();
 
     let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let orphan = coordinator.lease_events().unwrap().pop().unwrap();
     let guard = match coordinator
         .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(10))
         .expect("request verification job after kill")
@@ -1110,10 +1236,243 @@ fn killed_verification_owner_releases_lease_before_ttl_expiry() {
     let lease = guard
         .acquire_heavy_with_ttl(Duration::from_secs(10), Duration::from_secs(60))
         .expect("verification lease after owner kill");
+    assert_eq!(
+        coordinator
+            .heavy_lease_status()
+            .unwrap()
+            .lease_id
+            .as_deref(),
+        Some(lease.id()),
+        "status must preserve the new holder's ticket"
+    );
     lease.release().expect("release recovered lease");
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    let events = coordinator.lease_events().unwrap();
+    let recovered: Vec<_> = events
+        .iter()
+        .filter(|event| event.lease_id == orphan.lease_id && event.kind == LeaseEventKind::Released)
+        .collect();
+    assert_eq!(recovered.len(), 1, "orphan recovery must be recorded once");
+    assert_eq!(
+        recovered[0].reason.as_deref(),
+        Some("holder lock released without settlement")
+    );
+    assert_eq!(events.len(), 4, "normal release must not be recorded twice");
     guard
         .complete(JobOutcome::Completed)
         .expect("complete recovered job");
+}
+
+#[test]
+fn status_recovers_killed_verification_ticket_once() {
+    let arena = TestArena::new();
+    let ready = arena.path("verify-ready");
+    let mut parked = spawn_helper(
+        "verify-holder",
+        &[
+            ("GWT_COORD_ROLE", "hold-verification-and-park".to_string()),
+            arena.coord_env(),
+            ("GWT_COORD_VERIFY_TARGET", "repo-a|wt-1".to_string()),
+            ("GWT_COORD_TTL_MS", "3600000".to_string()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(30));
+    let coordinator = IndexCoordinator::open(&arena.coord_root).unwrap();
+    let live = coordinator.heavy_lease_status().unwrap();
+    let ticket = fs::read(coordinator.heavy_ticket_path()).unwrap();
+    assert!(live.held);
+    assert_eq!(coordinator.lease_events().unwrap().len(), 1);
+
+    parked.child.kill().expect("kill verification holder");
+    let _ = parked.child.wait();
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    assert!(!coordinator.heavy_ticket_path().exists());
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    let events = coordinator.lease_events().unwrap();
+    assert_eq!(events.len(), 2, "status must settle the orphan only once");
+    assert_eq!(events[1].lease_id, live.lease_id.unwrap());
+    assert_eq!(events[1].kind, LeaseEventKind::Released);
+    assert_eq!(
+        events[1].reason.as_deref(),
+        Some("holder lock released without settlement")
+    );
+
+    // A holder can also die between appending its terminal event and
+    // removing the ticket. Recover that residue without a second event.
+    fs::write(coordinator.heavy_ticket_path(), ticket).unwrap();
+    assert!(!coordinator.heavy_lease_status().unwrap().held);
+    assert!(!coordinator.heavy_ticket_path().exists());
+    assert_eq!(coordinator.lease_events().unwrap().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4470: a lease whose holder is gone must not read as held
+// ---------------------------------------------------------------------------
+
+/// Publish a holder's target-job state directly, so a test can place the
+/// residue a finished or killed holder leaves behind.
+fn write_holder_state(path: &Path, owner: &OwnerIdentity, status: &str) {
+    fs::create_dir_all(path.parent().expect("state parent")).expect("create state dir");
+    let state = serde_json::json!({
+        "schema_version": COORDINATOR_SCHEMA_VERSION,
+        "epoch": 16,
+        "status": status,
+        "owner": { "pid": owner.pid, "start_id": owner.start_id },
+        "priority": "manual-rebuild",
+        "updated_at_ms": now_ms(),
+    });
+    fs::write(path, serde_json::to_vec(&state).expect("state json")).expect("write state");
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64
+}
+
+/// Write the ticket of a verification holder that took the lease `held_for`
+/// ago with a TTL of `ttl`.
+fn write_verification_ticket(
+    path: &Path,
+    target: &TargetKey,
+    owner: &OwnerIdentity,
+    held_for: Duration,
+    ttl: Duration,
+) {
+    let acquired_at_ms = now_ms().saturating_sub(held_for.as_millis() as u64);
+    let ticket = Ticket {
+        schema_version: COORDINATOR_SCHEMA_VERSION,
+        target: target.file_stem(),
+        priority: JobPriority::ManualRebuild,
+        owner: owner.clone(),
+        acquired_at_ms,
+        lease_id: Some("lease-4470".to_string()),
+        expires_at_ms: Some(acquired_at_ms.saturating_add(ttl.as_millis() as u64)),
+        holder_nice: None,
+        holder_spawn_host: None,
+    };
+    fs::write(path, serde_json::to_vec(&ticket).expect("ticket json")).expect("write ticket");
+}
+
+/// A descriptor that keeps `heavy.lock` locked after its holder is gone.
+///
+/// `O_CLOEXEC` closes an inherited lock descriptor at `exec`, not at `fork`,
+/// so a child forked out of a lease holder keeps the `flock` alive for that
+/// window — the coordinator's own release tests measure it. While it lasts,
+/// the kernel probe reads contended although nothing is verifying.
+fn phantom_lock(path: &Path) -> fs::File {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .expect("open heavy lock");
+    FileExt::lock_exclusive(&file).expect("hold the phantom lock");
+    file
+}
+
+/// Issue #4470 AC-1 / AC-4: a holder that published a terminal job status is
+/// finished. Reporting its ticket's TTL remainder as "held" sent waiters into
+/// a 25-minute wait for a lease nobody was using.
+#[test]
+fn completed_holder_is_not_reported_as_a_held_lease() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let key = TargetKey::verification("repo-a", "wt-1");
+    let owner = OwnerIdentity::current();
+    let phantom = phantom_lock(&coordinator.heavy_lock_path());
+    write_verification_ticket(
+        &coordinator.heavy_ticket_path(),
+        &key,
+        &owner,
+        Duration::from_secs(20 * 60),
+        Duration::from_secs(45 * 60),
+    );
+    write_holder_state(&coordinator.target_state_path(&key), &owner, "completed");
+
+    let status = coordinator.heavy_lease_status().expect("read lease status");
+    assert!(
+        !status.held,
+        "a holder that published `completed` must not read as holding the lease: {status:?}"
+    );
+    assert!(status.holder_stale, "{status:?}");
+    assert_eq!(status.holder_job_status, Some(JobStatus::Completed));
+    assert_eq!(
+        status.remaining_ms, None,
+        "residue has no TTL worth waiting out: {status:?}"
+    );
+
+    // The descriptor closes exactly as `exec` closes an inherited one. The
+    // waiter must then take the lease on its first attempt, not after the
+    // ticket's 45-minute TTL lapses.
+    drop(phantom);
+    let guard = expect_owner(
+        coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(5))
+            .expect("request verification job"),
+    );
+    guard
+        .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+        .expect("acquire must not wait behind a completed holder");
+}
+
+/// Issue #4470 AC-2 / AC-4: the holder's PID is the other half. A refusal
+/// naming a process that no longer exists still counted down its full TTL.
+#[test]
+fn dead_holder_pid_is_not_reported_as_a_held_lease() {
+    let arena = TestArena::new();
+    let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
+    let key = TargetKey::verification("repo-a", "wt-1");
+    // A reaped process: its PID is gone for good, unlike an invented number.
+    let mut exited = spawn_helper(
+        "exit-now",
+        &[
+            ("GWT_COORD_ROLE", "exit-now".to_string()),
+            arena.coord_env(),
+        ],
+    );
+    let dead_pid = exited.child.id();
+    exited.child.wait().expect("reap the helper");
+    let owner = OwnerIdentity {
+        pid: dead_pid,
+        start_id: "dead-holder".to_string(),
+    };
+    let phantom = phantom_lock(&coordinator.heavy_lock_path());
+    write_verification_ticket(
+        &coordinator.heavy_ticket_path(),
+        &key,
+        &owner,
+        Duration::from_secs(20 * 60),
+        Duration::from_secs(45 * 60),
+    );
+    // Killed mid-run: the job state still says `running`, so liveness is the
+    // only thing that can tell this residue from a working holder.
+    write_holder_state(&coordinator.target_state_path(&key), &owner, "running");
+
+    let status = coordinator.heavy_lease_status().expect("read lease status");
+    assert!(
+        !status.held,
+        "a holder whose process is gone must not read as holding the lease: {status:?}"
+    );
+    assert!(status.holder_stale, "{status:?}");
+    assert_eq!(status.holder_alive, Some(false));
+    assert_eq!(
+        status.remaining_ms, None,
+        "residue has no TTL worth waiting out: {status:?}"
+    );
+
+    drop(phantom);
+    let guard = expect_owner(
+        coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(5))
+            .expect("request verification job"),
+    );
+    guard
+        .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(60))
+        .expect("acquire must not wait behind a dead holder");
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,9 +1538,8 @@ fn issues_index_job_yields_the_heavy_lease_to_a_waiting_verification_run() {
     // The lease is released before the reason is written, so the winner can
     // be here first; the reason is what the assertion is about, not the
     // ordering of two independent writes.
-    wait_for_file(&result, Duration::from_secs(10));
     assert_eq!(
-        fs::read_to_string(&result).unwrap_or_default(),
+        read_when_published(&result, Duration::from_secs(10)),
         HeavyYieldReason::Preempted.as_str(),
         "the index job must record that it was preempted after waiting {waited:?}"
     );
@@ -1229,9 +1587,8 @@ fn issues_index_job_releases_the_heavy_lease_when_its_hold_cap_lapses() {
         !stop.exists(),
         "the cap must fire while the index job is still running"
     );
-    wait_for_file(&result, Duration::from_secs(10));
     assert_eq!(
-        fs::read_to_string(&result).unwrap_or_default(),
+        read_when_published(&result, Duration::from_secs(10)),
         HeavyYieldReason::CapReached.as_str(),
     );
 
@@ -1354,9 +1711,8 @@ fn background_index_job_yields_the_heavy_lease_to_an_interactive_search() {
     let waited = started.elapsed();
 
     assert!(!stop.exists(), "the background build must still be running");
-    wait_for_file(&result, Duration::from_secs(10));
     assert_eq!(
-        fs::read_to_string(&result).unwrap_or_default(),
+        read_when_published(&result, Duration::from_secs(10)),
         HeavyYieldReason::Preempted.as_str(),
         "the background build must record that an interactive search preempted \
          it after waiting {waited:?}"
@@ -1547,17 +1903,26 @@ fn sustained_interactive_traffic_and_background_index_work_both_progress() {
     wait_for_file(&ready, Duration::from_secs(30));
     let (baseline, _) = read_counter(&ledger);
 
-    // Three full bursts of searches, issued back to back.
+    // Three full bursts with a live background waiter at each release.
+    // The helper drops its pending registration between jobs; its ready
+    // marker alone does not prove sustained contention. Hold each search
+    // lease until that background worker has queued its next attempt.
     let rounds = 3 * MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
     for round in 1..=rounds {
-        coordinator
+        let lease = coordinator
             .acquire_interactive_search_heavy(&search_key, Duration::from_secs(20))
             .unwrap_or_else(|err| {
                 let _ = fs::write(&stop, b"stop");
                 panic!("interactive search {round}/{rounds} must still be served: {err}")
-            })
-            .release()
-            .expect("release search lease");
+            });
+        poll_until(Duration::from_secs(20), || {
+            coordinator
+                .heavy_lease_status()
+                .expect("read queued background waiter")
+                .pending
+                >= 1
+        });
+        lease.release().expect("release search lease");
     }
 
     let (after, _) = read_counter(&ledger);
@@ -2096,7 +2461,7 @@ fn refresh_broker_two_processes_cannot_claim_the_same_target_concurrently() {
 
     let claimed = results
         .iter()
-        .filter(|(_, _, result)| fs::read_to_string(result).is_ok_and(|value| value == "claimed"))
+        .filter(|(_, _, result)| read_when_published(result, Duration::from_secs(20)) == "claimed")
         .count();
     assert_eq!(
         claimed, 1,

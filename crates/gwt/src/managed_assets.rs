@@ -1,6 +1,8 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs, io,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -59,7 +61,9 @@ fn with_managed_asset_lock<T>(
 /// (read by Codex before 0.131.0-alpha.21) and the workspace-home copy (read by
 /// newer Codex). Deduplicated when both resolve to the same file.
 pub fn managed_codex_hook_paths(worktree: &Path) -> Vec<PathBuf> {
-    gwt_skills::codex_hooks_paths_for_codex_discovery(worktree, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree);
+    let root = runtime.as_deref().unwrap_or(worktree);
+    gwt_skills::codex_hooks_paths_for_codex_discovery(root, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
 }
 
 /// Resolve the only Host Codex config whose project trust lifecycle gwt can
@@ -231,6 +235,9 @@ pub fn managed_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
 }
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        return refresh_managed_gwt_assets_for_pm_worktree(worktree);
+    }
     with_managed_asset_lock(worktree, || {
         crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
         crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
@@ -249,57 +256,769 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
 
 /// Refresh the resident PM's own managed assets without mutating the linked
 /// main checkout's workspace-home Codex hooks. Launch materialization owns
-/// provider-specific workspace-home discovery; safe-boundary refreshes are
-/// confined to the canonical PM checkout.
+/// provider-specific workspace-home discovery; safe-boundary refreshes write
+/// provider assets in the PM runtime and Git hooks in its canonical checkout.
 pub fn refresh_managed_gwt_assets_for_pm_worktree(worktree: &Path) -> io::Result<()> {
-    if !crate::pm_registry::is_pm_worktree(worktree) {
+    with_managed_asset_lock(worktree, || {
+        refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
+    })
+}
+
+/// Caller holds the managed-assets lock through repoint and regeneration.
+pub(crate) fn refresh_managed_gwt_assets_for_pm_worktree_locked(worktree: &Path) -> io::Result<()> {
+    if !crate::pm_registry::is_canonical_pm_worktree(worktree) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("not a canonical PM worktree: {}", worktree.display()),
         ));
     }
-    with_managed_asset_lock(worktree, || {
-        let snapshot = PmManagedAssetSnapshot::capture(worktree)?;
-        let refresh = (|| {
-            materialize_managed_gwt_assets_for_targets(
-                worktree,
-                &ManagedAssetTarget::ALL,
-                CodexHookDiscoveryMode::WorktreeLocal,
-                false,
+    refresh_pm_runtime_assets(worktree, &ManagedAssetTarget::ALL)?;
+    crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
+    crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
+    Ok(())
+}
+
+fn refresh_pm_runtime_assets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<ManagedAssetMaterialization> {
+    let runtime = crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(worktree)?;
+    let snapshot = PmManagedAssetSnapshot::capture(&runtime)?;
+    let refresh = (|| {
+        let hook_bin = materialize_managed_gwt_assets_for_targets(
+            &runtime,
+            targets,
+            CodexHookDiscoveryMode::WorktreeLocal,
+            false,
+        )?;
+        materialize_pm_project_policy(worktree, &runtime, targets)?;
+        gwt_skills::materialize_managed_git_hooks(worktree)?;
+        Ok(ManagedAssetMaterialization { hook_bin })
+    })();
+    match refresh {
+        Ok(result) => {
+            snapshot.discard();
+            Ok(result)
+        }
+        Err(error) => match snapshot.restore() {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(io::Error::other(format!(
+                "{error}; restoring prior PM managed assets also failed: {restore_error}"
+            ))),
+        },
+    }
+}
+
+/// Opt-in content rides the existing generated gwt-pm leaf and its snapshot.
+fn materialize_pm_project_policy(
+    worktree: &Path,
+    runtime: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<()> {
+    let prefs_path = worktree
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("PM worktree has no project store"))?
+        .join("project-state/pm.json");
+    let prefs = crate::pm_registry::load_pm_prefs(&prefs_path)?;
+    let mut policy = String::new();
+    for relative in prefs.settings.project_policy_files {
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "PM project_policy_files requires a project-relative file: {}",
+                    relative.display()
+                ),
+            ));
+        }
+        let source = worktree.join(&relative);
+        let content = fs::read_to_string(&source).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("read opted-in PM policy {}: {error}", source.display()),
+            )
+        })?;
+        policy.push_str(&format!("\n### {}\n\n{}\n", relative.display(), content));
+    }
+    if policy.is_empty() {
+        return Ok(());
+    }
+    for (target, root) in [
+        (ManagedAssetTarget::ClaudeCode, ".claude/skills"),
+        (ManagedAssetTarget::Codex, ".codex/skills"),
+    ] {
+        if targets.contains(&target) {
+            gwt_skills::pm_guidance::generate_pm_guidance_with_policy(
+                &runtime.join(root),
+                &policy,
             )?;
-            update_git_exclude(worktree).map_err(|error| {
-                io::Error::other(format!("failed to update PM managed excludes: {error}"))
-            })
-        })();
-        match refresh {
-            Ok(()) => {
-                snapshot.discard();
-                crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
-                crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
-                Ok(())
+        }
+    }
+    Ok(())
+}
+
+/// Preserve only untracked gwt-owned collisions before the non-force Git
+/// repoint. The same lock also covers the caller's checkout and regeneration.
+/// Backups remain outside the checkout after success and after rollback.
+pub(crate) fn with_pm_repoint_transaction<T>(
+    worktree: &Path,
+    target: &str,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_managed_asset_lock(worktree, || {
+        let tree = pm_repoint_target_tree(worktree, target)?;
+        let tracked = pm_repoint_git(worktree, &["ls-files", "-z"])?;
+        let tracked = std::str::from_utf8(&tracked)
+            .map_err(|_| io::Error::other("user-owned changes: non-UTF8 index path"))?
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect::<BTreeSet<_>>();
+        let index_owns = |path: &Path| {
+            path.ancestors().any(|entry| tracked.contains(entry))
+                || tracked
+                    .range(path.to_path_buf()..)
+                    .next()
+                    .is_some_and(|entry| entry.starts_with(path))
+        };
+        let mut candidates = Vec::new();
+        let mut protected = Vec::new();
+        for (path, (mode, _)) in &tree {
+            if index_owns(path) {
+                continue;
             }
-            Err(error) => match snapshot.restore() {
-                Ok(()) => Err(error),
-                Err(restore_error) => Err(io::Error::other(format!(
-                    "{error}; restoring prior PM managed assets also failed: {restore_error}"
-                ))),
-            },
+            match pm_repoint_existing_file(worktree, path) {
+                Ok(false) => continue,
+                Ok(true) if matches!(mode.as_str(), "100644" | "100755") => {}
+                _ => {
+                    protected.push(path.clone());
+                    continue;
+                }
+            }
+            if gwt_skills::is_gwt_managed_skill_or_command_path(path)
+                || pm_repoint_work_history_path(path)
+            {
+                candidates.push(path.clone());
+            } else {
+                protected.push(path.clone());
+            }
+        }
+        if !protected.is_empty() {
+            return Err(io::Error::other(format!(
+                "user-owned changes: {} incoming path collision(s): {}",
+                protected.len(),
+                protected
+                    .iter()
+                    .take(5)
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        if candidates.is_empty() {
+            return operation();
+        }
+
+        let project_state = worktree
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| io::Error::other("managed artifacts: PM has no project-state root"))?
+            .join("project-state");
+        let backup_root = project_state
+            .join("pm-repoint-backups")
+            .join(uuid::Uuid::new_v4().to_string());
+        pm_repoint_create_dir(&backup_root)?;
+        let mut entries = Vec::new();
+        let result = (|| {
+            for relative in candidates {
+                entries.push(PmRepointBackup::capture(worktree, &backup_root, relative)?);
+            }
+            let incoming_history = validate_pm_repoint_incoming_history(worktree, &tree, &entries)?;
+            let history = entries
+                .iter()
+                .filter(|entry| pm_repoint_work_history_path(&entry.relative))
+                .map(|entry| entry.relative.clone())
+                .collect::<Vec<_>>();
+            for relative in history {
+                validate_pm_repoint_history_name(worktree, &relative)?;
+                let paths =
+                    gwt_core::workspace_projection::preserve_workspace_work_event_log_as_shards(
+                        &worktree.join(&relative),
+                        &worktree.join(".gwt/work/events"),
+                    )
+                    .map_err(|error| io::Error::other(format!("Work history: {error}")))?;
+                for path in paths {
+                    let relative = path.strip_prefix(worktree).map_err(|_| {
+                        io::Error::other("Work history: preserved shard escaped checkout")
+                    })?;
+                    let Some((mode, _)) = tree.get(relative) else {
+                        continue;
+                    };
+                    if !matches!(mode.as_str(), "100644" | "100755")
+                        || incoming_history.get(relative) != Some(&fs::read(&path)?)
+                    {
+                        return Err(io::Error::other(format!(
+                            "Work history: incoming shard differs from preserved event: {}",
+                            relative.display()
+                        )));
+                    }
+                    if !index_owns(relative)
+                        && !entries.iter().any(|entry| entry.relative == relative)
+                    {
+                        entries.push(PmRepointBackup::capture(
+                            worktree,
+                            &backup_root,
+                            relative.to_path_buf(),
+                        )?);
+                    }
+                }
+            }
+            for entry in &mut entries {
+                let path = worktree.join(&entry.relative);
+                if !pm_repoint_existing_file(worktree, &entry.relative)?
+                    || fs::read(&path)? != entry.bytes
+                {
+                    return Err(io::Error::other(format!(
+                        "managed artifacts: source changed before repoint: {}",
+                        entry.relative.display()
+                    )));
+                }
+                fs::remove_file(&path)?;
+                entry.displaced = true;
+                pm_repoint_sync_dir(path.parent().expect("collision has parent"))?;
+            }
+            operation()
+        })();
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let mut failures = Vec::new();
+                for entry in entries.iter().filter(|entry| entry.displaced) {
+                    if let Err(restore) = entry.restore(worktree) {
+                        failures.push(format!("{}: {restore}", entry.relative.display()));
+                    }
+                }
+                Err(io::Error::other(format!(
+                    "{error}; managed artifacts / Work history backup retained at {}{}",
+                    backup_root.display(),
+                    if failures.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; {} restore failure(s): {}",
+                            failures.len(),
+                            failures.into_iter().take(5).collect::<Vec<_>>().join(", ")
+                        )
+                    }
+                )))
+            }
         }
     })
 }
 
-const PM_MANAGED_ASSET_TRANSACTION_ROOTS: &[&str] = &[
-    ".claude",
-    ".codex",
-    ".gwt/opencode",
-    ".gwt/openclaw",
-    ".gwt/hermes",
-];
+fn pm_repoint_git(worktree: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
+    let output = gwt_core::process::run_git_logged(args, Some(worktree))?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "managed artifacts: git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
+                .trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
+fn pm_repoint_target_tree(
+    worktree: &Path,
+    target: &str,
+) -> io::Result<BTreeMap<PathBuf, (String, String)>> {
+    let output = pm_repoint_git(worktree, &["ls-tree", "-r", "-z", "--full-tree", target])?;
+    let text = std::str::from_utf8(&output)
+        .map_err(|_| io::Error::other("user-owned changes: non-UTF8 incoming tree path"))?;
+    text.split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (metadata, path) = entry
+                .split_once('\t')
+                .ok_or_else(|| io::Error::other("managed artifacts: invalid Git tree entry"))?;
+            let fields = metadata.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 3
+                || !Path::new(path)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(io::Error::other("managed artifacts: invalid Git tree path"));
+            }
+            Ok((
+                PathBuf::from(path),
+                (fields[0].to_string(), fields[2].to_string()),
+            ))
+        })
+        .collect()
+}
+
+/// Inspect every managed parent without following symlinks/reparse points.
+fn pm_repoint_existing_file(worktree: &Path, relative: &Path) -> io::Result<bool> {
+    let mut path = worktree.to_path_buf();
+    for part in relative.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return Err(io::Error::other(
+                "user-owned changes: noncanonical collision path",
+            ));
+        }
+        path.push(part);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        reject_pm_managed_asset_indirection(&path, &metadata)?;
+        let valid = if path == worktree.join(relative) {
+            metadata.is_file()
+        } else {
+            metadata.is_dir()
+        };
+        if !valid {
+            return Err(io::Error::other(format!(
+                "user-owned changes: unsupported collision node: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(true)
+}
+
+fn pm_repoint_work_history_path(relative: &Path) -> bool {
+    if relative == Path::new(".gwt/work/events.jsonl") {
+        return true;
+    }
+    let Ok(tail) = relative.strip_prefix(".gwt/work/events") else {
+        return false;
+    };
+    let Some(name) = tail
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jsonl"))
+    else {
+        return false;
+    };
+    if name.len() != 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return false;
+    }
+    tail == Path::new(&format!("{name}.jsonl"))
+        || tail == Path::new(&format!("{}/{name}.jsonl", &name[..2]))
+}
+
+fn validate_pm_repoint_history_name(worktree: &Path, relative: &Path) -> io::Result<()> {
+    if relative == Path::new(".gwt/work/events.jsonl") {
+        return Ok(());
+    }
+    let bytes = fs::read(worktree.join(relative))?;
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace));
+    let value: serde_json::Value = serde_json::from_slice(lines.next().unwrap_or_default())
+        .map_err(|error| io::Error::other(format!("Work history: invalid shard: {error}")))?;
+    let id = value["id"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("Work history: shard lacks event id"))?;
+    let canonical = gwt_core::paths::gwt_work_event_shard_path(Path::new(".gwt/work/events"), id);
+    if lines.next().is_some() || canonical.file_name() != relative.file_name() {
+        return Err(io::Error::other(format!(
+            "Work history: shard path does not match event id: {}",
+            relative.display()
+        )));
+    }
+    Ok(())
+}
+
+fn pm_repoint_event_lines(bytes: &[u8]) -> io::Result<BTreeMap<String, &[u8]>> {
+    let mut events = BTreeMap::new();
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        let value: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
+            io::Error::other(format!("Work history: invalid incoming event: {error}"))
+        })?;
+        let id = value["id"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("Work history: event lacks id"))?;
+        if events
+            .insert(id.to_string(), line)
+            .is_some_and(|previous| previous != line)
+        {
+            return Err(io::Error::other(
+                "Work history: divergent duplicate event id",
+            ));
+        }
+    }
+    Ok(events)
+}
+
+fn validate_pm_repoint_incoming_history(
+    worktree: &Path,
+    tree: &BTreeMap<PathBuf, (String, String)>,
+    entries: &[PmRepointBackup],
+) -> io::Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut preserved = BTreeMap::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| pm_repoint_work_history_path(&entry.relative))
+    {
+        for (id, bytes) in pm_repoint_event_lines(&entry.bytes)? {
+            if preserved
+                .insert(id, bytes)
+                .is_some_and(|previous| previous != bytes)
+            {
+                return Err(io::Error::other("Work history: divergent source event id"));
+            }
+        }
+    }
+    let mut incoming_blobs = BTreeMap::new();
+    if preserved.is_empty() {
+        return Ok(incoming_blobs);
+    }
+    let incoming = tree
+        .iter()
+        .filter(|(path, _)| pm_repoint_work_history_path(path))
+        .collect::<Vec<_>>();
+    // Bound stdin below a pipe buffer: the existing batch helper writes its
+    // requests before draining stdout, which may contain a large legacy log.
+    for chunk in incoming.chunks(32) {
+        if chunk
+            .iter()
+            .any(|(_, (mode, _))| !matches!(mode.as_str(), "100644" | "100755"))
+        {
+            return Err(io::Error::other(
+                "Work history: incoming history is not a regular file",
+            ));
+        }
+        let oids = chunk
+            .iter()
+            .map(|(_, (_, oid))| oid.clone())
+            .collect::<Vec<_>>();
+        let blobs = gwt_git::blob::read_blob_bytes_batch(worktree, &oids).map_err(|error| {
+            io::Error::other(format!(
+                "Work history: {}",
+                error.to_string().chars().take(400).collect::<String>()
+            ))
+        })?;
+        for ((path, _), blob) in chunk.iter().zip(blobs) {
+            for (id, bytes) in pm_repoint_event_lines(&blob)? {
+                if preserved
+                    .get(&id)
+                    .is_some_and(|original| *original != bytes)
+                {
+                    return Err(io::Error::other(format!(
+                        "Work history: incoming event differs from preserved history: {}",
+                        path.display()
+                    )));
+                }
+            }
+            incoming_blobs.insert((*path).clone(), blob);
+        }
+    }
+    Ok(incoming_blobs)
+}
+
+struct PmRepointBackup {
+    relative: PathBuf,
+    backup: PathBuf,
+    bytes: Vec<u8>,
+    permissions: fs::Permissions,
+    displaced: bool,
+}
+
+impl PmRepointBackup {
+    fn capture(worktree: &Path, backup_root: &Path, relative: PathBuf) -> io::Result<Self> {
+        if !pm_repoint_existing_file(worktree, &relative)? {
+            return Err(io::Error::other(
+                "managed artifacts: collision disappeared before backup",
+            ));
+        }
+        let source = worktree.join(&relative);
+        let bytes = fs::read(&source)?;
+        let permissions = fs::metadata(&source)?.permissions();
+        let backup = backup_root.join(&relative);
+        pm_repoint_create_dir(backup.parent().expect("backup parent"))?;
+        pm_repoint_write_new(&backup, &bytes, &permissions)?;
+        if fs::read(&backup)? != bytes {
+            return Err(io::Error::other(
+                "managed artifacts: backup verification failed",
+            ));
+        }
+        Ok(Self {
+            relative,
+            backup,
+            bytes,
+            permissions,
+            displaced: false,
+        })
+    }
+
+    fn restore(&self, worktree: &Path) -> io::Result<()> {
+        if pm_repoint_existing_file(worktree, &self.relative)? {
+            if fs::read(worktree.join(&self.relative))? == self.bytes {
+                return Ok(());
+            }
+            return Err(io::Error::other(
+                "user-owned changes: refusing to overwrite current file",
+            ));
+        }
+        let path = worktree.join(&self.relative);
+        pm_repoint_create_dir(path.parent().expect("restore parent"))?;
+        let bytes = fs::read(&self.backup)?;
+        if bytes != self.bytes {
+            return Err(io::Error::other(
+                "backup verification failed during restore",
+            ));
+        }
+        pm_repoint_write_new(&path, &bytes, &self.permissions)
+    }
+}
+
+fn pm_repoint_write_new(
+    path: &Path,
+    bytes: &[u8],
+    permissions: &fs::Permissions,
+) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.set_permissions(permissions.clone())?;
+    file.sync_all()?;
+    pm_repoint_sync_dir(path.parent().expect("written file parent"))
+}
+
+fn pm_repoint_create_dir(path: &Path) -> io::Result<()> {
+    if !pm_managed_asset_node_exists(path)? {
+        if let Some(parent) = path.parent() {
+            pm_repoint_create_dir(parent)?;
+        }
+    }
+    ensure_real_pm_managed_asset_directory(path)?;
+    pm_repoint_sync_dir(path)?;
+    if let Some(parent) = path.parent() {
+        pm_repoint_sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn pm_repoint_sync_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Generated leaves are supplied by the same path definitions the writers use.
+fn pm_generated_asset_paths(worktree: &Path) -> Vec<PathBuf> {
+    let mut paths = gwt_skills::provider_hooks::managed_provider_hook_paths(worktree);
+    paths.extend([
+        worktree.join(gwt_skills::settings_local::CLAUDE_SETTINGS_PATH),
+        worktree.join(gwt_skills::settings_local::CODEX_HOOKS_PATH),
+    ]);
+    for root in [".claude/skills", ".codex/skills"] {
+        let root = worktree.join(root);
+        paths.push(gwt_skills::coordination_guidance::skill_path(&root));
+        paths.push(gwt_skills::pm_guidance::skill_path(&root));
+    }
+    paths
+}
+
+fn pm_managed_asset_targets(worktree: &Path) -> io::Result<Vec<PathBuf>> {
+    let plan = gwt_skills::distribute::plan_distribution_to_worktree_for_targets(
+        worktree,
+        &ManagedAssetTarget::ALL,
+        gwt_skills::TrackedAssetWritePolicy::PreserveTracked,
+    )?;
+    let mut targets = pm_generated_asset_paths(worktree);
+    targets.extend(plan.mutation_paths().map(Path::to_path_buf));
+    targets.extend(
+        gwt_skills::provider_hooks::HERMES_CREDENTIAL_FILES
+            .iter()
+            .map(|name| worktree.join(".gwt/hermes").join(name)),
+    );
+    // Runtime owns provider assets; the same Git hook plan still owns leaves
+    // in the separate canonical checkout, including their rollback snapshot.
+    let canonical = crate::pm_registry::pm_worktree_for_runtime_dir(worktree);
+    let git_worktree = canonical.as_deref().unwrap_or(worktree);
+    if let Some(plan) = gwt_skills::plan_managed_git_hooks(git_worktree) {
+        let self_ignore = plan.hooks_dir.join(".gitignore");
+        if !self_ignore.exists() {
+            targets.push(self_ignore);
+        }
+        targets.extend(plan.hooks.into_iter().filter_map(|hook| {
+            (!hook.target.exists() || gwt_skills::git_hooks::is_managed_hook(&hook.target))
+                .then_some(hook.target)
+        }));
+    }
+    if crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_none() {
+        targets.push(resolve_git_exclude_path(worktree)?);
+    }
+    targets.sort();
+    // A pruned managed subtree already includes its regenerated leaves.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for target in targets {
+        if !roots.iter().any(|root| target.starts_with(root)) {
+            roots.push(target);
+        }
+    }
+    Ok(roots)
+}
+
+/// Guard managed namespaces before the distribution planner can traverse them.
+/// Project links outside these namespaces are never inspected or snapshotted;
+/// the Hermes credential bridge owns its link leaves without following them.
+fn preflight_pm_managed_asset_refresh(worktree: &Path) -> io::Result<()> {
+    for path in pm_generated_asset_paths(worktree) {
+        preflight_pm_managed_asset_path(worktree, &path, "write")?;
+    }
+    // The Hermes credential bridge replaces links without following them.
+    // Its parent is checked above; .env/auth.json remain valid link leaves.
+    for relative in [
+        ".claude/skills",
+        ".codex/skills",
+        ".gwt/hermes/skills",
+        ".claude/commands",
+        ".claude/hooks/scripts",
+        ".codex/hooks/scripts",
+    ] {
+        let root = worktree.join(relative);
+        preflight_pm_managed_asset_path(worktree, &root, "write/prune")?;
+        if !root.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with("gwt-") {
+                preflight_pm_managed_asset_tree(&entry.path())?;
+            }
+        }
+    }
+    // Use the writer's canonical names too: on case-insensitive filesystems
+    // an existing GWT-execute directory is also the gwt-execute write target.
+    for relative in [".claude/skills", ".codex/skills", ".gwt/hermes/skills"] {
+        for entry in gwt_skills::assets::CLAUDE_SKILLS.dirs() {
+            let name = entry.path().file_name().unwrap_or_default();
+            if name.to_string_lossy().starts_with("gwt-") {
+                preflight_pm_managed_asset_tree(&worktree.join(relative).join(name))?;
+            }
+        }
+    }
+    for relative in [".claude/skills", ".codex/skills"] {
+        for name in ["gwt-pm", "gwt-coordination"] {
+            preflight_pm_managed_asset_tree(&worktree.join(relative).join(name))?;
+        }
+    }
+    // Commands also contain non-gwt names (currently release.md). Their
+    // existing tracked files are preserved by distribution; the command root
+    // and its ancestors have already been checked above.
+    let tracked_paths = gwt_skills::distribute::tracked_gwt_asset_paths(worktree);
+    for entry in gwt_skills::assets::CLAUDE_COMMANDS.entries() {
+        let path = worktree.join(".claude/commands").join(entry.path());
+        if entry.as_file().is_some()
+            && path.exists()
+            && gwt_skills::distribute::should_skip_tracked_path(worktree, &path, &tracked_paths)
+        {
+            continue;
+        }
+        preflight_pm_managed_asset_path(worktree, &path, "write/prune")?;
+        preflight_pm_managed_asset_tree(&path)?;
+    }
+    // Runtime owns provider assets; the same Git hook plan still owns leaves
+    // in the separate canonical checkout, including their rollback snapshot.
+    let canonical = crate::pm_registry::pm_worktree_for_runtime_dir(worktree);
+    let git_worktree = canonical.as_deref().unwrap_or(worktree);
+    if let Some(plan) = gwt_skills::plan_managed_git_hooks(git_worktree) {
+        let self_ignore = plan.hooks_dir.join(".gitignore");
+        if !self_ignore.exists() {
+            preflight_pm_managed_asset_path(worktree, &self_ignore, "write")?;
+        }
+        for hook in plan.hooks {
+            if !hook.target.exists() || gwt_skills::git_hooks::is_managed_hook(&hook.target) {
+                preflight_pm_managed_asset_path(worktree, &hook.target, "write")?;
+            }
+        }
+    }
+    if crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_none() {
+        preflight_pm_managed_asset_path(worktree, &resolve_git_exclude_path(worktree)?, "write")?;
+    }
+    Ok(())
+}
+
+fn preflight_pm_managed_asset_path(
+    worktree: &Path,
+    path: &Path,
+    operation: &str,
+) -> io::Result<()> {
+    // Git's exclude may live in the linked main checkout. Stop at the shared
+    // ancestor so OS aliases above the checkouts (e.g. /var) remain valid.
+    let shared = worktree
+        .ancestors()
+        .find(|ancestor| path.starts_with(ancestor));
+    let ancestors = path
+        .ancestors()
+        .take_while(|ancestor| Some(*ancestor) != shared)
+        .collect::<Vec<_>>();
+    for node in ancestors.into_iter().rev() {
+        match fs::symlink_metadata(node) {
+            Ok(metadata) => {
+                reject_pm_managed_asset_indirection(node, &metadata).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("PM managed asset {operation} preflight: {error}"),
+                    )
+                })?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn preflight_pm_managed_asset_tree(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    reject_pm_managed_asset_indirection(path, &metadata).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("PM managed asset write/prune preflight: {error}"),
+        )
+    })?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            preflight_pm_managed_asset_tree(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
 
 struct PmManagedAssetSnapshot {
     entries: Vec<PmManagedAssetSnapshotEntry>,
-    gwt_parent: PathBuf,
-    gwt_parent_existed: bool,
+    worktree: PathBuf,
+    missing_directories: Vec<PathBuf>,
     backup_root: PathBuf,
 }
 
@@ -311,38 +1030,36 @@ struct PmManagedAssetSnapshotEntry {
 
 impl PmManagedAssetSnapshot {
     fn capture(worktree: &Path) -> io::Result<Self> {
+        preflight_pm_managed_asset_refresh(worktree)?;
         let project_state = worktree
             .parent()
             .and_then(Path::parent)
             .ok_or_else(|| io::Error::other("canonical PM worktree has no project-state root"))?
             .join("project-state");
         ensure_real_pm_managed_asset_directory(&project_state)?;
-        let gwt_parent = worktree.join(".gwt");
-        let gwt_parent_existed = pm_managed_asset_node_exists(&gwt_parent)?;
-        if gwt_parent_existed {
-            let metadata = fs::symlink_metadata(&gwt_parent)?;
-            reject_pm_managed_asset_indirection(&gwt_parent, &metadata)?;
-            if !metadata.file_type().is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "PM managed provider-home parent is not a directory: {}",
-                        gwt_parent.display()
-                    ),
-                ));
+        let targets = pm_managed_asset_targets(worktree)?;
+        let exclude = if crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_some() {
+            None
+        } else {
+            Some(resolve_git_exclude_path(worktree)?)
+        };
+        let mut missing_directories = BTreeSet::new();
+        let canonical = crate::pm_registry::pm_worktree_for_runtime_dir(worktree);
+        for target in &targets {
+            let root = canonical
+                .as_deref()
+                .filter(|root| target.starts_with(root))
+                .unwrap_or(worktree);
+            for parent in target
+                .ancestors()
+                .skip(1)
+                .take_while(|parent| parent.starts_with(root) && *parent != root)
+            {
+                if !pm_managed_asset_node_exists(parent)? {
+                    missing_directories.insert(parent.to_path_buf());
+                }
             }
         }
-        let mut targets = PM_MANAGED_ASSET_TRANSACTION_ROOTS
-            .iter()
-            .map(|relative| worktree.join(relative))
-            .collect::<Vec<_>>();
-        targets.push(resolve_git_exclude_path(worktree)?);
-        let exclude_backup = unique_pm_managed_asset_sibling(
-            targets
-                .last()
-                .expect("Git exclude is always appended to the transaction targets"),
-            "backup",
-        )?;
         let target_presence = targets
             .iter()
             .map(|target| pm_managed_asset_node_exists(target))
@@ -354,10 +1071,10 @@ impl PmManagedAssetSnapshot {
         fs::create_dir(&backup_root)?;
         let mut entries: Vec<PmManagedAssetSnapshotEntry> = Vec::with_capacity(targets.len());
         for (index, (target, existed)) in targets.into_iter().zip(target_presence).enumerate() {
-            let backup = if index < PM_MANAGED_ASSET_TRANSACTION_ROOTS.len() {
-                backup_root.join(index.to_string())
+            let backup = if Some(&target) == exclude.as_ref() {
+                unique_pm_managed_asset_sibling(&target, "backup")?
             } else {
-                exclude_backup.clone()
+                backup_root.join(index.to_string())
             };
             if existed {
                 if let Err(error) = copy_pm_managed_asset_node(&target, &backup) {
@@ -394,8 +1111,8 @@ impl PmManagedAssetSnapshot {
         }
         Ok(Self {
             entries,
-            gwt_parent,
-            gwt_parent_existed,
+            worktree: worktree.to_path_buf(),
+            missing_directories: missing_directories.into_iter().collect(),
             backup_root,
         })
     }
@@ -403,6 +1120,23 @@ impl PmManagedAssetSnapshot {
     fn restore(self) -> io::Result<()> {
         let mut failures = Vec::new();
         for entry in &self.entries {
+            let parent = entry.target.parent().expect("managed target parent");
+            if let Err(error) = preflight_pm_managed_asset_path(&self.worktree, parent, "restore")
+                .and_then(|()| {
+                    if entry.existed {
+                        fs::create_dir_all(parent)
+                    } else {
+                        Ok(())
+                    }
+                })
+            {
+                failures.push(format!(
+                    "restore parent for {}: {error}",
+                    entry.target.display()
+                ));
+                continue;
+            }
+
             let quarantine = match unique_pm_managed_asset_sibling(&entry.target, "failed") {
                 Ok(path) => path,
                 Err(error) => {
@@ -460,8 +1194,8 @@ impl PmManagedAssetSnapshot {
                 }
             }
         }
-        if !self.gwt_parent_existed {
-            match fs::remove_dir(&self.gwt_parent) {
+        for directory in self.missing_directories.iter().rev() {
+            match fs::remove_dir(directory) {
                 Ok(()) => {}
                 Err(error)
                     if matches!(
@@ -469,8 +1203,8 @@ impl PmManagedAssetSnapshot {
                         io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
                     ) => {}
                 Err(error) => failures.push(format!(
-                    "remove newly-created empty PM provider-home parent {}: {error}",
-                    self.gwt_parent.display()
+                    "remove newly-created empty PM managed asset directory {}: {error}",
+                    directory.display()
                 )),
             }
         }
@@ -590,6 +1324,11 @@ fn remove_pm_managed_asset_node(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    // A captured credential link is an owned leaf. Unlink it without ever
+    // traversing its destination, just as remove_dir_all did inside a backup.
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(path);
+    }
     reject_pm_managed_asset_indirection(path, &metadata)?;
     if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)
@@ -599,19 +1338,8 @@ fn remove_pm_managed_asset_node(path: &Path) -> io::Result<()> {
 }
 
 fn copy_pm_managed_asset_node(source: &Path, destination: &Path) -> io::Result<()> {
-    copy_pm_managed_asset_node_at(source, destination, source)
-}
-
-fn copy_pm_managed_asset_node_at(
-    source: &Path,
-    destination: &Path,
-    transaction_root: &Path,
-) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
-        if !pm_managed_asset_symlink_is_allowed(transaction_root, source) {
-            reject_pm_managed_asset_indirection(source, &metadata)?;
-        }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -625,11 +1353,7 @@ fn copy_pm_managed_asset_node_at(
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            copy_pm_managed_asset_node_at(
-                &entry.path(),
-                &destination.join(entry.file_name()),
-                transaction_root,
-            )?;
+            copy_pm_managed_asset_node(&entry.path(), &destination.join(entry.file_name()))?;
         }
         fs::set_permissions(destination, metadata.permissions())?;
         return Ok(());
@@ -646,20 +1370,6 @@ fn copy_pm_managed_asset_node_at(
             source.display()
         ),
     ))
-}
-
-fn pm_managed_asset_symlink_is_allowed(transaction_root: &Path, source: &Path) -> bool {
-    transaction_root.file_name().and_then(|name| name.to_str()) == Some("hermes")
-        && transaction_root
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some(".gwt")
-        && source.parent() == Some(transaction_root)
-        && matches!(
-            source.file_name().and_then(|name| name.to_str()),
-            Some(".env" | "auth.json")
-        )
 }
 
 #[cfg(unix)]
@@ -773,6 +1483,13 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     is_ephemeral: bool,
 ) -> io::Result<ManagedAssetMaterialization> {
     with_managed_asset_lock(worktree, || {
+        if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+            let runtime = crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(worktree)?;
+            return refresh_pm_runtime_assets(
+                worktree,
+                &refresh_targets_for_agent(&runtime, agent_id),
+            );
+        }
         let targets = refresh_targets_for_agent(worktree, agent_id);
         let hook_bin = materialize_managed_gwt_assets_for_targets(
             worktree,
@@ -789,6 +1506,9 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
 }
 
 pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        return refresh_managed_gwt_assets_for_pm_worktree(worktree);
+    }
     with_managed_asset_lock(worktree, || {
         let targets = detect_existing_managed_asset_targets(worktree);
         materialize_managed_gwt_assets_for_targets(
@@ -839,6 +1559,15 @@ fn materialize_managed_gwt_assets_for_targets(
             ),
         ));
     }
+    // #4339: `core.hooksPath` is inherited through git config, but the
+    // directory it names is generated and never arrives with a clone or a
+    // `git worktree add`. Materializing it here — before any provider-specific
+    // work, and regardless of which targets are selected — is what keeps
+    // commitlint and the commit/push gates from silently doing nothing in a
+    // fresh worktree.
+    gwt_skills::materialize_managed_git_hooks(worktree).map_err(|error| {
+        io::Error::other(format!("failed to materialize managed git hooks: {error}"))
+    })?;
     // #3374: an ephemeral worktree refreshes tracked gwt-* assets from the
     // embedded bundle — its tracked copies are a stale base-ref snapshot, not
     // user content. Persistent worktrees keep the preserve-tracked default.
@@ -859,7 +1588,8 @@ fn materialize_managed_gwt_assets_for_targets(
     // makes the `$gwt-pm` bootstrap prompt resolvable at all. The predicate is
     // structural (canonical PM worktree path), so no other worktree can be
     // handed the PM contract by an ambient value.
-    let is_pm = crate::pm_registry::is_pm_worktree(worktree);
+    let is_pm = crate::pm_registry::is_canonical_pm_worktree(worktree)
+        || crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_some();
     let hook_bin =
         regenerate_managed_hook_configs_for_targets(worktree, targets, codex_hook_discovery_mode)?;
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
@@ -890,7 +1620,16 @@ fn materialize_managed_gwt_assets_for_targets(
 }
 
 pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<()> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        return refresh_managed_gwt_assets_for_pm_worktree(worktree);
+    }
     with_managed_asset_lock(worktree, || {
+        // #4339: a worktree created before gwt owned `core.hooksPath` still has
+        // an empty hook directory. Self-heal is the route that reaches those
+        // worktrees without waiting for a relaunch.
+        gwt_skills::materialize_managed_git_hooks(worktree).map_err(|error| {
+            io::Error::other(format!("failed to materialize managed git hooks: {error}"))
+        })?;
         let targets = detect_existing_managed_asset_targets(worktree);
         regenerate_managed_hook_configs_for_targets(
             worktree,
@@ -1261,6 +2000,567 @@ mod tests {
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn repoint_git(root: &Path, args: &[&str]) -> String {
+        let output = gwt_core::process::run_git_logged(args, Some(root)).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn pm_runtime_isolates_project_configuration_and_keeps_project_data_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let worktree = gwt_core::paths::gwt_projects_dir().join("test/pm/worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        repoint_git(&worktree, &["init", "--quiet"]);
+        for relative in [
+            "src/main.rs",
+            "README.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".claude/skills/project/SKILL.md",
+            ".claude/agents/project.md",
+            ".claude/commands/project.md",
+            ".codex/skills/project/SKILL.md",
+            ".grok/skills/project/SKILL.md",
+            ".claude/settings.json",
+        ] {
+            let path = worktree.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "PROJECT-ONLY-SENTINEL").unwrap();
+        }
+        super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).unwrap();
+        let runtime = worktree.parent().unwrap().join("runtime");
+        assert!(
+            runtime.join(".claude/skills/gwt-pm/SKILL.md").is_file(),
+            "PM configuration must be materialized outside the project checkout"
+        );
+        assert!(!runtime.join("AGENTS.md").exists());
+        assert!(!runtime.join(".claude/skills/project").exists());
+        assert!(!runtime.join(".claude/settings.json").exists());
+        for relative in ["src/main.rs", "README.md", "AGENTS.md"] {
+            assert_eq!(
+                std::fs::read_to_string(worktree.join(relative)).unwrap(),
+                "PROJECT-ONLY-SENTINEL",
+                "AC-5a: project data stays readable"
+            );
+        }
+        let skill = runtime.join(".claude/skills/gwt-pm/SKILL.md");
+        assert!(!std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("PROJECT-ONLY-SENTINEL"));
+
+        // Explicit project-store opt-in uses the same owned generated leaf.
+        let prefs = worktree
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("project-state/pm.json");
+        std::fs::write(
+            &prefs,
+            r#"{"settings":{"project_policy_files":["AGENTS.md"]}}"#,
+        )
+        .unwrap();
+        let canonical_worktree = dunce::canonicalize(&worktree).unwrap();
+        super::refresh_managed_gwt_assets_for_pm_worktree_locked(&canonical_worktree).unwrap();
+        assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("PROJECT-ONLY-SENTINEL"));
+        assert!(!std::fs::symlink_metadata(&skill)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::write(&prefs, r#"{"settings":{}}"#).unwrap();
+        super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).unwrap();
+        assert!(!std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("PROJECT-ONLY-SENTINEL"));
+        let before = std::fs::read(&skill).unwrap();
+        std::fs::write(
+            &prefs,
+            r#"{"settings":{"project_policy_files":["missing.md"]}}"#,
+        )
+        .unwrap();
+        assert!(super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).is_err());
+        assert_eq!(
+            std::fs::read(&skill).unwrap(),
+            before,
+            "failed opt-in refresh rolls back the owned runtime leaf"
+        );
+        repoint_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+        seed_repoint_collision(&worktree, ".husky/commit-msg", "#!/bin/sh\nexit 0\n");
+        let hook = worktree.join(".husky/_/commit-msg");
+        let prior_hook = "# gwt-managed-git-hook\n# previous version\n";
+        seed_repoint_collision(&worktree, ".husky/_/commit-msg", prior_hook);
+        let snapshot = super::PmManagedAssetSnapshot::capture(&runtime).unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        assert_ne!(std::fs::read_to_string(&hook).unwrap(), prior_hook);
+        snapshot.restore().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&hook).unwrap(),
+            prior_hook,
+            "runtime rollback must include the canonical Git hook owned leaves"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_snapshot_does_not_capture_project_owned_nodes() {
+        let (_temp, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
+        let project_path = worktree.join(".claude/agents/project.md");
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(&project_path, "project before").unwrap();
+        let socket_path = project_path.with_extension("sock");
+        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let managed_path = worktree.join(".claude/settings.local.json");
+        std::fs::write(&managed_path, "managed before").unwrap();
+        repoint_git(&worktree, &["config", "core.hooksPath", ".git-hooks/_"]);
+        seed_repoint_collision(&worktree, ".git-hooks/pre-commit", "echo project hook");
+        let hook_path = worktree.join(".git-hooks/_/pre-commit");
+        let hook_before = "# gwt-managed-git-hook\n# previous generated hook\n";
+        seed_repoint_collision(&worktree, ".git-hooks/_/pre-commit", hook_before);
+        seed_repoint_collision(&worktree, ".claude/hooks/scripts/gwt-old.sh", "old script");
+        let snapshot = super::PmManagedAssetSnapshot::capture(&worktree).unwrap();
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| !project_path.starts_with(&entry.target)),
+            "project-owned nodes must not be captured through a shared parent"
+        );
+        assert!(snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.target == hook_path));
+        gwt_skills::distribute_to_worktree(&worktree).unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        std::fs::write(&project_path, "project after").unwrap();
+        std::fs::write(&managed_path, "managed after").unwrap();
+        snapshot.restore().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project_path).unwrap(),
+            "project after"
+        );
+        assert_eq!(
+            std::fs::read_to_string(managed_path).unwrap(),
+            "managed before"
+        );
+        assert_eq!(std::fs::read_to_string(hook_path).unwrap(), hook_before);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(".claude/hooks/scripts/gwt-old.sh")).unwrap(),
+            "old script"
+        );
+        assert!(socket_path.exists());
+        assert!(!worktree.join(".codex").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_snapshot_preserves_project_and_hermes_symlinks_verbatim() {
+        let (_temp, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
+        let sentinel = worktree.join("shared/agent.md");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, "project agent content").unwrap();
+        let links = [
+            (".claude/agents/planner", "../../shared/agent.md"),
+            (".codex/skills/unity-tools", "../missing-skills"),
+            (".gwt/hermes/.env", "/outside/hermes/.env"),
+            (".gwt/hermes/auth.json", "../../credentials/auth.json"),
+        ];
+        for (relative, target) in links {
+            let path = worktree.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+        }
+        repoint_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+        std::fs::create_dir_all(worktree.join(".husky/_")).unwrap();
+        std::fs::write(worktree.join(".husky/pre-commit"), "echo tracked hook").unwrap();
+        for name in ["pre-commit", ".gitignore"] {
+            std::os::unix::fs::symlink(&sentinel, worktree.join(".husky/_").join(name)).unwrap();
+        }
+        let snapshot = super::PmManagedAssetSnapshot::capture(&worktree).unwrap();
+        // Rollback preserves project links and recovers credential links verbatim.
+        std::fs::remove_file(worktree.join(links[2].0)).unwrap();
+        snapshot.restore().unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        for name in ["pre-commit", ".gitignore"] {
+            assert_eq!(
+                std::fs::read_link(worktree.join(".husky/_").join(name)).unwrap(),
+                sentinel
+            );
+        }
+        for (relative, target) in links {
+            assert_eq!(
+                std::fs::read_link(worktree.join(relative)).unwrap(),
+                Path::new(target)
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(sentinel).unwrap(),
+            "project agent content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_refresh_rejects_managed_write_and_prune_symlinks_before_mutation() {
+        let mut paths = vec![
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/commands/release.md",
+            ".claude/hooks/scripts/gwt-retired.sh",
+            ".gwt/opencode/plugins",
+        ];
+        let probe = tempfile::tempdir().unwrap();
+        std::fs::create_dir(probe.path().join("GWT-case")).unwrap();
+        if probe.path().join("gwt-case").exists() {
+            paths.push(".codex/skills/GWT-execute");
+        }
+        for relative in paths {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+            let worktree = gwt_core::paths::gwt_projects_dir().join("test/pm/worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            repoint_git(&worktree, &["init", "--quiet"]);
+            let outside = temp.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            let sentinel = outside.join("sentinel");
+            std::fs::write(&sentinel, "user content").unwrap();
+            let runtime =
+                crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+            let path = runtime.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            let error = super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree)
+                .expect_err("managed indirection must fail before refresh")
+                .to_string();
+            assert!(!runtime.join(".claude/settings.local.json").exists());
+            assert!(
+                error.contains("write") || error.contains("prune"),
+                "{error}"
+            );
+            assert!(
+                error.to_lowercase().contains(&relative.to_lowercase()),
+                "{error}"
+            );
+            assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "user content");
+            assert_eq!(std::fs::read_link(path).unwrap(), outside);
+        }
+    }
+
+    fn repoint_fixture(incoming: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("pm/worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        repoint_git(&worktree, &["init", "--quiet"]);
+        repoint_git(&worktree, &["config", "user.name", "Test"]);
+        repoint_git(&worktree, &["config", "user.email", "test@example.com"]);
+        repoint_git(
+            &worktree,
+            &["commit", "--quiet", "--allow-empty", "-m", "base"],
+        );
+        let base = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        for (path, bytes) in incoming {
+            let path = worktree.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        repoint_git(&worktree, &["add", "."]);
+        repoint_git(&worktree, &["commit", "--quiet", "-m", "incoming"]);
+        let target = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        repoint_git(&worktree, &["checkout", "--quiet", "--detach", &base]);
+        (temp, worktree, target)
+    }
+
+    fn seed_repoint_collision(worktree: &Path, path: &str, bytes: &str) {
+        let path = worktree.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn pm_repoint_transaction_preserves_ignored_managed_bytes_outside_checkout() {
+        let asset = ".claude/skills/gwt-execute/SKILL.md";
+        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        seed_repoint_collision(&worktree, asset, "old generated bytes");
+        seed_repoint_collision(&worktree, "user.txt", "user work");
+        std::fs::write(worktree.join(".git/info/exclude"), ".claude/\n").unwrap();
+        super::with_pm_repoint_transaction(&worktree, &target, || {
+            assert!(!worktree.join(asset).exists());
+            repoint_git(&worktree, &["checkout", "--quiet", "--detach", &target]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "incoming"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("user.txt")).unwrap(),
+            "user work"
+        );
+        let backups = temp.path().join("project-state/pm-repoint-backups");
+        let backup = std::fs::read_dir(backups)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read_to_string(backup.join(asset)).unwrap(),
+            "old generated bytes"
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_restores_on_callback_failure_without_overwriting_new_content() {
+        let asset = ".codex/skills/gwt-execute/SKILL.md";
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        seed_repoint_collision(&worktree, asset, "original");
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            Err(std::io::Error::other("repoint rejected"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("repoint rejected"));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "original"
+        );
+
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            std::fs::write(worktree.join(asset), "concurrent user edit")?;
+            Err(std::io::Error::other("repoint rejected"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("backup"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "concurrent user edit"
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_rejects_user_collision_before_displacing_managed_files() {
+        let asset = ".claude/commands/gwt-execute.md";
+        let user = ".claude/skills/user/SKILL.md";
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming"), (user, "incoming")]);
+        seed_repoint_collision(&worktree, asset, "generated");
+        seed_repoint_collision(&worktree, user, "user owned");
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject before checkout")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("user-owned changes"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "generated"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(user)).unwrap(),
+            "user owned"
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_preserves_unknown_work_history_and_rejects_divergent_incoming_event()
+    {
+        let legacy = ".gwt/work/events.jsonl";
+        let original = " {\"id\":\"event-future\",\"work_item_id\":\"work-future\",\"kind\":\"future-kind\",\"updated_at\":\"2026-09-10T00:00:00Z\",\"extra\":true}\n";
+        let (_temp, worktree, target) = repoint_fixture(&[(legacy, "")]);
+        seed_repoint_collision(&worktree, legacy, original);
+        super::with_pm_repoint_transaction(&worktree, &target, || {
+            repoint_git(&worktree, &["checkout", "--quiet", "--detach", &target]);
+            Ok(())
+        })
+        .unwrap();
+        let shard = gwt_core::paths::gwt_work_event_shard_path(
+            &worktree.join(".gwt/work/events"),
+            "event-future",
+        );
+        assert_eq!(std::fs::read_to_string(shard).unwrap(), original);
+
+        let relative_shard = gwt_core::paths::gwt_work_event_shard_path(
+            Path::new(".gwt/work/events"),
+            "event-future",
+        );
+        let divergent = original.replace("true", "false");
+        let (_temp, worktree, target) =
+            repoint_fixture(&[(legacy, ""), (relative_shard.to_str().unwrap(), &divergent)]);
+        seed_repoint_collision(&worktree, legacy, original);
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject divergent incoming event")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(legacy)).unwrap(),
+            original
+        );
+
+        let (_temp, worktree, target) = repoint_fixture(&[(legacy, &divergent)]);
+        seed_repoint_collision(&worktree, legacy, original);
+        let mut called = false;
+        let error = super::with_pm_repoint_transaction(&worktree, &target, || {
+            called = true;
+            Ok(())
+        })
+        .expect_err("must reject divergent incoming legacy event before preservation");
+        assert!(!called);
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(legacy)).unwrap(),
+            original
+        );
+        let canonical = gwt_core::paths::gwt_work_event_shard_path(
+            &worktree.join(".gwt/work/events"),
+            "event-future",
+        );
+        assert!(
+            !canonical.exists(),
+            "divergence must be rejected before publication"
+        );
+
+        let flat_shard = Path::new(".gwt/work/events").join(relative_shard.file_name().unwrap());
+        let (_temp, worktree, target) =
+            repoint_fixture(&[(legacy, ""), (flat_shard.to_str().unwrap(), &divergent)]);
+        seed_repoint_collision(&worktree, legacy, original);
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject divergent incoming flat shard")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(legacy)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn pm_repoint_transaction_holds_materializer_lock_through_callback() {
+        let asset = ".claude/commands/gwt-execute.md";
+        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt"));
+        seed_repoint_collision(&worktree, asset, "original");
+        let identity_root = gwt_git::worktree::main_worktree_root(&worktree).unwrap();
+        let identity = gwt_core::repo_hash::compute_path_hash(&identity_root);
+        let lock_path = gwt_core::paths::gwt_home()
+            .join("locks/managed-assets")
+            .join(format!("{identity}.lock"));
+        let contender = super::with_pm_repoint_transaction(&worktree, &target, || {
+            // Probe the actual lock, not a worker's scheduling delay. Keeping
+            // both handles on this thread also preserves the isolated HOME.
+            let contender = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)?;
+            let error = fs2::FileExt::try_lock_exclusive(&contender)
+                .expect_err("the transaction must hold the materializer lock during its callback");
+            assert!(
+                gwt_core::operation_deadline::is_lock_contended(&error),
+                "{error}"
+            );
+            assert!(!worktree.join(asset).exists());
+            Ok(contender)
+        })
+        .unwrap();
+        fs2::FileExt::try_lock_exclusive(&contender)
+            .expect("the transaction must release the materializer lock after its callback");
+        fs2::FileExt::unlock(&contender).unwrap();
+    }
+
+    #[test]
+    #[ignore = "load worker controlled by scripts/test-managed-assets-lock-stress.py"]
+    fn pm_repoint_transaction_lock_stress_worker() {
+        let ready = PathBuf::from(
+            std::env::var_os("GWT_MANAGED_ASSETS_STRESS_READY").expect("stress runner ready path"),
+        );
+        let stop = PathBuf::from(
+            std::env::var_os("GWT_MANAGED_ASSETS_STRESS_STOP").expect("stress runner stop path"),
+        );
+        let mut iterations = 0;
+        loop {
+            pm_repoint_transaction_holds_materializer_lock_through_callback();
+            iterations += 1;
+            if iterations == 1 {
+                std::fs::write(&ready, b"ready").unwrap();
+            }
+            // The runner controls lifetime so scheduler delays cannot let a
+            // finite background suite finish before the foreground checks.
+            if stop.exists() {
+                break;
+            }
+        }
+        println!("load worker completed {iterations} lock checks");
+    }
+
+    #[test]
+    fn pm_repoint_transaction_rejects_work_shard_with_mismatched_event_id() {
+        let shard = gwt_core::paths::gwt_work_event_shard_path(
+            Path::new(".gwt/work/events"),
+            "expected-id",
+        );
+        let relative = shard.to_str().unwrap();
+        let (_temp, worktree, target) = repoint_fixture(&[(relative, "")]);
+        let original = "{\"id\":\"different-id\",\"work_item_id\":\"work-future\",\"kind\":\"future-kind\",\"updated_at\":\"2026-09-10T00:00:00Z\"}\n";
+        seed_repoint_collision(&worktree, relative, original);
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject mismatched shard identity")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("Work history"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(relative)).unwrap(),
+            original
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_repoint_transaction_rejects_symlinked_managed_parent_and_incoming_asset() {
+        let asset = ".codex/skills/gwt-execute/SKILL.md";
+        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let outside = temp.path().join("outside");
+        seed_repoint_collision(
+            &outside,
+            "skills/gwt-execute/SKILL.md",
+            "outside user bytes",
+        );
+        std::os::unix::fs::symlink(&outside, worktree.join(".codex")).unwrap();
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject symlink")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("user-owned changes"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("skills/gwt-execute/SKILL.md")).unwrap(),
+            "outside user bytes"
+        );
+
+        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let base = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        repoint_git(&worktree, &["checkout", "--quiet", "--detach", &target]);
+        std::fs::remove_file(worktree.join(asset)).unwrap();
+        std::os::unix::fs::symlink("outside-file", worktree.join(asset)).unwrap();
+        repoint_git(&worktree, &["add", asset]);
+        repoint_git(&worktree, &["commit", "--quiet", "-m", "incoming symlink"]);
+        let target = repoint_git(&worktree, &["rev-parse", "HEAD"]);
+        repoint_git(&worktree, &["checkout", "--quiet", "--detach", &base]);
+        seed_repoint_collision(&worktree, asset, "original");
+        let error = super::with_pm_repoint_transaction::<()>(&worktree, &target, || {
+            panic!("must reject incoming symlink")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("user-owned changes"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(asset)).unwrap(),
+            "original"
+        );
+    }
 
     #[test]
     fn process_stable_codex_config_path_uses_os_default_and_absolute_process_home() {

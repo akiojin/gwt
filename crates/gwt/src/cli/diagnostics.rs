@@ -4,7 +4,7 @@ use std::{
     cmp::Reverse,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -20,6 +20,8 @@ pub(crate) mod errors;
 const CPU_DIAGNOSTICS_SCHEMA_VERSION: u32 = 1;
 const RECENT_LOG_FILE_LIMIT: usize = 16;
 const RECENT_LOG_LINES_PER_FILE: usize = 2_000;
+const HOST_CPU_SAMPLE_COUNT: usize = 3;
+const HOST_CPU_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// SPEC-1939 Phase 67 family enum for `gwtd diagnostics ...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,7 @@ pub struct CpuDiagnostics {
     pub repo_path: String,
     pub gwt_processes: Vec<ProcessSnapshot>,
     pub runner_processes: Vec<ProcessSnapshot>,
+    pub host_cpu: HostCpuDiagnostics,
     pub binaries: BinaryDiagnostics,
     pub runtime: RuntimeDiagnostics,
     pub recent_logs: LogBudgetDiagnostics,
@@ -78,6 +81,14 @@ pub struct ProcessSnapshot {
     pub cpu_percent: Option<f64>,
     pub elapsed: Option<String>,
     pub command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HostCpuDiagnostics {
+    pub fseventsd: Option<ProcessSnapshot>,
+    pub sample_count: usize,
+    pub sample_interval_ms: u64,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -127,6 +138,7 @@ pub struct StaleDiagnostics {
 
 pub fn collect_cpu_diagnostics(repo_path: &Path) -> CpuDiagnostics {
     let snapshots = collect_process_snapshots();
+    let host_cpu = collect_host_cpu_diagnostics(&snapshots);
     let gwt_processes = snapshots
         .iter()
         .filter(|snapshot| is_gwt_process(snapshot))
@@ -170,11 +182,67 @@ pub fn collect_cpu_diagnostics(repo_path: &Path) -> CpuDiagnostics {
         repo_path: repo_path.display().to_string(),
         gwt_processes,
         runner_processes,
+        host_cpu,
         binaries,
         runtime,
         recent_logs,
         stale,
     }
+}
+
+fn collect_host_cpu_diagnostics(initial: &[ProcessSnapshot]) -> HostCpuDiagnostics {
+    if !cfg!(target_os = "macos") {
+        return summarize_host_cpu_samples(&[]);
+    }
+
+    let mut samples = vec![initial
+        .iter()
+        .find(|process| is_fseventsd(process))
+        .cloned()];
+    if samples[0].is_some() {
+        for _ in 1..HOST_CPU_SAMPLE_COUNT {
+            std::thread::sleep(HOST_CPU_SAMPLE_INTERVAL);
+            samples.push(collect_process_snapshots().into_iter().find(is_fseventsd));
+        }
+    }
+    summarize_host_cpu_samples(&samples)
+}
+
+fn summarize_host_cpu_samples(samples: &[Option<ProcessSnapshot>]) -> HostCpuDiagnostics {
+    let fseventsd = samples.last().cloned().flatten();
+    let sustained_high_cpu = fseventsd.as_ref().is_some_and(|latest| {
+        samples.len() == HOST_CPU_SAMPLE_COUNT
+            && samples.iter().all(|sample| {
+                sample.as_ref().is_some_and(|sample| {
+                    sample.pid == latest.pid
+                        && sample
+                            .cpu_percent
+                            .is_some_and(|cpu| cpu.is_finite() && cpu > 100.0)
+                })
+            })
+    });
+
+    HostCpuDiagnostics {
+        fseventsd,
+        sample_count: samples.len(),
+        sample_interval_ms: if samples.len() > 1 {
+            HOST_CPU_SAMPLE_INTERVAL.as_millis() as u64
+        } else {
+            0
+        },
+        warning: sustained_high_cpu.then(|| {
+            "fseventsd CPU exceeded 100% in three samples one second apart. Inspect active filesystem watchers and Spotlight Search Privacy for worktree target directories; these samples do not establish the cause.".to_string()
+        }),
+    }
+}
+
+fn is_fseventsd(snapshot: &ProcessSnapshot) -> bool {
+    snapshot
+        .command
+        .split_whitespace()
+        .next()
+        .and_then(|command| Path::new(command).file_name())
+        .is_some_and(|name| name == "fseventsd")
 }
 
 fn collect_process_snapshots() -> Vec<ProcessSnapshot> {
@@ -428,19 +496,73 @@ mod tests {
     }
 
     #[test]
+    fn cpu_diagnostics_json_includes_host_cpu() {
+        let repo = tempfile::tempdir().expect("temporary repository path");
+        let diagnostics = collect_cpu_diagnostics(repo.path());
+        let payload = serde_json::to_value(diagnostics).expect("serializable CPU diagnostics");
+
+        assert!(
+            payload.get("host_cpu").is_some_and(Value::is_object),
+            "CPU diagnostics must include the host_cpu object"
+        );
+    }
+
+    #[test]
     fn parses_ps_output_and_classifies_gwt_processes() {
         let text = "\
   935     1 100.2 02:17:18 /Applications/GWT.app/Contents/MacOS/gwt
 936 935 78.4 00:00:05 /Users/me/.gwt/runtime/venvs/chroma/bin/python /Users/me/.gwt/runtime/runners/chroma_index_runner-abc.py --action status
 1200 1 0.0 00:01:00 /Users/me/project/target/debug/gwtd diagnostics cpu --json
+346 1 125.0 12:00:00 /System/Library/Frameworks/CoreServices.framework/Frameworks/FSEvents.framework/Support/fseventsd
+1201 1 0.0 00:00:01 /usr/bin/grep fseventsd
 ";
         let snapshots = parse_process_snapshots(text);
-        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots.len(), 5);
         assert_eq!(snapshots[0].pid, 935);
         assert_eq!(snapshots[0].cpu_percent, Some(100.2));
         assert!(is_gwt_process(&snapshots[0]));
         assert!(is_chroma_runner_process(&snapshots[1]));
         assert!(!is_gwt_process(&snapshots[2]));
+        assert!(is_fseventsd(&snapshots[3]));
+        assert!(!is_fseventsd(&snapshots[4]));
+    }
+
+    #[test]
+    fn host_cpu_warns_after_three_high_samples() {
+        let sample = parse_process_snapshot_line("346 1 125.0 12:00:00 /usr/libexec/fseventsd");
+        let samples = [sample.clone(), sample.clone(), sample.clone()];
+        let diagnostics = summarize_host_cpu_samples(&samples);
+
+        assert_eq!(diagnostics.fseventsd, sample);
+        assert_eq!(diagnostics.sample_count, 3);
+        assert_eq!(diagnostics.sample_interval_ms, 1_000);
+        assert!(diagnostics.warning.is_some());
+    }
+
+    #[test]
+    fn host_cpu_does_not_warn_for_transient_or_incomplete_overage() {
+        let sample = parse_process_snapshot_line("346 1 125.0 12:00:00 /usr/libexec/fseventsd");
+        let mut samples = [sample.clone(), sample.clone(), sample.clone()];
+        assert!(summarize_host_cpu_samples(&samples[..1]).warning.is_none());
+
+        samples[1] = None;
+        assert!(summarize_host_cpu_samples(&samples).warning.is_none());
+
+        samples[1] = sample;
+        samples[1].as_mut().unwrap().cpu_percent = Some(100.0);
+        assert!(summarize_host_cpu_samples(&samples).warning.is_none());
+
+        samples[1].as_mut().unwrap().cpu_percent = Some(f64::NAN);
+        assert!(summarize_host_cpu_samples(&samples).warning.is_none());
+
+        samples[1].as_mut().unwrap().cpu_percent = Some(125.0);
+        samples[1].as_mut().unwrap().pid = 347;
+        assert!(summarize_host_cpu_samples(&samples).warning.is_none());
+
+        let unavailable = collect_host_cpu_diagnostics(&[]);
+        assert!(unavailable.fseventsd.is_none());
+        assert_eq!(unavailable.sample_interval_ms, 0);
+        assert!(unavailable.warning.is_none());
     }
 
     #[test]

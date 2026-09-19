@@ -65,11 +65,26 @@ printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
 /// Fake runner script that additionally parks any `index-issues` rebuild
 /// until the release file exists, so concurrent repair admissions stay
 /// observable while the first coordinated job is still in flight.
+///
+/// Issue #4247: the parked rebuild holds the host heavy lease, so it keeps
+/// the real runner's FR-389 yield contract. When an interactive search is
+/// pending on that lease it answers `yielded` (logged as a `yielded` line);
+/// the job owner hands the lease over and re-invokes the runner under the
+/// same admission. Without this, a search arriving behind the parked
+/// rebuild waited out its admission deadline instead of being served.
 const FAKE_RUNNER_BLOCKING_ISSUE_REBUILD: &str = "#!/bin/sh\n\
 echo \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\n\
 case \"$*\" in\n\
   *\"--action index-issues\"*)\n\
-    while [ ! -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; do sleep 0.05; done\n\
+    while [ ! -f \"$GWT_FAKE_RUNNER_RELEASE\" ]; do\n\
+      if grep -qs '\"priority\": *\"interactive-search\"' \
+\"$HOME\"/.gwt/runtime/index-coordinator/heavy.pending/*.json; then\n\
+        echo yielded >> \"$GWT_FAKE_RUNNER_LOG\"\n\
+        printf '%s\\n' '{\"ok\": true, \"yielded\": true}'\n\
+        exit 0\n\
+      fi\n\
+      sleep 0.05\n\
+    done\n\
     ;;\n\
 esac\n\
 printf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n";
@@ -546,6 +561,57 @@ fn missing_scope_returns_typed_not_ready_instead_of_silent_empty_success() {
     assert_eq!(INDEX_NOT_READY_EXIT_CODE, 75);
 }
 
+/// Issue #4455 AC-3: while a scope is being rebuilt, a blocking search must
+/// answer that the rebuild is in flight instead of holding the caller for the
+/// full repair wait. `gwt-search` uses this as a mandatory preflight, so a
+/// silent stall — or a bare "missing" — is not a usable answer.
+#[test]
+fn scope_under_rebuild_reports_the_rebuild_instead_of_holding_the_caller() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture =
+        setup_search_fixture(r#"{"ok": true, "scopes": {"specs": {"state": "missing"}}}"#);
+    gwt_core::runtime::ensure_project_index_runtime()
+        .expect("prime the managed runtime outside the measured window");
+
+    // No `GWT_INDEX_SEARCH_REPAIR_WAIT_MS` override: this measures the
+    // production join window, which used to be the full 30 seconds.
+    let started = Instant::now();
+    let error = gwt::search_project_index(
+        &fixture.repo,
+        "specs scope under rebuild",
+        &[IndexSearchScope::Specs],
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    )
+    .expect_err("a scope under rebuild must not degrade into a silent empty success");
+    let elapsed = started.elapsed();
+
+    let IndexSearchError::NotReady(not_ready) = error else {
+        panic!("expected typed INDEX_NOT_READY while the rebuild is in flight, got {error:?}");
+    };
+    assert!(
+        not_ready.rebuild_in_progress,
+        "the caller must be told a rebuild is running: {not_ready:?}"
+    );
+    assert_eq!(
+        not_ready.rebuilding_scopes,
+        vec!["specs".to_string()],
+        "the scopes being rebuilt must be named: {not_ready:?}"
+    );
+    assert!(
+        not_ready.retry_after_ms > 0,
+        "retry information is mandatory: {not_ready:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the caller was held for the whole repair wait instead of being told \
+         the rebuild is in flight (waited {elapsed:?})"
+    );
+}
+
 #[test]
 fn typed_v2_not_ready_canonicalizes_file_pair_repair_and_retries_fallback() {
     let _env_lock = env_lock()
@@ -792,24 +858,61 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
         r#"{"ok": true, "scopes": {"issues": {"state": "missing"}}}"#,
     );
 
-    let handles: Vec<_> = (0..4)
-        .map(|caller| {
-            let repo = fixture.repo.clone();
-            std::thread::spawn(move || {
-                gwt::search_project_index(
-                    &repo,
-                    &format!("missing issues scope caller {caller}"),
-                    &[IndexSearchScope::Issues],
-                    None,
-                    IndexSearchMatchMode::Semantic,
-                    false,
-                )
-            })
+    let search = |caller| {
+        let repo = fixture.repo.clone();
+        std::thread::spawn(move || {
+            gwt::search_project_index(
+                &repo,
+                &format!("missing issues scope caller {caller}"),
+                &[IndexSearchScope::Issues],
+                None,
+                IndexSearchMatchMode::Semantic,
+                false,
+            )
         })
+    };
+
+    // Pin the CI ordering: repair holds the heavy lease before the late
+    // queries arrive. Starting all queries together can hide a fake runner
+    // that never yields (Issues #4247 / #4281).
+    let first = search(0).join();
+    wait_for_rebuild_invocations(
+        &fixture.runner_log,
+        "--action index-issues",
+        1,
+        Duration::from_secs(15),
+    );
+    let late_callers: Vec<_> = (1..4).map(search).collect();
+    let results: Vec<_> = std::iter::once(first)
+        .chain(late_callers.into_iter().map(|caller| caller.join()))
         .collect();
-    for handle in handles {
-        let error = handle
-            .join()
+
+    // Admission is synchronous in each caller. Once they return there is
+    // nothing left to admit. Release and drain before asserting their results
+    // so a failure cannot leave the fake runner parked after fixture teardown.
+    fs::write(&fixture.release, b"go").expect("release parked rebuild");
+
+    let coordinator = gwt_core::index_coordinator::IndexCoordinator::open_default()
+        .expect("isolated coordinator");
+    let repo_hash = gwt::index_worker::detect_repo_hash(&fixture.repo).expect("repo hash");
+    let key = gwt_core::index_coordinator::TargetKey::repo_shared(repo_hash.as_str(), "issues");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(coordinator.target_state_path(&key)).expect("repair state"),
+        )
+        .expect("parse repair state");
+        assert_eq!(state["epoch"], 1, "exactly one repair admission: {state}");
+        if state["status"] != "running" {
+            assert_eq!(state["status"], "completed", "repair must finish: {state}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "repair did not finish: {state}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    for result in results {
+        let error = result
             .expect("search caller thread")
             .expect_err("every concurrent caller gets the typed not-ready");
         assert!(
@@ -818,28 +921,80 @@ fn concurrent_non_blocking_searches_coalesce_into_one_repair_admission() {
         );
     }
 
-    // The first queued repair becomes the coordinator job owner and parks on
-    // the blocked fake runner; every other caller's repair request must
-    // coalesce into that in-flight job instead of admitting a second runner.
-    wait_for_rebuild_invocations(
-        &fixture.runner_log,
-        "--action index-issues",
-        1,
-        Duration::from_secs(15),
-    );
-    // Give the remaining detached repair threads time to reach admission
-    // while the owner is still parked, then release the runner.
-    std::thread::sleep(Duration::from_secs(3));
-    fs::write(&fixture.release, b"go").expect("release parked rebuild");
-    std::thread::sleep(Duration::from_secs(2));
-
     let repairs = rebuild_invocations(&fixture.runner_log, "--action index-issues");
+    let yields = fs::read_to_string(&fixture.runner_log)
+        .expect("runner log")
+        .lines()
+        .filter(|line| *line == "yielded")
+        .count();
+    assert!(
+        yields >= 1,
+        "the late callers must have been served by the parked repair \
+         yielding the heavy lease: {repairs:#?}"
+    );
     assert_eq!(
-        repairs.len(),
+        repairs.len().saturating_sub(yields),
         1,
         "concurrent non-blocking searches must share exactly one \
-         host-coordinated repair admission (FR-097): {repairs:#?}"
+         host-coordinated repair admission (FR-097): {yields} yield(s), \
+         {repairs:#?}"
     );
+}
+
+/// Issue #3866 AC-3/AC-5: `cancelled` and `repair_stopped` are stop states the
+/// runner holds until an explicit `index.repair` (Issue #4205). A queued
+/// repair is refused, so waiting cannot help: the blocking search must fail
+/// fast and non-retryably instead of burning the 30 s repair wait.
+#[test]
+fn operator_stop_state_fails_fast_without_queueing_repair() {
+    for reason in ["cancelled", "repair_stopped"] {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = setup_search_fixture(&format!(
+            r#"{{"ok": true, "scopes": {{"issues": {{"state": "corrupt", "reason": "{reason}"}}}}}}"#
+        ));
+
+        let started = Instant::now();
+        let error = gwt::search_project_index(
+            &fixture.repo,
+            "stopped issues scope",
+            &[IndexSearchScope::Issues],
+            None,
+            IndexSearchMatchMode::Semantic,
+            true,
+        )
+        .expect_err("a stopped scope must fail typed, never silently succeed");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{reason}: an operator stop state must not wait out the repair \
+             window: {:?}",
+            started.elapsed()
+        );
+        assert!(!error.retryable(), "{reason}: {error:?}");
+        match &error {
+            IndexSearchError::SearchFailed(failed) => {
+                assert!(
+                    failed.affected_scopes.iter().any(|scope| scope == "issues"),
+                    "{reason}: {failed:?}"
+                );
+                assert!(failed.reason.contains(reason), "{reason}: {failed:?}");
+                assert!(
+                    failed.reason.contains("index.repair"),
+                    "{reason}: the error must carry the recovery step: {failed:?}"
+                );
+            }
+            other => panic!("{reason}: expected a non-retryable failure, got {other:?}"),
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            rebuild_invocations(&fixture.runner_log, "--action index-").is_empty(),
+            "{reason}: the runner refuses queued repairs in a stop state, so \
+             none may be queued"
+        );
+    }
 }
 
 #[test]

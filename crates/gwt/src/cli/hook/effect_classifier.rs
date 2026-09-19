@@ -219,6 +219,12 @@ fn classify_json_operation(
         } else {
             (GovernanceEffect::Protected, REASON_KNOWN_PROTECTED)
         }
+    } else if operation == "issue.label" {
+        if issue_label_is_safety_sensitive(params) {
+            (GovernanceEffect::Protected, REASON_KNOWN_PROTECTED)
+        } else {
+            (GovernanceEffect::Reversible, REASON_KNOWN_REVERSIBLE)
+        }
     } else if operation == "execution.continue" {
         (GovernanceEffect::Protected, REASON_KNOWN_PROTECTED)
     } else if workflow_policy::is_read_only_json_envelope_operation(&operation) {
@@ -238,6 +244,34 @@ fn classify_json_operation(
         ObservationConfidence::Exact,
         reason,
     )
+}
+
+fn issue_label_is_safety_sensitive(params: Option<&serde_json::Value>) -> bool {
+    let Some(params) = params.and_then(serde_json::Value::as_object) else {
+        return true;
+    };
+    let Some(action) = params.get("action").and_then(serde_json::Value::as_str) else {
+        return true;
+    };
+    let Some(labels) = params.get("labels").and_then(serde_json::Value::as_array) else {
+        return true;
+    };
+    if labels.is_empty() || labels.iter().any(|label| !label.is_string()) {
+        return true;
+    }
+    match action {
+        "add" => labels.iter().any(|label| {
+            label
+                .as_str()
+                .is_some_and(|label| label.eq_ignore_ascii_case("auto-merge"))
+        }),
+        "remove" => labels.iter().any(|label| {
+            label.as_str().is_some_and(|label| {
+                label.eq_ignore_ascii_case("hold") || label.eq_ignore_ascii_case("gwt-spec")
+            })
+        }),
+        _ => true,
+    }
 }
 
 fn is_explicitly_reversible_json_operation(operation: &str) -> bool {
