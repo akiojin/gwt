@@ -55040,6 +55040,53 @@ fn background_work_scan_results_refresh_active_work_off_the_gui_event_loop() {
 }
 
 #[test]
+fn active_work_projection_build_reads_the_work_items_cache_without_deep_copying() {
+    // Issue #4234 AC-1 / AC-2: the Workspace rail build used to ask the
+    // WorkItems cache for two *owned* deep copies of the parsed works.json per
+    // refresh — once to test emptiness and once to render the rows. At
+    // repository scale that is the largest per-refresh allocation left in the
+    // GUI, and it is paid on every rail rebuild for the life of the process.
+    // The cache already hands out an `Arc`, so the build must borrow it.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (runtime, _events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+    let work_items_cache = Arc::clone(&runtime.work_items_cache);
+
+    let job = runtime
+        .active_work_projection_refresh_job(&repo)
+        .expect("refresh job");
+    let before = work_items_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .deep_copy_count;
+    let refreshed = super::run_active_work_projection_refresh(job);
+    let after = work_items_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .deep_copy_count;
+
+    let view = refreshed.view.expect("the rail still builds");
+    assert!(
+        view.active_works
+            .iter()
+            .any(|work| work.branch.as_deref() == Some("work/off-loop")),
+        "the borrowed projection must still render the recorded Work"
+    );
+    assert_eq!(
+        after - before,
+        0,
+        "the rail build copied the parsed works.json {} time(s) instead of \
+         borrowing the cached Arc",
+        after - before
+    );
+}
+
+#[test]
 fn active_work_projection_refresh_off_the_loop_matches_the_on_loop_build() {
     // Issue #4406 AC-6: the off-loop build is the same build. Applying its
     // result on the event loop must install the cache and broadcast without
