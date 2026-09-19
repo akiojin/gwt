@@ -1830,7 +1830,7 @@ fn terminal_work_integration_delivery(
 /// lifecycle, which makes a settlement receipt unmintable: the receipt is
 /// written only by a terminal `workspace.update`, that update resolves its
 /// target with `allow_terminal: false`, `workspace.ensure` hard-refuses a
-/// terminal canonical Work, and no operation reopens one.
+/// terminal Work. An active successor must satisfy its own receipt requirement.
 ///
 /// An unreadable branch, Work id, or WorkItems projection answers `false` so an
 /// infrastructure failure keeps the ordinary receipt requirement rather than
@@ -1852,22 +1852,24 @@ fn canonical_work_for_worktree_is_terminal(worktree: &Path) -> bool {
     let branch = gwt_git::Repository::open(worktree)
         .ok()
         .and_then(|repository| repository.current_branch().ok().flatten());
-    let Some(work_id) = gwt_core::workspace_projection::canonical_work_id(
+    let Some(items) = gwt_core::workspace_projection::load_workspace_work_items(worktree)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    let Some(work_id) = gwt_core::workspace_projection::current_work_id(
+        &items,
         worktree,
         branch.as_deref(),
         Some(worktree),
     ) else {
         return false;
     };
-    gwt_core::workspace_projection::load_workspace_work_items(worktree)
-        .ok()
-        .flatten()
-        .is_some_and(|items| {
-            items
-                .work_items
-                .iter()
-                .any(|item| item.id == work_id && item.is_terminal())
-        })
+    items
+        .work_items
+        .iter()
+        .any(|item| item.id == work_id && item.is_terminal())
 }
 
 /// Return an actionable refusal when this worktree has entered the tracked
@@ -7996,6 +7998,61 @@ mod tests {
     // refuses terminal targets. A predecessor receipt therefore has to behave
     // like a missing one (#3459): the delivered event log is the only fact left
     // to check, while the status projection keeps the generation gap visible.
+    #[test]
+    fn active_successor_does_not_inherit_discarded_work_receipt_waiver() {
+        use gwt_core::workspace_projection::{
+            WorkEvent, WorkEventKind, WorkspaceExecutionContainerRef,
+        };
+        use sha2::Digest;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let root_id = gwt_core::workspace_projection::canonical_work_id(
+            &fixture.repo,
+            Some("main"),
+            Some(&fixture.repo),
+        )
+        .unwrap();
+        let mut start = WorkEvent::new(WorkEventKind::Start, &root_id, Utc::now());
+        start.owner = Some("Issue #4074".to_string());
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("main".to_string()),
+            worktree_path: Some(fixture.repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, start.clone())
+            .unwrap();
+        gwt_core::workspace_projection::record_workspace_work_event(
+            &fixture.repo,
+            WorkEvent::new(WorkEventKind::Discard, &root_id, Utc::now()),
+        )
+        .unwrap();
+        assert!(canonical_work_for_worktree_is_terminal(&fixture.repo));
+        let mut successor = WorkEvent::new(
+            WorkEventKind::Start,
+            format!(
+                "work-successor-{}",
+                hex::encode(sha2::Sha256::digest(root_id.as_bytes()))
+            ),
+            Utc::now(),
+        );
+        successor.owner = start.owner;
+        successor.execution_container = start.execution_container;
+        successor.related_work_item_id = Some(root_id);
+        gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, successor)
+            .unwrap();
+        assert!(
+            !canonical_work_for_worktree_is_terminal(&fixture.repo),
+            "an active successor must mint its own settlement receipt"
+        );
+    }
+
     #[test]
     fn terminal_canonical_work_with_predecessor_receipt_does_not_refuse_delivered_events() {
         let _env_lock = crate::env_test_lock()
