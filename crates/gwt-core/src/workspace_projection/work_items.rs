@@ -16,6 +16,23 @@ fn bool_is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Issue #4508: most recent inline [`WorkEvent`]s retained per Work item in the
+/// derived projection (`works.json`).
+///
+/// The projection is derived state — the durable log is the `.gwt/work/events/`
+/// shard tree — but before this cap its inline history grew monotonically with
+/// uptime (491 MB / 661,394 inline events after three days on the gwt host).
+/// `workspace.work_prune` / `workspace.projection_prune` could not hold it back
+/// because both collect whole Work items and skip the ones whose owner Issue is
+/// still open, so exactly the long-lived items accumulated without limit. The
+/// resident [`WorkItemsProjection`] and every projection write are bounded by
+/// `work_items × MAX_INLINE_WORK_EVENTS` instead.
+///
+/// The retained window must stay wide enough for the readers of inline history:
+/// event-id dedup on re-ingest, [`WorkItem::latest_next_action`], the derived
+/// progress summary, and terminal-close detection all look at the recent tail.
+pub const MAX_INLINE_WORK_EVENTS: usize = 50;
+
 /// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Issue
 /// linked to a Workspace. Workspace Card preview and Detail pane render these
 /// as chips (`#Issue-1234`) instead of free-text. The number is required;
@@ -266,6 +283,14 @@ pub struct WorkItem {
     /// not move when later metadata or heartbeat events are folded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discarded_at: Option<DateTime<Utc>>,
+    /// Issue #4508: watermark of the inline history dropped by
+    /// [`WorkItemsProjection::compact_inline_events`]. Every event at or before
+    /// this instant was folded into `legacy_metadata_snapshot` before being
+    /// dropped, so re-reading a source that still carries it must not replay it
+    /// or the truncated history would grow straight back. `None` marks an item
+    /// whose inline history is still complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_compacted_through: Option<DateTime<Utc>>,
 }
 
 impl WorkItem {
@@ -395,6 +420,7 @@ impl WorkItemsProjection {
                 duplicate_event_containers: BTreeMap::new(),
                 discarded: false,
                 discarded_at: None,
+                events_compacted_through: None,
             });
             self.work_items.len() - 1
         });
@@ -674,6 +700,78 @@ impl WorkItemsProjection {
             backfill_work_item_progress_summary(item);
         }
     }
+
+    /// Issue #4508: total inline events held across every Work item. The
+    /// measurable that [`compact_inline_events`](Self::compact_inline_events)
+    /// bounds, in the same shape as `WorkItemsCache::parse_count`.
+    pub fn inline_event_count(&self) -> usize {
+        self.work_items.iter().map(|item| item.events.len()).sum()
+    }
+
+    /// True when any Work item exceeds [`MAX_INLINE_WORK_EVENTS`]. Lets a
+    /// writer skip cloning a projection that is already inside the cap.
+    pub fn needs_inline_event_compaction(&self) -> bool {
+        self.work_items
+            .iter()
+            .any(|item| item.events.len() > MAX_INLINE_WORK_EVENTS)
+    }
+
+    /// Issue #4508: bound every Work item's inline history to the newest
+    /// [`MAX_INLINE_WORK_EVENTS`] events, returning how many were dropped.
+    ///
+    /// A Work item's fields already are the fold of its complete history, so
+    /// freezing them as the authoritative metadata snapshot lets a later refold
+    /// reproduce this exact state from the retained tail alone — the same
+    /// replay base `merge_eventless_legacy_item` uses for eventless legacy
+    /// rows. Compaction is therefore lossless for the current state: only the
+    /// ability to re-derive it from scratch is traded away.
+    pub fn compact_inline_events(&mut self) -> usize {
+        self.work_items
+            .iter_mut()
+            .map(compact_work_item_inline_events)
+            .sum()
+    }
+}
+
+fn compact_work_item_inline_events(item: &mut WorkItem) -> usize {
+    if item.events.len() <= MAX_INLINE_WORK_EVENTS {
+        return 0;
+    }
+    item.events.sort_by_key(|event| event.updated_at);
+    let dropped = item.events.len() - MAX_INLINE_WORK_EVENTS;
+
+    // The boundary must cover everything the snapshot already reflects, which
+    // is the whole history: a Backfill event does not advance `updated_at`, so
+    // taking the maximum of both keeps a dropped event from looking like a
+    // late arrival that still needs replaying.
+    let boundary = item.events[..dropped]
+        .iter()
+        .map(|event| event.updated_at)
+        .chain(std::iter::once(item.updated_at))
+        .chain(item.events_compacted_through)
+        .chain(item.legacy_metadata_snapshot_at)
+        .max()
+        .unwrap_or(item.updated_at);
+
+    let mut snapshot = item.clone();
+    snapshot.events.clear();
+    snapshot.legacy_metadata_snapshot = None;
+    snapshot.duplicate_event_containers.clear();
+
+    item.events.drain(..dropped);
+    let retained_ids = item
+        .events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    item.duplicate_event_containers
+        .retain(|event_id, _| retained_ids.contains(event_id));
+
+    item.legacy_metadata_snapshot = Some(Box::new(snapshot));
+    item.legacy_metadata_snapshot_at = Some(boundary);
+    item.legacy_metadata_authoritative = true;
+    item.events_compacted_through = Some(boundary);
+    dropped
 }
 
 fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
@@ -986,6 +1084,109 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    /// Issue #4508 AC-1: the inline event history of one Work item must stop
+    /// growing with uptime, and the state folded from the dropped prefix must
+    /// survive as authoritative metadata so nothing regresses.
+    #[test]
+    fn compact_inline_events_caps_history_and_preserves_folded_state() {
+        let started_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(started_at);
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-compaction", started_at);
+        start.title = Some("Compaction owner".to_string());
+        start.owner = Some("#4508".to_string());
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-4508".to_string()),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        projection.apply_event(start);
+
+        let total = MAX_INLINE_WORK_EVENTS * 4;
+        for index in 0..total {
+            let mut update = WorkEvent::new(
+                WorkEventKind::Update,
+                "work-compaction",
+                started_at + chrono::Duration::seconds(index as i64 + 1),
+            );
+            update.progress_summary = Some(format!("update {index}"));
+            projection.apply_event(update);
+        }
+
+        let before = projection.work_items[0].clone();
+        assert_eq!(before.events.len(), total + 1);
+
+        let dropped = projection.compact_inline_events();
+        assert_eq!(dropped, total + 1 - MAX_INLINE_WORK_EVENTS);
+
+        let item = &projection.work_items[0];
+        assert_eq!(item.events.len(), MAX_INLINE_WORK_EVENTS);
+        assert_eq!(
+            item.events.last().map(|event| event.id.as_str()),
+            before.events.last().map(|event| event.id.as_str()),
+            "compaction retains the newest events, not the oldest"
+        );
+        assert_eq!(item.id, before.id);
+        assert_eq!(item.title, before.title);
+        assert_eq!(item.owner, before.owner);
+        assert_eq!(item.created_at, before.created_at);
+        assert_eq!(item.updated_at, before.updated_at);
+        assert_eq!(item.status_category, before.status_category);
+        assert_eq!(item.execution_containers, before.execution_containers);
+        assert_eq!(item.progress_summary, before.progress_summary);
+        assert_eq!(
+            item.events_compacted_through,
+            Some(before.updated_at),
+            "the compaction watermark marks the folded-and-dropped prefix"
+        );
+        assert!(item.legacy_metadata_authoritative);
+        let snapshot = item
+            .legacy_metadata_snapshot
+            .as_ref()
+            .expect("compaction freezes the folded state as the replay base");
+        assert_eq!(snapshot.owner, before.owner);
+        assert_eq!(snapshot.execution_containers, before.execution_containers);
+        assert!(snapshot.events.is_empty());
+
+        assert_eq!(
+            projection.compact_inline_events(),
+            0,
+            "compaction is idempotent once the item is inside the cap"
+        );
+    }
+
+    /// Issue #4508 AC-1: a compacted item that keeps receiving events stays
+    /// bounded rather than climbing back to its pre-compaction size.
+    #[test]
+    fn compact_inline_events_keeps_a_busy_work_item_bounded() {
+        let started_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(started_at);
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Start,
+            "work-busy",
+            started_at,
+        ));
+
+        let mut clock = 1i64;
+        for _round in 0..8 {
+            for _ in 0..MAX_INLINE_WORK_EVENTS {
+                projection.apply_event(WorkEvent::new(
+                    WorkEventKind::Update,
+                    "work-busy",
+                    started_at + chrono::Duration::seconds(clock),
+                ));
+                clock += 1;
+            }
+            projection.compact_inline_events();
+            assert!(
+                projection.inline_event_count() <= MAX_INLINE_WORK_EVENTS,
+                "inline history must stay inside the cap across rounds"
+            );
+        }
+    }
 
     #[test]
     fn workspace_work_events_build_hot_projection_with_lifecycle_refs() {

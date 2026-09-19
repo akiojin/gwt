@@ -103,6 +103,7 @@ pub use projection::{
     WorkspaceProjectionUpdate, WorkspaceStartUpdate,
 };
 pub use work_items::workspace_execution_container_same;
+pub use work_items::MAX_INLINE_WORK_EVENTS;
 pub use work_items::{
     DuplicateWorkEventProvenance, WorkAgentRef, WorkEvent, WorkEventApplyOutcome, WorkEventKind,
     WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceIssueLink,

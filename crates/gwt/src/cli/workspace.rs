@@ -3702,6 +3702,7 @@ pub(crate) mod tests {
                 duplicate_event_containers: Default::default(),
                 discarded: false,
                 discarded_at: None,
+                events_compacted_through: None,
             }
         }
 
