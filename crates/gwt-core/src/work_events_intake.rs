@@ -192,11 +192,16 @@ fn ingest_work_events_sources_locked(
         incoming.extend(collect_machine_local_work_events(content)?);
     }
     // Issue #4508: an event dropped by inline-history compaction is already
-    // folded into its Work item's authoritative snapshot. Its source shard is
+    // folded into its Work item's authoritative state. Its source shard is
     // immutable and keeps offering it, so without this watermark every pass
     // would re-apply it, re-grow the truncated history, and mark the
     // projection changed — rewriting works.json on every scan for no state
     // change.
+    //
+    // Close kinds are exempt. Close state is owned by the machine-local
+    // lifecycle log (FR-384), and a close stamped before the Work's last
+    // update would otherwise be dropped and never close it. Re-applying one is
+    // already guarded: a terminal item refuses events at or before its close.
     let compacted_through = previous
         .work_items
         .iter()
@@ -207,10 +212,11 @@ fn ingest_work_events_sources_locked(
         .collect::<HashMap<_, _>>();
     if !compacted_through.is_empty() {
         incoming.retain(|(event, _)| {
-            let already_folded = compacted_through
-                .get(&event.work_item_id)
-                .is_some_and(|through| event.updated_at <= *through)
-                && !seen_event_ids.contains(&event.id);
+            let already_folded = !is_close_kind(event.kind)
+                && !seen_event_ids.contains(&event.id)
+                && compacted_through
+                    .get(&event.work_item_id)
+                    .is_some_and(|through| event.updated_at <= *through);
             if already_folded {
                 report.skipped_duplicate += 1;
             }
