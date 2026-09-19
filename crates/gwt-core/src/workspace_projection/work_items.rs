@@ -3,7 +3,7 @@
 //! fold that turns recorded events into current Work items, plus the legacy
 //! `Workspace*`-prefixed adapter aliases.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -32,6 +32,22 @@ fn bool_is_false(value: &bool) -> bool {
 /// event-id dedup on re-ingest, [`WorkItem::latest_next_action`], the derived
 /// progress summary, and terminal-close detection all look at the recent tail.
 pub const MAX_INLINE_WORK_EVENTS: usize = 50;
+
+/// Issue #4508: most recent Board entry ids retained per Work item.
+///
+/// `board_refs` grows by one entry per event that carried a `board_entry_id`,
+/// so capping only `events` just moves the growth here — the gwt host's busiest
+/// Work items held 2,680 refs, 25 MB across the projection. Nothing reads the
+/// list for more than provenance, so the newest window is what matters.
+pub const MAX_WORK_BOARD_REFS: usize = 50;
+
+/// Issue #4508: most recent agent sessions retained per Work item.
+///
+/// One entry is kept per session that ever touched the Work, so a long-lived
+/// Work accumulates them for the life of the project (1,391 on the gwt host's
+/// PM Work). Sessions are pruned oldest-first by `updated_at`, which keeps the
+/// recent attachments that session-conflict detection actually consults.
+pub const MAX_WORK_AGENT_REFS: usize = 50;
 
 /// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Issue
 /// linked to a Workspace. Workspace Card preview and Detail pane render these
@@ -708,43 +724,45 @@ impl WorkItemsProjection {
         self.work_items.iter().map(|item| item.events.len()).sum()
     }
 
-    /// True when any Work item exceeds [`MAX_INLINE_WORK_EVENTS`]. Lets a
-    /// writer skip cloning a projection that is already inside the cap.
+    /// True when any Work item exceeds one of the per-item caps. Lets a writer
+    /// skip cloning a projection that is already inside them.
     pub fn needs_inline_event_compaction(&self) -> bool {
-        self.work_items
-            .iter()
-            .any(|item| item.events.len() > MAX_INLINE_WORK_EVENTS)
+        self.work_items.iter().any(work_item_exceeds_caps)
     }
 
-    /// Issue #4508: bound every Work item's inline history to the newest
-    /// [`MAX_INLINE_WORK_EVENTS`] events, returning how many were dropped.
+    /// Issue #4508: bound every Work item's accumulated history — inline
+    /// events, Board refs, and agent refs — returning how many entries were
+    /// dropped.
     ///
     /// A Work item's fields already are the fold of its complete history, so
-    /// freezing them as the authoritative metadata snapshot lets a later refold
-    /// reproduce this exact state from the retained tail alone — the same
-    /// replay base `merge_eventless_legacy_item` uses for eventless legacy
-    /// rows. Compaction is therefore lossless for the current state: only the
-    /// ability to re-derive it from scratch is traded away.
+    /// marking them authoritative lets a later refold reproduce this exact
+    /// state from the retained tail alone: `merge_eventless_legacy_item`
+    /// derives its replay base from the item itself when no snapshot is
+    /// stored. Compaction is therefore lossless for the current state; only
+    /// the ability to re-derive it from scratch is traded away.
     pub fn compact_inline_events(&mut self) -> usize {
-        self.work_items
-            .iter_mut()
-            .map(compact_work_item_inline_events)
-            .sum()
+        self.work_items.iter_mut().map(compact_work_item).sum()
     }
 }
 
-fn compact_work_item_inline_events(item: &mut WorkItem) -> usize {
-    if item.events.len() <= MAX_INLINE_WORK_EVENTS {
+fn work_item_exceeds_caps(item: &WorkItem) -> bool {
+    item.events.len() > MAX_INLINE_WORK_EVENTS
+        || item.board_refs.len() > MAX_WORK_BOARD_REFS
+        || item.agents.len() > MAX_WORK_AGENT_REFS
+}
+
+fn compact_work_item(item: &mut WorkItem) -> usize {
+    if !work_item_exceeds_caps(item) {
         return 0;
     }
     item.events.sort_by_key(|event| event.updated_at);
-    let dropped = item.events.len() - MAX_INLINE_WORK_EVENTS;
+    let dropped_events = item.events.len().saturating_sub(MAX_INLINE_WORK_EVENTS);
 
-    // The boundary must cover everything the snapshot already reflects, which
-    // is the whole history: a Backfill event does not advance `updated_at`, so
-    // taking the maximum of both keeps a dropped event from looking like a
-    // late arrival that still needs replaying.
-    let boundary = item.events[..dropped]
+    // The boundary must cover everything the folded state already reflects,
+    // which is the whole history: a Backfill event does not advance
+    // `updated_at`, so taking the maximum of both keeps a dropped event from
+    // looking like a late arrival that still needs replaying.
+    let boundary = item.events[..dropped_events]
         .iter()
         .map(|event| event.updated_at)
         .chain(std::iter::once(item.updated_at))
@@ -753,25 +771,32 @@ fn compact_work_item_inline_events(item: &mut WorkItem) -> usize {
         .max()
         .unwrap_or(item.updated_at);
 
-    let mut snapshot = item.clone();
-    snapshot.events.clear();
-    snapshot.legacy_metadata_snapshot = None;
-    snapshot.duplicate_event_containers.clear();
-
-    item.events.drain(..dropped);
+    item.events.drain(..dropped_events);
     let retained_ids = item
         .events
         .iter()
         .map(|event| event.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     item.duplicate_event_containers
         .retain(|event_id, _| retained_ids.contains(event_id));
 
-    item.legacy_metadata_snapshot = Some(Box::new(snapshot));
+    let dropped_board_refs = item.board_refs.len().saturating_sub(MAX_WORK_BOARD_REFS);
+    item.board_refs.drain(..dropped_board_refs);
+
+    item.agents.sort_by_key(|agent| agent.updated_at);
+    let dropped_agents = item.agents.len().saturating_sub(MAX_WORK_AGENT_REFS);
+    item.agents.drain(..dropped_agents);
+
+    // No snapshot is stored: it is exactly this item's own folded state, and
+    // duplicating every field here is what made the projection large in the
+    // first place. `merge_eventless_legacy_item` rebuilds it on demand, and an
+    // older snapshot must not survive a moved boundary — replaying only the
+    // newer events onto stale metadata would roll the Work item back.
+    item.legacy_metadata_snapshot = None;
     item.legacy_metadata_snapshot_at = Some(boundary);
     item.legacy_metadata_authoritative = true;
     item.events_compacted_through = Some(boundary);
-    dropped
+    dropped_events + dropped_board_refs + dropped_agents
 }
 
 fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
@@ -1142,14 +1167,16 @@ mod tests {
             Some(before.updated_at),
             "the compaction watermark marks the folded-and-dropped prefix"
         );
-        assert!(item.legacy_metadata_authoritative);
-        let snapshot = item
-            .legacy_metadata_snapshot
-            .as_ref()
-            .expect("compaction freezes the folded state as the replay base");
-        assert_eq!(snapshot.owner, before.owner);
-        assert_eq!(snapshot.execution_containers, before.execution_containers);
-        assert!(snapshot.events.is_empty());
+        assert!(
+            item.legacy_metadata_authoritative,
+            "the folded state becomes the authoritative replay base"
+        );
+        assert_eq!(item.legacy_metadata_snapshot_at, Some(before.updated_at));
+        assert!(
+            item.legacy_metadata_snapshot.is_none(),
+            "the replay base is the item itself; storing a copy of every field \
+             is what made the projection large"
+        );
 
         assert_eq!(
             projection.compact_inline_events(),
@@ -1159,7 +1186,9 @@ mod tests {
     }
 
     /// Issue #4508 AC-1: a compacted item that keeps receiving events stays
-    /// bounded rather than climbing back to its pre-compaction size.
+    /// bounded rather than climbing back to its pre-compaction size. Board and
+    /// agent refs accumulate per event too, so capping only `events` would just
+    /// move the growth into them.
     #[test]
     fn compact_inline_events_keeps_a_busy_work_item_bounded() {
         let started_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
@@ -1173,19 +1202,38 @@ mod tests {
         let mut clock = 1i64;
         for _round in 0..8 {
             for _ in 0..MAX_INLINE_WORK_EVENTS {
-                projection.apply_event(WorkEvent::new(
+                let mut event = WorkEvent::new(
                     WorkEventKind::Update,
                     "work-busy",
                     started_at + chrono::Duration::seconds(clock),
-                ));
+                );
+                event.board_entry_id = Some(format!("board-{clock}"));
+                event.agent_session_id = Some(format!("session-{clock}"));
+                projection.apply_event(event);
                 clock += 1;
             }
             projection.compact_inline_events();
+            let item = &projection.work_items[0];
             assert!(
-                projection.inline_event_count() <= MAX_INLINE_WORK_EVENTS,
+                item.events.len() <= MAX_INLINE_WORK_EVENTS,
                 "inline history must stay inside the cap across rounds"
             );
+            assert!(
+                item.board_refs.len() <= MAX_WORK_BOARD_REFS,
+                "board refs must stay inside the cap across rounds"
+            );
+            assert!(
+                item.agents.len() <= MAX_WORK_AGENT_REFS,
+                "agent refs must stay inside the cap across rounds"
+            );
         }
+
+        let item = &projection.work_items[0];
+        assert_eq!(
+            item.board_refs.last().map(String::as_str),
+            Some(format!("board-{}", clock - 1).as_str()),
+            "the newest refs are the ones kept"
+        );
     }
 
     #[test]

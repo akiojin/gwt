@@ -799,10 +799,15 @@ fn fold_work_events(
 
 fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy: WorkItem) {
     legacy.legacy_metadata_authoritative = true;
-    // Issue #4508: a refold rebuilds the item from the snapshot, so the
+    // Issue #4508: a refold rebuilds the item from its replay base, so the
     // compaction watermark has to be carried across explicitly or the next
-    // intake pass would replay the prefix this snapshot already contains.
+    // intake pass would replay the prefix that base already contains. A
+    // compacted item also keeps deriving its base from itself: storing the
+    // copy back would re-add a duplicate of every field the compaction just
+    // dropped, and a projection that gained a snapshot counts as changed, so
+    // every pass would rewrite works.json without any state change.
     let events_compacted_through = legacy.events_compacted_through;
+    let retain_snapshot = events_compacted_through.is_none();
     let legacy_snapshot_at = legacy
         .legacy_metadata_snapshot_at
         .unwrap_or(legacy.updated_at);
@@ -816,7 +821,7 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
     });
     let mut legacy_base = (*immutable_snapshot).clone();
     legacy_base.events.clear();
-    legacy_base.legacy_metadata_snapshot = Some(immutable_snapshot.clone());
+    legacy_base.legacy_metadata_snapshot = retain_snapshot.then(|| immutable_snapshot.clone());
     legacy_base.legacy_metadata_authoritative = true;
     legacy_base.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
     legacy_base.duplicate_event_containers.clear();
@@ -844,7 +849,7 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
         snapshot_projection.apply_event(event);
     }
     let mut legacy = snapshot_projection.work_items.pop().unwrap();
-    legacy.legacy_metadata_snapshot = Some(immutable_snapshot);
+    legacy.legacy_metadata_snapshot = retain_snapshot.then_some(immutable_snapshot);
     legacy.legacy_metadata_authoritative = true;
     legacy.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
     legacy.events_compacted_through = events_compacted_through;
