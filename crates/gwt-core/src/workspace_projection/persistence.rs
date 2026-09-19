@@ -3727,6 +3727,10 @@ pub struct WorkItemsCache {
     entries: HashMap<PathBuf, CachedWorkItemsProjection>,
     /// Lifetime parse counter; tests assert the steady state stops parsing.
     pub parse_count: u64,
+    /// Lifetime counter of owned deep copies handed out by the non-`shared`
+    /// APIs (Issue #4234). A repository-scale projection costs megabytes per
+    /// copy, so hot paths assert this stays flat.
+    pub deep_copy_count: u64,
 }
 
 #[cfg(test)]
@@ -3795,6 +3799,7 @@ impl WorkItemsCache {
     /// Cached equivalent of [`load_or_synthesize_workspace_work_items`].
     pub fn load_or_synthesize(&mut self, repo_path: &Path) -> Result<WorkItemsProjection> {
         let (projection, _) = self.load_or_synthesize_shared(repo_path)?;
+        self.deep_copy_count += 1;
         Ok(projection.as_ref().clone())
     }
 
@@ -3836,6 +3841,7 @@ impl WorkItemsCache {
             journal_path,
             project_root,
         )?;
+        self.deep_copy_count += 1;
         Ok(projection.as_ref().clone())
     }
 

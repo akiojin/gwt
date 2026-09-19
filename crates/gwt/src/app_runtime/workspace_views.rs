@@ -4513,11 +4513,14 @@ fn build_active_work_projection(
     // no projection has been saved yet (fresh home / never-launched
     // project) but Work records exist (e.g. worktree backfill), synthesize
     // a default projection so the records still surface.
+    // Issue #4234: borrow the cache's `Arc` instead of taking an owned deep
+    // copy. A repository-scale works.json costs megabytes per copy, and this
+    // build runs on every rail refresh for the life of the process.
     let loaded_projection = saved_projection.or_else(|| {
         lock_recover(&job.work_items_cache)
-            .load_or_synthesize(&job.project_root)
+            .load_or_synthesize_shared(&job.project_root)
             .ok()
-            .filter(|works| !works.work_items.is_empty())
+            .filter(|(works, _)| !works.work_items.is_empty())
             .map(|_| {
                 gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
                     &job.project_root,
@@ -4563,12 +4566,15 @@ fn build_active_work_projection(
         // Current and WorkItems share the stable Project State identity.
         // The exact worktree is an event destination, never a second
         // WorkItems discovery root.
+        // The `Arc` handle keeps this projection alive for the whole read even
+        // if a later refresh replaces the cache entry, so the borrow never
+        // outlives what it points at (Issue #4234).
         let work_items = lock_recover(&job.work_items_cache)
-            .load_or_synthesize(&job.project_root)
-            .map(|items| items.work_items)
-            .unwrap_or_default();
+            .load_or_synthesize_shared(&job.project_root)
+            .ok();
         let workspaces = work_items
             .iter()
+            .flat_map(|(items, _)| items.work_items.iter())
             .map(|item| workspace_work_item_view_from_item(item, &session_index, resume_branches))
             .collect::<Vec<_>>();
         let mut view = active_work_projection_from_saved_with_journal(
