@@ -3627,6 +3627,166 @@ mod tests {
         );
     }
 
+    /// Fixture: a gwt-shaped worktree — an integration base recorded as
+    /// `origin/develop` with work continuing on a feature branch — carrying
+    /// exactly `changed` as its diff.
+    fn ready_gate_worktree(worktree: &std::path::Path, changed: &[(&str, &str)]) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        for args in [
+            vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            vec!["checkout", "-q", "-b", "work/issue-4510"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(worktree)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+        for (rel, contents) in changed {
+            let path = worktree.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+    }
+
+    fn ready_gate_session(
+        worktree: &std::path::Path,
+        session_id: &str,
+        route: gwt_agent::LaunchRoute,
+        monitor_launched: bool,
+    ) {
+        let mut session =
+            gwt_agent::Session::new(worktree, "work/issue-4510", gwt_agent::AgentId::ClaudeCode);
+        session.id = session_id.to_string();
+        session.launch_route = route;
+        if monitor_launched {
+            session.launch_args = vec![crate::issue_monitor::issue_monitor_launch_prompt(
+                crate::LinkedIssueKind::Issue,
+                3752,
+            )];
+        }
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("persist ready-gate session");
+    }
+
+    /// Issue #4510 AC-3 / AC-4: PR #4374's exact shape — an Issue Monitor
+    /// launch whose whole diff is one Playwright spec — must reach Ready, and
+    /// a genuinely attended launch that touches real UI must still not.
+    ///
+    /// The two halves share one fixture on purpose: the fix is a narrowing of
+    /// *what counts as a UI surface*, never a relaxation of the gate itself.
+    #[test]
+    fn a_monitor_launched_test_only_change_reaches_ready_while_manual_ui_still_waits() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        // AC-3: the mis-stamped Monitor launch with a test-only diff.
+        let session_id = "ready-4510-monitor";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let repo = tempfile::tempdir().unwrap();
+        ready_gate_worktree(
+            repo.path(),
+            &[(
+                "crates/gwt/playwright/tests/pane-close-latency-live.spec.ts",
+                "test('pane close', async () => {});\n",
+            )],
+        );
+        // `Manual` is what the launcher actually wrote for PR #4374's session.
+        ready_gate_session(
+            repo.path(),
+            session_id,
+            gwt_agent::LaunchRoute::Manual,
+            true,
+        );
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.pr_quarantine_contexts.insert(
+            7,
+            PrQuarantineContext {
+                number: 7,
+                body: "User Verification Result: n/a (autonomous)\n\
+                       Agent Visual Check: n/a (no UI surface)\n"
+                    .to_string(),
+                comments: Vec::new(),
+            },
+        );
+        // The plan records the surfaces `verify.plan` would have derived, so
+        // the gate reads the real classification rather than a hand-written one.
+        use crate::cli::verification_record as verification;
+        let derived = crate::cli::verify_derivation::derive(repo.path()).expect("derive the plan");
+        assert_eq!(
+            derived.surfaces,
+            vec!["frontend-tests".to_string()],
+            "the fixture reproduces PR #4374's change set"
+        );
+        verification::save_plan(
+            repo.path(),
+            &verification::VerificationPlanRecord {
+                session_id: session_id.to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: derived.surfaces.clone(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (record, _) =
+            verification::run_verification(repo.path(), session_id, &["git --version".to_string()])
+                .unwrap();
+        verification::save(repo.path(), &record).unwrap();
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap();
+        assert_eq!(
+            code, 0,
+            "a Playwright-spec-only autonomous change has no UI for a human to confirm: {out}"
+        );
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+
+        // AC-4: an attended launch touching real UI keeps the human gate.
+        let manual_id = "ready-4510-manual";
+        let _manual_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, manual_id);
+        let manual_repo = tempfile::tempdir().unwrap();
+        ready_gate_worktree(
+            manual_repo.path(),
+            &[("crates/gwt/web/app.js", "export const x = 1;\n")],
+        );
+        ready_gate_session(
+            manual_repo.path(),
+            manual_id,
+            gwt_agent::LaunchRoute::Manual,
+            false,
+        );
+        let mut manual_env = crate::cli::TestEnv::new(manual_repo.path().to_path_buf());
+        manual_env.seed_pr(7, seeded_pr());
+        manual_env.pr_quarantine_contexts.insert(
+            7,
+            PrQuarantineContext {
+                number: 7,
+                body: "User Verification Result: n/a (autonomous)\n".to_string(),
+                comments: Vec::new(),
+            },
+        );
+        let mut out = String::new();
+        let code = run(&mut manual_env, PrCommand::Ready { number: 7 }, &mut out).unwrap();
+        assert_eq!(code, 2, "a real UI change still needs a human: {out}");
+        assert!(out.contains("manual UI verification requires"), "{out}");
+        assert!(manual_env.pr_ready_call_log.is_empty());
+    }
+
     #[test]
     fn manual_ready_still_requires_user_confirmation() {
         let _lock = crate::env_test_lock()
