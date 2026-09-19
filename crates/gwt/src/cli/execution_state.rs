@@ -29333,9 +29333,10 @@ exit 1
             assert_eq!(run_code, 0, "{run_out}");
 
             env.seed_created_pr(gwt_git::PrStatus {
+                head_ref_name: String::new(),
+                check_counts: None,
                 number: 7,
                 title: "Adopted execution handoff".to_string(),
-                head_ref_name: String::new(),
                 state: gwt_git::pr_status::PrState::Open,
                 url: "https://example.invalid/pr/7".to_string(),
                 created_at: None,
@@ -29594,9 +29595,10 @@ exit 1
             env.seed_pr(
                 4122,
                 gwt_git::PrStatus {
+                    head_ref_name: String::new(),
+                    check_counts: None,
                     number: 4122,
                     title: "Inherited terminal recovery".to_string(),
-                    head_ref_name: String::new(),
                     state: gwt_git::pr_status::PrState::Open,
                     url: "https://example.invalid/pr/4122".to_string(),
                     created_at: None,
