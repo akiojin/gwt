@@ -23798,7 +23798,9 @@ exit 1
                     3752,
                 ),
             ];
-            session.save(&sessions_dir).expect("persist monitor session");
+            session
+                .save(&sessions_dir)
+                .expect("persist monitor session");
             assert_eq!(
                 session_launch_route(Some("session-4510-monitor")),
                 Some(gwt_agent::LaunchRoute::Autonomous),
@@ -23811,8 +23813,11 @@ exit 1
                 gwt_agent::Session::new(repo.path(), "work/attended", gwt_agent::AgentId::Codex);
             attended.id = "session-4510-attended".to_string();
             attended.launch_route = gwt_agent::LaunchRoute::Manual;
-            attended.launch_args = vec!["--resume".to_string(), "fix the kanban column".to_string()];
-            attended.save(&sessions_dir).expect("persist attended session");
+            attended.launch_args =
+                vec!["--resume".to_string(), "fix the kanban column".to_string()];
+            attended
+                .save(&sessions_dir)
+                .expect("persist attended session");
             assert_eq!(
                 session_launch_route(Some("session-4510-attended")),
                 Some(gwt_agent::LaunchRoute::Manual)
