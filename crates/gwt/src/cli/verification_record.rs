@@ -5182,6 +5182,8 @@ mod tests {
         env.prs.insert(
             3854,
             gwt_git::PrStatus {
+                head_ref_name: String::new(),
+                check_counts: None,
                 number: 3854,
                 title: "typed quarantine".to_string(),
                 state: gwt_git::pr_status::PrState::Open,

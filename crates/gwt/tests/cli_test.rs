@@ -1302,6 +1302,8 @@ fn red_108_dispatch_pr_current_is_live_first() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.seed_current_pr(Some(PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 77,
         title: "Current PR".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -1332,6 +1334,8 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
         "## Summary\n\nBody".to_string(),
     );
     env.seed_created_pr(PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 88,
         title: "Created PR".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -1391,6 +1395,8 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
     env.seed_pr(
         42,
         PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 42,
             title: "Updated PR".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -1441,6 +1447,8 @@ fn red_109_dispatch_pr_view_reads_live_data() {
     env.seed_pr(
         42,
         PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 42,
             title: "Viewed PR".to_string(),
             state: gwt_git::pr_status::PrState::Merged,
@@ -1468,6 +1476,8 @@ fn red_109_dispatch_pr_current_surfaces_branch_behind_as_effective_merge_state()
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.seed_current_pr(Some(PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 91,
         title: "Update branch required".to_string(),
         state: gwt_git::pr_status::PrState::Open,

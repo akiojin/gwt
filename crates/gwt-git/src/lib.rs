@@ -10,6 +10,7 @@ pub mod commit;
 pub mod diff;
 pub mod gh_rest;
 pub mod issue;
+pub mod merge_conflict;
 pub mod merged_branch_prune;
 pub mod merged_pr_sync;
 pub mod migration;
@@ -27,16 +28,20 @@ pub use branch::{
 pub use commit::CommitEntry;
 pub use diff::{FileEntry, FileStatus};
 pub use issue::{Issue, IssueCache};
+pub use merge_conflict::{
+    measure_pr_conflict, remote_tracking_ref, PrConflictReport, CONFLICT_FILE_LIST_CAP,
+};
 pub use pr_status::{
-    classify_pr_lifecycle, classify_pr_lifecycle_with, classify_unlanded_branches,
-    collect_unlanded_work_branches, fetch_pr_inventory_tracked, fetch_pr_list,
-    parse_pr_inventory_json, parse_pr_inventory_json_with, parse_unlanded_branch_refs,
-    pr_check_report, CiStatus, MergeStatus, PrCheckReport, PrClosingIssue, PrInventoryFields,
-    PrInventoryHistory, PrInventoryHistoryEntry, PrInventoryInclude, PrInventoryItem,
-    PrInventoryOptions, PrInventoryRead, PrLifecycleClass, PrLifecycleDecision, PrStatus,
-    ReviewStatus, UnlandedBranch, UnlandedBranchProbe, PR_ESCALATE_AFTER_UNCHANGED_CYCLES,
-    PR_FALLBACK_WHEN_NOT_EXECUTABLE, PR_INVENTORY_CACHE_FILE, PR_INVENTORY_CACHE_TTL_SECS,
-    PR_INVENTORY_HISTORY_FILE, PR_STALE_AFTER_HOURS, UNLANDED_BRANCH_BASE_REF,
+    check_counts_from_rollup, classify_pr_lifecycle, classify_pr_lifecycle_with,
+    classify_unlanded_branches, collect_unlanded_work_branches, fetch_pr_inventory_tracked,
+    fetch_pr_list, parse_pr_inventory_json, parse_pr_inventory_json_with,
+    parse_unlanded_branch_refs, pr_check_report, CiStatus, MergeStatus, PrCheckCounts,
+    PrCheckReport, PrClosingIssue, PrInventoryFields, PrInventoryHistory, PrInventoryHistoryEntry,
+    PrInventoryInclude, PrInventoryItem, PrInventoryOptions, PrInventoryRead, PrLifecycleClass,
+    PrLifecycleDecision, PrStatus, ReviewStatus, UnlandedBranch, UnlandedBranchProbe,
+    PR_ESCALATE_AFTER_UNCHANGED_CYCLES, PR_FALLBACK_WHEN_NOT_EXECUTABLE, PR_INVENTORY_CACHE_FILE,
+    PR_INVENTORY_CACHE_TTL_SECS, PR_INVENTORY_HISTORY_FILE, PR_STALE_AFTER_HOURS,
+    PR_VIEW_JSON_FIELDS, UNLANDED_BRANCH_BASE_REF,
 };
 pub use refs::{list_existing_refs, resolve_canonical_root_tree, CanonicalRootTree};
 pub use repository::{

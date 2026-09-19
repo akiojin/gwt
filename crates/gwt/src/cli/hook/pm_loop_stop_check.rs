@@ -294,8 +294,9 @@ fn handle_at(
          follows its `fallback` (triage → rerun a flake → fresh-launch a regression → escalate); \
          stale (no update for `stale_after_hours`), SUPERSEDED, owner-Issue-closed, and \
          `escalation_due` rows are digest escalations — never auto-close them. \
-         A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change \
-         cycle: advance one or escalate with the reason. \
+         A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is \
+         never a no-change cycle: advance one or escalate with the reason. A READY_TO_PROMOTE \
+         row is advanced by running `pr.ready` on it, with no user confirmation. \
          Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, \
          red or escalation-due PRs, and quiet agents; advance at least one item with a concrete \
          action or user handoff. \
@@ -684,7 +685,7 @@ mod tests {
             // Issue #3868 AC-2 / AC-3: the fallback order and the red-PR
             // exception to the silent cycle are in the Stop hook itself.
             "a row with `default_action_executable` false follows its `fallback`",
-            "A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change cycle",
+            "A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is",
             "Treat that required advance or handoff as a reportable milestone or escalation",
             "Re-report every unresolved wait in every cycle using the window title and required user action",
             "identify the owning Issue and say `title unavailable`",

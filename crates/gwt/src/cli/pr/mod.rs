@@ -1046,6 +1046,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
                 "review_status": item.review_status,
                 "closing_issues": item.closing_issues,
                 "head_ref_name": item.head_ref_name,
+                "base_ref_name": item.base_ref_name,
                 "lifecycle": item.lifecycle,
                 "lifecycle_source": item.lifecycle_source,
                 "stale": item.stale,
@@ -1053,6 +1054,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
                 "dwell_hours": item.dwell_hours,
                 "owner_issue_closed": item.owner_issue_closed,
                 "owner_issue": item.owner_issue,
+                "owner_issue_source": item.owner_issue_source,
                 "default_action": item.default_action,
                 "default_action_executable": item.default_action_executable,
                 "default_action_operation": item.default_action_operation,
@@ -1064,6 +1066,24 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
             });
             if let Some(deferred) = item.deferred_user_verification {
                 row["deferred_user_verification"] = serde_json::json!(deferred);
+            }
+            // SPEC #3835 AC-3 / AC-4 / AC-6: the facts the PM used to collect
+            // by hand. Each is omitted when it was not measured, so an absent
+            // key reads as "unknown" rather than as a zero.
+            if let Some(counts) = item.check_counts {
+                row["check_counts"] = serde_json::json!(counts);
+            }
+            if let Some(conflict) = &item.conflict {
+                row["conflict"] = serde_json::json!(conflict);
+            }
+            if let Some(unresolved) = item.unresolved_review_threads {
+                row["unresolved_review_threads"] = serde_json::json!(unresolved);
+            }
+            if let Some(complete) = item.coderabbit_review_complete {
+                row["coderabbit_review_complete"] = serde_json::json!(complete);
+            }
+            if let Some(blocker) = &item.ready_to_promote_blocker {
+                row["ready_to_promote_blocker"] = serde_json::json!(blocker);
             }
             row
         })
@@ -1109,7 +1129,20 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
 pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
     out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
+    // SPEC #3835 AC-1: without the head branch the PM had to list every remote
+    // `work/*` ref and match commit subjects to find the PR's owner.
+    if !pr.head_ref_name.is_empty() {
+        out.push_str(&format!("head_branch: {}\n", pr.head_ref_name));
+    }
     out.push_str(&format!("ci: {}\n", pr.ci_status));
+    // SPEC #3835 AC-3: `ci: PENDING` alone cannot tell a skipped check from a
+    // running one, so the individual states travel with the summary.
+    if let Some(counts) = pr.check_counts {
+        out.push_str(&format!(
+            "checks: {} success / {} failure / {} skipped / {} in_progress (of {})\n",
+            counts.success, counts.failure, counts.skipped, counts.in_progress, counts.total
+        ));
+    }
     out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
     out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
     out.push_str(&format!("review: {}\n", pr.review_status));
@@ -1205,6 +1238,13 @@ mod tests {
 
     fn seeded_inventory_item() -> gwt_git::PrInventoryItem {
         gwt_git::PrInventoryItem {
+            base_ref_name: "develop".to_string(),
+            check_counts: None,
+            conflict: None,
+            unresolved_review_threads: None,
+            coderabbit_review_complete: None,
+            ready_to_promote_blocker: None,
+            owner_issue_source: None,
             number: 7,
             title: "CLI family split".to_string(),
             url: "https://example.com/pr/7".to_string(),
@@ -1238,6 +1278,8 @@ mod tests {
 
     fn seeded_pr() -> gwt_git::PrStatus {
         gwt_git::PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 7,
             title: "CLI family split".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -2472,6 +2514,122 @@ mod tests {
         }
     }
 
+    /// SPEC #3835 AC-2 / AC-3 / AC-4 / AC-6: the facts the PM used to collect
+    /// by hand reach the row it already reads.
+    #[test]
+    fn pr_list_renders_the_measured_facts_the_pm_used_to_collect_by_hand() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut item = seeded_inventory_item();
+        item.base_ref_name = "develop".to_string();
+        item.owner_issue_source = Some("head_branch".to_string());
+        item.check_counts = Some(gwt_git::PrCheckCounts {
+            success: 16,
+            failure: 0,
+            skipped: 2,
+            in_progress: 0,
+            total: 18,
+        });
+        item.conflict = Some(gwt_git::PrConflictReport {
+            conflicting_files: vec!["crates/gwt/src/cli/pr/mod.rs".to_string()],
+            conflicting_file_count: 13,
+            files_truncated: false,
+            behind_by: Some(265),
+            probe: None,
+        });
+        item.unresolved_review_threads = Some(0);
+        item.coderabbit_review_complete = Some(true);
+        item.ready_to_promote_blocker = Some("behind_base".to_string());
+        env.seed_pr_inventory(vec![item]);
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+                refresh: false,
+                include: None,
+                force_reason: None,
+            },
+            &mut out,
+        )
+        .expect("run pr list");
+        assert_eq!(code, 0);
+
+        let payload: serde_json::Value = serde_json::from_str(&out).expect("pr.list JSON");
+        let row = &payload["pull_requests"][0];
+        assert_eq!(row["base_ref_name"], "develop");
+        assert_eq!(row["owner_issue_source"], "head_branch");
+        assert_eq!(row["check_counts"]["skipped"], 2);
+        assert_eq!(row["check_counts"]["in_progress"], 0);
+        assert_eq!(row["conflict"]["conflicting_file_count"], 13);
+        assert_eq!(row["conflict"]["behind_by"], 265);
+        assert_eq!(row["unresolved_review_threads"], 0);
+        assert_eq!(row["coderabbit_review_complete"], true);
+        assert_eq!(row["ready_to_promote_blocker"], "behind_base");
+    }
+
+    /// An unmeasured fact is absent, never rendered as a zero.
+    #[test]
+    fn pr_list_omits_facts_the_read_did_not_measure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr_inventory(vec![seeded_inventory_item()]);
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+                refresh: false,
+                include: None,
+                force_reason: None,
+            },
+            &mut out,
+        )
+        .expect("run pr list");
+
+        let payload: serde_json::Value = serde_json::from_str(&out).expect("pr.list JSON");
+        let row = &payload["pull_requests"][0];
+        for absent in [
+            "check_counts",
+            "conflict",
+            "unresolved_review_threads",
+            "coderabbit_review_complete",
+        ] {
+            assert!(row.get(absent).is_none(), "{absent} must be absent: {out}");
+        }
+    }
+
+    /// SPEC #3835 AC-1 / AC-3: `pr.view` answers the head branch and the
+    /// individual check states, not only the summary.
+    #[test]
+    fn pr_view_renders_the_head_branch_and_the_check_counts() {
+        let mut pr = seeded_pr();
+        pr.head_ref_name = "work/issue-3712".to_string();
+        pr.check_counts = Some(gwt_git::PrCheckCounts {
+            success: 16,
+            failure: 0,
+            skipped: 2,
+            in_progress: 0,
+            total: 18,
+        });
+        let mut out = String::new();
+        render_pr(&mut out, &pr);
+        assert!(out.contains("head_branch: work/issue-3712"), "{out}");
+        assert!(
+            out.contains("checks: 16 success / 0 failure / 2 skipped / 0 in_progress (of 18)"),
+            "{out}"
+        );
+
+        let mut bare = String::new();
+        render_pr(&mut bare, &seeded_pr());
+        assert!(!bare.contains("head_branch:"), "{bare}");
+        assert!(!bare.contains("checks:"), "{bare}");
+    }
+
     #[test]
     fn pr_list_renders_deferred_user_verification_for_owner_review() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2867,6 +3025,8 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 2538,
             title: "Active Work title".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -2930,6 +3090,8 @@ mod tests {
         env.repo_path = repo.clone();
         env.files.insert("body.md".to_string(), "Body".to_string());
         env.seed_created_pr(gwt_git::PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 2540,
             title: "Other branch PR".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -3272,6 +3434,8 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
         env.repo_path = repo.clone();
         env.seed_current_pr(Some(gwt_git::PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 9999,
             title: "Auto-done PR".to_string(),
             state: gwt_git::pr_status::PrState::Merged,

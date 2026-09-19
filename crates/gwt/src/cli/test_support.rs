@@ -348,6 +348,8 @@ pub fn sample_issue_snapshot() -> IssueSnapshot {
 
 pub fn sample_pr_status() -> gwt_git::PrStatus {
     gwt_git::PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 128,
         title: "Enforce coverage".to_string(),
         state: gwt_git::pr_status::PrState::Open,
