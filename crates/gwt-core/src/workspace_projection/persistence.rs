@@ -3592,6 +3592,11 @@ pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkIte
                 }
             }
             items.refresh_derived_progress_summaries();
+            // Issue #4508: bound the resident projection before any caller can
+            // hold on to it. Derived summaries are refreshed first so a legacy
+            // file's complete history still decides them once, and the
+            // authoritative snapshot compaction freezes carries that result.
+            items.compact_inline_events();
             Ok(Some(items))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -3918,6 +3923,18 @@ pub fn save_workspace_work_items_projection_to_path(
     path: &Path,
     projection: &WorkItemsProjection,
 ) -> Result<()> {
+    // Issue #4508: the projection is the file's only writer, so capping the
+    // inline history here is what actually stops works.json from growing with
+    // uptime. A projection already inside the cap is written without the copy.
+    let compacted;
+    let projection = if projection.needs_inline_event_compaction() {
+        let mut owned = projection.clone();
+        owned.compact_inline_events();
+        compacted = owned;
+        &compacted
+    } else {
+        projection
+    };
     let bytes = serde_json::to_vec_pretty(projection)
         .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
     write_atomic(path, &bytes)
@@ -7723,6 +7740,7 @@ fn synthesize_workspace_work_item_from_legacy(
         duplicate_event_containers: Default::default(),
         discarded: false,
         discarded_at: None,
+        events_compacted_through: None,
     };
     if let Some(projection) = projection {
         item.agents

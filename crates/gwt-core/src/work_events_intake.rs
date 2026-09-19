@@ -191,6 +191,38 @@ fn ingest_work_events_sources_locked(
     if let Some(content) = local_content {
         incoming.extend(collect_machine_local_work_events(content)?);
     }
+    // Issue #4508: an event dropped by inline-history compaction is already
+    // folded into its Work item's authoritative state. Its source shard is
+    // immutable and keeps offering it, so without this watermark every pass
+    // would re-apply it, re-grow the truncated history, and mark the
+    // projection changed — rewriting works.json on every scan for no state
+    // change.
+    //
+    // Close kinds are exempt. Close state is owned by the machine-local
+    // lifecycle log (FR-384), and a close stamped before the Work's last
+    // update would otherwise be dropped and never close it. Re-applying one is
+    // already guarded: a terminal item refuses events at or before its close.
+    let compacted_through = previous
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            item.events_compacted_through
+                .map(|through| (item.id.clone(), through))
+        })
+        .collect::<HashMap<_, _>>();
+    if !compacted_through.is_empty() {
+        incoming.retain(|(event, _)| {
+            let already_folded = !is_close_kind(event.kind)
+                && !seen_event_ids.contains(&event.id)
+                && compacted_through
+                    .get(&event.work_item_id)
+                    .is_some_and(|through| event.updated_at <= *through);
+            if already_folded {
+                report.skipped_duplicate += 1;
+            }
+            !already_folded
+        });
+    }
     if incoming.is_empty() {
         return Ok(report);
     }
@@ -773,6 +805,15 @@ fn fold_work_events(
 
 fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy: WorkItem) {
     legacy.legacy_metadata_authoritative = true;
+    // Issue #4508: a refold rebuilds the item from its replay base, so the
+    // compaction watermark has to be carried across explicitly or the next
+    // intake pass would replay the prefix that base already contains. A
+    // compacted item also keeps deriving its base from itself: storing the
+    // copy back would re-add a duplicate of every field the compaction just
+    // dropped, and a projection that gained a snapshot counts as changed, so
+    // every pass would rewrite works.json without any state change.
+    let events_compacted_through = legacy.events_compacted_through;
+    let retain_snapshot = events_compacted_through.is_none();
     let legacy_snapshot_at = legacy
         .legacy_metadata_snapshot_at
         .unwrap_or(legacy.updated_at);
@@ -786,10 +827,11 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
     });
     let mut legacy_base = (*immutable_snapshot).clone();
     legacy_base.events.clear();
-    legacy_base.legacy_metadata_snapshot = Some(immutable_snapshot.clone());
+    legacy_base.legacy_metadata_snapshot = retain_snapshot.then(|| immutable_snapshot.clone());
     legacy_base.legacy_metadata_authoritative = true;
     legacy_base.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
     legacy_base.duplicate_event_containers.clear();
+    legacy_base.events_compacted_through = events_compacted_through;
     let Some(rebuilt) = projection
         .work_items
         .iter_mut()
@@ -813,9 +855,10 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
         snapshot_projection.apply_event(event);
     }
     let mut legacy = snapshot_projection.work_items.pop().unwrap();
-    legacy.legacy_metadata_snapshot = Some(immutable_snapshot);
+    legacy.legacy_metadata_snapshot = retain_snapshot.then_some(immutable_snapshot);
     legacy.legacy_metadata_authoritative = true;
     legacy.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
+    legacy.events_compacted_through = events_compacted_through;
     legacy.events = rebuilt_events;
     for agent in std::mem::take(&mut rebuilt.agents) {
         if !legacy
@@ -3460,6 +3503,7 @@ mod tests {
             duplicate_event_containers: BTreeMap::new(),
             discarded: false,
             discarded_at: None,
+            events_compacted_through: None,
         };
         merge_eventless_legacy_item(&mut projection, legacy);
 
