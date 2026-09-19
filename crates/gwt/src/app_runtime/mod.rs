@@ -7925,6 +7925,20 @@ impl AppRuntime {
                     },
                 )
             }
+            FrontendEvent::IssueMonitorQueuePush { issue_numbers } => {
+                let publication = self.publish_active_issue_monitor_control(serde_json::json!({
+                    "terminal_queue_push": { "issue_numbers": issue_numbers.clone() }
+                }));
+                let now = chrono::Utc::now().to_rfc3339();
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "queue-push",
+                    |monitor| {
+                        monitor.terminal_queue_push(&issue_numbers, "operator", &now);
+                    },
+                )
+            }
             FrontendEvent::IssueMonitorQueueRemove { issue_numbers } => {
                 let publication = self.publish_active_issue_monitor_control(serde_json::json!({
                     "terminal_queue_remove": { "issue_numbers": issue_numbers.clone() }

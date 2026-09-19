@@ -293,7 +293,12 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
           : workActions,
     };
   }
-  return { order: issueEntryStateKey(entry) === "open" ? ["launch-agent"] : [] };
+  // SPEC #3165 TQ-9: a Backlog Issue is the one the user puts into the queue.
+  // This is the requested feature's main direction, so it sits on the row next
+  // to "Launch agent" rather than behind a separate surface.
+  return {
+    order: issueEntryStateKey(entry) === "open" ? ["queue-push", "launch-agent"] : [],
+  };
 }
 
 function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, canvasWindow }) {
@@ -3046,6 +3051,10 @@ export function createKnowledgeKanbanSurface({
           label: "Settings",
           aria: "Project Agent settings for",
         }),
+        "queue-push": Object.freeze({
+          label: "Add to queue",
+          aria: "Add to queue",
+        }),
         "queue-remove": Object.freeze({
           label: "Remove from queue",
           aria: "Remove from queue",
@@ -3099,6 +3108,12 @@ export function createKnowledgeKanbanSurface({
               kind: "issue_monitor_configure_issue",
               issue_number: entry.number,
               linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "queue-push":
+            send({
+              kind: "issue_monitor_queue_push",
+              issue_numbers: [entry.number],
             });
             return;
           case "queue-remove":

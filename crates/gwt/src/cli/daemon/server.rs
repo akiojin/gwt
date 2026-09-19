@@ -1693,6 +1693,9 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
+    /// the user's own act, so the entries are attributed to the operator.
+    TerminalQueuePush(Vec<u64>),
     /// SPEC #3165 TQ-9: remove Issues from this terminal's explicit queue.
     TerminalQueueRemove(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
@@ -2403,6 +2406,14 @@ fn apply_routine_issue_monitor_control(
         }
         IssueMonitorControl::PriorityOrder(issue_numbers) => {
             monitor.set_priority_order(issue_numbers);
+            true
+        }
+        IssueMonitorControl::TerminalQueuePush(issue_numbers) => {
+            monitor.terminal_queue_push(
+                &issue_numbers,
+                "operator",
+                &chrono::Utc::now().to_rfc3339(),
+            );
             true
         }
         IssueMonitorControl::TerminalQueueRemove(issue_numbers) => {
@@ -3187,6 +3198,15 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     window_id: Some(delivered.get("window_id")?.as_str()?.to_string()),
                 };
                 return Some(IssueMonitorControl::TerminalDelivered { target });
+            }
+            if let Some(push) = payload.get("terminal_queue_push") {
+                let issue_numbers = push
+                    .get("issue_numbers")?
+                    .as_array()?
+                    .iter()
+                    .map(serde_json::Value::as_u64)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(IssueMonitorControl::TerminalQueuePush(issue_numbers));
             }
             if let Some(remove) = payload.get("terminal_queue_remove") {
                 let issue_numbers = remove

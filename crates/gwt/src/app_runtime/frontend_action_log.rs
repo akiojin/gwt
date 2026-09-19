@@ -691,6 +691,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("reorder_issue_monitor_issues", "issue_monitor")
                 .target(issue_numbers.len().to_string())
         }
+        FrontendEvent::IssueMonitorQueuePush { issue_numbers } => {
+            FrontendUserActionLog::new("issue_monitor_queue_push", "issue_monitor")
+                .target(issue_numbers.len().to_string())
+        }
         FrontendEvent::IssueMonitorQueueRemove { issue_numbers } => {
             FrontendUserActionLog::new("issue_monitor_queue_remove", "issue_monitor")
                 .target(issue_numbers.len().to_string())

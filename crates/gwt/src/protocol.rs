@@ -882,6 +882,12 @@ pub enum FrontendEvent {
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },
+    /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
+    /// the user's own act — the Monitor's auto-refill is a separate path — so
+    /// the entries are attributed to the operator.
+    IssueMonitorQueuePush {
+        issue_numbers: Vec<u64>,
+    },
     /// SPEC #3165 TQ-9: remove Issues from this terminal's explicit queue.
     /// A launch already running for them is not stopped.
     IssueMonitorQueueRemove {

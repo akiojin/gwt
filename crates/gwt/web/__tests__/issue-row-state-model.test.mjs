@@ -362,7 +362,9 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
   const bareOpen = issueRowStateModel({ entry: knowledgeEntry(49) });
   assert.deepEqual(bareOpen.primary, { key: "issue:open", label: "Open", tone: "idle" });
   assert.deepEqual(bareOpen.secondary, []);
-  assert.deepEqual(bareOpen.actions, ["launch-agent"]);
+  // SPEC #3165 TQ-9: a Backlog Issue is exactly the row the user queues from,
+  // so the push sits beside the direct launch.
+  assert.deepEqual(bareOpen.actions, ["queue-push", "launch-agent"]);
   assert.deepEqual(bareOpen.overflow, []);
 
   const bareClosed = issueRowStateModel({ entry: knowledgeEntry(51, { state: "closed" }) });
@@ -599,7 +601,7 @@ test("every rendered Issue row has one primary badge, at most two secondary item
   const row49 = fixture.body.querySelector('[data-issue-number="49"]');
   assert.equal(row49.querySelector(".knowledge-row-badge").textContent, "Open");
   assert.deepEqual(secondaryItems(row49), []);
-  assert.deepEqual(visibleActions(row49), ["launch-agent"]);
+  assert.deepEqual(visibleActions(row49), ["queue-push", "launch-agent"]);
 
   const row51 = fixture.body.querySelector('[data-issue-number="51"]');
   assert.equal(row51.querySelector(".knowledge-row-badge").textContent, "Closed");
@@ -693,6 +695,14 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
   assert.equal(fixture.calls.cleaned.length, 1);
   assert.equal(fixture.calls.cleaned[0].candidate.branch, "work/issue-3671");
   assert.equal(fixture.calls.cleaned[0].windowId, "win-1");
+
+  // SPEC #3165 TQ-9: the queue push is the requested feature's main direction.
+  // Clicking it must reach the backend, not fall through to the default arm.
+  fixture.body.querySelector('[data-issue-number="49"] [data-action="queue-push"]').click();
+  assert.deepEqual(
+    fixture.sent.filter((message) => message.kind === "issue_monitor_queue_push"),
+    [{ kind: "issue_monitor_queue_push", issue_numbers: [49] }],
+  );
 
   fixture.body.querySelector('[data-issue-number="49"] [data-action="launch-agent"]').click();
   assert.deepEqual(fixture.calls.launchWizard, [{ windowId: "win-1", number: 49 }]);
