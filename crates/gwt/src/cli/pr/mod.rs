@@ -1550,7 +1550,7 @@ mod tests {
             unresolved_review_threads: None,
             coderabbit_review_complete: None,
             ready_to_promote_blocker: None,
-            owner_issue_source: None,
+            owner_issue_source: Some("head_branch".to_string()),
             number: 7,
             title: "CLI family split".to_string(),
             url: "https://example.com/pr/7".to_string(),
