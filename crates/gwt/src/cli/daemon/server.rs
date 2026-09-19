@@ -1693,6 +1693,11 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
+    /// the user's own act, so the entries are attributed to the operator.
+    TerminalQueuePush(Vec<u64>),
+    /// SPEC #3165 TQ-9: remove Issues from this terminal's explicit queue.
+    TerminalQueueRemove(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
     /// state. The PM's `launch_now` writes the new priority order to prefs
     /// (the SOT the driver re-reads each scan) and then sends this so the
@@ -2401,6 +2406,18 @@ fn apply_routine_issue_monitor_control(
         }
         IssueMonitorControl::PriorityOrder(issue_numbers) => {
             monitor.set_priority_order(issue_numbers);
+            true
+        }
+        IssueMonitorControl::TerminalQueuePush(issue_numbers) => {
+            monitor.terminal_queue_push(
+                &issue_numbers,
+                "operator",
+                &chrono::Utc::now().to_rfc3339(),
+            );
+            true
+        }
+        IssueMonitorControl::TerminalQueueRemove(issue_numbers) => {
+            monitor.terminal_queue_remove(&issue_numbers, &chrono::Utc::now().to_rfc3339());
             true
         }
         IssueMonitorControl::Launched {
@@ -3181,6 +3198,24 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     window_id: Some(delivered.get("window_id")?.as_str()?.to_string()),
                 };
                 return Some(IssueMonitorControl::TerminalDelivered { target });
+            }
+            if let Some(push) = payload.get("terminal_queue_push") {
+                let issue_numbers = push
+                    .get("issue_numbers")?
+                    .as_array()?
+                    .iter()
+                    .map(serde_json::Value::as_u64)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(IssueMonitorControl::TerminalQueuePush(issue_numbers));
+            }
+            if let Some(remove) = payload.get("terminal_queue_remove") {
+                let issue_numbers = remove
+                    .get("issue_numbers")?
+                    .as_array()?
+                    .iter()
+                    .map(serde_json::Value::as_u64)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(IssueMonitorControl::TerminalQueueRemove(issue_numbers));
             }
             if let Some(requeue) = payload.get("requeue") {
                 let issue_number = requeue.get("issue_number")?.as_u64()?;
@@ -4366,11 +4401,7 @@ fn scan_issue_monitor_once_blocking(
             detail: error.to_string(),
         });
     }
-    let monitor_owner = format!(
-        "{}:{}",
-        crate::process::current_username(),
-        std::process::id()
-    );
+    let monitor_owner = crate::process::current_claim_owner();
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
         &mut monitor,
         &loaded,
@@ -9798,6 +9829,37 @@ exit 0
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+    }
+
+    // SPEC #3165 TQ-9: the GUI's "Remove from queue" reaches the daemon as a
+    // decodable control and drops the Issue from this terminal's queue.
+    #[test]
+    fn issue_monitor_terminal_queue_remove_control_decodes_and_applies() {
+        let control =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "terminal_queue_remove": { "issue_numbers": [42] } }),
+                std::process::id() + 1,
+            ))
+            .expect("queue remove control decodes");
+        assert_eq!(control, IssueMonitorControl::TerminalQueueRemove(vec![42]));
+
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42, 43], "operator", "2026-09-10T00:00:00Z");
+        assert!(apply_issue_monitor_control(&mut monitor, control));
+        let queue = monitor
+            .prefs()
+            .terminal_queues
+            .remove(&crate::process::current_hostname())
+            .expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![43]
+        );
     }
 
     // SPEC-3431 T-021 (FR-006): `scan_now` asks the driver for one immediate

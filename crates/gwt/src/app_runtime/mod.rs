@@ -2432,14 +2432,7 @@ fn observe_local_claim_candidates(
     let observations = observations.inspect_err(|failure| {
         tracing::warn!(error = %failure, "issue monitor completion probe expired");
     })?;
-    Ok(Some((
-        format!(
-            "{}:{}",
-            gwt::process::current_username(),
-            std::process::id()
-        ),
-        observations,
-    )))
+    Ok(Some((gwt::process::current_claim_owner(), observations)))
 }
 
 /// Issue #3528 (SPEC #3200 FR-059, #3165 FR-098): the deadline boundary of one
@@ -7929,6 +7922,34 @@ impl AppRuntime {
                     "reorder",
                     |monitor| {
                         monitor.reorder_queued_issues(&priority_order);
+                    },
+                )
+            }
+            FrontendEvent::IssueMonitorQueuePush { issue_numbers } => {
+                let publication = self.publish_active_issue_monitor_control(serde_json::json!({
+                    "terminal_queue_push": { "issue_numbers": issue_numbers.clone() }
+                }));
+                let now = chrono::Utc::now().to_rfc3339();
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "queue-push",
+                    |monitor| {
+                        monitor.terminal_queue_push(&issue_numbers, "operator", &now);
+                    },
+                )
+            }
+            FrontendEvent::IssueMonitorQueueRemove { issue_numbers } => {
+                let publication = self.publish_active_issue_monitor_control(serde_json::json!({
+                    "terminal_queue_remove": { "issue_numbers": issue_numbers.clone() }
+                }));
+                let now = chrono::Utc::now().to_rfc3339();
+                self.issue_monitor_control_result_events(
+                    &client_id,
+                    publication,
+                    "queue-remove",
+                    |monitor| {
+                        monitor.terminal_queue_remove(&issue_numbers, &now);
                     },
                 )
             }
