@@ -200,7 +200,7 @@ fn evaluate_title_summary_guard(
 
     if is_title_sensitive_tool(event) && !is_read_only_exploration_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
-            "Agent Workspace identity is required before work starts",
+            "Agent Workspace identity is required before work starts. Run workspace.update with purpose + current_focus to set it",
             "Set both a short work name and current focus before exploration, implementation, or verification commands. This is required so Workspace can show which window is doing what.\n\n\
 Required command shape:\n\
   gwtd <<'JSON'\n\
@@ -1711,10 +1711,14 @@ mod tests {
         };
         let context = WorkflowContext::unknown().with_title_summary_missing(true);
 
-        assert!(matches!(
-            evaluate_with_context(&event, repo.path(), &context).expect("guard output"),
-            HookOutput::PreToolUsePermission { .. }
-        ));
+        let output = evaluate_with_context(&event, repo.path(), &context).expect("guard output");
+        let visible = output.summary().chars().take(256).collect::<String>();
+        assert!(visible.contains("workspace.update"), "{visible}");
+        assert!(
+            visible.contains("purpose") && visible.contains("current_focus"),
+            "{visible}"
+        );
+        assert!(!output.permission_decision_reason().contains("Stop working"));
     }
 
     #[test]

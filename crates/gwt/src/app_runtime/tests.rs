@@ -45383,6 +45383,144 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     assert_eq!(persisted.pending_effects, journal);
 }
 
+// SPEC #3165 TQ-9: the row's "Add to queue" action is the user's way to put an
+// Issue into this terminal's implementation queue. It is the requested feature's
+// main direction — "remove" is only its counterpart — so the GUI must reach
+// `terminal_queue_push` the same way it reaches the removal, and it must not
+// touch another terminal's queue.
+#[test]
+fn app_runtime_issue_monitor_queue_push_adds_only_to_the_local_terminal_queue() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let queue = |numbers: &[u64]| gwt::issue_monitor::IssueMonitorTerminalQueue {
+        entries: numbers
+            .iter()
+            .map(
+                |number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "operator".to_string(),
+                },
+            )
+            .collect(),
+        last_seen_at: None,
+    };
+    let host = gwt::process::current_hostname();
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 1,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    seeded.terminal_queues.insert(host.clone(), queue(&[42]));
+    seeded
+        .terminal_queues
+        .insert(format!("{host}-other"), queue(&[42]));
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorQueuePush {
+            issue_numbers: vec![43],
+        },
+    );
+
+    assert!(!events.is_empty(), "push answers with a refreshed snapshot");
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let numbers = |terminal: &str| {
+        persisted.terminal_queues[terminal]
+            .entries
+            .iter()
+            .map(|entry| entry.number)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(numbers(&host), vec![42, 43]);
+    assert_eq!(numbers(&format!("{host}-other")), vec![42]);
+    let queued_by = persisted.terminal_queues[&host]
+        .entries
+        .iter()
+        .find(|entry| entry.number == 43)
+        .map(|entry| entry.queued_by.clone());
+    assert_eq!(
+        queued_by.as_deref(),
+        Some("operator"),
+        "a queue push from the row is the operator's own act"
+    );
+}
+
+// SPEC #3165 TQ-9 / AC-4: the row's "Remove from queue" action removes the
+// Issue from this terminal's queue and leaves other terminals' queues alone.
+#[test]
+fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let queue = |numbers: &[u64]| gwt::issue_monitor::IssueMonitorTerminalQueue {
+        entries: numbers
+            .iter()
+            .map(
+                |number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "operator".to_string(),
+                },
+            )
+            .collect(),
+        last_seen_at: None,
+    };
+    let host = gwt::process::current_hostname();
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 1,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    seeded
+        .terminal_queues
+        .insert(host.clone(), queue(&[42, 43]));
+    seeded
+        .terminal_queues
+        .insert(format!("{host}-other"), queue(&[42]));
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorQueueRemove {
+            issue_numbers: vec![42],
+        },
+    );
+
+    assert!(
+        !events.is_empty(),
+        "removal answers with a refreshed snapshot"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let numbers = |terminal: &str| {
+        persisted.terminal_queues[terminal]
+            .entries
+            .iter()
+            .map(|entry| entry.number)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(numbers(&host), vec![43]);
+    assert_eq!(numbers(&format!("{host}-other")), vec![42]);
+}
+
 #[test]
 fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_and_delivery() {
     let _env_lock = env_test_lock()
@@ -55015,6 +55153,53 @@ fn background_work_scan_results_refresh_active_work_off_the_gui_event_loop() {
         "the merge scan result reached the row"
     );
     assert_eq!(row.work_summary.as_deref(), Some("tip subject"));
+}
+
+#[test]
+fn active_work_projection_build_reads_the_work_items_cache_without_deep_copying() {
+    // Issue #4234 AC-1 / AC-2: the Workspace rail build used to ask the
+    // WorkItems cache for two *owned* deep copies of the parsed works.json per
+    // refresh — once to test emptiness and once to render the rows. At
+    // repository scale that is the largest per-refresh allocation left in the
+    // GUI, and it is paid on every rail rebuild for the life of the process.
+    // The cache already hands out an `Arc`, so the build must borrow it.
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let (runtime, _events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
+    let work_items_cache = Arc::clone(&runtime.work_items_cache);
+
+    let job = runtime
+        .active_work_projection_refresh_job(&repo)
+        .expect("refresh job");
+    let before = work_items_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .deep_copy_count;
+    let refreshed = super::run_active_work_projection_refresh(job);
+    let after = work_items_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .deep_copy_count;
+
+    let view = refreshed.view.expect("the rail still builds");
+    assert!(
+        view.active_works
+            .iter()
+            .any(|work| work.branch.as_deref() == Some("work/off-loop")),
+        "the borrowed projection must still render the recorded Work"
+    );
+    assert_eq!(
+        after - before,
+        0,
+        "the rail build copied the parsed works.json {} time(s) instead of \
+         borrowing the cached Arc",
+        after - before
+    );
 }
 
 #[test]
