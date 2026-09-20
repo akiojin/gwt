@@ -285,6 +285,24 @@ pub const OPERATIONS: &[Operation] = &[
         name: "issue.monitor.questions",
         aliases: &[],
     },
+    // The operator's hand on the implementation queue: list what is queued,
+    // put an Issue in, take one out, and reorder what is left.
+    Operation {
+        name: "issue.monitor.queue.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.queue.move",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.queue.push",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.queue.remove",
+        aliases: &[],
+    },
     Operation {
         name: "issue.monitor.quota_hold.clear",
         aliases: &["issue.monitor.quota-hold.clear"],

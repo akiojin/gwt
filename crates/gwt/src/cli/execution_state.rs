@@ -11910,15 +11910,41 @@ fn base_execution_recoveries(
 /// route, so it cannot drift that way.
 ///
 /// `None` when the session is unknown here; callers treat that as attended.
+///
+/// Issue #4510: the stamp is authoritative when it says `Autonomous`, but a
+/// `Manual` stamp is not proof of a human. Some launch paths reach the Session
+/// writer without passing the Monitor's stamping step, and the resulting
+/// mis-stamp is unrecoverable downstream — the agent may not write its own
+/// `User Verification Result: confirmed`, and no PR body wording can undo it
+/// (PR #4374 stalled fully green for exactly this reason). So a `Manual` stamp
+/// is cross-checked against the launch prompt the Monitor itself composed,
+/// which is a fact about the launch route rather than a preference.
 #[must_use]
 pub fn session_launch_route(session_id: Option<&str>) -> Option<gwt_agent::LaunchRoute> {
     let session_id = session_id
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
-    gwt_agent::Session::load(&path)
-        .ok()
-        .map(|session| session.launch_route)
+    let session = gwt_agent::Session::load(&path).ok()?;
+    if session.launch_route != gwt_agent::LaunchRoute::Autonomous
+        && launched_by_issue_monitor(&session)
+    {
+        return Some(gwt_agent::LaunchRoute::Autonomous);
+    }
+    Some(session.launch_route)
+}
+
+/// Whether the Issue Monitor composed this session's launch prompt.
+///
+/// The prompt is written into `launch_args` by the launcher and says so in
+/// its own words, so it is evidence from the launch route itself — the same
+/// class of fact as the `gwt-auto-improve:` claim prefix, but one that lives
+/// in the durable record this function already reads.
+fn launched_by_issue_monitor(session: &gwt_agent::Session) -> bool {
+    session
+        .launch_args
+        .iter()
+        .any(|arg| arg.contains(crate::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE))
 }
 
 /// Whether a settlement reason blames a human who was supposed to look at the
@@ -23742,6 +23768,63 @@ exit 1
             stamp_session_launch_route(session_id, route);
         }
 
+        /// Issue #4510 AC-1: a `Manual` stamp on a session the Issue Monitor
+        /// started is a mis-stamp, not a human. The launch prompt the Monitor
+        /// composed is in `launch_args`, and it says in its own words that no
+        /// human authored it — so the route is read back from that, the same
+        /// class of launch-route fact as the `gwt-auto-improve:` claim prefix.
+        #[test]
+        fn a_monitor_launch_reads_back_autonomous_despite_a_manual_stamp() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("sessions home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().expect("worktree fixture");
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+            let mut session = gwt_agent::Session::new(
+                repo.path(),
+                "work/issue-3752",
+                gwt_agent::AgentId::ClaudeCode,
+            );
+            session.id = "session-4510-monitor".to_string();
+            session.launch_route = gwt_agent::LaunchRoute::Manual;
+            session.launch_args = vec![
+                "--dangerously-skip-permissions".to_string(),
+                crate::issue_monitor::issue_monitor_launch_prompt(
+                    crate::LinkedIssueKind::Issue,
+                    3752,
+                ),
+            ];
+            session
+                .save(&sessions_dir)
+                .expect("persist monitor session");
+            assert_eq!(
+                session_launch_route(Some("session-4510-monitor")),
+                Some(gwt_agent::LaunchRoute::Autonomous),
+                "the Monitor's own launch prompt outranks a Manual mis-stamp"
+            );
+
+            // A human-driven launch carries no such prompt, so the Manual
+            // stamp stands and the visual-verification gate keeps its teeth.
+            let mut attended =
+                gwt_agent::Session::new(repo.path(), "work/attended", gwt_agent::AgentId::Codex);
+            attended.id = "session-4510-attended".to_string();
+            attended.launch_route = gwt_agent::LaunchRoute::Manual;
+            attended.launch_args =
+                vec!["--resume".to_string(), "fix the kanban column".to_string()];
+            attended
+                .save(&sessions_dir)
+                .expect("persist attended session");
+            assert_eq!(
+                session_launch_route(Some("session-4510-attended")),
+                Some(gwt_agent::LaunchRoute::Manual)
+            );
+            assert_eq!(session_launch_route(Some("session-4510-absent")), None);
+        }
+
         /// Issue #4217 AC-2: the route reaches the caller from the durable
         /// Session, so a consumer never has to guess it from an environment
         /// variable the launcher may not have set.
@@ -29250,9 +29333,10 @@ exit 1
             assert_eq!(run_code, 0, "{run_out}");
 
             env.seed_created_pr(gwt_git::PrStatus {
+                head_ref_name: String::new(),
+                check_counts: None,
                 number: 7,
                 title: "Adopted execution handoff".to_string(),
-                head_ref_name: String::new(),
                 state: gwt_git::pr_status::PrState::Open,
                 url: "https://example.invalid/pr/7".to_string(),
                 created_at: None,
@@ -29511,9 +29595,10 @@ exit 1
             env.seed_pr(
                 4122,
                 gwt_git::PrStatus {
+                    head_ref_name: String::new(),
+                    check_counts: None,
                     number: 4122,
                     title: "Inherited terminal recovery".to_string(),
-                    head_ref_name: String::new(),
                     state: gwt_git::pr_status::PrState::Open,
                     url: "https://example.invalid/pr/4122".to_string(),
                     created_at: None,

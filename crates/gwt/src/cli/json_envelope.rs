@@ -498,6 +498,25 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
         }
+        "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
+            project_root: optional_path(params, "project_root")?,
+            terminal: optional_string(params, "terminal")?,
+        }),
+        "issue.monitor.queue.push" => CliCommand::Issue(IssueCommand::MonitorQueuePush {
+            project_root: optional_path(params, "project_root")?,
+            issue_numbers: required_u64_vec(params, "numbers")?,
+            position: optional_usize(params, "position")?,
+            force: optional_bool(params, "force")?.unwrap_or(false),
+        }),
+        "issue.monitor.queue.remove" => CliCommand::Issue(IssueCommand::MonitorQueueRemove {
+            project_root: optional_path(params, "project_root")?,
+            issue_numbers: required_u64_vec(params, "numbers")?,
+        }),
+        "issue.monitor.queue.move" => CliCommand::Issue(IssueCommand::MonitorQueueMove {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            position: required_usize(params, "position")?,
+        }),
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
@@ -1719,6 +1738,10 @@ fn optional_usize(
         .transpose()
 }
 
+fn required_usize(params: &Map<String, Value>, key: &'static str) -> Result<usize, CliParseError> {
+    optional_usize(params, key)?.ok_or(CliParseError::MissingFlag(key))
+}
+
 fn optional_u64_vec(
     params: &Map<String, Value>,
     key: &'static str,
@@ -2296,6 +2319,11 @@ mod tests {
             ("UNKNOWN", "UNKNOWN", "UNKNOWN", false),
         ] {
             let fields = PrInventoryFields {
+                base_ref_name: "develop".to_string(),
+                check_counts: None,
+                conflict: None,
+                unresolved_review_threads: None,
+                coderabbit_review_complete: None,
                 number: 4139,
                 title: "a PR".to_string(),
                 url: "https://example.com/pr/4139".to_string(),

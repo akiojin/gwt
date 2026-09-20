@@ -213,7 +213,12 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
   if (Number.isFinite(entry?.queue_position)) {
-    items.push({ kind: "chip", key: "queue", label: `Queue ${entry.queue_position}` });
+    const terminal = String(entry?.queue_terminal || "").trim();
+    items.push({
+      kind: "chip",
+      key: "queue",
+      label: terminal ? `Queue ${entry.queue_position} · ${terminal}` : `Queue ${entry.queue_position}`,
+    });
   }
   if (work?.pr_number) {
     const prState = String(work.pr_state || "").trim();
@@ -253,7 +258,7 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   switch (monitor?.state) {
     case "queued":
       return {
-        order: ["launch-now", "configure-issue", "move-up", "move-down", ...workActions],
+        order: ["launch-now", "configure-issue", "queue-remove", "move-up", "move-down", ...workActions],
       };
     case "launch_failed":
     case "agent_failed":
@@ -288,7 +293,12 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
           : workActions,
     };
   }
-  return { order: issueEntryStateKey(entry) === "open" ? ["launch-agent"] : [] };
+  // SPEC #3165 TQ-9: a Backlog Issue is the one the user puts into the queue.
+  // This is the requested feature's main direction, so it sits on the row next
+  // to "Launch agent" rather than behind a separate surface.
+  return {
+    order: issueEntryStateKey(entry) === "open" ? ["queue-push", "launch-agent"] : [],
+  };
 }
 
 function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, canvasWindow }) {
@@ -303,6 +313,10 @@ function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, can
     }
     case "launch-now":
       return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
+    case "queue-push":
+      return issueEntryStateKey(entry) === "open" && !monitor;
+    case "queue-remove":
+      return Boolean(Number.isFinite(entry?.queue_position));
     case "requeue-issue":
       return ISSUE_ROW_REQUEUE_STATES.has(monitor?.state);
     case "configure-issue":
@@ -3037,6 +3051,14 @@ export function createKnowledgeKanbanSurface({
           label: "Settings",
           aria: "Project Agent settings for",
         }),
+        "queue-push": Object.freeze({
+          label: "Add to queue",
+          aria: "Add to queue",
+        }),
+        "queue-remove": Object.freeze({
+          label: "Remove from queue",
+          aria: "Remove from queue",
+        }),
         "move-up": Object.freeze({ label: "↑ Move up", aria: "Move up" }),
         "move-down": Object.freeze({ label: "↓ Move down", aria: "Move down" }),
         "continue-work": Object.freeze({ label: "Continue work", aria: "Continue work on" }),
@@ -3086,6 +3108,18 @@ export function createKnowledgeKanbanSurface({
               kind: "issue_monitor_configure_issue",
               issue_number: entry.number,
               linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "queue-push":
+            send({
+              kind: "issue_monitor_queue_push",
+              issue_numbers: [entry.number],
+            });
+            return;
+          case "queue-remove":
+            send({
+              kind: "issue_monitor_queue_remove",
+              issue_numbers: [entry.number],
             });
             return;
           case "move-up":
