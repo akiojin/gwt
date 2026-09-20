@@ -118,9 +118,16 @@ impl Drop for ScopedEnvVar {
 ///
 /// `contents` travels as one argument, so keep scripts well below the
 /// platform's single-argument limit (128 KiB on Linux).
+///
+/// The child is given an explicit `PATH`: `chmod` is resolved through it, and
+/// `PATH` is process-wide state that a *sibling* test may legitimately be
+/// rewriting at the same moment (several set it to `""` to prove a lookup
+/// fails). Inheriting it made this helper fail with `chmod: command not found`
+/// in whichever unrelated test happened to be running then.
 #[cfg(unix)]
 pub fn write_executable_script(path: &Path, contents: &str) -> std::io::Result<()> {
     let output = crate::process::hidden_command("/bin/sh")
+        .env("PATH", "/usr/bin:/bin")
         .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
         .arg(path)
         .arg(contents)

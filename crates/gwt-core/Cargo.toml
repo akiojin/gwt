@@ -36,7 +36,7 @@ libc = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
-fsevent-sys = "4.1"
+fsevent-sys = "5.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
