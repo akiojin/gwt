@@ -2319,6 +2319,11 @@ mod tests {
             ("UNKNOWN", "UNKNOWN", "UNKNOWN", false),
         ] {
             let fields = PrInventoryFields {
+                base_ref_name: "develop".to_string(),
+                check_counts: None,
+                conflict: None,
+                unresolved_review_threads: None,
+                coderabbit_review_complete: None,
                 number: 4139,
                 title: "a PR".to_string(),
                 url: "https://example.com/pr/4139".to_string(),

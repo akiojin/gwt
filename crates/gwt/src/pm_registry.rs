@@ -39,11 +39,14 @@ use sha2::{Digest, Sha256};
 /// distinguishable from a dead one without a keepalive line in the
 /// conversation (FR-4).
 /// Issue #3868 AC-3: a red, conflicted, or escalation-due open PR is never a
-/// no-change cycle. Kept terse on purpose — this clause rides the PTY wake
-/// prompts, which must stay under the 1024-byte canonical queue (#3825).
+/// no-change cycle. SPEC #3835 AC-7 adds the promotable Draft: leaving one
+/// unpromoted is exactly how PR #4507 sat Draft until a human rescued it.
+/// Kept terse on purpose — this clause rides the PTY wake prompts, which must
+/// stay under the 1024-byte canonical queue (#3825).
 pub const PM_CYCLE_REPORTING_CLAUSE: &str =
     "Report a digest only for a milestone or an escalation; end the cycle with no user-facing \
-     output only if nothing changed and no open PR is CI-RED, CONFLICTED, or escalation_due.";
+     output only if nothing changed and no open PR is CI-RED, CONFLICTED, READY_TO_PROMOTE, or \
+     escalation_due.";
 
 /// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
 /// and subscribe-ordering reminder for the Stop-gate continuation. The
