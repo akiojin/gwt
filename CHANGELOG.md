@@ -1,6 +1,327 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.101.0] - 2026-09-21
+
+### Bug Fixes
+
+- **gui:** Active Work rebuild slot の取得を match guard 化されない形に固定する
+- **workspace:** Store consolidation の quarantine が自分の lease で失敗する問題を解消
+- **index:** Index.repair が常に非空の構造化応答を返すようにする
+- **gui:** ブランチ cleanup の進捗と結果を再接続クライアントへ届ける
+- **verify:** Daemon は checkout ではなく project 単位の launcher にする
+- **verify:** 継承する QoS クラスの劣化を検証記録に残す
+- **verify:** 逃げ道の無い gate を外し out-of-tree 経路だけを先に出す
+- **verify:** Windows で未使用になる BASELINE_NICE の import に cfg を付ける
+- **verify:** 停滞判定を末端プロセスの累積 CPU 増分で行う (#4409)
+- **core:** ファイル公開を temp+rename に統一し空ファイル読み取り race を塞ぐ
+- **issue-monitor:** Quota hold を連続 3 回の起動失敗で形成し、再検証で自動解除する
+- **issue-monitor:** 縮退 status に provenance を持たせ実障害と区別できるようにする
+- **execution:** Complete merged record initializers
+- **launch:** Fall back when resume conversation is missing
+- **launch:** Rollback provisional session on spawn failure
+- **launch:** Revoke capability on startup rollback
+- **discussion:** Park duplicate active proposals
+- **launch:** Keep inspection resume non-producing
+- **discussion:** Stabilize resume entry identity
+- **coordination:** Repair exact legacy recovery replay
+- **coordination:** Close exact legacy import crash window
+- **recovery:** 表示トークンとブラウザ検証の配信契約を修正
+- **gwt:** Rustc 1.95+ で develop 全体の clippy 検証行列が落ちる問題を解消
+- **cli:** Unknown operation 応答に did-you-mean 候補を出す
+- **discussion:** Discussion.update が Proposal ブロックを消す問題を修正
+- **pm:** Pane と制御世代の回収を一貫させる
+- **pm:** PM が起動・停止・監視に使う launch identity と pane 整合を status に揃える
+- **execution:** Authority を持たない orphan window に obligation の決済を要求しない
+- **paths:** Worktree root の short-circuit で Windows 長パスへ正規化する
+- **hooks:** .codex/hooks.json の gwtd fallback を可搬な形へ戻す
+- **test:** 分割 repair の contention テストで env_test_lock を取得する
+- **test:** 分割 repair の contention テストで gwt home を thread-local に固定する
+- **app-runtime:** Projection watcher から background 再構築をスケジュールする
+- **test:** AC-3 の非同期 projection 契約に 2 件のテストを合わせる
+- **test:** Lease clamp の検証を実時間計測から純関数の assert へ変える
+- **hooks:** .codex/hooks.json を可搬な sh テンプレートへ戻す
+- **test:** Session lease の clamp 検証を実時間計測から定数の assert へ変える
+- **coordination:** Windows の atomic replace が prompt 予算を食い潰すのを直す
+- **hook:** Prompt hot path の書き込みがストレージ待ちで止まるのをやめる
+- **hook:** 旧状態とサブディレクトリでもreminderのscopeを保持
+- **workspace:** Accrete した container ref を detach し ensure の ambiguity を解消
+- **pr:** CI集計とowner状態取得の修正途中を保全
+- **pr:** 欠落ownerの部分取得で正常なPR一覧を維持する
+- **pr:** Owner取得のGraphQL実ポイントを予算台帳へ反映
+- **pr:** 並列hydrationに合わせてowner解決テストの可変捕捉を解消する
+- **pr:** PR分類テストの構造体初期化に新フィールドを補う
+- **index:** Canonical verification を search/index と別の coordinator root に分離する
+- **issue-monitor:** REST一覧の継続ページを取得して状態欠落を防ぐ
+- **pm:** プロジェクト所有symlinkでPM再生成が停止する問題を修正
+- **pm:** 追跡済みcommandのsymlinkを再生成時に保持する
+- **pm:** 管理アセットの復元対象を生成側の所有パスに限定
+- **delivery:** 未配信差分をclose前に警告し記帳のみの枝を分離する
+- **skills:** Build lifecycle の owner 引数案内を統一
+- **issue-monitor:** マージ済み配送の settlement を closure lineage の誤読から解放する
+- **issue:** State操作をcatalogに登録し未対応のduplicate指定を拒否する
+- **pm:** PMの基点をリポジトリの既定ブランチから導出
+- **restore:** 復元の実セッション会計と期間指定回収を整える
+- **restore:** Developを取り込み復元サマリの発行契機を統一する
+- **perf:** Budget 超過の連続判定をプロセス間で共有し全 route で violation を記録する
+- **perf:** 検知ロックの一時的な競合で判定を落とさないよう待機を上限付きにする
+- **agent:** Package runner を launch PATH へ再束縛して実ホスト npx の spawn を止める
+- **issue-monitor:** Readiness 失敗を Issue 単位に閉じ込め行に理由を出す
+- **issue-monitor:** Scan 継続時も未確認候補は allowlist で落とす
+- **release:** Bump=auto がメジャーを返さないようにし breaking marker は報告に留める
+- **verify:** Verify.run の進捗を lease 状態に公開し deferred を試行上限と扱わない (#4280)
+- **pm:** Runtimeを分離しproject設定の暗黙混入を防止
+- **agent:** 自動更新でリネームされた npx キャッシュを起動前に隔離する
+- **index:** Search が投入する repair を search のデッドラインから切り離す
+- **runtime:** 着地済みworktreeの自動復元を抑止する
+- **runtime:** 復元の重複と終端Workの再起動を防ぐ
+- **runtime:** 復元時の終端処理と登録済みPMの継続を保つ
+- **runtime:** 診断を保護し着地済みの空窓を復元対象から除く
+- **runtime:** 復元判定と空窓削除に同じwindow IDを使う
+- **runtime:** Develop 取込で壊れた復元抑止のビルドと PM 例外テストを直す
+- **verify:** Dead / completed holder の verification lease を held と報告しない
+- **verify:** Cargo test の分類を実行範囲で判定し focused テストの host lease 待ちを解消
+- **verify:** Cargoの複数対象指定とglobal引数の誤分類を防ぐ
+- **verify:** 任意のadmission経由で進捗を通知する
+- **skills:** 規約と拒否メッセージが実在しない operation 名を案内しないようにする
+- **execution:** 正本Workと配信証拠で終端記帳を判定する
+- **board:** 読み取り件数を制限し未知のパラメータを拒否する
+- **verify:** PRのWork shard追加コミット後も検証証跡を維持する
+- **verify:** Stale診断の既存識別文言を維持する
+- **verify:** Rust 1.98の固定長チャンクlintに対応する
+- **workspace:** Discarded Workの後継作業と復旧操作を案内する
+- **work:** PR配信時に実行権限を検証してWorkへ関連付ける
+- **workspace:** Discarded Work の後継を launch transaction 内で materialize する
+- **issue-monitor:** Add host identity and terminal queue state
+- **issue-monitor:** Distinguish queued claim owners
+- **issue-monitor:** Block live queued claim collisions
+- **issue-monitor:** Gate queued claims by label index
+- **issue-monitor:** Reject foreign queued pushes
+- **issue-monitor:** Update status payload fixtures
+- **issue-monitor:** Repair prefs rustdoc link
+- **issue-monitor:** キュー除外を行アクションのメニューに配置
+- **issue-monitor:** キュー除外の表示名とクリック送信を追加
+- **issue-monitor:** キュー除外をブラウザ protocol と daemon control に接続
+- **issue-monitor:** キュー操作 4 つを operation catalog に登録する
+- **workspace:** Workspace rail の projection 構築で works.json の deep copy を止める
+- **hook:** 権限拒否の文言を実際のNeedsHuman状態から構成する
+- **pr:** 自律実行の PR が user-verification gate で配信不能になる問題を解消する
+- **test-support:** Write_executable_script の PATH 継承による共有 flake を解消する
+- **pr:** Develop 統合で失われた owner_issue_source の fixture 値を復元する
+
+### Documentation
+
+- **issue-monitor:** Quota hold のドキュメントから rustdoc で解決できないリンクを外す
+- **pm:** PM 機能の修正は PM 自身が実装して着地させる規約を追加する
+
+### Features
+
+- **verify:** Daemon にプロセス木外の検証起動 RPC を追加する
+- **verify:** Verify.run を daemon 経由で agent 木の外に起動する
+- **execution:** Harden blocked recovery verification
+- **coordination:** Add exact recovery board append
+- **recovery:** Add durable delivery store
+- **board:** Add durable recovery delivery
+- **recovery:** 再起動前にRecovery Centerの実装途中を退避
+- **coordination:** Board 投稿に worktree origin と deterministic identity を追加
+- **worktree:** ディスク空き容量が閾値を下回ったら build 成果物を自動回収する
+- **issue:** PM が Issue の state を自分で変更できる operation を追加
+- **update:** 手動 Update クリックを drain-and-apply 経路に合流させる
+- **issue:** 確認契約付きのラベル追加・削除操作を追加する
+- **issue-monitor:** Project terminal queue status
+- **issue-monitor:** Expose queue row actions
+- **issue-monitor:** Add queue refill and orphan adoption
+- **issue-monitor:** Add opt-in terminal queue refill scan
+- **issue-monitor:** キュー投入を GUI から到達可能にする
+- **pr:** PM が git を叩かずに open PR を分類し全緑 Draft を Ready 化できるようにする
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3752 の Work イベントシャードを記録する
+- **work:** Issue #3752 の Work イベントシャードを記録する
+- **work:** Issue #3752 の Work イベントシャードを記録する
+- **work:** Issue #4435 世代の Work イベントを記録する
+- **work:** Issue #4435 完了世代の Work イベントを記録する
+- **work:** Record issue 4377 work event receipts
+- **work:** Issue #3697 の work event shard を記録する
+- **work:** Issue #3697 の受け入れ条件再評価を記録する
+- **work:** Verify 前に work event shard を記録する
+- **work:** Verify 前に work event shard を記録する
+- **work:** 完了時の Work event shard を記録する
+- **work:** Verify 前に Work event shard を記録する
+- **work:** Verify 前に Work event shard を記録する
+- **work:** 本世代の terminal Work event を記録する
+- **work:** Work event を記録
+- **work:** Work event を記録
+- **work:** #4366 の Work イベントを記録する
+- **work:** #4366 の再開記録を保存
+- **work:** #4413 の terminal Work event receipt を記録する
+- **work:** Record issue 1974 execution
+- **work:** Record issue 1974 design handoff
+- **work:** Record issue 1974 projection bleed evidence
+- **work:** Issue 1974のPR handoff blockerを記録する
+- **work:** Issue 1974の再実行状態を記録する
+- **work:** Issue 1974のbase同期結果を記録する
+- **work:** Issue 1974の実行再試行を記録する
+- **work:** Issue 1974の継続状態を同期する
+- **work:** Record continuation recovery
+- **work:** Record workspace backfill
+- **work:** Record Issue #1974 continuation events
+- **hooks:** 再起動前に生成済みCodex設定を保存
+- **work:** Issue 1974の再開記録を保存
+- **work:** #1974 の実行記録シャードを追加
+- **work:** Record Work events for issue 4370
+- **work:** Record Work events for issue 4370
+- **work:** Issue 4397 の Work イベントを記録
+- **work:** Issue 4397 の Work イベントを記録
+- **work:** #4474 の Work イベント shard を記録する
+- **work:** #4474 の Work イベント shard と terminal receipt を記録する
+- **work:** #4474 の PR 作成 receipt を記録する
+- **work:** #3712 の Work イベント shard を記録する
+- **work:** #3712 の Work イベント receipt を記録する
+- **work:** #3712 の Work イベント shard を記録する
+- **work:** #3712 の終端 Work イベント receipt を記録する
+- **work:** #3712 の develop 追従世代の Work イベント receipt を記録する
+- **work:** Issue #4434 完了世代の Work イベントを記録する
+- **work:** #4454 の Work event shard を記録する
+- **work:** #4454 の terminal Work event shard を記録する
+- **rescue:** Window 消失前の未コミット実装を退避 (#3777)
+- **work:** Work event shard を記録する
+- **work:** Work event shard を記録する
+- **work:** Issue 3777 の作業状態を記録する
+- **work:** Issue 3777 の実行権限を再接続する
+- **hook:** Runtime-state stage の内訳を計測できるようにする
+- **hook:** Board-reminder stage の内訳を計測できるようにする
+- **work:** Issue #3777 の実行記録シャードを追加
+- **work:** Issue #3777 の実行記録シャードを追加
+- **work:** Issue #3777 の受け入れ監査を記録
+- **work:** Issue #4465 の Work receipt を記録する
+- **work:** Issue #4141の検証後の復旧記録を保全する
+- **work:** Issue #4285 の Work event shard を記録する
+- **work:** Phase 2のPR関連付けを記録
+- **work:** Issue #4391 の Work イベントを記録する
+- **work:** Issue #4391 の完了 Work イベントを記録する
+- **work:** PM管理アセット配信の引継ぎと操作不足を記録
+- **work:** Record work event shards
+- **work:** Record work event shards
+- **work:** Record terminal work update receipt
+- **work:** Issue #4477の受け入れ監査と配信記録を更新
+- **work:** Phase 1 配信中に生成された work event 記録を追加する
+- **work:** Phase 1 settle 時点の work event 記録を追加する
+- **work:** Issue state 操作の先行配信記録を確定
+- **work:** Phase 1の検証済み引き渡しを記録する
+- **work:** Phase3のPR配信履歴を記録
+- **work:** Issue #4305 の完了 Work イベントを記録する
+- **work:** 復元会計の継続監査と最終検証を記録する
+- **work:** Work イベントを記録する
+- **work:** Work イベントを記録する
+- **work:** Issue #3972 の完了処理で生成された Work event shard を追加
+- **work:** Issue #3972 の Work event shard を追跡に追加
+- **work:** Issue #3972 の Work event shard を追跡に追加
+- **work:** #4376 の Work event shard を記録
+- **work:** #4376 の settle 用 Work event shard を記録
+- **work:** #4376 の後継 generation settle 用 Work event shard を記録
+- **work:** Issue #4436 の Work イベントを記録する
+- **work:** Issue #4373 世代の Work receipt を記録する
+- **work:** Issue #4280 の終端 Work event shard を記録する
+- **work:** Issue #4445 の Work event shard を記録
+- **work:** #4455 の terminal Work event receipt を記録する
+- **work:** #4143 の再open受け入れ確認の Work イベントを記録する
+- **work:** #4143 の終端 Work イベントを記録する
+- **work:** #4470 継続世代の Work receipt を記録
+- **work:** Issue #4196 の Work イベントシャードを記録する
+- **work:** Issue #4196 の終端 Work イベントを記録する
+- **work:** #4196 の再開履歴を記録する
+- **work:** #4396 の Work イベントを記録する
+- **work:** #4396 の Work イベントを記録する
+- **work:** 既存PRの配信記録を同期
+- **work:** PR #4502 の配信先を記録
+- **work:** Issue 3376のPR引き渡しと完了記録を保存
+- **work:** Issue #3697の実PR配信eventを記録する
+- **work:** Issue #4377の既存PR参照記録を保存
+- **work:** Issue #4377の回帰テストPR引き継ぎを記録
+- **work:** Issue #3752 の Work イベントシャードを記録する
+- **work:** Issue #4074 の後継 Work event shard を記録する
+- **work:** Issue #4074 の配信完了 event を記録する
+- **work:** Issue #4074 の terminal Work update を記録する
+- **work:** Issue #3165 の Work イベントを記録
+- **work:** #3165 の Work イベントシャードを記録する
+- **work:** Issue #4488の作業eventを記録する
+- **work:** Issue #4488のPR配信eventを記録する
+- **work:** Issue #4510 の Work event shard を記録する
+- **work:** Issue #4510 の terminal Work update を記録する
+- **work:** SPEC #3835 の Work receipt shard を記録する
+- **work:** SPEC #3835 の Work receipt shard を記録する
+- **work:** SPEC #3835 の Work receipt shard を記録する
+- **work:** Issue #4510 の terminal Work update receipt を記録する
+- **lint:** MacOS の FSEvents adapter で fsevent-sys の deprecation を許可する
+
+### Performance
+
+- **gui:** Active Work projection の再構築を GUI イベントループから blocking worker へ移す
+- **gui:** Work lifecycle の rail 配信を GUI event loop 外の再構築へ委ねる
+- **gui:** Worktree reconcile を ingest worker へ移し GUI event loop を解放する
+- **work:** Hook health の surface 監査を fingerprint キャッシュで再利用する
+- **work:** Work イベント取り込みの intake state をグループ単位で差分保存する
+- **hook:** Warm prompt パスから重複した worktree 解決と projection 読込を除去
+- **paths:** Worktree top level の解決で git spawn を止める
+
+### Refactor
+
+- **app-runtime:** PreparedActiveWorkDispatch を match guard へ畳む
+
+### Styling
+
+- **verify:** Cargo fmt を適用する
+- **recovery:** 統合後のモジュール宣言順を整える
+- **paths:** Cargo fmt
+- **app-runtime:** Cargo fmt
+- **issue-monitor:** キュー除外テストを rustfmt に揃える
+
+### Testing
+
+- **gwt:** Background projection build に合わせて app_runtime テストの期待を更新する
+- **gui:** Socket open の順序契約に cleanup 再購読を許容する
+- **verify:** 実 verify.run を駆動するテストに起動ホストを宣言させる
+- **verify:** Lease 系の統合テストにも起動ホストを宣言させる
+- **verify:** 配置テストを起動側の spawn host 宣言から切り離す
+- **issue-monitor:** Provider hold の claim gate を再検証前の時刻で検証する
+- **issue-monitor:** Account switch の回帰テストを hold 形成閾値のガード下で実行する
+- **discussion:** Cover duplicate active proposal cleanup
+- **discussion:** Remove no-op fixture rewrite
+- **recovery:** 両テーマの基準画像とフィルター再表示を検証
+- **recovery:** 両テーマの実ブラウザで実行時エラーを検知する
+- **recovery:** 画面証拠をOS依存の基準画像から添付へ統一
+- **recovery:** 接続時の再読込を既存の順序検証へ反映
+- **recovery:** WebSocket継承済みの読取専用定数を上書きしない
+- **issue-monitor:** ACK 後の制御 identity 永続化を固定する
+- **pm:** 制御 authority と full target の契約を固定する
+- **issue-monitor:** Runtime consistency と wait reason を固定する
+- **issue-monitor:** PM control authority と replay を固定する
+- **issue-monitor:** Cover terminal escalation failover
+- **pm-guidance:** Rendered SKILL.md の必須フレーズを行を跨がない形にする
+- **ui:** 250ms の prompt 応答性契約を実経路で固定する
+- **ui:** 競合中の prompt 応答性 E2E を安定化する
+- **pm:** Refresh fixtureにリモート既定refを設定
+- **pm:** 起動テスト入口で環境ロックを保持
+- **restore:** 起動経路テストの共有ロックを既定契約へ合わせる
+- **index:** 公平性検証の背景待機者を同期する
+- **launch:** PATH置換fixtureで並列probe用のshを保持する
+- **runtime:** 並行移行の検証で既存の状態待機を使用
+- **verify:** Lease回収テストの待機予算を安定化
+- **work:** PR権限照合に合わせて統合fixtureを補完する
+- **startup:** 停止Sessionの遅延読込後の復元候補同値を検証
+- **gui:** Pane close 回帰テストの post-burst probe を壁時計 assert から外す
+- **issue-monitor:** Cover orphan queue adoption
+
+### Ci
+
+- Windows の prompt 遅延を単独実行でも計測する
+
+### Revert
+
+- **app-runtime:** Watcher パスへの background 再構築追加を取り消す
+
 ## [9.100.3] - 2026-09-16
 
 ### Bug Fixes
