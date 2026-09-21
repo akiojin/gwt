@@ -28,9 +28,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
-      # SPEC #4551 T-055: the crates the PR touched, so the flake job can
-      # re-run only those twenty times instead of the whole workspace.
-      crates: ${{ steps.classify.outputs.crates }}
+      # SPEC #4551 T-055: the cargo test targets the PR touched, as
+      # `<crate>|test|<name>` / `<crate>|lib|` tokens, so the flake job repeats
+      # only those. Crate granularity does not fit: measured on this runner
+      # class, one `cargo test --workspace --all-features` takes 11m23s, so 20
+      # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
+      # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
+      flake_targets: ${{ steps.classify.outputs.flake_targets }}
     steps:
       - name: Classify changed files
         id: classify
@@ -44,7 +48,13 @@ jobs:
           # embed is code: CHANGELOG.md (include_str! in gwt-core) and
           # .claude/ + .codex/ (include_dir! in gwt-skills).
           docs_only=true
-          crates=""
+          flake_targets=""
+          add_target() {
+            case " $flake_targets " in
+              *" $1 "*) ;;
+              *) flake_targets="${flake_targets:+$flake_targets }$1" ;;
+            esac
+          }
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
@@ -53,21 +63,31 @@ jobs:
               *) docs_only=false ;;
             esac
             case "$file" in
-              crates/*/*)
-                crate="${file#crates/}"
-                crate="${crate%%/*}"
-                case " $crates " in
-                  *" $crate "*) ;;
-                  *) crates="${crates:+$crates }$crate" ;;
+              crates/*/*) crate="${file#crates/}"; crate="${crate%%/*}" ;;
+              *) continue ;;
+            esac
+            case "$file" in
+              "crates/$crate/tests/"*.rs)
+                # Only a direct child of tests/ is its own integration target;
+                # a helper module in a subdirectory is not.
+                leaf="${file#crates/$crate/tests/}"
+                case "$leaf" in
+                  */*) ;;
+                  *) add_target "$crate|test|${leaf%.rs}" ;;
                 esac
+                ;;
+              "crates/$crate/src/"*)
+                # `#[cfg(test)]` units. Bin-only targets are not repeated here;
+                # `Test (Rust)` still runs them once.
+                add_target "$crate|lib|"
                 ;;
             esac
           done <<<"$files"
           echo "$files"
           echo "docs_only=$docs_only"
-          echo "crates=$crates"
+          echo "flake_targets=$flake_targets"
           echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
-          echo "crates=$crates" >>"$GITHUB_OUTPUT"
+          echo "flake_targets=$flake_targets" >>"$GITHUB_OUTPUT"
 
   test:
     name: Test (Rust)
@@ -181,17 +201,17 @@ jobs:
   # SPEC #4551 T-055 / AC-6: one green run says nothing about a test whose
   # result is not a function of its source. All 16 issues this SPEC bundles
   # were found by an unrelated PR turning red, never by the PR that introduced
-  # them. This re-runs only the crates the PR touched, at default parallelism
-  # (#4023 and #4182 reproduce only when the suite competes with itself), and
-  # fails when the outcome changes between runs.
+  # them. This re-runs only the test targets the PR touched, at default
+  # parallelism (#4023 and #4182 reproduce only when the suite competes with
+  # itself), and fails when the outcome changes between runs.
   #
   # It depends on `changes`, so its name must stay off the develop required
   # status checks: branch protection reads a skipped job as Success. Pinned by
   # crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
   flake-detection:
-    name: Flake detection (changed crates)
+    name: Flake detection (changed test targets)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.crates != '' }}
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.flake_targets != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -214,11 +234,11 @@ jobs:
         continue-on-error: true
       # N lives in the script, not here, so the number the gate actually runs
       # is the number the contract test reads.
-      - name: Re-run the changed crates until the outcome wobbles
+      - name: Re-run the changed test targets until the outcome wobbles
         env:
-          GWT_FLAKE_CRATES: ${{ needs.changes.outputs.crates }}
+          GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
         run: scripts/ci-flake-detect.sh
-        timeout-minutes: 60
+        timeout-minutes: 45
 
   test-python-runner:
     name: Test (Python runner)
