@@ -29,7 +29,7 @@
 //!   so an index query reloads the embedding runtime every time and cost 6.4s
 //!   warm on the development machine — far past any budget a denial can carry.
 //!   The same two corpora answer the same question from local files in
-//!   milliseconds. [`Lookup`] keeps the seam, so a persistent-runtime semantic
+//!   milliseconds. The `Lookup` seam is kept, so a persistent-runtime semantic
 //!   backend can replace this one without touching the rest of the module.
 //!
 //! The section deliberately speaks Issue / Execution vocabulary. The original
