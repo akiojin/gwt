@@ -95,6 +95,18 @@ fn ok_body(body: &str) -> HttpResponse {
     }
 }
 
+fn graphql_mentions_field(query: &str, field: &str) -> bool {
+    query
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == field)
+}
+
+fn assert_issue_variables(payload: &serde_json::Value, number: u64) {
+    assert_eq!(payload["variables"]["owner"], "octo");
+    assert_eq!(payload["variables"]["repo"], "gwt");
+    assert_eq!(payload["variables"]["number"], number);
+}
+
 fn created(body: &str) -> HttpResponse {
     HttpResponse {
         status: 201,
@@ -159,17 +171,63 @@ fn red_50_fetch_posts_graphql_with_auth() {
 fn red_51_fetch_returns_not_modified_on_match() {
     let transport = FakeTransport::new();
     transport.enqueue(ok_body(
-        r#"{"data":{"repository":{"issue":{
-            "number":1,"title":"t","body":"b","state":"OPEN","updatedAt":"T1",
-            "labels":{"nodes":[]},
-            "comments":{"nodes":[]}
-        }}}}"#,
+        r#"{"data":{"repository":{"issue":{"updatedAt":"T1"}}}}"#,
     ));
     let client = client_with(transport);
     let res = client
         .fetch(IssueNumber(1), Some(&UpdatedAt::new("T1")))
         .unwrap();
     assert!(matches!(res, FetchResult::NotModified));
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().expect("probe body")).unwrap();
+    let query = payload["query"].as_str().expect("probe query");
+    assert!(graphql_mentions_field(query, "updatedAt"));
+    assert!(!graphql_mentions_field(query, "body"));
+    assert!(!graphql_mentions_field(query, "comments"));
+    assert_issue_variables(&payload, 1);
+}
+
+#[test]
+fn conditional_fetch_runs_full_query_only_after_changed_probe() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{"updatedAt":"T2"}}}}"#,
+    ));
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{
+            "number":1,"title":"changed","body":"fresh body","state":"CLOSED","updatedAt":"T2",
+            "labels":{"nodes":[{"name":"bug"}]},
+            "comments":{"nodes":[]}
+        }}}}"#,
+    ));
+    let client = client_with(transport);
+
+    let result = client
+        .fetch(IssueNumber(1), Some(&UpdatedAt::new("T1")))
+        .expect("changed conditional fetch");
+
+    let FetchResult::Updated(snapshot) = result else {
+        panic!("changed probe must return the full snapshot");
+    };
+    assert_eq!(snapshot.title, "changed");
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    let probe: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().expect("probe body")).unwrap();
+    let full: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().expect("full body")).unwrap();
+    let probe_query = probe["query"].as_str().expect("probe query");
+    let full_query = full["query"].as_str().expect("full query");
+    assert!(graphql_mentions_field(probe_query, "updatedAt"));
+    assert!(!graphql_mentions_field(probe_query, "body"));
+    assert!(!graphql_mentions_field(probe_query, "comments"));
+    assert!(graphql_mentions_field(full_query, "body"));
+    assert!(graphql_mentions_field(full_query, "comments"));
+    assert_issue_variables(&probe, 1);
+    assert_issue_variables(&full, 1);
 }
 
 // -----------------------------------------------------------------------
@@ -304,14 +362,32 @@ fn red_58_set_state_closed_sends_state_field() {
     ));
     let client = client_with(transport);
     let snap = client
-        .set_state(IssueNumber(5), IssueState::Closed)
+        .set_state(
+            IssueNumber(5),
+            IssueState::Closed,
+            Some(gwt_github::IssueCloseReason::NotPlanned),
+        )
         .unwrap();
 
     let reqs = client.transport().recorded();
     let payload: serde_json::Value =
         serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(payload["state"], "closed");
+    assert_eq!(payload["state_reason"], "not_planned");
     assert_eq!(snap.state, IssueState::Closed);
+
+    client.transport().enqueue(ok_body(
+        r#"{"number":5,"title":"T","body":"B","state":"open","updated_at":"t","labels":[]}"#,
+    ));
+    let reopened = client
+        .set_state(IssueNumber(5), IssueState::Open, None)
+        .unwrap();
+    let requests = client.transport().recorded();
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["state"], "open");
+    assert!(payload.get("state_reason").is_none());
+    assert_eq!(reopened.state, IssueState::Open);
 }
 
 // -----------------------------------------------------------------------
@@ -1033,6 +1109,27 @@ fn owner_mutation_classifies_connection_refusal_as_pre_submit_network_failure() 
     ));
 }
 
+/// Blocks until the caller's deadline has provably expired.
+///
+/// SPEC #4551 T-030, mechanism (A). The predicate is the deadline's own
+/// absolute expiry, not a wall-clock constant chosen to be larger than
+/// another wall-clock constant, so a saturated runner can stall this thread
+/// for any length of time and the ordering the caller asserts still holds.
+/// [`ResolutionDeadline::remaining`] treats a zero remainder as expired, so
+/// waiting until `checked_duration_since` yields `None` leaves the deadline
+/// strictly past.
+fn wait_until_the_deadline_has_expired(deadline: &ResolutionDeadline) {
+    let expires_at = deadline.expires_at();
+    while let Some(remaining) = expires_at.checked_duration_since(Instant::now()) {
+        std::thread::sleep(remaining);
+    }
+}
+
+/// Answers successfully, but only once the caller's deadline is already past.
+///
+/// Prefer this shape over "sleep a little and hope the deadline was shorter"
+/// whenever a test needs a response that arrives too late: it makes the
+/// lateness an observed fact instead of a race between two constants.
 struct LateResponseTransport;
 
 impl HttpTransport for LateResponseTransport {
@@ -1043,11 +1140,17 @@ impl HttpTransport for LateResponseTransport {
     fn execute_with_deadline(
         &self,
         _request: HttpRequest,
-        _deadline: &ResolutionDeadline,
+        deadline: &ResolutionDeadline,
     ) -> Result<HttpResponse, HttpError> {
-        std::thread::sleep(Duration::from_millis(25));
+        wait_until_the_deadline_has_expired(deadline);
         Ok(owner_page(Vec::new(), false, None))
     }
+}
+
+/// The deadline the [`LateResponseTransport`] tests hand the client. Its value
+/// only bounds how long they take; the transport waits it out either way.
+fn late_response_deadline() -> ResolutionDeadline {
+    ResolutionDeadline::new(Duration::from_millis(100), Duration::from_millis(100))
 }
 
 #[test]
@@ -1058,10 +1161,12 @@ fn owner_read_rejects_a_response_returned_after_the_absolute_deadline() {
         "akiojin",
         "gwt",
     );
-    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
 
     let error = client
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .list_issues(
+            &RepositoryIdentity::gwt_upstream(),
+            &late_response_deadline(),
+        )
         .expect_err("late owner response");
 
     assert!(matches!(error, ApiError::Timeout { .. }));
@@ -1108,7 +1213,6 @@ fn owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown
         "akiojin",
         "gwt",
     );
-    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
 
     let error = client
         .create_owner_issue(
@@ -1118,7 +1222,7 @@ fn owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown
                 body: "Body".to_string(),
                 labels: Vec::new(),
             },
-            &deadline,
+            &late_response_deadline(),
         )
         .expect_err("late mutation response");
 
@@ -1628,4 +1732,106 @@ fn owner_environment_override_rejects_an_expired_deadline_before_client_construc
         };
 
     assert!(matches!(error, ApiError::Timeout { .. }));
+}
+
+#[test]
+fn issue_labels_use_directional_single_requests() {
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "[]".into(),
+    });
+    transport.enqueue(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "[]".into(),
+    });
+    let client = client_with(transport);
+    client
+        .add_labels_mutation(IssueNumber(42), &["new".into()])
+        .unwrap();
+    client
+        .remove_label_mutation(IssueNumber(42), "phase/review #1")
+        .unwrap();
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, HttpMethod::Post);
+    assert!(requests[0].url.ends_with("/issues/42/labels"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[0].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"labels": ["new"]})
+    );
+    assert_eq!(requests[1].method, HttpMethod::Delete);
+    assert!(requests[1]
+        .url
+        .ends_with("/issues/42/labels/phase%2Freview%20%231"));
+}
+
+#[test]
+fn issue_label_failure_certainty_does_not_retry() {
+    for (status, unknown) in [(422, false), (503, true)] {
+        for remove in [false, true] {
+            let transport = FakeTransport::new();
+            transport.enqueue(HttpResponse {
+                status,
+                headers: vec![],
+                body: "{}".into(),
+            });
+            let client = client_with(transport);
+            let error = if remove {
+                client.remove_label_mutation(IssueNumber(42), "x")
+            } else {
+                client.add_labels_mutation(IssueNumber(42), &["x".into()])
+            }
+            .unwrap_err();
+            assert_eq!(
+                matches!(error, OwnerMutationError::RemoteOutcomeUnknown(_)),
+                unknown
+            );
+            assert_eq!(client.transport().recorded().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn issue_labels_honor_and_settle_rest_budget() {
+    for remove in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let transport = FakeTransport::new();
+        transport.enqueue(HttpResponse {
+            status: 429,
+            headers: vec![],
+            body: String::new(),
+        });
+        let client = client_with(transport).with_budget(ledger.clone(), gate);
+        let mutate = || {
+            if remove {
+                client.remove_label_mutation(IssueNumber(42), "x")
+            } else {
+                client.add_labels_mutation(IssueNumber(42), &["x".into()])
+            }
+        };
+        assert!(matches!(
+            mutate(),
+            Err(OwnerMutationError::PreSubmit(ApiError::RateLimited { .. }))
+        ));
+        assert!(ledger
+            .active_block(
+                gwt_core::github_quota::GitHubQuota::Rest,
+                chrono::Utc::now()
+            )
+            .is_some());
+        assert!(matches!(
+            mutate(),
+            Err(OwnerMutationError::PreSubmit(ApiError::RateLimited { .. }))
+        ));
+        assert_eq!(client.transport().recorded().len(), 1);
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+            1
+        );
+    }
 }

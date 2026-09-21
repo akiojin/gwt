@@ -245,6 +245,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
         ["board", "show"].as_slice(),
         ["issue", "view", "1"].as_slice(),
         ["hook", "register-codex-managed-hook-trust"].as_slice(),
+        ["hook", "register-codex-managed-project-trust"].as_slice(),
         ["index", "--help"].as_slice(),
         ["workspace", "update", "--title-summary", "legacy"].as_slice(),
     ] {
@@ -347,6 +348,308 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
     );
 }
 
+/// Issue #3967 AC-4: this is the front door an operator runs to check a real
+/// machine, and it used to answer `trusted 0 gwt-managed Codex hooks` with exit
+/// 0 while Codex was still going to stop every launch on `Hooks need review`.
+/// Hooks gwt cannot vouch for have to be reported, and the operation has to
+/// fail.
+#[test]
+fn gwtd_hook_register_codex_managed_hook_trust_fails_on_hooks_it_cannot_vouch_for() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    // Generate against one installed binary, then ask a gwt that resolves a
+    // different one to vouch for the result.
+    let generated_with = project.path().join("Programs").join("GWT").join("gwtd");
+    // #4057: pin the generator per thread. `GWT_HOOK_BIN` is process-global, so
+    // setting it here would leak this pin into any materialization another test
+    // runs at the same time.
+    {
+        let _pin = gwt_skills::settings_local::ScopedHookBin::set(&generated_with);
+        gwt_skills::generate_codex_hooks(project.path()).expect("generate hooks");
+    }
+
+    let mut child = isolated_gwtd_command()
+        .env("GWT_HOOK_BIN", env!("CARGO_BIN_EXE_gwtd"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd hook register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_hook_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child.wait_with_output().expect("wait gwtd hook register");
+
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("hook registration stdout must be JSON");
+    assert_eq!(
+        response["ok"].as_bool(),
+        Some(false),
+        "registration must not report success while hooks stay untrusted, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        response["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Hooks need review")),
+        "the refusal must name the launch Codex would stop, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_writes_exact_project() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    let canonical_project = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(project.path()).expect("canonical project"),
+    );
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(
+        output.status.success(),
+        "registration should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("project trust registration stdout must be JSON");
+    assert_eq!(response["ok"].as_bool(), Some(true));
+    assert!(
+        response["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("trusted gwt-managed Codex worktree")),
+        "JSON output should report the exact project trust registration, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(config_path).expect("read config")).unwrap();
+    assert_eq!(
+        config["projects"][canonical_project.to_string_lossy().as_ref()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_refuses_explicit_untrusted() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    let canonical_project = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(project.path()).expect("canonical project"),
+    );
+    let mut project_config = toml::Table::new();
+    project_config.insert(
+        "trust_level".to_string(),
+        toml::Value::String("untrusted".to_string()),
+    );
+    let mut projects = toml::Table::new();
+    projects.insert(
+        canonical_project.to_string_lossy().into_owned(),
+        toml::Value::Table(project_config),
+    );
+    let mut root = toml::Table::new();
+    root.insert("projects".to_string(), toml::Value::Table(projects));
+    let config = toml::to_string_pretty(&toml::Value::Table(root)).unwrap();
+    fs::write(&config_path, &config).expect("seed explicit untrusted config");
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(!output.status.success());
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("project trust refusal stdout must be JSON");
+    assert_eq!(response["ok"].as_bool(), Some(false));
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("explicitly untrusted")),
+        "JSON error should preserve the fail-closed reason, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(fs::read_to_string(config_path).unwrap(), config);
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_uses_effective_codex_home() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let codex_home = tempfile::tempdir().expect("codex tempdir");
+    let config_path = codex_home.path().join("config.toml");
+    let canonical_project = gwt_core::paths::normalize_windows_child_process_path(
+        &fs::canonicalize(project.path()).expect("canonical project"),
+    );
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(
+        output.status.success(),
+        "registration should use CODEX_HOME, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config: toml::Value =
+        toml::from_str(&fs::read_to_string(config_path).expect("read config")).unwrap();
+    assert_eq!(
+        config["projects"][canonical_project.to_string_lossy().as_ref()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+}
+
+#[test]
+fn gwtd_hook_register_codex_managed_project_trust_refuses_arbitrary_host_config() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let stable_codex_home = tempfile::tempdir().expect("stable Codex tempdir");
+    let arbitrary_codex_home = tempfile::tempdir().expect("arbitrary Codex tempdir");
+    let arbitrary_config = arbitrary_codex_home.path().join("config.toml");
+
+    let mut child = isolated_gwtd_command()
+        .env("CODEX_HOME", stable_codex_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd project trust register");
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_project_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": arbitrary_config.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child
+        .wait_with_output()
+        .expect("wait gwtd project trust register");
+
+    assert!(!output.status.success());
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("project trust refusal stdout must be JSON");
+    assert_eq!(response["ok"].as_bool(), Some(false));
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("process-stable/default")),
+        "refusal must identify the supported Host config boundary: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !arbitrary_config.exists(),
+        "the explicit arbitrary Host config must remain untouched"
+    );
+}
+
+#[test]
+fn gwtd_internal_docker_marker_refuses_an_explicit_codex_config() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let stable_codex_home = tempfile::tempdir().expect("stable Codex tempdir");
+    let arbitrary_codex_home = tempfile::tempdir().expect("arbitrary Codex tempdir");
+    let arbitrary_config = arbitrary_codex_home.path().join("config.toml");
+
+    let output = isolated_gwtd_command()
+        .args([
+            "__internal",
+            "daemon-hook",
+            "register-codex-managed-project-trust",
+            "--project-root",
+            project.path().to_str().expect("project path utf8"),
+            "--runtime-target",
+            "docker",
+            "--codex-config",
+            arbitrary_config.to_str().expect("config path utf8"),
+        ])
+        .env("CODEX_HOME", stable_codex_home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run internal Docker project trust registration");
+
+    assert!(!output.status.success());
+    assert!(
+        !arbitrary_config.exists(),
+        "a caller-controlled Docker marker must not authorize an explicit config"
+    );
+}
+
 #[test]
 fn gwtd_managed_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();
@@ -408,105 +711,8 @@ fn gwtd_provider_hook_event_remains_argv_transport_exception() {
     );
 }
 
-#[test]
-fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
-    let home = tempfile::tempdir().expect("home tempdir");
-    let repo = tempfile::tempdir().expect("repo tempdir");
-    assert!(hidden_command("git")
-        .arg("init")
-        .arg("-q")
-        .arg(repo.path())
-        .status()
-        .expect("git init")
-        .success());
-    assert!(hidden_command("git")
-        .arg("-C")
-        .arg(repo.path())
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/example/project.git"
-        ])
-        .status()
-        .expect("git remote add")
-        .success());
-
-    let output = isolated_gwtd_command()
-        .current_dir(repo.path())
-        .args(["hook", "gwt-self-improvement-stop"])
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .stdin(Stdio::null())
-        .output()
-        .expect("run gwtd gwt self-improvement hook");
-
-    assert!(
-        output.status.success(),
-        "direct self-improvement hook should exit 0 outside akiojin/gwt, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "non-gwt repos must receive no hook output, got: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn gwtd_direct_self_improvement_stop_bypasses_repo_coordinate_bootstrap() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let home = tempfile::tempdir().expect("home tempdir");
-    let repo = tempfile::tempdir().expect("repo tempdir");
-    let fake_bin = tempfile::tempdir().expect("fake bin tempdir");
-    let marker = fake_bin.path().join("remote-v-called");
-    let real_git = env::split_paths(&env::var_os("PATH").expect("PATH"))
-        .map(|directory| directory.join("git"))
-        .find(|path| path.is_file())
-        .expect("real git executable");
-    let fake_git = fake_bin.path().join("git");
-    fs::write(
-        &fake_git,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = \"remote\" ] && [ \"$2\" = \"-v\" ]; then\n  : > \"$GWT_REMOTE_PROBE_MARKER\"\nfi\nexec \"{}\" \"$@\"\n",
-            real_git.display()
-        ),
-    )
-    .expect("write fake git");
-    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
-        .expect("make fake git executable");
-    let path = env::join_paths(
-        std::iter::once(fake_bin.path().to_path_buf())
-            .chain(env::split_paths(&env::var_os("PATH").expect("PATH"))),
-    )
-    .expect("compose PATH");
-
-    let output = isolated_gwtd_command()
-        .current_dir(repo.path())
-        .args(["hook", "gwt-self-improvement-stop"])
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .env("PATH", path)
-        .env("GWT_REMOTE_PROBE_MARKER", &marker)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run direct self-improvement Stop hook");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !marker.exists(),
-        "direct Stop must not run the unbounded repo-coordinate `git remote -v` bootstrap"
-    );
-}
-
-/// Initialize a worktree whose `origin` is `akiojin/gwt` so generation emits the
-/// repo-owned self-improvement Stop hook alongside the shared managed hooks.
+/// Initialize a worktree whose `origin` is `akiojin/gwt`, the repository whose
+/// generated hook assets this suite inspects.
 fn init_gwt_origin_repo(worktree: &Path) {
     assert!(hidden_command("git")
         .arg("init")
@@ -620,13 +826,12 @@ fn gwtd_hook_argv_rejected(args: &[&str], stdin: &str) -> (bool, String) {
 }
 
 /// Regression guard for issue #3178: every managed-hook command that generation
-/// emits must stay inside gwtd's argv transport allowlist. The self-improvement
-/// Stop hook regressed because its generated `hook gwt-self-improvement-stop`
-/// command had no matching `is_allowed_argv_exception` entry, so each Stop hit
-/// the legacy-argv rejection. This test derives the subcommands from the actual
-/// generated artifacts (not a hard-coded list) and runs each through the real
-/// binary, so a new generation site that drifts ahead of the allowlist fails
-/// here instead of silently at runtime.
+/// emits must stay inside gwtd's argv transport allowlist. A generated command
+/// with no matching `is_allowed_argv_exception` entry hits the legacy-argv
+/// rejection on every hook invocation. This test derives the subcommands from
+/// the actual generated artifacts (not a hard-coded list) and runs each through
+/// the real binary, so a new generation site that drifts ahead of the allowlist
+/// fails here instead of silently at runtime.
 #[test]
 fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
     let worktree = tempfile::tempdir().expect("worktree tempdir");
@@ -642,7 +847,7 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
     collect_generated_text(worktree.path(), &mut corpus);
     let subcommands = generated_hook_subcommands(&corpus);
 
-    for expected in ["event", "provider-event", "gwt-self-improvement-stop"] {
+    for expected in ["event", "provider-event"] {
         assert!(
             subcommands.contains(expected),
             "generation must still emit the `hook {expected}` managed-hook command; \
@@ -657,7 +862,6 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
                 vec!["hook", "provider-event", "opencode", "session.created"],
                 "{\"sessionId\":\"guard\"}",
             ),
-            "gwt-self-improvement-stop" => (vec!["hook", "gwt-self-improvement-stop"], ""),
             other => panic!(
                 "generation emits an unmapped gwtd hook subcommand `{other}`. Add a representative \
                  argv here and confirm gwtd's is_allowed_argv_exception accepts it, or the same \
@@ -673,134 +877,82 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
     }
 }
 
-/// Walk up from the gwt crate dir to the repository root that owns the
-/// committed managed-hook settings (`.claude/settings.json`).
-#[cfg(unix)]
-fn repo_root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|dir| dir.join(".claude/settings.json").is_file())
-        .map(Path::to_path_buf)
-        .expect("locate repository root containing .claude/settings.json")
-}
-
-/// Collect every committed managed-hook `command` string that invokes the
-/// repo-owned `gwt-self-improvement-stop` hook (Claude + Codex transports).
-#[cfg(unix)]
-fn committed_self_improvement_stop_commands() -> Vec<String> {
-    let root = repo_root();
-    let mut commands = Vec::new();
-    for relative in [".claude/settings.json", ".codex/hooks.json"] {
-        let path = root.join(relative);
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let value: serde_json::Value =
-            serde_json::from_str(&text).unwrap_or_else(|err| panic!("parse {relative}: {err}"));
-        let Some(events) = value.get("hooks").and_then(|hooks| hooks.as_object()) else {
-            continue;
-        };
-        for matchers in events.values() {
-            for matcher in matchers.as_array().into_iter().flatten() {
-                for hook in matcher
-                    .get("hooks")
-                    .and_then(|hooks| hooks.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                        if command.contains("gwt-self-improvement-stop") {
-                            commands.push(command.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    commands
-}
-
-// Only the `#[cfg(unix)]` degradation test drives a POSIX shell, so gate the
-// fixture the same way or `-D warnings` trips dead_code on Windows.
-#[cfg(unix)]
-fn posix_shell_fixture(path: &Path) -> (&'static str, String) {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    #[cfg(windows)]
-    {
-        let bytes = normalized.as_bytes();
-        assert!(
-            bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/',
-            "Windows fixture path must be drive-absolute: {normalized}"
-        );
-        let drive = (bytes[0] as char).to_ascii_lowercase();
-        ("bash", format!("/mnt/{drive}/{}", &normalized[3..]))
-    }
-    #[cfg(not(windows))]
-    {
-        ("sh", normalized)
-    }
-}
-
-/// Regression guard for issue #3178's actual harm: the committed self-improvement
-/// Stop hook command must NOT leak gwtd's legacy-argv rejection into the agent's
-/// Stop loop when the installed gwtd predates the `gwt-self-improvement-stop`
-/// transport exception (e.g. v9.61.0). The command is repo-committed, so it runs
-/// against whatever gwtd a developer has installed; it must degrade silently on
-/// older binaries the same way the OpenCode/OpenClaw JS bridges already do
-/// (stderr/exit ignored). A `HookOutput::StopBlock` from a current binary exits 0
-/// and writes its decision JSON to stdout, so a graceful wrapper that drops
-/// stderr and forces exit 0 still surfaces a real block.
-#[cfg(unix)]
+/// SPEC #3164 AC-R2: the retired `improvement.*` operations are gone from the
+/// envelope dispatcher, so they must land on the pre-existing unknown-operation
+/// rejection rather than on a bespoke refusal code.
 #[test]
-fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
-    let commands = committed_self_improvement_stop_commands();
-    assert!(
-        !commands.is_empty(),
-        "expected at least one committed gwt-self-improvement-stop hook command to guard"
-    );
+fn retired_improvement_operations_hit_the_unknown_operation_rejection() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
 
-    // A fake gwtd that mimics a pre-v9.63.0 binary: it rejects the unknown argv
-    // with the legacy-argv error on stderr and a non-zero exit.
-    let fake_dir = tempfile::tempdir().expect("fake bin dir");
-    let fake_gwtd = fake_dir.path().join("gwtd");
-    fs::write(
-        &fake_gwtd,
-        "#!/bin/sh\n\
-         echo 'gwtd hook: legacy argv invocation is disabled; use stdin JSON envelope.' >&2\n\
-         exit 2\n",
-    )
-    .expect("write fake gwtd");
-    let (shell, fake_gwtd_for_shell) = posix_shell_fixture(&fake_gwtd);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
-            .expect("chmod fake gwtd");
-    }
+    for operation in ["improvement.list", "improvement.capture"] {
+        let mut child = isolated_gwtd_command()
+            .current_dir(repo.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn gwtd");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(
+                format!("{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}")
+                    .as_bytes(),
+            )
+            .expect("write envelope");
+        let output = child.wait_with_output().expect("wait gwtd");
 
-    for command in &commands {
-        let output = hidden_command(shell)
-            .arg("-c")
-            .arg(command)
-            .env("GWT_BIN_PATH", &fake_gwtd_for_shell)
-            .stdin(Stdio::null())
-            .output()
-            .expect("run committed self-improvement stop command");
-
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "committed self-improvement Stop command must exit 0 on an unsupported gwtd so it \
-             does not block the agent's Stop loop (issue #3178); command: {command}; stderr: {}",
+        assert!(
+            !output.status.success(),
+            "`{operation}` must be refused after the improvement subsystem retirement"
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            output.stderr.is_empty(),
-            "committed self-improvement Stop command must not leak gwtd's legacy-argv rejection \
-             into the agent's Stop feedback (issue #3178); command: {command}; stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
+            combined.contains("unknown"),
+            "`{operation}` must be refused through the existing unknown-operation path, got: {combined}"
         );
     }
+}
+
+/// SPEC #3164 AC-R3: `gwtd hook gwt-self-improvement-stop` lost its argv
+/// transport exception along with the hook, so the binary must refuse it
+/// instead of running a retired gate.
+#[test]
+fn retired_self_improvement_stop_hook_is_no_longer_an_argv_exception() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
+
+    let output = isolated_gwtd_command()
+        .current_dir(repo.path())
+        .args(["hook", "gwt-self-improvement-stop"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run retired self-improvement hook");
+
+    assert!(
+        !output.status.success(),
+        "the retired self-improvement Stop hook must not be dispatched"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "the retired hook must emit no hook decision, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("gwt-self-improvement-stop"),
+        "the retired hook must not be advertised as a transport exception, got: {stderr}"
+    );
 }
 
 /// Issue #3606: a JSON operation that acts on the project store must name the

@@ -382,3 +382,82 @@ fn forward_owner_is_fail_open_when_live_target_is_unreachable() {
 
     handle_forward(&input).expect("unreachable live target must fail open");
 }
+
+/// Issue #3541 AC-6: live forwarding stays fail-open, but the transport
+/// failure must still leave a sanitized ledger row that names the event.
+#[test]
+fn live_forward_failure_is_fail_open_and_recorded_in_the_error_ledger() {
+    use gwt::daemon_runtime::handle_forward_for_event;
+    use gwt_core::error_ledger::ErrorKind;
+
+    let _lock = env_lock();
+    let mut env = EnvGuard::new();
+    let home = tempfile::tempdir().expect("isolated home");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path().join(".gwt"));
+    let worktree = home.path().join("repo");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
+    let port = listener.local_addr().expect("listener addr").port();
+    drop(listener);
+
+    const TOKEN_SENTINEL: &str = "LIVE_FORWARD_TOKEN_MUST_NOT_PERSIST_3541";
+    const PAYLOAD_SENTINEL: &str = "LIVE_FORWARD_PAYLOAD_MUST_NOT_PERSIST_3541";
+    const SESSION_ID: &str = "session-3541-live-forward";
+    env.set("GWT_SESSION_ID", SESSION_ID);
+    env.set(
+        "GWT_HOOK_FORWARD_URL",
+        format!("http://127.0.0.1:{port}/internal/hook-live"),
+    );
+    env.set("GWT_HOOK_FORWARD_TOKEN", TOKEN_SENTINEL);
+    env.unset("GWT_SESSION_RUNTIME_PATH");
+    env.unset("GWT_HOOK_PROFILE_PATH");
+    env.unset("CODEX_THREAD_ID");
+
+    let input = serde_json::json!({
+        "session_id": "provider-session-sensitive",
+        "cwd": worktree.display().to_string(),
+        "prompt": PAYLOAD_SENTINEL,
+        "tool_name": "Bash",
+        "tool_input": { "command": format!("echo {PAYLOAD_SENTINEL}") }
+    })
+    .to_string();
+
+    handle_forward_for_event("PreToolUse", &input)
+        .expect("live forwarding transport failure must remain fail-open");
+
+    let rows = gwt_core::error_ledger::list_since(None).expect("error ledger");
+    let row = rows
+        .iter()
+        .find(|row| {
+            row.kind == ErrorKind::HookFailure
+                && row.context.get("fail_open").map(String::as_str) == Some("true")
+        })
+        .unwrap_or_else(|| panic!("fail-open transport failure must be recorded: {rows:?}"));
+    assert_eq!(
+        row.context.get("event").map(String::as_str),
+        Some("PreToolUse")
+    );
+    assert!(
+        row.context
+            .get("handler")
+            .is_some_and(|handler| handler.contains("forward")),
+        "failure must identify the forwarding handler: {row:?}"
+    );
+    assert_eq!(
+        row.context.get("exit_status").map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(row.target.session_id.as_deref(), Some(SESSION_ID));
+
+    let ledger_text = serde_json::to_string(&rows).expect("ledger json");
+    for sentinel in [
+        TOKEN_SENTINEL,
+        PAYLOAD_SENTINEL,
+        "provider-session-sensitive",
+    ] {
+        assert!(
+            !ledger_text.contains(sentinel),
+            "sensitive input leaked into the ledger: {ledger_text}"
+        );
+    }
+}
