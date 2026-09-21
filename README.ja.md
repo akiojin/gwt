@@ -848,6 +848,13 @@ macOS では1秒間隔で3回採取し、同じプロセスが全標本で CPU 1
 警告は観測結果であり、特定 worktree が原因である証明ではありません。
 稼働中のファイル監視利用者と Spotlight のプライバシー設定を確認してください。
 
+Spotlight のインデックス処理そのものは Issue Monitor の snapshot から読めます。
+`issue.monitor.status` の `spotlight` は `mds_stores` プロセスとその CPU 率を
+列挙し、100% を超えたプロセスがある場合に `warning` を載せます。worktree が
+数百規模のホストでは、この daemon がエージェント本体を上回る CPU 消費者になり、
+そうでなければ「ホストが重い」としか観測できません。Spotlight の無い
+プラットフォームでは、プロセスも警告も無い状態でこのブロックを返します。
+
 ## 開発
 
 ### ビルド
