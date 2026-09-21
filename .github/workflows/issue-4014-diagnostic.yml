@@ -1,0 +1,64 @@
+# TEMPORARY diagnostic workflow for Issue #4014.
+#
+# #4014 needs evidence that macOS cannot produce: `cargo test -p gwt --bin gwt`
+# stops making progress on Windows and the 90-minute job timeout is the only
+# signal. That timeout names nothing, so the owning test is unknown.
+#
+# Two jobs answer the two possible shapes:
+#
+#   serial  — `--test-threads=1` makes libtest print each test name *before*
+#             running it, so a hang leaves the culprit as the last line of the
+#             log. This also answers whether the hang needs concurrency: if it
+#             reproduces at one thread, it is a single-test hang that the
+#             global `env_test_lock` merely amplifies into a suite deadlock.
+#   parallel— default parallelism over the whole target, reproducing the
+#             original observation under a shorter cap.
+#
+# Delete this file once #4014 has its answer.
+name: Issue 4014 diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/issue-4014]
+
+concurrency:
+  group: issue-4014-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  serial-app-runtime:
+    name: Serial app_runtime (names the hang)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      - name: Build the target
+        run: cargo test -p gwt --bin gwt --no-run
+        timeout-minutes: 45
+      # `--nocapture` keeps libtest's writes unbuffered so the name of the test
+      # that never returns survives a step timeout.
+      - name: Run app_runtime serially
+        run: cargo test -p gwt --bin gwt app_runtime::tests:: -- --test-threads=1 --nocapture
+        timeout-minutes: 60
+
+  parallel-full-target:
+    name: Default-parallel --bin gwt (reproduces the stall)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      - name: Build the target
+        run: cargo test -p gwt --bin gwt --no-run
+        timeout-minutes: 45
+      - name: Run the whole target at default parallelism
+        shell: pwsh
+        run: |
+          Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
+          Write-Host "logical processors: $([Environment]::ProcessorCount)"
+          cargo test -p gwt --bin gwt
+        timeout-minutes: 45
