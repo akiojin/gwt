@@ -124,6 +124,24 @@ pub fn load_issue_title_from_cache(cache_root: &Path, issue_number: u64) -> Opti
     }
 }
 
+/// Whether `issue_number` is OPEN according to `<cache_root>/<n>/meta.json`.
+///
+/// `None` means the cache cannot answer — no entry, unreadable, or an
+/// unrecognized `state`. Callers that use this to decide whether to *surface*
+/// an Issue (Issue #4542's denial advisory) must treat `None` as "do not
+/// surface": the cache is the only local source of Issue state, and reaching
+/// GitHub to settle it is not available on a latency-bound path.
+pub fn issue_is_open_in_cache(cache_root: &Path, issue_number: u64) -> Option<bool> {
+    let path = cache_root.join(issue_number.to_string()).join("meta.json");
+    let bytes = fs::read(&path).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    match value.get("state")?.as_str()?.trim() {
+        "open" => Some(true),
+        "closed" => Some(false),
+        _ => None,
+    }
+}
+
 pub fn issue_cache_source_fingerprint(
     cache_root: &Path,
 ) -> Result<Option<IssueCacheSourceFingerprint>, String> {
