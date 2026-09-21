@@ -3,7 +3,7 @@
 //! fold that turns recorded events into current Work items, plus the legacy
 //! `Workspace*`-prefixed adapter aliases.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -15,6 +15,39 @@ use super::*;
 fn bool_is_false(value: &bool) -> bool {
     !*value
 }
+
+/// Issue #4508: most recent inline [`WorkEvent`]s retained per Work item in the
+/// derived projection (`works.json`).
+///
+/// The projection is derived state — the durable log is the `.gwt/work/events/`
+/// shard tree — but before this cap its inline history grew monotonically with
+/// uptime (491 MB / 661,394 inline events after three days on the gwt host).
+/// `workspace.work_prune` / `workspace.projection_prune` could not hold it back
+/// because both collect whole Work items and skip the ones whose owner Issue is
+/// still open, so exactly the long-lived items accumulated without limit. The
+/// resident [`WorkItemsProjection`] and every projection write are bounded by
+/// `work_items × MAX_INLINE_WORK_EVENTS` instead.
+///
+/// The retained window must stay wide enough for the readers of inline history:
+/// event-id dedup on re-ingest, [`WorkItem::latest_next_action`], the derived
+/// progress summary, and terminal-close detection all look at the recent tail.
+pub const MAX_INLINE_WORK_EVENTS: usize = 50;
+
+/// Issue #4508: most recent Board entry ids retained per Work item.
+///
+/// `board_refs` grows by one entry per event that carried a `board_entry_id`,
+/// so capping only `events` just moves the growth here — the gwt host's busiest
+/// Work items held 2,680 refs, 25 MB across the projection. Nothing reads the
+/// list for more than provenance, so the newest window is what matters.
+pub const MAX_WORK_BOARD_REFS: usize = 50;
+
+/// Issue #4508: most recent agent sessions retained per Work item.
+///
+/// One entry is kept per session that ever touched the Work, so a long-lived
+/// Work accumulates them for the life of the project (1,391 on the gwt host's
+/// PM Work). Sessions are pruned oldest-first by `updated_at`, which keeps the
+/// recent attachments that session-conflict detection actually consults.
+pub const MAX_WORK_AGENT_REFS: usize = 50;
 
 /// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Issue
 /// linked to a Workspace. Workspace Card preview and Detail pane render these
@@ -269,6 +302,29 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
+    /// Issue #4508: watermark of the inline history that
+    /// [`WorkItemsProjection::compact_inline_events`] dropped, or `None` while
+    /// the inline history is still complete. Every event at or before this
+    /// instant is already folded into the item's own fields, so a source that
+    /// still carries it must not replay it or the truncated history would grow
+    /// straight back.
+    ///
+    /// This is derived rather than stored. `WorkItem` deserializes with
+    /// `deny_unknown_fields`, so one added field in `works.json` stops every
+    /// binary that predates it — on 2026-09-19 that halted `workspace.*` across
+    /// the whole host. The existing fields already say it: an authoritative
+    /// replay base that stores no snapshot *is* the item itself, valid through
+    /// `legacy_metadata_snapshot_at`. Compaction is the only thing that
+    /// produces that combination, because every other writer of
+    /// `legacy_metadata_authoritative` stores the snapshot alongside it.
+    pub fn events_compacted_through(&self) -> Option<DateTime<Utc>> {
+        if self.legacy_metadata_authoritative && self.legacy_metadata_snapshot.is_none() {
+            self.legacy_metadata_snapshot_at
+        } else {
+            None
+        }
+    }
+
     /// A Work is incomplete while it is neither completed (Done) nor discarded.
     /// Both Done and Discarded are terminal closes (FR-352).
     pub fn is_incomplete(&self) -> bool {
@@ -499,11 +555,13 @@ impl WorkItemsProjection {
             }
         }
         if let Some(container) = event.execution_container.clone() {
-            if !item
+            if let Some(existing) = item
                 .execution_containers
-                .iter()
-                .any(|existing| workspace_execution_container_same(existing, &container))
+                .iter_mut()
+                .find(|existing| workspace_execution_container_same(existing, &container))
             {
+                merge_workspace_pr_metadata(existing, &container);
+            } else {
                 item.execution_containers.push(container);
             }
         }
@@ -613,11 +671,146 @@ impl WorkItemsProjection {
         healed
     }
 
+    /// Issue #4465: detach refs to `container` from every Work other than its
+    /// canonical owner.
+    ///
+    /// `canonical_work_id` is a pure function of (project, branch, worktree),
+    /// so the canonical owner of a container is never ambiguous — only the
+    /// *references* accrete, when a branch or worktree is reused by a later
+    /// Work while an earlier one is still incomplete. #3684's classifier only
+    /// sees Works whose containers are *all* foreign, so the common shape (a
+    /// stale Work that keeps its own container and picks up one more) escapes
+    /// it and pins `workspace.ensure` fail-closed forever.
+    ///
+    /// Fail-closed boundaries: the canonical Work must exist, be incomplete,
+    /// and itself hold the container. Detaching a ref never terminalizes a
+    /// Work and never touches its other containers. Returns the healed ids.
+    ///
+    /// `matches_container` decides container identity, so callers reuse the
+    /// same predicate their refusal path uses — a heal that disagreed with the
+    /// refusal would leave the session blocked anyway. `restrict_to`, when
+    /// non-empty, limits the repair to those Work ids; an explicitly scoped
+    /// caller must not reach past the scope it named.
+    pub fn detach_foreign_container_refs<F>(
+        &mut self,
+        canonical_id: &str,
+        restrict_to: &[String],
+        matches_container: F,
+    ) -> Vec<String>
+    where
+        F: Fn(&WorkspaceExecutionContainerRef) -> bool,
+    {
+        let canonical_owns = self.work_items.iter().any(|item| {
+            item.id == canonical_id
+                && item.is_incomplete()
+                && item.execution_containers.iter().any(&matches_container)
+        });
+        if !canonical_owns {
+            return Vec::new();
+        }
+        let mut healed = Vec::new();
+        for item in &mut self.work_items {
+            if item.id == canonical_id
+                || (!restrict_to.is_empty() && !restrict_to.contains(&item.id))
+            {
+                continue;
+            }
+            let before = item.execution_containers.len();
+            item.execution_containers
+                .retain(|owned| !matches_container(owned));
+            if item.execution_containers.len() != before {
+                healed.push(item.id.clone());
+            }
+        }
+        healed
+    }
+
     pub fn refresh_derived_progress_summaries(&mut self) {
         for item in &mut self.work_items {
             backfill_work_item_progress_summary(item);
         }
     }
+
+    /// Issue #4508: total inline events held across every Work item. The
+    /// measurable that [`compact_inline_events`](Self::compact_inline_events)
+    /// bounds, in the same shape as `WorkItemsCache::parse_count`.
+    pub fn inline_event_count(&self) -> usize {
+        self.work_items.iter().map(|item| item.events.len()).sum()
+    }
+
+    /// True when any Work item exceeds one of the per-item caps. Lets a writer
+    /// skip cloning a projection that is already inside them.
+    pub fn needs_inline_event_compaction(&self) -> bool {
+        self.work_items.iter().any(work_item_exceeds_caps)
+    }
+
+    /// Issue #4508: bound every Work item's accumulated history — inline
+    /// events, Board refs, and agent refs — returning how many entries were
+    /// dropped.
+    ///
+    /// A Work item's fields already are the fold of its complete history, so
+    /// marking them authoritative lets a later refold reproduce this exact
+    /// state from the retained tail alone: `merge_eventless_legacy_item`
+    /// derives its replay base from the item itself when no snapshot is
+    /// stored. Compaction is therefore lossless for the current state; only
+    /// the ability to re-derive it from scratch is traded away.
+    pub fn compact_inline_events(&mut self) -> usize {
+        self.work_items.iter_mut().map(compact_work_item).sum()
+    }
+}
+
+fn work_item_exceeds_caps(item: &WorkItem) -> bool {
+    item.events.len() > MAX_INLINE_WORK_EVENTS
+        || item.board_refs.len() > MAX_WORK_BOARD_REFS
+        || item.agents.len() > MAX_WORK_AGENT_REFS
+}
+
+fn compact_work_item(item: &mut WorkItem) -> usize {
+    if !work_item_exceeds_caps(item) {
+        return 0;
+    }
+    item.events.sort_by_key(|event| event.updated_at);
+    let dropped_events = item.events.len().saturating_sub(MAX_INLINE_WORK_EVENTS);
+
+    // The boundary must cover everything the folded state already reflects,
+    // which is the whole history: a Backfill event does not advance
+    // `updated_at`, so taking the maximum of both keeps a dropped event from
+    // looking like a late arrival that still needs replaying.
+    let boundary = item.events[..dropped_events]
+        .iter()
+        .map(|event| event.updated_at)
+        .chain(std::iter::once(item.updated_at))
+        .chain(item.legacy_metadata_snapshot_at)
+        .max()
+        .unwrap_or(item.updated_at);
+
+    item.events.drain(..dropped_events);
+    let retained_ids = item
+        .events
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<BTreeSet<_>>();
+    item.duplicate_event_containers
+        .retain(|event_id, _| retained_ids.contains(event_id));
+
+    let dropped_board_refs = item.board_refs.len().saturating_sub(MAX_WORK_BOARD_REFS);
+    item.board_refs.drain(..dropped_board_refs);
+
+    item.agents.sort_by_key(|agent| agent.updated_at);
+    let dropped_agents = item.agents.len().saturating_sub(MAX_WORK_AGENT_REFS);
+    item.agents.drain(..dropped_agents);
+
+    // No snapshot is stored: it is exactly this item's own folded state, and
+    // duplicating every field here is what made the projection large in the
+    // first place. `merge_eventless_legacy_item` rebuilds it on demand, and an
+    // older snapshot must not survive a moved boundary — replaying only the
+    // newer events onto stale metadata would roll the Work item back. This
+    // trio is also what [`WorkItem::events_compacted_through`] reads back, so
+    // the watermark needs no field of its own in `works.json`.
+    item.legacy_metadata_snapshot = None;
+    item.legacy_metadata_snapshot_at = Some(boundary);
+    item.legacy_metadata_authoritative = true;
+    dropped_events + dropped_board_refs + dropped_agents
 }
 
 fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
@@ -645,7 +838,25 @@ fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
     })
 }
 
-pub(crate) fn workspace_execution_container_same(
+pub(crate) fn merge_workspace_pr_metadata(
+    target: &mut WorkspaceExecutionContainerRef,
+    source: &WorkspaceExecutionContainerRef,
+) {
+    if source.pr_number.is_some() && source.pr_number != target.pr_number {
+        target.pr_number = source.pr_number;
+        target.pr_url = source.pr_url.clone();
+        target.pr_state = source.pr_state.clone();
+    } else {
+        if source.pr_url.is_some() {
+            target.pr_url = source.pr_url.clone();
+        }
+        if source.pr_state.is_some() {
+            target.pr_state = source.pr_state.clone();
+        }
+    }
+}
+
+pub fn workspace_execution_container_same(
     left: &WorkspaceExecutionContainerRef,
     right: &WorkspaceExecutionContainerRef,
 ) -> bool {
@@ -913,6 +1124,132 @@ mod tests {
 
     use super::*;
 
+    /// Issue #4508 AC-1: the inline event history of one Work item must stop
+    /// growing with uptime, and the state folded from the dropped prefix must
+    /// survive as authoritative metadata so nothing regresses.
+    #[test]
+    fn compact_inline_events_caps_history_and_preserves_folded_state() {
+        let started_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(started_at);
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-compaction", started_at);
+        start.title = Some("Compaction owner".to_string());
+        start.owner = Some("#4508".to_string());
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-4508".to_string()),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        projection.apply_event(start);
+
+        let total = MAX_INLINE_WORK_EVENTS * 4;
+        for index in 0..total {
+            let mut update = WorkEvent::new(
+                WorkEventKind::Update,
+                "work-compaction",
+                started_at + chrono::Duration::seconds(index as i64 + 1),
+            );
+            update.progress_summary = Some(format!("update {index}"));
+            projection.apply_event(update);
+        }
+
+        let before = projection.work_items[0].clone();
+        assert_eq!(before.events.len(), total + 1);
+
+        let dropped = projection.compact_inline_events();
+        assert_eq!(dropped, total + 1 - MAX_INLINE_WORK_EVENTS);
+
+        let item = &projection.work_items[0];
+        assert_eq!(item.events.len(), MAX_INLINE_WORK_EVENTS);
+        assert_eq!(
+            item.events.last().map(|event| event.id.as_str()),
+            before.events.last().map(|event| event.id.as_str()),
+            "compaction retains the newest events, not the oldest"
+        );
+        assert_eq!(item.id, before.id);
+        assert_eq!(item.title, before.title);
+        assert_eq!(item.owner, before.owner);
+        assert_eq!(item.created_at, before.created_at);
+        assert_eq!(item.updated_at, before.updated_at);
+        assert_eq!(item.status_category, before.status_category);
+        assert_eq!(item.execution_containers, before.execution_containers);
+        assert_eq!(item.progress_summary, before.progress_summary);
+        assert_eq!(
+            item.events_compacted_through(),
+            Some(before.updated_at),
+            "the compaction watermark marks the folded-and-dropped prefix"
+        );
+        assert!(
+            item.legacy_metadata_authoritative,
+            "the folded state becomes the authoritative replay base"
+        );
+        assert_eq!(item.legacy_metadata_snapshot_at, Some(before.updated_at));
+        assert!(
+            item.legacy_metadata_snapshot.is_none(),
+            "the replay base is the item itself; storing a copy of every field \
+             is what made the projection large"
+        );
+
+        assert_eq!(
+            projection.compact_inline_events(),
+            0,
+            "compaction is idempotent once the item is inside the cap"
+        );
+    }
+
+    /// Issue #4508 AC-1: a compacted item that keeps receiving events stays
+    /// bounded rather than climbing back to its pre-compaction size. Board and
+    /// agent refs accumulate per event too, so capping only `events` would just
+    /// move the growth into them.
+    #[test]
+    fn compact_inline_events_keeps_a_busy_work_item_bounded() {
+        let started_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(started_at);
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Start,
+            "work-busy",
+            started_at,
+        ));
+
+        let mut clock = 1i64;
+        for _round in 0..8 {
+            for _ in 0..MAX_INLINE_WORK_EVENTS {
+                let mut event = WorkEvent::new(
+                    WorkEventKind::Update,
+                    "work-busy",
+                    started_at + chrono::Duration::seconds(clock),
+                );
+                event.board_entry_id = Some(format!("board-{clock}"));
+                event.agent_session_id = Some(format!("session-{clock}"));
+                projection.apply_event(event);
+                clock += 1;
+            }
+            projection.compact_inline_events();
+            let item = &projection.work_items[0];
+            assert!(
+                item.events.len() <= MAX_INLINE_WORK_EVENTS,
+                "inline history must stay inside the cap across rounds"
+            );
+            assert!(
+                item.board_refs.len() <= MAX_WORK_BOARD_REFS,
+                "board refs must stay inside the cap across rounds"
+            );
+            assert!(
+                item.agents.len() <= MAX_WORK_AGENT_REFS,
+                "agent refs must stay inside the cap across rounds"
+            );
+        }
+
+        let item = &projection.work_items[0];
+        assert_eq!(
+            item.board_refs.last().map(String::as_str),
+            Some(format!("board-{}", clock - 1).as_str()),
+            "the newest refs are the ones kept"
+        );
+    }
+
     #[test]
     fn workspace_work_events_build_hot_projection_with_lifecycle_refs() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -984,6 +1321,72 @@ mod tests {
 
         let event_lines = std::fs::read_to_string(&events_path).expect("event log");
         assert_eq!(event_lines.lines().count(), 2);
+    }
+
+    #[test]
+    fn apply_event_merges_pr_metadata_into_matching_execution_container() {
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 19, 10, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 8, 19, 11, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-pr-metadata", t0);
+        start.execution_container = Some(container_for_test(
+            "work/issue-3697",
+            "/repo/work/issue-3697",
+        ));
+        projection.apply_event(start);
+
+        let mut pr = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
+        pr.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3697".to_string()),
+            worktree_path: Some(PathBuf::from("/repo/work/issue-3697")),
+            pr_number: Some(3672),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/3672".to_string()),
+            pr_state: Some("OPEN".to_string()),
+        });
+        projection.apply_event(pr);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-pr-metadata")
+            .expect("item");
+        assert_eq!(
+            item.execution_containers.len(),
+            1,
+            "same worktree must not duplicate the container"
+        );
+        let container = &item.execution_containers[0];
+        assert_eq!(container.pr_number, Some(3672));
+        assert_eq!(
+            container.pr_url.as_deref(),
+            Some("https://github.com/akiojin/gwt/pull/3672")
+        );
+        assert_eq!(container.pr_state.as_deref(), Some("OPEN"));
+        assert_eq!(item.events.len(), 2);
+        assert_eq!(
+            item.events[1]
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.pr_number),
+            Some(3672),
+            "the Pr event itself must carry PR metadata"
+        );
+
+        let mut later = WorkEvent::new(WorkEventKind::Pr, "work-pr-metadata", t1);
+        let mut closed = container.clone();
+        closed.pr_state = Some("CLOSED".to_string());
+        later.execution_container = Some(closed);
+        projection.apply_event(later);
+        let mut update = WorkEvent::new(WorkEventKind::Update, "work-pr-metadata", t1);
+        update.execution_container = Some(container_for_test(
+            "work/issue-3697",
+            "/repo/work/issue-3697",
+        ));
+        projection.apply_event(update);
+        let container = &projection.work_items[0].execution_containers[0];
+        assert_eq!(container.pr_number, Some(3672));
+        assert_eq!(container.pr_state.as_deref(), Some("CLOSED"));
     }
 
     #[test]
@@ -1915,5 +2318,139 @@ mod tests {
                 "{id} ref must be kept"
             );
         }
+    }
+
+    /// Issue #4465: the real accretion shape. A stale Work keeps its *own*
+    /// container and additionally picks up the container of a reused branch
+    /// (measured on `work-work-issue-2359-34a6ca7a`, which held both
+    /// `work/issue-2359` and `work/issue-4465`). The #3684 classifier cannot
+    /// see it because not every container is foreign, so `workspace.ensure`
+    /// stays ambiguous forever. Detaching the foreign *ref* — not the Work —
+    /// is the repair.
+    #[test]
+    fn detach_foreign_container_refs_removes_only_the_accreted_ref() {
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 16, 8, 39, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+        let own = container_for_test("work/issue-2359", "/repo/work/issue-2359");
+        let reused = container_for_test("work/issue-4465", "/repo/work/issue-4465");
+
+        let mut canonical = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+        canonical.agent_session_id = Some("session-new".to_string());
+        canonical.execution_container = Some(reused.clone());
+        projection.apply_event(canonical);
+
+        let mut stale = WorkEvent::new(WorkEventKind::Start, "work-stale", t0);
+        stale.agent_session_id = Some("session-old".to_string());
+        stale.execution_container = Some(own.clone());
+        projection.apply_event(stale);
+        let mut accreted = WorkEvent::new(WorkEventKind::Update, "work-stale", t0);
+        accreted.execution_container = Some(reused.clone());
+        projection.apply_event(accreted);
+
+        let healed = projection.detach_foreign_container_refs("work-canonical", &[], |c| {
+            workspace_execution_container_same(c, &reused)
+        });
+        assert_eq!(healed, vec!["work-stale".to_string()]);
+
+        let stale_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-stale")
+            .expect("stale item");
+        assert_eq!(
+            stale_item.execution_containers.len(),
+            1,
+            "only the accreted ref is detached: {:?}",
+            stale_item.execution_containers
+        );
+        assert!(
+            workspace_execution_container_same(&stale_item.execution_containers[0], &own),
+            "the stale Work keeps its own container"
+        );
+        assert!(
+            stale_item.is_incomplete() && !stale_item.discarded,
+            "detaching a ref never terminalizes the Work"
+        );
+        let canonical_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-canonical")
+            .expect("canonical item");
+        assert_eq!(
+            canonical_item.execution_containers.len(),
+            1,
+            "the canonical Work keeps the container it owns"
+        );
+        // Idempotent: a second heal finds nothing.
+        assert!(projection
+            .detach_foreign_container_refs("work-canonical", &[], |c| {
+                workspace_execution_container_same(c, &reused)
+            })
+            .is_empty());
+    }
+
+    /// Issue #4465 fail-closed boundaries: the canonical Work must exist, be
+    /// incomplete, and itself hold the container. Otherwise nothing is
+    /// detached — a missing or terminal canonical owner is not authority to
+    /// strip another Work's container.
+    #[test]
+    fn detach_foreign_container_refs_is_fail_closed_without_a_live_canonical_owner() {
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 16, 8, 39, 0).unwrap();
+        let reused = container_for_test("work/issue-4465", "/repo/work/issue-4465");
+
+        let seed = |with_canonical: bool, canonical_done: bool| {
+            let mut projection = WorkItemsProjection::empty(t0);
+            if with_canonical {
+                let mut canonical = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+                canonical.execution_container = Some(reused.clone());
+                projection.apply_event(canonical);
+                if canonical_done {
+                    projection.apply_event(WorkEvent::new(
+                        WorkEventKind::Done,
+                        "work-canonical",
+                        t0,
+                    ));
+                }
+            }
+            let mut stale = WorkEvent::new(WorkEventKind::Start, "work-stale", t0);
+            stale.execution_container = Some(reused.clone());
+            projection.apply_event(stale);
+            projection
+        };
+
+        assert!(
+            seed(false, false)
+                .detach_foreign_container_refs("work-canonical", &[], |c| {
+                    workspace_execution_container_same(c, &reused)
+                })
+                .is_empty(),
+            "a missing canonical Work must not strip refs"
+        );
+        assert!(
+            seed(true, true)
+                .detach_foreign_container_refs("work-canonical", &[], |c| {
+                    workspace_execution_container_same(c, &reused)
+                })
+                .is_empty(),
+            "a terminal canonical Work must not strip refs"
+        );
+
+        // The canonical Work exists and is live, but does not hold the
+        // container itself: still fail-closed.
+        let mut projection = WorkItemsProjection::empty(t0);
+        let mut canonical = WorkEvent::new(WorkEventKind::Start, "work-canonical", t0);
+        canonical.execution_container = Some(container_for_test("work/other", "/repo/work/other"));
+        projection.apply_event(canonical);
+        let mut stale = WorkEvent::new(WorkEventKind::Start, "work-stale", t0);
+        stale.execution_container = Some(reused.clone());
+        projection.apply_event(stale);
+        assert!(
+            projection
+                .detach_foreign_container_refs("work-canonical", &[], |c| {
+                    workspace_execution_container_same(c, &reused)
+                })
+                .is_empty(),
+            "a canonical Work that does not hold the container must not strip refs"
+        );
     }
 }

@@ -11,7 +11,9 @@ use gwt_github::{
     SpecOpsError,
 };
 
-use crate::cli::{CliEnv, CliParseError, ClientRef, IssueCommand};
+use crate::cli::{
+    issue::guard_autonomous_acceptance_block, CliEnv, CliParseError, ClientRef, IssueCommand,
+};
 
 use std::collections::BTreeMap;
 
@@ -104,6 +106,24 @@ pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
             i += 1;
         }
         return Ok(IssueCommand::SpecList { phase, state });
+    }
+    if head == "audit" {
+        let mut state: Option<String> = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--state" => {
+                    i += 1;
+                    if i >= args.len() {
+                        return Err(CliParseError::MissingFlag("--state"));
+                    }
+                    state = Some(args[i].clone());
+                }
+                other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+            }
+            i += 1;
+        }
+        return Ok(IssueCommand::SpecAudit { state });
     }
     if head == "create" {
         let mut title: Option<String> = None;
@@ -373,6 +393,7 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
+        IssueCommand::SpecAudit { state } => audit_spec_tasks(env, out, state.as_deref())?,
         IssueCommand::SpecCreate {
             title,
             file,
@@ -447,6 +468,24 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(&format!("repaired cache for #{number}\n"));
             0
         }
+        IssueCommand::SpecLint {
+            number,
+            sections,
+            snapshot,
+            directive_epoch,
+            phase_slice,
+        } => run_spec_lint(
+            env,
+            out,
+            number,
+            &sections,
+            snapshot,
+            directive_epoch,
+            phase_slice,
+        )?,
+        IssueCommand::SpecInspectionComplete { number } => {
+            run_spec_inspection_complete(env, out, number)?
+        }
         IssueCommand::SpecRename { number, title } => {
             let snapshot = env.client().patch_title(IssueNumber(number), &title)?;
             Cache::new(env.cache_root()).write_snapshot(&snapshot)?;
@@ -459,6 +498,327 @@ pub(super) fn run<E: CliEnv>(
         _ => unreachable!("issue_spec::run called with non-spec command"),
     };
     Ok(code)
+}
+
+/// Issue #4146 AC-4: report every gwt-spec Issue whose `tasks` section carries
+/// task rows with no checkbox.
+///
+/// Those rows used to be invisible to the completion count, so a section could
+/// read "10 done / 0 open" with 51 rows untouched and the Issue was closed as
+/// complete. Closed Issues are scanned by default because that is where the
+/// damage already landed; `--state open` / `--state all` widen the scan.
+fn audit_spec_tasks<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    state: Option<&str>,
+) -> Result<i32, SpecOpsError> {
+    let state = match state.unwrap_or("closed") {
+        "closed" => Some(gwt_github::client::IssueState::Closed),
+        "open" => Some(gwt_github::client::IssueState::Open),
+        "all" => None,
+        other => {
+            return Err(SpecOpsError::from(ApiError::Unexpected(format!(
+                "unknown --state '{other}' (expected open, closed, or all)"
+            ))))
+        }
+    };
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    let list = env
+        .client()
+        .list_spec_issues(&SpecListFilter { phase: None, state })?;
+    let scanned = list.len();
+    let tasks = SectionName("tasks".to_string());
+    let mut flagged = 0usize;
+    let mut without_tasks = 0usize;
+    let mut unreadable: Vec<String> = Vec::new();
+    for spec in list {
+        let content = match ops.read_section(spec.number, &tasks) {
+            Ok(content) => content,
+            Err(SpecOpsError::SectionNotFound(_)) => {
+                without_tasks += 1;
+                continue;
+            }
+            Err(err) => {
+                unreadable.push(format!("#{}: {err}", spec.number.0));
+                continue;
+            }
+        };
+        let progress = crate::spec_tasks::parse_tasks_progress(&content);
+        if progress.untracked == 0 {
+            continue;
+        }
+        flagged += 1;
+        let state_marker = match spec.state {
+            gwt_github::client::IssueState::Open => "OPEN",
+            gwt_github::client::IssueState::Closed => "CLOSED",
+        };
+        out.push_str(&format!(
+            "#{} [{state_marker}] completed={} open={} untracked={} {}\n",
+            spec.number.0, progress.completed, progress.open, progress.untracked, spec.title
+        ));
+    }
+    for failure in &unreadable {
+        out.push_str(&format!("unreadable {failure}\n"));
+    }
+    out.push_str(&format!(
+        "audit: scanned {scanned}, flagged {flagged}, no tasks section {without_tasks}, unreadable {}\n",
+        unreadable.len()
+    ));
+    Ok(0)
+}
+
+/// Sections the lint reads when the caller names none.
+const DEFAULT_LINT_SECTIONS: &[&str] = &["spec", "plan", "tasks"];
+
+fn section_sha256(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(content.as_bytes()))
+}
+
+/// The marker prefix of the Issue body: the `gwt-spec` header and the
+/// `sections:` index, with the inline artifact blocks stripped off.
+fn marker_header(body: &str) -> String {
+    match body.find("<!-- artifact:") {
+        Some(index) => body[..index].to_string(),
+        None => body.to_string(),
+    }
+}
+
+/// Issue #4541 AC-1..AC-4: run the deterministic lint in front of the
+/// inspection, record the result inside the Intake Inspection Snapshot, and
+/// seed the Finding Disposition Ledger with the findings so no reviewer
+/// budget is spent rediscovering them.
+fn run_spec_lint<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    number: u64,
+    requested_sections: &[String],
+    snapshot: bool,
+    directive_epoch: Option<String>,
+    phase_slice: Option<String>,
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::intake_inspection::{FindingDispositionLedger, IntakeInspectionSnapshot};
+    use crate::cli::spec_artifact_lint::{lint, ArtifactInput, RoundtripObservation, SectionInput};
+
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    // The lint is a pre-gate, so it reads the GitHub entity, not whatever the
+    // cache happened to hold.
+    ops.refresh_cache(IssueNumber(number))?;
+
+    let names: Vec<String> = if requested_sections.is_empty() {
+        DEFAULT_LINT_SECTIONS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    } else {
+        requested_sections.to_vec()
+    };
+
+    let mut sections: Vec<SectionInput> = Vec::new();
+    for name in &names {
+        match ops.read_section(IssueNumber(number), &SectionName(name.clone())) {
+            Ok(content) => sections.push(SectionInput {
+                name: name.clone(),
+                content,
+            }),
+            Err(SpecOpsError::SectionNotFound(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    if sections.is_empty() {
+        return Err(SpecOpsError::SectionNotFound(names.join(", ")));
+    }
+
+    let header = ops
+        .cache()
+        .load_entry(IssueNumber(number))
+        .map(|entry| marker_header(&entry.snapshot.body));
+
+    // Drift between the last verified write and what is stored now is a
+    // roundtrip break, whatever the write receipt said at the time.
+    let operability = crate::cli::artifact_operability::load(env.repo_path(), number)
+        .ok()
+        .flatten();
+    let roundtrip = sections
+        .iter()
+        .filter_map(|section| {
+            let record = operability.as_ref()?.sections.get(&section.name)?;
+            Some(RoundtripObservation {
+                section: section.name.clone(),
+                written_sha256: record.sha256.clone(),
+                readback_sha256: section_sha256(&section.content),
+            })
+        })
+        .collect();
+
+    let report = lint(
+        &ArtifactInput {
+            owner_number: number,
+            sections: sections.clone(),
+            marker_header: header,
+            roundtrip,
+        },
+        chrono::Utc::now(),
+    );
+
+    out.push_str(&format!(
+        "lint #{number}: {} section(s) scanned, {} finding(s), {} critical{}\n",
+        report.sections_scanned.len(),
+        report.findings.len(),
+        report.critical_count(),
+        if report.is_clean() { " — clean" } else { "" }
+    ));
+    for finding in &report.findings {
+        out.push_str(&format!(
+            "{} [{}] {} ({}) {}\n",
+            finding.id,
+            finding.severity.as_str(),
+            finding.code.as_str(),
+            finding.section,
+            finding.message
+        ));
+    }
+
+    if snapshot {
+        let hashes = sections
+            .iter()
+            .map(|section| (section.name.clone(), section_sha256(&section.content)))
+            .collect();
+        let now = chrono::Utc::now();
+        let captured = IntakeInspectionSnapshot::capture(number, hashes, &report, now)
+            .with_context(directive_epoch, phase_slice, Vec::new());
+        let ledger = FindingDispositionLedger::seed_from_lint(&report, now);
+        match crate::cli::intake_inspection::save(env.repo_path(), &captured, &ledger) {
+            Ok(Some((snapshot_path, ledger_path))) => {
+                out.push_str(&format!(
+                    "snapshot: {}\nledger: {} ({} entry/entries, {} charged to reviewer budget)\n",
+                    snapshot_path.display(),
+                    ledger_path.display(),
+                    ledger.entries.len(),
+                    ledger.reviewer_budget_entries().len()
+                ));
+            }
+            Ok(None) => out.push_str(
+                "snapshot: not persisted (repo hash unresolvable outside a git worktree)\n",
+            ),
+            Err(err) => out.push_str(&format!("snapshot: not persisted ({err})\n")),
+        }
+        out.push('\n');
+        out.push_str(&gwt_skills::inspection_guidance::render_reviewer_checklist());
+    }
+
+    Ok(i32::from(report.critical_count() > 0))
+}
+
+/// Issue #4541 AC-6: completion needs a GitHub-entity readback per section.
+/// Evidence is derived here rather than accepted from the caller, so an agent
+/// cannot declare completion by asserting it.
+fn run_spec_inspection_complete<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    number: u64,
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::intake_inspection::{
+        validate_completion_evidence, CompletionEvidence, FindingDispositionLedger,
+        ReadbackEvidence, ReadbackSource, SectionCompletion,
+    };
+
+    let Some(snapshot) = crate::cli::intake_inspection::load_snapshot(env.repo_path(), number)
+        .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?
+    else {
+        out.push_str(&format!(
+            "no Intake Inspection Snapshot for #{number}; run issue.spec.lint first\n"
+        ));
+        return Ok(1);
+    };
+    let ledger = crate::cli::intake_inspection::load_ledger(env.repo_path(), number)
+        .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?
+        .unwrap_or_else(|| FindingDispositionLedger {
+            owner_number: number,
+            entries: Vec::new(),
+            updated_at: snapshot.captured_at,
+        });
+
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    // Reaching the GitHub entity is what makes this readback rather than a
+    // cache re-read; when it fails, the evidence is cache-only and the gate
+    // below refuses it instead of quietly settling.
+    let source = match ops.refresh_cache(IssueNumber(number)) {
+        Ok(()) => ReadbackSource::GitHubEntity,
+        Err(err) => {
+            out.push_str(&format!(
+                "warning: could not reach the GitHub entity for #{number} ({err}); evidence falls back to the local cache\n"
+            ));
+            ReadbackSource::LocalCache
+        }
+    };
+    let operability = crate::cli::artifact_operability::load(env.repo_path(), number)
+        .ok()
+        .flatten();
+    let observed_at = chrono::Utc::now();
+
+    let mut sections = Vec::new();
+    for name in snapshot.section_hashes.keys() {
+        // No verified write receipt means the section was written outside the
+        // verified path (manual escaping, a user-run script).
+        let bypass_path = operability
+            .as_ref()
+            .is_none_or(|record| !record.sections.contains_key(name));
+        let readback = match ops.read_section(IssueNumber(number), &SectionName(name.clone())) {
+            Ok(content) => Some(ReadbackEvidence {
+                source,
+                sha256: section_sha256(&content),
+                observed_at,
+                refs: vec![format!("issue:{number}#{name}")],
+            }),
+            Err(SpecOpsError::SectionNotFound(_)) => None,
+            Err(err) => return Err(err),
+        };
+        sections.push(SectionCompletion {
+            section: name.clone(),
+            bypass_path,
+            readback,
+        });
+    }
+
+    let evidence = CompletionEvidence { sections };
+    match validate_completion_evidence(&snapshot, &ledger, &evidence) {
+        Ok(()) => {
+            out.push_str(&format!(
+                "completion evidence for #{number}: PASS ({} section(s) confirmed against the GitHub entity)\n",
+                snapshot.section_hashes.len()
+            ));
+            Ok(0)
+        }
+        Err(errors) => {
+            out.push_str(&format!(
+                "completion evidence for #{number}: BLOCKED ({} problem(s))\n",
+                errors.len()
+            ));
+            for error in &errors {
+                out.push_str(&format!("- {error}\n"));
+            }
+            Ok(1)
+        }
+    }
 }
 
 fn write_spec_section<E: CliEnv>(
@@ -475,6 +835,7 @@ fn write_spec_section<E: CliEnv>(
         },
         cache,
     );
+    guard_spec_section_write(&ops, number, &section, &content)?;
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
     super::intake_outcome::auto_record_issue_operation(
@@ -492,6 +853,28 @@ fn write_spec_section<E: CliEnv>(
     );
     out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
+}
+
+/// Issue #3873 AC-2: a `spec` section write on an `auto-merge` Issue must keep
+/// a machine-checkable acceptance block. Reads the Issue's current labels
+/// through a conditional refresh so a label added after the last cache write
+/// is honoured; other sections are never inspected.
+fn guard_spec_section_write<C: IssueClient>(
+    ops: &SpecOps<C>,
+    number: u64,
+    section: &str,
+    content: &str,
+) -> Result<(), SpecOpsError> {
+    if section != SPEC_SECTION_NAME {
+        return Ok(());
+    }
+    ops.refresh_cache(IssueNumber(number))?;
+    let labels = ops
+        .cache()
+        .load_entry(IssueNumber(number))
+        .map(|entry| entry.snapshot.labels)
+        .unwrap_or_default();
+    guard_autonomous_acceptance_block(&labels, content)
 }
 
 /// Render the committed-write evidence line (SPEC-3248 P7C / #3284): byte
@@ -536,6 +919,7 @@ fn write_structured_spec_section<E: CliEnv>(
     } else {
         merge_structured_spec(&existing, &structured)
     };
+    guard_spec_section_write(&ops, number, &section, &content)?;
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
     super::intake_outcome::auto_record_issue_operation(
@@ -574,6 +958,7 @@ fn create_spec_from_markdown<E: CliEnv>(
         .into_iter()
         .map(|section| (section.name, section.content))
         .collect();
+    guard_autonomous_acceptance_block(&labels, raw)?;
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(
         env.repo_path(),
@@ -604,6 +989,7 @@ fn create_spec_from_structured_json<E: CliEnv>(
     );
     let structured = parse_structured_spec_json(raw_json)?;
     let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
+    guard_autonomous_acceptance_block(&labels, &spec)?;
     let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
     super::intake_outcome::auto_record_issue_operation(

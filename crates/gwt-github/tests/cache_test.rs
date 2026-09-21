@@ -1,10 +1,15 @@
 //! Contract tests for the `cache` module (SPEC-12 tdd.md Layer 6).
 
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::BTreeMap,
+    fs,
+    sync::{Arc, Barrier},
+    time::Duration,
+};
 
 use gwt_github::{
     body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
-    cache::{Cache, CacheEntry},
+    cache::{Cache, CacheEntry, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
 };
@@ -157,6 +162,288 @@ fn red_56_subsequent_write_replaces_body() {
         let name = entry.file_name().into_string().unwrap();
         assert!(!name.ends_with(".tmp"), "stray tmp file found: {}", name);
     }
+}
+
+#[test]
+fn issue_snapshot_write_invalidates_existing_validation_sidecar() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v1", "t1"));
+    cache.write_snapshot(&first).unwrap();
+    let receipt = tmp.path().join("42/issue-validation.json");
+    fs::write(
+        &receipt,
+        r#"{"version":1,"generation":"old","validated_at":"now"}"#,
+    )
+    .unwrap();
+
+    let second = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v2", "t2"));
+    cache.write_snapshot(&second).unwrap();
+
+    assert!(
+        !receipt.exists(),
+        "ordinary cache writes must invalidate full-validation proof"
+    );
+}
+
+#[test]
+fn matching_validation_receipt_marks_snapshot_fresh() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap()
+        .renewed());
+
+    match cache
+        .load_validated_entry(snapshot.number, Duration::from_secs(60))
+        .unwrap()
+    {
+        ValidatedCacheEntry::Fresh(entry) => assert_eq!(entry.entry.snapshot, snapshot),
+        other => panic!("expected fresh validated entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn validation_receipt_is_bound_to_the_snapshot_contents() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_current(&snapshot)
+        .unwrap()
+        .renewed());
+
+    let mut replacement = snapshot.clone();
+    replacement.body = "concurrent replacement".to_string();
+    cache.write_snapshot(&replacement).unwrap();
+
+    match cache
+        .load_validated_entry(snapshot.number, Duration::from_secs(60))
+        .unwrap()
+    {
+        ValidatedCacheEntry::Unvalidated(entry) => {
+            assert_eq!(entry.entry.snapshot.body, "concurrent replacement")
+        }
+        other => panic!("mismatched receipt must be unvalidated, got {other:?}"),
+    }
+}
+
+#[test]
+fn failed_snapshot_write_leaves_validation_receipt_absent() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v1", "t1"));
+    cache.write_snapshot(&first).unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_current(&first)
+        .unwrap()
+        .renewed());
+    let receipt = cache.validation_receipt_path(first.number);
+
+    fs::remove_file(tmp.path().join("42/body.md")).unwrap();
+    fs::create_dir(tmp.path().join("42/body.md")).unwrap();
+    let second = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("v2", "t2"));
+
+    assert!(cache.write_snapshot(&second).is_err());
+    assert!(
+        !receipt.exists(),
+        "failed or partial writes must never retain validation proof"
+    );
+}
+
+#[test]
+fn identical_snapshot_commits_rotate_generation_and_invalidate_receipt() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    let first = cache.current_generation(snapshot.number).unwrap().unwrap();
+    assert!(cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&first))
+        .unwrap()
+        .renewed());
+
+    cache.write_snapshot(&snapshot).unwrap();
+    let second = cache.current_generation(snapshot.number).unwrap().unwrap();
+
+    assert_ne!(first, second, "every cache commit needs an ABA-safe UUID");
+    assert!(!cache.validation_receipt_path(snapshot.number).exists());
+}
+
+#[test]
+fn stale_generation_cannot_overwrite_a_newer_cache_commit() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("first", "tasks"));
+    cache.write_snapshot(&first).unwrap();
+    let stale_generation = cache.current_generation(first.number).unwrap().unwrap();
+
+    let newer = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("newer", "tasks"));
+    cache.write_snapshot(&newer).unwrap();
+    let delayed = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("delayed", "tasks"));
+
+    assert!(cache
+        .write_snapshot_if_generation(&delayed, Some(&stale_generation))
+        .unwrap()
+        .is_none());
+    assert_eq!(cache.load_entry(first.number).unwrap().snapshot, newer);
+}
+
+#[test]
+fn simultaneous_generation_cas_allows_exactly_one_writer() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let initial = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("initial", "tasks"));
+    cache.write_snapshot(&initial).unwrap();
+    let generation = cache.current_generation(initial.number).unwrap().unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let handles: Vec<_> = ["writer-a", "writer-b"]
+        .into_iter()
+        .map(|body| {
+            let cache = cache.clone();
+            let generation = generation.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body(body, "tasks"));
+                barrier.wait();
+                cache
+                    .write_snapshot_if_generation(&snapshot, Some(&generation))
+                    .unwrap()
+            })
+        })
+        .collect();
+    barrier.wait();
+    let committed = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .filter(Option::is_some)
+        .count();
+
+    assert_eq!(committed, 1, "generation CAS must select one writer");
+}
+
+#[test]
+fn validation_publication_rejects_a_changed_generation() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let first = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("first", "tasks"));
+    cache.write_snapshot(&first).unwrap();
+    let stale_generation = cache.current_generation(first.number).unwrap().unwrap();
+    let newer = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("newer", "tasks"));
+    cache.write_snapshot(&newer).unwrap();
+
+    assert!(!cache
+        .renew_validation_receipt_if_generation(&first, Some(&stale_generation))
+        .unwrap()
+        .renewed());
+    assert!(!cache.validation_receipt_path(first.number).exists());
+}
+
+#[test]
+fn validation_publication_rejects_mixed_files_with_the_old_generation() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let expected = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("expected", "tasks"));
+    cache.write_snapshot(&expected).unwrap();
+    let generation = cache.current_generation(expected.number).unwrap().unwrap();
+
+    // Model a failed multi-file writer: body.md changed, but meta.json never
+    // published a new generation. A NotModified probe must keep using the
+    // pre-probe snapshot instead of reloading and blessing these mixed files.
+    fs::write(tmp.path().join("42/body.md"), "partial writer body").unwrap();
+
+    assert!(!cache
+        .renew_validation_receipt_if_generation(&expected, Some(&generation))
+        .unwrap()
+        .renewed());
+    assert!(!cache.validation_receipt_path(expected.number).exists());
+}
+
+/// Issue #4436 AC-4: a renewal names which of the four refusals happened, and
+/// only a concurrent writer answers `cache_changed`.
+///
+/// Every refusal used to be reported to operators as "the cache changed; retry
+/// the operation". Three of them describe the persisted entry, so retrying
+/// re-ran the same refusal against a `meta.json` that never moved.
+#[test]
+fn validation_renewal_distinguishes_a_concurrent_writer_from_a_stable_cache() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    let generation = cache.current_generation(snapshot.number).unwrap().unwrap();
+
+    assert_eq!(
+        cache
+            .renew_validation_receipt_if_generation(&snapshot, Some(&generation))
+            .unwrap(),
+        ValidationReceiptRenewal::Renewed
+    );
+
+    // The caller's generation is no longer the persisted one: a real race, and
+    // the only outcome a retry can resolve.
+    cache.write_snapshot(&snapshot).unwrap();
+    let changed = cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&generation))
+        .unwrap();
+    assert_eq!(changed, ValidationReceiptRenewal::GenerationChanged);
+    assert!(changed.cache_changed());
+
+    // The generation is still the caller's, but the persisted bytes are not the
+    // validated snapshot. Nothing changed under the caller; the entry is simply
+    // not what was validated.
+    let current = cache.current_generation(snapshot.number).unwrap().unwrap();
+    fs::write(tmp.path().join("42/body.md"), "partial writer body").unwrap();
+    let mismatch = cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&current))
+        .unwrap();
+    assert_eq!(mismatch, ValidationReceiptRenewal::SnapshotMismatch);
+    assert!(
+        !mismatch.cache_changed(),
+        "a stable generation must never be reported as a concurrent writer"
+    );
+
+    // No entry at all, and no generation to bind a receipt to.
+    let missing = mk_snapshot(43, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    let unbound = cache.renew_validation_receipt_if_current(&missing).unwrap();
+    assert_eq!(unbound, ValidationReceiptRenewal::EntryUnreadable);
+    assert!(!unbound.cache_changed());
+}
+
+#[test]
+fn malformed_legacy_meta_can_be_replaced_by_an_unconditional_fetch() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("repaired", "tasks"));
+    fs::create_dir_all(tmp.path().join("42")).unwrap();
+    fs::write(tmp.path().join("42/meta.json"), "{malformed").unwrap();
+    fs::write(tmp.path().join("42/body.md"), "stale partial body").unwrap();
+
+    match cache
+        .load_validated_entry(snapshot.number, Duration::from_secs(60))
+        .unwrap()
+    {
+        ValidatedCacheEntry::Missing { generation: None } => {}
+        other => panic!("malformed metadata must route to self-repair, got {other:?}"),
+    }
+    let committed = cache
+        .write_snapshot_if_generation(&snapshot, None)
+        .unwrap()
+        .expect("unconditional fetch should replace malformed legacy cache");
+    assert_eq!(
+        cache.load_entry(snapshot.number).unwrap().snapshot,
+        snapshot
+    );
+    assert_eq!(
+        cache.current_generation(snapshot.number).unwrap(),
+        Some(committed)
+    );
 }
 
 // RED-57: write_snapshot with body containing comments also writes comments/*.md
@@ -370,6 +657,29 @@ fn apply_phase_change_overwrites_labels_and_persists_to_meta() {
 }
 
 #[test]
+fn apply_phase_change_invalidates_existing_validation_sidecar() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let body = mk_body_with_spec_and_tasks_in_body("spec", "tasks");
+    cache.write_snapshot(&mk_snapshot(7, body)).unwrap();
+    let receipt = tmp.path().join("7/issue-validation.json");
+    fs::write(
+        &receipt,
+        r#"{"version":1,"generation":"old","validated_at":"now"}"#,
+    )
+    .unwrap();
+
+    cache
+        .apply_phase_change(IssueNumber(7), vec!["phase/done".to_string()])
+        .unwrap();
+
+    assert!(
+        !receipt.exists(),
+        "label-only cache writes must invalidate full-validation proof"
+    );
+}
+
+#[test]
 fn apply_phase_change_returns_error_when_entry_is_missing() {
     // No prior write_snapshot for #404 — apply_phase_change must surface
     // a typed error so the caller can map it to a user-friendly message
@@ -473,16 +783,39 @@ Rest of the body is human prose, not a real SPEC.\n"
         leftover.iter().map(|e| e.file_name()).collect::<Vec<_>>()
     );
 
-    // load_entry must NOT surface this entry: the SPEC header is present
-    // but parse failed, so exposing an empty SpecBody would let
-    // `SpecOps::write_section` recompute the routing from scratch and
-    // overwrite the body's sections index, orphaning any content in
-    // comments referenced by the malformed index.
+    // Issue #4392: load_entry surfaces the entry with an empty SpecBody and
+    // the parse error, instead of hiding it. Hiding it made every validated
+    // read (issue.view / edit / comment) fail forever, because the receipt
+    // renewal could never reload what it had just written.
+    // `SpecOps::write_section` refuses entries carrying the marker, so the
+    // orphaned-comment hazard stays closed.
+    let entry = cache
+        .load_entry(IssueNumber(123))
+        .expect("load_entry must surface header-present-but-malformed entries");
+    assert_eq!(entry.snapshot.body, body);
+    assert!(entry.spec_body.sections.is_empty());
     assert!(
-        cache.load_entry(IssueNumber(123)).is_none(),
-        "load_entry must hide header-present-but-malformed entries to \
-         prevent SpecOps::write_section from corrupting them"
+        entry
+            .spec_parse_error
+            .as_deref()
+            .is_some_and(|error| error.contains("broken index map")),
+        "{:?}",
+        entry.spec_parse_error
     );
+
+    assert!(
+        cache
+            .renew_validation_receipt_if_current(&snapshot)
+            .unwrap()
+            .renewed(),
+        "a malformed SPEC body must still receive a validation receipt"
+    );
+    assert!(matches!(
+        cache
+            .load_validated_entry(IssueNumber(123), Duration::from_secs(60))
+            .unwrap(),
+        ValidatedCacheEntry::Fresh(_)
+    ));
 }
 
 // Companion to the previous test: a plain Issue (no `<!-- gwt-spec id=...`

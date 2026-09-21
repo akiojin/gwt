@@ -8,6 +8,7 @@
 // updateCameraFrame DOM output and the cell-click → frameWindow contract.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 
@@ -51,6 +52,15 @@ function makeMinimap(container, windows, overrides = {}) {
   return { minimap, calls };
 }
 
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
 test("createFleetMinimap returns a no-op surface when there is no container", () => {
   const minimap = createFleetMinimap({ container: null });
   assert.equal(typeof minimap.renderCells, "function");
@@ -61,6 +71,69 @@ test("createFleetMinimap returns a no-op surface when there is no container", ()
   minimap.renderCells();
   minimap.update();
   minimap.setZoom(1.25);
+});
+
+test("visibility toggle collapses the radar, persists the preference, and keeps cell state live", () => {
+  const { container } = setupDom();
+  const storage = memoryStorage();
+  const windows = [
+    windowAt("w-agent", 0, 0, 100, 80, {
+      agent_color: "violet",
+      telemetry: "running",
+    }),
+  ];
+  const { minimap } = makeMinimap(container, windows, { storage });
+
+  minimap.renderCells();
+
+  const toggle = container.querySelector(".fleet-minimap__visibility-toggle");
+  assert.ok(toggle, "the minimap exposes its visibility toggle");
+  assert.equal(container.dataset.collapsed, "false");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(toggle.getAttribute("aria-label"), "Hide minimap");
+
+  toggle.dispatchEvent(new container.ownerDocument.defaultView.Event("click"));
+
+  assert.equal(container.dataset.collapsed, "true");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle.getAttribute("aria-label"), "Show minimap");
+  assert.equal(storage.getItem("gwt:ui:fleet-minimap-collapsed"), "1");
+  windows[0].telemetry = "waiting";
+  minimap.renderCells();
+  assert.equal(
+    container.querySelector('[data-window-id="w-agent"]').dataset.telemetry,
+    "waiting",
+    "collapsed presentation keeps receiving telemetry updates",
+  );
+
+  toggle.dispatchEvent(new container.ownerDocument.defaultView.Event("click"));
+
+  assert.equal(container.dataset.collapsed, "false");
+  assert.equal(storage.getItem("gwt:ui:fleet-minimap-collapsed"), null);
+});
+
+test("stored collapsed preference is restored when the minimap is created", () => {
+  const { container } = setupDom();
+  const storage = memoryStorage({ "gwt:ui:fleet-minimap-collapsed": "1" });
+  makeMinimap(container, [windowAt("w-1", 0, 0)], { storage });
+
+  const toggle = container.querySelector(".fleet-minimap__visibility-toggle");
+  assert.equal(container.dataset.collapsed, "true");
+  assert.equal(toggle?.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle?.getAttribute("aria-label"), "Show minimap");
+});
+
+test("collapsed minimap CSS leaves only the token-styled visibility toggle", () => {
+  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+  assert.match(css, /\.fleet-minimap\[data-collapsed="true"\]/);
+  assert.match(
+    css,
+    /\.fleet-minimap\[data-collapsed="true"\]\s*>\s*:not\(\.fleet-minimap__visibility-toggle\)/,
+  );
+  const toggleRule = /\.fleet-minimap__visibility-toggle\s*\{[^}]+\}/.exec(css)?.[0] ?? "";
+  assert.match(toggleRule, /var\(--color-border\)/);
+  assert.match(toggleRule, /var\(--color-surface-elevated\)/);
+  assert.doesNotMatch(toggleRule, /#[0-9a-f]{3,8}\b|rgba?\(/i);
 });
 
 test("renderCells creates one cell per window keyed by window id", () => {
@@ -623,4 +696,48 @@ test("renderCells repositions an existing cell after its window geometry changes
     parseFloat(cell.style.top) > topBefore,
     "the moved window's cell must shift down with its new world y",
   );
+});
+
+// Issue #3884 AC-1: an `issue_preview` placement (SPEC-3671) is not drawn on the
+// canvas, so it must not be drawn on the minimap either — a radar rectangle with
+// no window behind it reads as "the window vanished". Windowize moves the
+// placement back to `canvas`, and only then does the cell appear.
+test("Issue #3884 AC-1: off-canvas placements are not drawn as minimap cells", () => {
+  const { container } = setupDom();
+  const issueWindow = windowAt("issue-1", 0, 0, 1400, 860, { preset: "issue" });
+  const inlineAgent = windowAt("agent-1", 120, 120, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  });
+  const kanbanAgent = windowAt("agent-2", 200, 200, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "agent_kanban", board_id: "kanban-1", lane_id: "active", order: 0 },
+  });
+  const windows = [issueWindow, inlineAgent, kanbanAgent];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+
+  const ids = [...container.querySelectorAll(".fleet-minimap__cell")].map(
+    (cell) => cell.dataset.windowId,
+  );
+  assert.deepEqual(ids, ["issue-1"], "only canvas-placed windows get a radar cell");
+  assert.equal(container.dataset.empty, "false");
+
+  // Windowize: the placement returns to the canvas and the cell appears.
+  inlineAgent.placement = { kind: "canvas" };
+  minimap.renderCells();
+  const afterWindowize = [...container.querySelectorAll(".fleet-minimap__cell")]
+    .map((cell) => cell.dataset.windowId)
+    .sort();
+  assert.deepEqual(afterWindowize, ["agent-1", "issue-1"]);
+
+  // A workspace whose only windows are inline agents is an empty radar.
+  windows.splice(0, windows.length, windowAt("agent-3", 0, 0, 100, 80, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  }));
+  minimap.renderCells();
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 0);
+  assert.equal(container.dataset.empty, "true");
 });

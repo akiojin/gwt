@@ -60,7 +60,9 @@ pub fn handle_with_input(
     {
         let reason = match &refreshed.status {
             crate::cli::verification_record::WorkEventSettlementStatus::Blocked(blocker) => {
-                crate::cli::verification_record::work_event_settlement_blocker_description(blocker)
+                crate::cli::verification_record::work_event_settlement_blocker_description(
+                    blocker, &resolved,
+                )
             }
             _ => "Work event settlement is waiting on the environment.".to_string(),
         };
@@ -81,7 +83,9 @@ pub fn handle_with_input(
             journal_entry_id,
         ),
         crate::cli::verification_record::WorkEventSettlementStatus::Blocked(blocker) => {
-            crate::cli::verification_record::work_event_settlement_blocker_description(blocker)
+            crate::cli::verification_record::work_event_settlement_blocker_description(
+                blocker, &resolved,
+            )
         }
         crate::cli::verification_record::WorkEventSettlementStatus::Settled { .. } => {
             "Work event settlement refused: the trusted obligation is still open. Refresh the settlement state and retry Stop.".to_string()

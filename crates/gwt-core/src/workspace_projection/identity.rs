@@ -48,6 +48,45 @@ pub fn canonical_work_id(
     ))
 }
 
+/// One stable successor identity per predecessor, shared by concurrent launches
+/// and retries without changing the canonical branch grouping key.
+pub fn successor_work_id(predecessor_id: &str) -> String {
+    format!(
+        "work-successor-{}",
+        hex::encode(Sha256::digest(predecessor_id.as_bytes()))
+    )
+}
+
+/// Canonicalize a stored Work owner onto the durable `SPEC-<n>` spelling.
+///
+/// `Issue #<n>` and the legacy `SPEC #<n>` spelling may upgrade to the same
+/// SPEC owner. The transition is one-way and requires canonical numbers.
+pub fn can_upgrade_work_owner(stored: Option<&str>, durable: Option<&str>) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    let Some(durable) = durable else {
+        return false;
+    };
+    let Some((prefix, stored_number)) = ["Issue #", "SPEC #"].into_iter().find_map(|prefix| {
+        stored
+            .strip_prefix(prefix)
+            .and_then(|number| number.parse::<u64>().ok())
+            .map(|number| (prefix, number))
+    }) else {
+        return false;
+    };
+    let Some(durable_number) = durable
+        .strip_prefix("SPEC-")
+        .and_then(|number| number.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    stored == format!("{prefix}{stored_number}")
+        && durable == format!("SPEC-{durable_number}")
+        && stored_number == durable_number
+}
+
 /// SPEC-2359 W16-2 (FR-389): the Workspace grouping key for one Work item —
 /// derived at view-assembly time, never stored (plan decision 6). Works that
 /// share a canonical branch (any spelling: `X`, `origin/X`,

@@ -98,7 +98,13 @@ pub fn apply_log_level_to_handle(handle: &ReloadHandle, level: LogLevel) -> Resu
 pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     // Startup housekeeping — best effort. Errors are returned inside
     // the report but never block initialization.
-    let report = housekeep::housekeep(&config.log_dir, config.retention_days);
+    let log_file_prefix = format!("{}.", writer::LOG_FILE_BASENAME);
+    let report = housekeep::housekeep(
+        &config.log_dir,
+        config.retention_days,
+        &log_file_prefix,
+        "%Y-%m-%d",
+    );
     if !report.errors.is_empty() {
         // We cannot emit a tracing event yet (the subscriber is not
         // installed). Swallow silently; the caller can inspect the

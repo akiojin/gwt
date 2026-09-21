@@ -25,13 +25,17 @@ mod texts;
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
-use crate::board_provider::{has_recent_post_by, load_entries_since_for_scope};
+use crate::board_provider::load_prompt_reminder_for_repo_hash;
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
+#[cfg(test)]
+use gwt_core::coordination::{load_reminders_state, write_reminders_state};
 use gwt_core::coordination::{
-    load_reminders_state, write_reminders_state, BoardEntryKind, RemindersState,
+    load_reminders_state_for_repo_hash, write_reminders_state_for_repo_hash, BoardEntryKind,
+    PromptBoardRead, PromptBoardReadRequest, RemindersState,
 };
 use gwt_core::workspace_projection::WorkspaceProjection;
 
@@ -51,8 +55,12 @@ const PROGRESS_SUMMARY_STALE_TURN_THRESHOLD: u32 = 4;
 /// long session does not pay the reminder on every UserPromptSubmit turn.
 const MEMORY_REMINDER_THROTTLE_WINDOW_HOURS: i64 = 6;
 
+use super::context::HookContext;
 use super::{HookError, HookEvent, HookOutput, IntentBoundaryEvent};
-use crate::board_audience::current_session_board_scope;
+use crate::board_audience::current_session_board_scope_from_projection;
+
+const USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE: Duration = Duration::from_millis(25);
+const USER_PROMPT_SUBMIT_REMINDER_WRITE_MIN_BUDGET: Duration = Duration::from_millis(100);
 
 pub use plan::{plan_reminder, ReminderInputs, ReminderPlan};
 
@@ -68,7 +76,7 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<HookOutput, HookError> {
     let hook_event = HookEvent::read_from_str(input)?;
-    let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
+    let Some(_) = IntentBoundaryEvent::from_name(event) else {
         return Ok(HookOutput::Silent);
     };
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -76,10 +84,45 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<HookOutput, HookErr
         return Ok(HookOutput::Silent);
     };
     let session = session_scoped_to_hook_cwd(session, hook_event.as_ref());
-    let Some(plan) = compute_plan(event, &session, Utc::now())? else {
+    handle_with_input_for_session(event, input, &session)
+}
+
+pub(crate) fn handle_with_input_for_session(
+    event: &str,
+    _input: &str,
+    session: &Session,
+) -> Result<HookOutput, HookError> {
+    let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
         return Ok(HookOutput::Silent);
     };
-    write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders)?;
+    let Some(plan) = compute_plan(event, session, Utc::now())? else {
+        return Ok(HookOutput::Silent);
+    };
+    if prompt_reminder_write_has_budget(event, gwt_core::operation_deadline::current()) {
+        let written = timed_substage(event, "board-reminder/reminders-write", || {
+            write_reminders_state_for_repo_hash(
+                &session.worktree_path,
+                session.repo_hash.as_deref(),
+                &session.id,
+                &plan.next_reminders,
+            )
+        });
+        // Issue #3777: the sidecar only throttles how often a reminder repeats,
+        // and its atomic replace now gives up at the prompt deadline instead of
+        // sleeping through it. Losing one update may repeat a reminder; failing
+        // the hook over it would cost the agent the whole prompt, so the write
+        // is fatal only outside the deadline-bounded prompt path.
+        match written {
+            Ok(()) => {}
+            Err(error) if event == "UserPromptSubmit" => {
+                tracing::warn!(
+                    ?error,
+                    "reminder sidecar write skipped within prompt budget"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     debug_assert_eq!(intent_event, plan_event(&plan.output));
     Ok(plan.output)
 }
@@ -110,6 +153,11 @@ fn session_scoped_to_hook_cwd(mut session: Session, hook_event: Option<&HookEven
     let Some(cwd) = hook_event.and_then(|event| hook_cwd_path(event.cwd.as_deref())) else {
         return session;
     };
+    if crate::pm_registry::pm_worktree_for_runtime_dir(&cwd).is_some() {
+        // Runtime discovery must not replace the persisted project's identity.
+        // A payload naming another PM's runtime does not transfer authority.
+        return session;
+    }
     session.worktree_path = cwd;
     session.repo_hash =
         gwt_core::repo_hash::detect_repo_hash(&session.worktree_path).map(|hash| hash.to_string());
@@ -153,14 +201,27 @@ fn build_self_match_keys(session: &Session) -> Vec<String> {
     keys
 }
 
-fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
-    let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
-        session,
-        &session.worktree_path,
-    );
-    let projection =
-        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
-    if !title_summary_missing_in_projection(projection.as_ref(), &session.id) {
+fn agent_title_summary_missing_in_projection(
+    session: &Session,
+    projection: Option<&WorkspaceProjection>,
+) -> Result<bool, HookError> {
+    // Issue #3984: an independent-review dispatch window owns no Workspace
+    // Work, so `workspace.update` is permanently rejected there — the same
+    // unfollowable-instruction case as the detached-HEAD probe below, only
+    // known up front from the launch marker instead of from git.
+    if crate::issue_monitor_review::review_dispatch_session_active() {
+        return Ok(false);
+    }
+    // Issue #4442: the resident PM window is the other `suppress_execution_control`
+    // session, and the title instruction is just as unfollowable there — see
+    // `pm_registry::pm_identity_exempt_session` for why neither `workspace.update`
+    // nor `workspace.ensure` can ever succeed in it.
+    if crate::pm_registry::pm_identity_exempt_session_for_worktree(&session.worktree_path) {
+        return Ok(false);
+    }
+    // Issue #3777 AC-1: the projection is the caller's single snapshot — this
+    // hot path must not re-read it per prompt.
+    if !title_summary_missing_in_projection(projection, &session.id) {
         return Ok(false);
     }
     // Issue #3491: a detached-HEAD worktree has no branch, so it has no
@@ -173,6 +234,17 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
     Ok(!crate::agent_project_state::worktree_head_is_detached(
         &session.worktree_path,
     ))
+}
+
+#[cfg(test)]
+fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
+    let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
+        session,
+        &session.worktree_path,
+    );
+    let projection =
+        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
+    agent_title_summary_missing_in_projection(session, projection.as_ref())
 }
 
 /// Pure decision for whether `session_id`'s agent still needs a `title_summary`.
@@ -222,9 +294,7 @@ fn append_title_summary_required_context(
         }
         // Inject even when there is no board reminder this turn, so a fresh
         // agent's first UserPromptSubmit always carries the title instruction.
-        HookOutput::Silent => {
-            HookOutput::hook_specific_additional_context(event, required.to_string())
-        }
+        HookOutput::Silent => HookOutput::hook_specific_additional_context(event, required),
         other => other,
     }
 }
@@ -297,12 +367,11 @@ fn append_title_summary_stale_context(
     output: HookOutput,
     event: IntentBoundaryEvent,
     stale: bool,
-    language: &str,
 ) -> HookOutput {
     if !stale || event != IntentBoundaryEvent::UserPromptSubmit {
         return output;
     }
-    let stale_text = texts::title_summary_stale_reminder(language);
+    let stale_text = texts::TITLE_SUMMARY_STALE_REMINDER;
     match output {
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{stale_text}"))
@@ -401,13 +470,11 @@ fn append_progress_summary_context(
     event: IntentBoundaryEvent,
     missing: bool,
     stale: bool,
-    language: &str,
 ) -> HookOutput {
     if !missing && !stale {
         return output;
     }
-    let reminder =
-        texts::progress_summary_reminder(language, stale, event == IntentBoundaryEvent::Stop);
+    let reminder = texts::progress_summary_reminder(stale, event == IntentBoundaryEvent::Stop);
     match output {
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{reminder}"))
@@ -473,12 +540,11 @@ fn append_memory_update_context(
     event: IntentBoundaryEvent,
     present: bool,
     suppress: bool,
-    language: &str,
 ) -> HookOutput {
     if !present || event == IntentBoundaryEvent::SessionStart || suppress {
         return output;
     }
-    let reminder = texts::memory_update_reminder(language, event == IntentBoundaryEvent::Stop);
+    let reminder = texts::memory_update_reminder(event == IntentBoundaryEvent::Stop);
     match output {
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{reminder}"))
@@ -487,6 +553,79 @@ fn append_memory_update_context(
             HookOutput::system_message(format!("{text}\n\n{reminder}"))
         }
         other => other,
+    }
+}
+
+struct PromptBoardReadOutcome {
+    read: PromptBoardRead,
+    succeeded: bool,
+}
+
+/// Time one `board-reminder` substage into the opt-in hook profile.
+///
+/// Issue #3777: on Windows the aggregate `board-reminder` record is ~85% of the
+/// prompt budget while its Board history read is already capped at
+/// [`USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE`], so the cost sits in the
+/// surrounding reads and writes. The substage names are fixed literals on the
+/// content-free allowlist in [`super::diagnostics`].
+fn timed_substage<T>(event: &str, handler: &'static str, work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let value = work();
+    super::diagnostics::record_handler_duration(event, handler, started.elapsed(), "ok");
+    value
+}
+
+fn prompt_reminder_write_has_budget(event: &str, deadline: Option<Instant>) -> bool {
+    event != "UserPromptSubmit"
+        || deadline.is_none_or(|deadline| {
+            deadline.saturating_duration_since(Instant::now())
+                > USER_PROMPT_SUBMIT_REMINDER_WRITE_MIN_BUDGET
+        })
+}
+
+fn load_user_prompt_board_read_with(
+    load: impl FnOnce() -> gwt_core::Result<PromptBoardRead> + Send + 'static,
+) -> PromptBoardReadOutcome {
+    let local_deadline = Instant::now() + USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE;
+    let deadline = gwt_core::operation_deadline::current()
+        .map_or(local_deadline, |outer| outer.min(local_deadline));
+    super::diagnostics::record_prompt_board_read();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let _ = sender.send(load());
+    });
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(read)) => PromptBoardReadOutcome {
+            read,
+            succeeded: true,
+        },
+        Ok(Err(_))
+        | Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => PromptBoardReadOutcome {
+            read: PromptBoardRead::default(),
+            succeeded: false,
+        },
+    }
+}
+
+#[cfg(test)]
+fn load_user_prompt_board_read_inline_with(
+    load: impl FnOnce() -> gwt_core::Result<PromptBoardRead>,
+) -> PromptBoardReadOutcome {
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE,
+    );
+    match load() {
+        Ok(read) => PromptBoardReadOutcome {
+            read,
+            succeeded: true,
+        },
+        Err(_) => PromptBoardReadOutcome {
+            read: PromptBoardRead::default(),
+            succeeded: false,
+        },
     }
 }
 
@@ -502,8 +641,21 @@ pub fn compute_plan(
         return Ok(None);
     };
 
-    let reminders = load_reminders_state(&session.worktree_path, &session.id)?;
-    let audience_scope = current_session_board_scope(&session.worktree_path, Some(&session.id))?;
+    let context = timed_substage(event, "board-reminder/context", || {
+        HookContext::for_board_reminder(session)
+    })?;
+    let mut reminders = timed_substage(event, "board-reminder/reminders-load", || {
+        load_reminders_state_for_repo_hash(
+            &session.worktree_path,
+            session.repo_hash.as_deref(),
+            &session.id,
+        )
+    })?;
+    let previous_last_injected_at = reminders.last_injected_at;
+    let audience_scope = current_session_board_scope_from_projection(
+        context.audience_projection(),
+        Some(&session.id),
+    );
     let self_workspace_id = match &audience_scope {
         gwt_core::coordination::BoardAudienceScope::Workspace(workspace_id) => {
             Some(workspace_id.clone())
@@ -511,34 +663,82 @@ pub fn compute_plan(
         _ => None,
     };
 
-    let recent_entries = match intent_event {
-        IntentBoundaryEvent::SessionStart => {
-            let threshold = now - session_start_window();
-            load_entries_since_for_scope(&session.worktree_path, threshold, &audience_scope)?
-        }
-        IntentBoundaryEvent::UserPromptSubmit => {
-            let since = reminders
-                .last_injected_at
-                .unwrap_or(now - session_start_window());
-            load_entries_since_for_scope(&session.worktree_path, since, &audience_scope)?
-        }
-        IntentBoundaryEvent::Stop => Vec::new(),
+    let diff_since = match intent_event {
+        IntentBoundaryEvent::SessionStart => now - session_start_window(),
+        IntentBoundaryEvent::UserPromptSubmit => reminders
+            .last_injected_at
+            .unwrap_or(now - session_start_window()),
+        IntentBoundaryEvent::Stop => now,
     };
-
-    let has_recent_own_status = has_recent_post_by(
-        &session.worktree_path,
-        &session.display_name,
-        &BoardEntryKind::Status,
-        redundancy_window(),
-    )?;
+    let redundancy_since = now - redundancy_window();
+    let history_since = reminders
+        .last_own_status_checked_at
+        .unwrap_or(redundancy_since)
+        .max(redundancy_since);
+    let load_worktree = session.worktree_path.clone();
+    let load_repo_hash = session.repo_hash.clone();
+    let load_scope = audience_scope.clone();
+    let load_author = session.display_name.clone();
+    let load = move || {
+        load_prompt_reminder_for_repo_hash(
+            &load_worktree,
+            load_repo_hash.as_deref(),
+            PromptBoardReadRequest {
+                diff_since,
+                scope: &load_scope,
+                status_author: &load_author,
+                status_kind: &BoardEntryKind::Status,
+                status_since: history_since,
+            },
+        )
+    };
+    let outcome = if intent_event == IntentBoundaryEvent::UserPromptSubmit {
+        timed_substage(event, "board-reminder/board-read", || {
+            #[cfg(test)]
+            {
+                if crate::board_provider::test_provider_override::has_forced_prompt_provider() {
+                    load_user_prompt_board_read_inline_with(load)
+                } else {
+                    load_user_prompt_board_read_with(load)
+                }
+            }
+            #[cfg(not(test))]
+            {
+                load_user_prompt_board_read_with(load)
+            }
+        })
+    } else {
+        PromptBoardReadOutcome {
+            read: load()?,
+            succeeded: true,
+        }
+    };
+    let board_read_succeeded = outcome.succeeded;
+    if board_read_succeeded {
+        reminders.last_own_status_checked_at = Some(now);
+        reminders.last_own_status_at = [
+            reminders.last_own_status_at,
+            outcome.read.latest_own_status_at,
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+    }
+    let recent_entries = outcome.read.recent_entries;
+    let has_recent_own_status = reminders
+        .last_own_status_at
+        .is_some_and(|updated_at| updated_at > redundancy_since);
 
     let self_match_keys = build_self_match_keys(session);
+    // Issue #4080: the setting only steers the narrative directive; every
+    // injected instruction body below is English.
     let language = resolve_narrative_language();
     // SPEC #3245 FR-004: the Work-state reminders (title purpose, progress
     // summary) fire for every session — the intake lane suppression is gone.
     // Only a terminal delivery settlement still quiets them.
-    let suppress_work_state_reminders =
-        terminal_work_state_reminders_suppressed(&session.worktree_path, &session.id);
+    let suppress_work_state_reminders = timed_substage(event, "board-reminder/suppression", || {
+        terminal_work_state_reminders_suppressed(context.audience_root(), &session.id)
+    });
     // SPEC-3431 FR-064: the resident PM owns no Work item, its window title is
     // fixed, and `workspace.update` cannot even succeed from its detached
     // worktree (#3477). Suppress separately from the terminal-settlement path
@@ -559,41 +759,36 @@ pub fn compute_plan(
         self_workspace_id,
     });
     if suppress_work_state_reminders {
-        plan.output =
-            replace_with_terminal_settlement_reminder(plan.output, intent_event, &language);
+        plan.output = replace_with_terminal_settlement_reminder(plan.output, intent_event);
     } else if is_resident_pm {
-        plan.output = replace_with_pm_reminder(plan.output, intent_event, &language);
+        plan.output = replace_with_pm_reminder(plan.output);
     }
 
     if emit_work_state_reminders {
         plan.output = append_title_summary_required_context(
             plan.output,
             intent_event,
-            agent_title_summary_missing(session)?,
+            agent_title_summary_missing_in_projection(
+                session,
+                context.canonical_project_projection(),
+            )?,
             &language,
         );
     }
 
-    let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
-        session,
-        &session.worktree_path,
-    );
-    let projection_for_stale =
-        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
     let (stale, updated_state) = compute_title_summary_stale_state(
         intent_event,
-        projection_for_stale.as_ref(),
+        context.canonical_project_projection(),
         &session.id,
         &plan.next_reminders,
     );
     plan.next_reminders = updated_state;
     if emit_work_state_reminders {
-        plan.output =
-            append_title_summary_stale_context(plan.output, intent_event, stale, &language);
+        plan.output = append_title_summary_stale_context(plan.output, intent_event, stale);
     }
     let (progress_missing, progress_stale, progress_state) = compute_progress_summary_state(
         intent_event,
-        projection_for_stale.as_ref(),
+        context.canonical_project_projection(),
         &session.id,
         &plan.next_reminders,
     );
@@ -604,32 +799,46 @@ pub fn compute_plan(
             intent_event,
             progress_missing,
             progress_stale,
-            &language,
         );
     }
     let memory_present = memory_source_present(&session.worktree_path);
     let (memory_suppress, memory_state) =
         compute_memory_reminder_state(intent_event, memory_present, &plan.next_reminders, now);
     plan.next_reminders = memory_state;
-    plan.output = append_memory_update_context(
-        plan.output,
+    plan.output =
+        append_memory_update_context(plan.output, intent_event, memory_present, memory_suppress);
+    preserve_board_diff_cursor_after_failed_read(
+        &mut plan,
         intent_event,
-        memory_present,
-        memory_suppress,
-        &language,
+        board_read_succeeded,
+        previous_last_injected_at,
     );
 
     Ok(Some(plan))
 }
 
-fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -> bool {
-    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
-    match crate::cli::verification_record::load_work_event_settlement_record(&resolved) {
+fn preserve_board_diff_cursor_after_failed_read(
+    plan: &mut ReminderPlan,
+    event: IntentBoundaryEvent,
+    board_read_succeeded: bool,
+    previous_last_injected_at: Option<DateTime<Utc>>,
+) {
+    if event != IntentBoundaryEvent::UserPromptSubmit || board_read_succeeded {
+        return;
+    }
+    // A failed bounded read delivered no Board delta. Advancing this cursor
+    // would permanently hide entries posted after the previous successful
+    // prompt, so only successful materializations may commit the position.
+    plan.next_reminders.last_injected_at = previous_last_injected_at;
+}
+
+fn terminal_work_state_reminders_suppressed(resolved_worktree: &Path, session_id: &str) -> bool {
+    match crate::cli::verification_record::load_work_event_settlement_record(resolved_worktree) {
         Ok(Some(record)) if record.session_id == session_id => return true,
         Err(_) => return true,
         Ok(Some(_)) | Ok(None) => {}
     }
-    crate::cli::execution_state::load(&resolved)
+    crate::cli::execution_state::load(resolved_worktree)
         .ok()
         .flatten()
         .is_some_and(|record| {
@@ -641,16 +850,8 @@ fn terminal_work_state_reminders_suppressed(worktree: &Path, session_id: &str) -
 /// SPEC-3431 FR-064: swap the implementation-agent reminder for the PM's.
 /// Shares [`replace_with_terminal_settlement_reminder`]'s substitution so both
 /// stay in step when a base reminder variant is added.
-fn replace_with_pm_reminder(
-    output: HookOutput,
-    _event: IntentBoundaryEvent,
-    language: &str,
-) -> HookOutput {
-    let replacement = match texts::reminder_language(language) {
-        texts::ReminderLanguage::Ja => texts::PM_REMINDER_JA,
-        texts::ReminderLanguage::En => texts::PM_REMINDER,
-    };
-    replace_base_reminders(output, replacement)
+fn replace_with_pm_reminder(output: HookOutput) -> HookOutput {
+    replace_base_reminders(output, texts::PM_REMINDER)
 }
 
 fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
@@ -658,12 +859,8 @@ fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
         [
             texts::USER_PROMPT_REMINDER,
             texts::USER_PROMPT_REMINDER_SHORT,
-            texts::USER_PROMPT_REMINDER_JA,
-            texts::USER_PROMPT_REMINDER_SHORT_JA,
             texts::STOP_REMINDER,
             texts::STOP_REMINDER_SHORT,
-            texts::STOP_REMINDER_JA,
-            texts::STOP_REMINDER_SHORT_JA,
         ]
         .into_iter()
         .fold(text, |text, base| text.replace(base, replacement))
@@ -680,44 +877,18 @@ fn replace_base_reminders(output: HookOutput, replacement: &str) -> HookOutput {
 fn replace_with_terminal_settlement_reminder(
     output: HookOutput,
     event: IntentBoundaryEvent,
-    language: &str,
 ) -> HookOutput {
-    let replacement = match (texts::reminder_language(language), event) {
-        (texts::ReminderLanguage::Ja, IntentBoundaryEvent::Stop) => {
-            texts::TERMINAL_SETTLEMENT_STOP_REMINDER_JA
-        }
-        (texts::ReminderLanguage::En, IntentBoundaryEvent::Stop) => {
-            texts::TERMINAL_SETTLEMENT_STOP_REMINDER
-        }
-        (texts::ReminderLanguage::Ja, _) => texts::TERMINAL_SETTLEMENT_REMINDER_JA,
-        (texts::ReminderLanguage::En, _) => texts::TERMINAL_SETTLEMENT_REMINDER,
+    let replacement = match event {
+        IntentBoundaryEvent::Stop => texts::TERMINAL_SETTLEMENT_STOP_REMINDER,
+        _ => texts::TERMINAL_SETTLEMENT_REMINDER,
     };
-    let replace_base = |text: String| {
-        [
-            texts::USER_PROMPT_REMINDER,
-            texts::USER_PROMPT_REMINDER_SHORT,
-            texts::USER_PROMPT_REMINDER_JA,
-            texts::USER_PROMPT_REMINDER_SHORT_JA,
-            texts::STOP_REMINDER,
-            texts::STOP_REMINDER_SHORT,
-            texts::STOP_REMINDER_JA,
-            texts::STOP_REMINDER_SHORT_JA,
-        ]
-        .into_iter()
-        .fold(text, |text, base| text.replace(base, replacement))
-    };
-    match output {
-        HookOutput::HookSpecificAdditionalContext { event, text } => {
-            HookOutput::hook_specific_additional_context(event, replace_base(text))
-        }
-        HookOutput::SystemMessage(text) => HookOutput::system_message(replace_base(text)),
-        other => other,
-    }
+    replace_base_reminders(output, replacement)
 }
 
 /// Resolve the narrative-output language from the global gwt config
 /// (SPEC-1933 FR-009 / FR-010). Falls back to `"en"` when settings
-/// cannot be loaded.
+/// cannot be loaded. Only the `Use language: <lang>` directive follows this
+/// value; injected instruction bodies stay English (Issue #4080).
 fn resolve_narrative_language() -> String {
     gwt_config::Settings::load()
         .map(|settings| settings.ai.effective_language().to_string())
@@ -743,6 +914,29 @@ mod tests {
         let mut session = Session::new(dir, branch, AgentId::Codex);
         session.display_name = display_name.to_string();
         session
+    }
+
+    #[test]
+    fn pm_runtime_hook_cwd_preserves_canonical_session_project() {
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(Path::new("/fixture"));
+        let runtime = worktree.parent().unwrap().join("runtime");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let session = make_session(&worktree, "", "PM");
+        let input = serde_json::json!({ "cwd": runtime }).to_string();
+        let event = HookEvent::read_from_str(&input).unwrap();
+        let resolved = session_scoped_to_hook_cwd(session, event.as_ref());
+        assert_eq!(resolved.worktree_path, worktree);
+        let other = home.path().join("ordinary-project");
+        std::fs::create_dir_all(&other).unwrap();
+        let ordinary = make_session(&other, "main", "Other");
+        assert_eq!(
+            session_scoped_to_hook_cwd(ordinary, event.as_ref()).worktree_path,
+            other,
+            "a foreign PM runtime payload must not transfer project identity"
+        );
     }
 
     fn workspace_agent(
@@ -871,6 +1065,47 @@ mod tests {
         );
     }
 
+    /// Issue #3767 AC-2: the intent-boundary reminder the PM reads every turn
+    /// carries the steering obligation, so the injected prompt cannot quietly
+    /// outrank the skill body back into "observe only".
+    #[test]
+    fn the_resident_pm_is_told_to_steer_running_launches() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let pm_worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).expect("pm worktree");
+        let session = make_session(&pm_worktree, "work", "Project Manager");
+
+        let plan = compute_plan(
+            "UserPromptSubmit",
+            &session,
+            "2026-09-03T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+        .expect("plan")
+        .expect("some plan");
+        let text = match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
+            other => panic!("expected additional context, got {other:?}"),
+        };
+        for phrase in [
+            "Steer them before you judge the cycle unchanged",
+            "stalled, drifting out of scope, or waiting for its next action",
+            "`board.post` with a mention or `pm.message.send`",
+            "never inject launch instructions past the Issue Monitor",
+            // Issue #4074 AC-4: the unlanded-branch stocktake.
+            "read `unlanded_branches` from `pr.list`",
+            "committed but has no PR carrying it",
+            "Relaunch the owner Issue or rule the branch archived",
+            "a row that survives a cycle unaddressed is an escalation",
+        ] {
+            assert!(
+                text.contains(phrase),
+                "PM reminder is missing `{phrase}`:\n{text}"
+            );
+        }
+    }
+
     /// The exemption is keyed on the PM worktree alone. An identical session
     /// anywhere else keeps the ordinary reminder — a regression here would
     /// silently disarm the coordination discipline for the whole fleet.
@@ -895,7 +1130,7 @@ mod tests {
             other => panic!("expected additional context, got {other:?}"),
         };
         assert!(
-            !text.contains("resident PM") && !text.contains("常駐 PM"),
+            !text.contains("resident PM"),
             "a non-PM worktree must never receive the PM reminder:\n{text}"
         );
         assert!(
@@ -904,8 +1139,97 @@ mod tests {
         );
     }
 
+    fn contains_japanese(text: &str) -> bool {
+        text.chars().any(|c| {
+            matches!(c,
+                '\u{3040}'..='\u{30FF}' // Hiragana / Katakana
+                | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+                | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+                | '\u{FF00}'..='\u{FFEF}' // Halfwidth / Fullwidth forms
+            )
+        })
+    }
+
+    /// Issue #4080 AC-4: the injected instruction text stays English no
+    /// matter what `settings.ai.language` resolves to. Only the narrative
+    /// language is steered, through the `Use language: <lang>` directive.
     #[test]
-    fn title_summary_guard_injects_japanese_required_update_when_missing() {
+    fn hook_injection_text_is_english_even_when_language_is_ja() {
+        let inputs = |event| ReminderInputs {
+            event,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![BoardEntry::new(
+                AuthorKind::Agent,
+                "OtherAgent",
+                BoardEntryKind::Status,
+                "other agent status",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_branch("feature/other")
+            .with_origin_session_id("sess-other")],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "ja".to_string(),
+            self_workspace_id: None,
+        };
+
+        for event in [
+            IntentBoundaryEvent::SessionStart,
+            IntentBoundaryEvent::UserPromptSubmit,
+            IntentBoundaryEvent::Stop,
+        ] {
+            for short in [false, true] {
+                let mut input = inputs(event);
+                input.has_recent_own_status = short;
+                let base = plan_reminder(input).output;
+                let variants = [
+                    ("base", base.clone()),
+                    ("pm", replace_with_pm_reminder(base.clone())),
+                    (
+                        "terminal-settlement",
+                        replace_with_terminal_settlement_reminder(base.clone(), event),
+                    ),
+                    ("work-state", {
+                        let with_title =
+                            append_title_summary_required_context(base.clone(), event, true, "ja");
+                        let with_stale =
+                            append_title_summary_stale_context(with_title, event, true);
+                        let with_progress =
+                            append_progress_summary_context(with_stale, event, true, true);
+                        append_memory_update_context(with_progress, event, true, false)
+                    }),
+                ];
+                for (label, output) in variants {
+                    let text = match &output {
+                        HookOutput::HookSpecificAdditionalContext { text, .. } => text.as_str(),
+                        HookOutput::SystemMessage(text) => text.as_str(),
+                        other => panic!("unexpected output for {event:?}/{label}: {other:?}"),
+                    };
+                    assert!(
+                        !contains_japanese(text),
+                        "{event:?}/{label}/short={short}: injected instruction text must be English:\n{text}"
+                    );
+                    if event != IntentBoundaryEvent::Stop {
+                        assert!(
+                            text.contains("Use language: ja"),
+                            "{event:?}/{label}: narrative directive must follow the setting:\n{text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Issue #4080: the title-required instruction is English under a `ja`
+    /// setting; the directive still names `ja` for the title-summary itself.
+    #[test]
+    fn title_summary_guard_injects_english_required_update_with_ja_directive() {
         let output = HookOutput::hook_specific_additional_context(
             IntentBoundaryEvent::UserPromptSubmit,
             "existing reminder",
@@ -927,31 +1251,18 @@ mod tests {
         assert!(text.contains(r#""operation":"workspace.update""#));
         assert!(text.contains(r#""purpose""#));
         assert!(!text.contains("--title-summary"));
-        assert!(text.contains("作業名"));
-        assert!(text.contains("完了"));
+        assert!(text.contains("short work purpose"));
+        assert!(text.contains("provisional"));
+        assert!(!text.contains("作業名"));
         assert!(text.contains("Use language: ja"));
     }
 
     /// SPEC-2359 Phase W-11 (US-58 / US-59 / SC-229): the required reminder
     /// must instruct the agent to author the work purpose (not the raw
     /// prompt), set a provisional purpose when it is not settled, and update
-    /// it once confirmed — in both Japanese and English.
+    /// it once confirmed.
     #[test]
     fn title_summary_required_reminder_instructs_provisional_purpose() {
-        let ja_text = texts::title_summary_required_reminder("ja");
-        assert!(ja_text.contains("目的"), "{ja_text}");
-        assert!(ja_text.contains("暫定"), "{ja_text}");
-        assert!(ja_text.contains("生プロンプト"), "{ja_text}");
-        // Imperative: must instruct setting the title before responding.
-        assert!(ja_text.contains("応答する前に"), "{ja_text}");
-        assert!(ja_text.contains("最初のアクション"), "{ja_text}");
-        assert!(
-            ja_text.contains(r#""operation":"workspace.update""#),
-            "{ja_text}"
-        );
-        assert!(ja_text.contains(r#""purpose""#), "{ja_text}");
-        assert!(!ja_text.contains("--title-summary"), "{ja_text}");
-
         let en_text = texts::title_summary_required_reminder("en");
         assert!(en_text.contains("purpose"), "{en_text}");
         assert!(en_text.contains("provisional"), "{en_text}");
@@ -969,13 +1280,9 @@ mod tests {
 
     /// Issue #3184: the required reminder is what pushes agents to write a
     /// title every turn until one is set; it must explicitly forbid transient
-    /// activity phases (browser check etc.) as the purpose, in both languages.
+    /// activity phases (browser check etc.) as the purpose.
     #[test]
     fn title_summary_required_reminder_forbids_transient_activity_labels() {
-        let ja_text = texts::title_summary_required_reminder("ja");
-        assert!(ja_text.contains("browser check"), "{ja_text}");
-        assert!(ja_text.contains("current_focus"), "{ja_text}");
-
         let en_text = texts::title_summary_required_reminder("en");
         assert!(en_text.contains("browser check"), "{en_text}");
         assert!(en_text.contains("transient activity"), "{en_text}");
@@ -997,6 +1304,78 @@ mod tests {
             panic!("title reminder must inject even when board output is Silent");
         };
         assert!(text.contains("before you respond"), "{text}");
+    }
+
+    #[test]
+    fn user_prompt_board_read_inherits_deadline_and_fails_open() {
+        let outcome = load_user_prompt_board_read_with(|| {
+            let deadline = gwt_core::operation_deadline::current()
+                .expect("UserPromptSubmit Board read must inherit a deadline");
+            assert!(
+                deadline.saturating_duration_since(std::time::Instant::now())
+                    <= USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE
+            );
+            Err(gwt_core::GwtError::Other(
+                "injected remote Board failure".to_string(),
+            ))
+        });
+
+        assert_eq!(outcome.read, PromptBoardRead::default());
+        assert!(!outcome.succeeded);
+    }
+
+    #[test]
+    fn user_prompt_board_read_returns_at_deadline_while_a_decoder_is_still_busy() {
+        let started = Instant::now();
+
+        let outcome = load_user_prompt_board_read_with(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(PromptBoardRead::default())
+        });
+
+        assert!(!outcome.succeeded);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(250),
+            "Board parent must not join a decoder past its 25ms child budget",
+        );
+    }
+
+    #[test]
+    fn user_prompt_reminder_state_write_requires_settlement_budget() {
+        assert!(!prompt_reminder_write_has_budget(
+            "UserPromptSubmit",
+            Some(Instant::now() + std::time::Duration::from_millis(50)),
+        ));
+        assert!(prompt_reminder_write_has_budget(
+            "UserPromptSubmit",
+            Some(Instant::now() + std::time::Duration::from_millis(150)),
+        ));
+        assert!(prompt_reminder_write_has_budget(
+            "SessionStart",
+            Some(Instant::now()),
+        ));
+    }
+
+    #[test]
+    fn failed_user_prompt_board_read_keeps_the_last_successful_diff_cursor() {
+        let previous = Utc.with_ymd_and_hms(2026, 8, 29, 10, 0, 0).unwrap();
+        let attempted = previous + chrono::Duration::minutes(1);
+        let mut plan = ReminderPlan {
+            output: HookOutput::Silent,
+            next_reminders: RemindersState {
+                last_injected_at: Some(attempted),
+                ..RemindersState::default()
+            },
+        };
+
+        preserve_board_diff_cursor_after_failed_read(
+            &mut plan,
+            IntentBoundaryEvent::UserPromptSubmit,
+            false,
+            Some(previous),
+        );
+
+        assert_eq!(plan.next_reminders.last_injected_at, Some(previous));
     }
 
     #[test]
@@ -1351,6 +1730,62 @@ mod tests {
         );
     }
 
+    /// Issue #4442 AC-1: the resident PM window is launched with
+    /// `suppress_execution_control`, so `workspace.update` and
+    /// `workspace.ensure` are both refused there for the life of the window.
+    /// Re-injecting the title instruction every turn is the same
+    /// unfollowable-instruction case as the branchless worktree above.
+    #[test]
+    fn agent_title_summary_missing_stays_silent_for_the_resident_pm_window() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["checkout", "-b", "pm/worktree"],
+            vec!["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            let output = gwt_core::process::run_git_logged(&args, Some(&repo)).expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        }
+        let repo = dunce::canonicalize(&repo).expect("canonical repo");
+        let session = make_session(&repo, "pm/worktree", "Claude Code");
+
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut agent = workspace_agent(
+            &session.id,
+            None,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        agent.title_summary = None;
+        agent.worktree_path = Some(repo.clone());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save projection");
+
+        std::env::remove_var(crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV);
+        assert!(
+            agent_title_summary_missing(&session).expect("ordinary session title check"),
+            "an ordinary agent without a title must still be reminded"
+        );
+
+        std::env::set_var(
+            crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV,
+            temp.path().join("pm-scratch"),
+        );
+        let pm_result = agent_title_summary_missing(&session);
+        std::env::remove_var(crate::pm_registry::GWT_PM_SCRATCH_DIR_ENV);
+
+        assert!(
+            !pm_result.expect("pm session title check"),
+            "the PM window can never record a title, so it must not be asked to"
+        );
+    }
+
     #[test]
     fn agent_title_summary_missing_reads_canonical_project_state_root() {
         let _env_lock = crate::env_test_lock()
@@ -1629,7 +2064,7 @@ mod tests {
         // the append functions inject.
         let language = resolve_narrative_language();
         let title_reminder = texts::title_summary_required_reminder(&language);
-        let progress_reminder = texts::progress_summary_reminder(&language, false, false);
+        let progress_reminder = texts::progress_summary_reminder(false, false);
 
         // Execution (signal unset -> default Execution): both Work reminders fire.
         let exec = compute_plan("UserPromptSubmit", &session, Utc::now())
@@ -1637,7 +2072,7 @@ mod tests {
             .expect("plan");
         let exec_text = additional_context(&exec.output);
         assert!(
-            exec_text.contains(title_reminder),
+            exec_text.contains(&title_reminder),
             "execution session must still receive the title-summary Work reminder"
         );
         assert!(
@@ -1653,7 +2088,7 @@ mod tests {
             .expect("plan");
         let intake_text = additional_context(&intake.output);
         assert!(
-            intake_text.contains(title_reminder),
+            intake_text.contains(&title_reminder),
             "intake-kind session must receive the same title-summary Work reminder: {intake_text}"
         );
         assert!(
@@ -1860,9 +2295,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let text = additional_context(&plan.output);
-        assert!(
-            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
-        );
+        assert!(text.contains("posted to the Board recently"));
     }
 
     #[test]
@@ -1880,9 +2313,7 @@ mod tests {
 
         let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
         let text = system_message(&plan.output);
-        assert!(
-            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
-        );
+        assert!(text.contains("posted to the Board recently"));
     }
 
     #[test]
@@ -2289,7 +2720,6 @@ mod tests {
             IntentBoundaryEvent::Stop,
             true,
             false,
-            "en",
         );
         let text = system_message(&output);
         assert!(text.contains("Progress Summary Reminder"));
@@ -2316,7 +2746,7 @@ mod tests {
                 language: "en".to_string(),
                 self_workspace_id: None,
             });
-            let replaced = replace_with_terminal_settlement_reminder(planned.output, event, "en");
+            let replaced = replace_with_terminal_settlement_reminder(planned.output, event);
             let text = match &replaced {
                 HookOutput::HookSpecificAdditionalContext { text, .. }
                 | HookOutput::SystemMessage(text) => text,
@@ -2383,6 +2813,8 @@ mod tests {
     fn reminders_state_round_trips_phase_u9_fields() {
         let original = RemindersState {
             last_injected_at: None,
+            last_own_status_checked_at: None,
+            last_own_status_at: None,
             last_reminded_kind: Default::default(),
             last_title_summary_seen: Some("Title".to_string()),
             unchanged_turn_count: 12,

@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use gwt_core::board_escalation::OperationRefusalKind;
+use gwt_github::SpecOpsError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GovernanceEffect {
@@ -26,6 +29,21 @@ pub enum GovernanceCause {
     DomainInvalid,
 }
 
+impl GovernanceCause {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StructuralGovernance => "structural_governance",
+            Self::TransientGovernance => "transient_governance",
+            Self::ExternalWait => "external_wait",
+            Self::NotReady => "not_ready",
+            Self::Authority => "authority",
+            Self::Integrity => "integrity",
+            Self::ManagedIdentity => "managed_identity",
+            Self::DomainInvalid => "domain_invalid",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GovernanceMetadata {
@@ -45,6 +63,145 @@ pub struct GovernanceMetadata {
     pub execution_generation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_id: Option<String>,
+}
+
+/// Whether the refusing caller can reach the next valid action itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalRecoverability {
+    AgentRecoverable,
+    HumanRequired,
+}
+
+/// Stable, operation-local refusal facts carried alongside human output.
+///
+/// `reason_code` and the typed disposition decide escalation. `output` stays
+/// outside this DTO and remains display-only, so wording changes cannot alter
+/// control flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationRefusal {
+    pub reason_code: String,
+    pub recoverability: RefusalRecoverability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<String>,
+    /// Issue that owns the refused work, when the refusing operation knows it
+    /// from durable state rather than from the caller's Session.
+    ///
+    /// An escalation without an owner reaches neither the Issue nor
+    /// `needs_human`, and the refusals that most need an owner — a missing or
+    /// unreadable Session identity — are exactly the ones where the Session
+    /// cannot supply it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "metadata_is_empty")]
+    pub governance: GovernanceMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_kind: Option<OperationRefusalKind>,
+}
+
+impl OperationRefusal {
+    pub(crate) fn agent_recoverable(
+        reason_code: impl Into<String>,
+        governance: GovernanceMetadata,
+        recovery_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            recoverability: RefusalRecoverability::AgentRecoverable,
+            recovery_action: Some(recovery_action.into()),
+            owner_number: None,
+            governance,
+            escalation_kind: None,
+        }
+    }
+
+    pub(crate) fn human_required(
+        reason_code: impl Into<String>,
+        escalation_kind: OperationRefusalKind,
+        governance: GovernanceMetadata,
+        recovery_action: Option<String>,
+    ) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            recoverability: RefusalRecoverability::HumanRequired,
+            recovery_action,
+            owner_number: None,
+            governance,
+            escalation_kind: Some(escalation_kind),
+        }
+    }
+
+    pub(crate) fn with_owner(mut self, owner_number: Option<u64>) -> Self {
+        self.owner_number = owner_number;
+        self
+    }
+
+    pub(crate) fn escalation_kind(&self) -> Option<OperationRefusalKind> {
+        if !self.disposition_is_consistent() {
+            return None;
+        }
+        match self.recoverability {
+            RefusalRecoverability::AgentRecoverable => None,
+            RefusalRecoverability::HumanRequired => self.escalation_kind,
+        }
+    }
+
+    fn disposition_is_consistent(&self) -> bool {
+        use GovernanceCause::{
+            Authority, DomainInvalid, ExternalWait, Integrity, ManagedIdentity, NotReady,
+            StructuralGovernance, TransientGovernance,
+        };
+        if self.reason_code.trim().is_empty()
+            || self.governance.effect != Some(GovernanceEffect::Protected)
+        {
+            return false;
+        }
+        match self.recoverability {
+            RefusalRecoverability::AgentRecoverable => {
+                self.escalation_kind.is_none()
+                    && self
+                        .recovery_action
+                        .as_deref()
+                        .is_some_and(|action| !action.trim().is_empty())
+                    && self.governance.retryable == Some(true)
+                    && matches!(
+                        self.governance.cause,
+                        Some(NotReady | TransientGovernance | ExternalWait)
+                    )
+            }
+            RefusalRecoverability::HumanRequired => {
+                self.governance.retryable == Some(false)
+                    && matches!(
+                        (self.escalation_kind, self.governance.cause),
+                        (
+                            Some(OperationRefusalKind::Authority),
+                            Some(Authority | ManagedIdentity)
+                        ) | (Some(OperationRefusalKind::Integrity), Some(Integrity))
+                            | (
+                                Some(OperationRefusalKind::Immutability),
+                                Some(DomainInvalid)
+                            )
+                            | (
+                                Some(OperationRefusalKind::Permission),
+                                Some(StructuralGovernance)
+                            )
+                    )
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GovernedCommandOutput {
+    pub exit_code: i32,
+    pub output: String,
+    pub refusal: Option<OperationRefusal>,
+}
+
+#[derive(Debug)]
+pub(crate) struct GovernedCommandFailure {
+    pub error: SpecOpsError,
+    pub refusal: Option<OperationRefusal>,
 }
 
 fn metadata_is_empty(metadata: &GovernanceMetadata) -> bool {
@@ -189,5 +346,46 @@ mod tests {
                     .expect("deserialize outcome");
             assert_eq!(roundtrip.outcome, outcome);
         }
+    }
+
+    #[test]
+    fn operation_refusal_roundtrip_keeps_stable_disposition_fields() {
+        let refusal = OperationRefusal::agent_recoverable(
+            "verification_stale_fingerprint",
+            GovernanceMetadata {
+                effect: Some(GovernanceEffect::Protected),
+                cause: Some(GovernanceCause::NotReady),
+                retryable: Some(true),
+                ..GovernanceMetadata::default()
+            },
+            "verify.run",
+        );
+
+        let value = serde_json::to_value(&refusal).expect("serialize operation refusal");
+        assert_eq!(value["reason_code"], "verification_stale_fingerprint");
+        assert_eq!(value["recoverability"], "agent_recoverable");
+        assert_eq!(value["recovery_action"], "verify.run");
+        assert!(value.get("escalation_kind").is_none());
+        assert_eq!(
+            serde_json::from_value::<OperationRefusal>(value).expect("roundtrip refusal"),
+            refusal
+        );
+    }
+
+    #[test]
+    fn inconsistent_human_disposition_cannot_request_escalation() {
+        let refusal = OperationRefusal::human_required(
+            "execution_owner_mismatch",
+            OperationRefusalKind::Permission,
+            GovernanceMetadata {
+                effect: Some(GovernanceEffect::Protected),
+                cause: Some(GovernanceCause::Authority),
+                retryable: Some(false),
+                ..GovernanceMetadata::default()
+            },
+            None,
+        );
+
+        assert_eq!(refusal.escalation_kind(), None);
     }
 }

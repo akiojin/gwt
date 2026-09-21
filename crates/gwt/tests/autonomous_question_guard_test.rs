@@ -111,6 +111,56 @@ fn codex_question_is_denied_and_recorded_as_a_handoff() {
     assert_eq!(prefs.autonomous_handoffs[0].tool_name, "request_user_input");
 }
 
+/// Issue #3716: Grok Build uses Claude-compatible hook files but sends its
+/// PreToolUse fields in camelCase. The provider boundary must normalize that
+/// wire payload before the shared question guard evaluates it.
+#[test]
+fn grok_camel_case_question_is_denied_and_recorded_as_a_handoff() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefs_path = dir.path().join("issue-monitor.json");
+    let raw = json!({
+        "hookEventName": "pre_tool_use",
+        "sessionId": "grok-session",
+        "toolName": "ask_user_question",
+        "toolInput": {
+            "questions": [{
+                "question": "Approve User Verification?",
+                "options": [{
+                    "label": "Approve",
+                    "description": "Continue to the PR gate"
+                }]
+            }]
+        }
+    })
+    .to_string();
+    let event = HookEvent::read_from_str(&raw)
+        .expect("valid Grok hook payload")
+        .expect("non-empty Grok hook payload");
+    let inputs = QuestionGuardInputs {
+        context: AutonomousExecutionContext {
+            issue_number: 3716,
+            session_id: "grok-session".to_string(),
+        },
+        prefs_path: &prefs_path,
+        provider: "grok-build",
+        now: NOW,
+        handoff_id: "grok-handoff",
+    };
+
+    let output = evaluate_and_record(&event, &inputs);
+
+    assert!(matches!(output, HookOutput::PreToolUsePermission { .. }));
+    let prefs = load(&prefs_path);
+    let handoff = &prefs.autonomous_handoffs[0];
+    assert_eq!(handoff.issue_number, 3716);
+    assert_eq!(handoff.session_id, "grok-session");
+    assert_eq!(handoff.provider, "grok-build");
+    assert_eq!(handoff.tool_name, "ask_user_question");
+    assert_eq!(handoff.question, "Approve User Verification?");
+    assert_eq!(handoff.options.len(), 1);
+    assert_eq!(handoff.options[0].label, "Approve");
+}
+
 /// A repeated hook invocation for the same intercepted call must not park the
 /// same question twice.
 #[test]
