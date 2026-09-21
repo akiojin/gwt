@@ -52,6 +52,7 @@ pub mod protocol;
 pub mod pty_start_gate;
 pub mod runtime_daemon_events;
 pub mod spec_tasks;
+pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;

@@ -2938,7 +2938,9 @@ impl ClaimProbeOutcome {
 /// Atomic agent-facing projection of the live Issue Monitor driver state.
 /// Unlike [`IssueMonitorStatusView`], this includes the ordered queue itself so
 /// callers never have to reconstruct transient claim outcomes from cache.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Eq` is deliberately not derived: Issue #4386 AC-1 carries Spotlight's CPU
+/// percentage, and float equality is not reflexive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorAgentStatus {
     pub queue: Vec<u64>,
     pub active_launches: Vec<u64>,
@@ -3028,6 +3030,13 @@ pub struct IssueMonitorAgentStatus {
     /// projections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_pressure: Option<crate::memory_pressure::MemoryPressureStatus>,
+    /// Issue #4386 AC-1: the CPU Spotlight's indexing daemon is spending on
+    /// this host, read from the process table at status time, so the largest
+    /// consumer on a saturated host is named here instead of found by hand
+    /// with `ps`. `None` in daemon projections and on hosts without
+    /// Spotlight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotlight: Option<crate::spotlight::SpotlightPressureStatus>,
     /// Issue #4087 AC-1: the Issue cache full-refresh cadence — when it last
     /// completed and how far past its TTL it is — so a stopped refresh is
     /// read from the same snapshot as `scan_stall` instead of inferred from
@@ -9395,6 +9404,7 @@ impl IssueMonitorState {
             idle_window_counts: self.idle_window_counts(),
             disk_space: None,
             memory_pressure: None,
+            spotlight: None,
             failure_surge,
         }
     }
@@ -15290,6 +15300,7 @@ mod tests {
                 generation_reclaim: None,
                 disk_space: None,
                 memory_pressure: None,
+                spotlight: None,
                 issue_cache: None,
                 idle_windows: Vec::new(),
                 idle_window_counts: BTreeMap::new(),
