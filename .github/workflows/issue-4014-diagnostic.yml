@@ -68,5 +68,6 @@ jobs:
       # `--nocapture` keeps libtest's writes unbuffered so the name of a test
       # that never returns survives a step timeout.
       - name: Run app_runtime serially
-        run: cargo test -p gwt --bin gwt --all-features app_runtime::tests:: -- --test-threads=1 --nocapture
+        run: |
+          cargo test -p gwt --bin gwt --all-features app_runtime::tests:: -- --test-threads=1 --nocapture
         timeout-minutes: 60
