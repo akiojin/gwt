@@ -622,6 +622,22 @@ pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
     if !git_repository_discovery_possible(repo_path) {
         return repo_path.to_path_buf();
     }
+    // Issue #3777 AC-1: a path that carries its own `.git` entry already *is*
+    // the working-tree top level, so `--show-toplevel` can only echo it back.
+    // `gwt_repo_local_work_dir` puts this resolver on the UserPromptSubmit hot
+    // path — every Board read was paying a process launch (~47ms on Windows,
+    // a fifth of the whole 250ms prompt budget) to learn nothing. A
+    // subdirectory has no `.git` of its own and still asks git, so the case
+    // this resolver exists for is untouched.
+    //
+    // Canonicalize rather than echoing the caller's spelling: git reports the
+    // long Windows form, and callers compare these roots against each other
+    // (and against `resolve_main_worktree_root`, which still shells out). An
+    // 8.3 short path like `AKIOJI~1` names the same directory but is not
+    // string-equal, so skipping this would silently split those comparisons.
+    if repo_path.join(".git").exists() {
+        return dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    }
     let Ok(output) = crate::process::run_git_logged(
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
         Some(repo_path),
@@ -814,6 +830,11 @@ pub fn gwt_session_state_path() -> PathBuf {
 /// Return the legacy logs root (`~/.gwt/logs/`).
 pub fn gwt_logs_dir() -> PathBuf {
     gwt_home().join("logs")
+}
+
+/// Return the host-wide error ledger directory (`~/.gwt/logs/errors/`).
+pub fn gwt_error_ledger_dir() -> PathBuf {
+    gwt_logs_dir().join("errors")
 }
 
 /// Return the legacy coordination root (`~/.gwt/coordination/`).
@@ -1181,6 +1202,82 @@ mod tests {
         );
     }
 
+    /// Issue #3777 AC-1: a path that already carries a `.git` entry *is* the
+    /// working-tree top level, so `git rev-parse --show-toplevel` can only
+    /// echo it back. The spawn is pure latency, and it sits on the
+    /// UserPromptSubmit hot path via `gwt_repo_local_work_dir` — every Board
+    /// read paid a process launch (~47ms on Windows) to learn nothing.
+    #[test]
+    fn resolve_current_worktree_root_returns_worktree_top_level_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        std::fs::create_dir_all(worktree.join(".git")).expect("worktree .git");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_current_worktree_root(&worktree);
+
+        assert_eq!(
+            comparable_path(&resolved),
+            comparable_path(&dunce::canonicalize(&worktree).expect("canonical worktree"))
+        );
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "a worktree top level must resolve to itself without spawning git (Issue #3777)"
+        );
+    }
+
+    /// The linked-worktree spelling of the same contract: `git worktree add`
+    /// writes `.git` as a *file* containing a `gitdir:` pointer, not a
+    /// directory. gwt runs almost entirely inside linked worktrees, so this is
+    /// the shape the prompt hot path actually meets.
+    #[test]
+    fn resolve_current_worktree_root_returns_linked_worktree_root_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("issue-3777");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: /repo.git/worktrees/issue-3777\n",
+        )
+        .expect("gitdir pointer");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_current_worktree_root(&worktree);
+
+        assert_eq!(
+            comparable_path(&resolved),
+            comparable_path(&dunce::canonicalize(&worktree).expect("canonical worktree"))
+        );
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "a linked worktree root must resolve to itself without spawning git (Issue #3777)"
+        );
+    }
+
+    /// The short-circuit must not swallow the case it exists to serve: a
+    /// *subdirectory* of a working tree still needs git to find the top level.
+    #[test]
+    fn resolve_current_worktree_root_still_resolves_a_subdirectory_to_its_top_level() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        init_git_repo(&worktree);
+        let nested = worktree.join("crates").join("gwt-core");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+
+        let resolved = resolve_current_worktree_root(&nested);
+
+        assert_ne!(
+            resolved, nested,
+            "a nested path must not be mistaken for the working-tree top level"
+        );
+        assert_eq!(
+            dunce::canonicalize(&resolved).expect("canonical resolved"),
+            dunce::canonicalize(&worktree).expect("canonical worktree"),
+        );
+    }
+
     /// A plain directory with no `.git` anywhere up its ancestry and no child
     /// bare repository cannot be a repository; git would only confirm that
     /// with an exit-128 spawn.
@@ -1241,6 +1338,15 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_logs_dir();
         assert!(p.ends_with(gwt_home_suffix(&["logs"])));
+    }
+
+    #[test]
+    fn gwt_error_ledger_dir_is_under_logs() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let p = gwt_error_ledger_dir();
+        assert!(p.ends_with(gwt_home_suffix(&["logs", "errors"])));
     }
 
     #[test]

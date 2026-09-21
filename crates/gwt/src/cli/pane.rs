@@ -1,7 +1,7 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -222,6 +222,23 @@ pub(super) fn run<E: CliEnv>(
     Ok(0)
 }
 
+/// Issue #3883 AC-6: the ids of the agent windows this project currently has on
+/// the canvas, read from the same live source `pane.list` reads.
+///
+/// `issue.monitor.reconcile` needs the canvas, not the durable snapshot: the
+/// whole failure it recovers from is a durable snapshot that disagrees with the
+/// windows that are actually running.
+pub(super) fn live_window_ids(default_project_root: &Path) -> Result<BTreeSet<String>, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let project_root = project_root_for_pane(default_project_root);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create pane runtime: {err}"))?;
+    let windows = runtime.block_on(request_window_list(&ws_url, &project_root))?;
+    Ok(windows.into_iter().map(|window| window.id).collect())
+}
+
 async fn run_async(
     ws_url: &str,
     project_root: &str,
@@ -236,6 +253,11 @@ async fn run_async(
             read_pane_snapshot(ws_url, project_root, &id, lines).await
         }
         PaneCommand::Close { id } => close_pane(ws_url, project_root, &id).await,
+        PaneCommand::Recover {
+            started_after,
+            started_before,
+            apply,
+        } => recover_panes(ws_url, project_root, &started_after, &started_before, apply).await,
         PaneCommand::Send { id, text } => {
             send_pane_input(ws_url, project_root, id.as_deref(), &text).await
         }
@@ -332,6 +354,10 @@ async fn send_pm_pane_input(
                 // read as "the message did not arrive".
                 "unverified" => Err(format!(
                     "pm message delivery is unverified: {}",
+                    reply.reason.unwrap_or_else(|| "unknown reason".to_string())
+                )),
+                "refused" => Err(format!(
+                    "pm message refused: {}",
                     reply.reason.unwrap_or_else(|| "unknown reason".to_string())
                 )),
                 "failed" => Err(format!(
@@ -545,6 +571,159 @@ async fn read_pane_snapshot_with_timeout(
             )
         }
     })?
+}
+
+pub(super) fn parse_recovery_bounds(after: &str, before: &str) -> Result<(i64, i64), String> {
+    let parse = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|time| time.timestamp())
+            .map_err(|_| {
+                "pane.recover requires RFC3339 started_after and started_before".to_string()
+            })
+    };
+    let (after, before) = (parse(after)?, parse(before)?);
+    if after > before {
+        return Err("pane.recover started_after must not exceed started_before".to_string());
+    }
+    Ok((after, before))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PaneRecoveryCandidate {
+    window_id: String,
+    session_id: String,
+    worktree_path: std::path::PathBuf,
+    worktree_exists: bool,
+    started_at: String,
+    child_pid: u32,
+    child_started_at: u64,
+}
+
+fn plan_pane_recovery(
+    windows: &[PersistedWindowState],
+    sessions: &[crate::session_inventory::SessionObservation],
+    after: i64,
+    before: i64,
+    caller_session_id: Option<&str>,
+) -> Vec<PaneRecoveryCandidate> {
+    let mut selected = sessions
+        .iter()
+        .filter_map(|session| {
+            if session.launch_origin != gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                || session.restore_source_session_id.is_none()
+                || caller_session_id == Some(session.session_id.as_str())
+                || sessions
+                    .iter()
+                    .filter(|other| other.session_id == session.session_id)
+                    .count()
+                    != 1
+                || windows
+                    .iter()
+                    .filter(|window| window.session_id.as_deref() == Some(&session.session_id))
+                    .count()
+                    != 1
+                || i64::try_from(session.child_started_at)
+                    .ok()
+                    .is_none_or(|started| started < after || started > before)
+            {
+                return None;
+            }
+            let window = windows.iter().find(|window| {
+                is_agent_pane(window) && window.session_id.as_deref() == Some(&session.session_id)
+            })?;
+            Some(PaneRecoveryCandidate {
+                window_id: window.id.clone(),
+                session_id: session.session_id.clone(),
+                worktree_path: session.worktree_path.clone(),
+                worktree_exists: session.worktree_exists,
+                started_at: session.started_at.clone(),
+                child_pid: session.child_pid,
+                child_started_at: session.child_started_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by(|a, b| {
+        (a.worktree_exists, a.child_started_at, &a.session_id).cmp(&(
+            b.worktree_exists,
+            b.child_started_at,
+            &b.session_id,
+        ))
+    });
+    selected
+}
+
+async fn recover_panes(
+    ws_url: &str,
+    project_root: &str,
+    started_after: &str,
+    started_before: &str,
+    apply: bool,
+) -> Result<String, String> {
+    let (after, before) = parse_recovery_bounds(started_after, started_before)?;
+    let windows = request_window_list(ws_url, project_root).await?;
+    let inventory = crate::session_inventory::observe_sessions(
+        Path::new(project_root),
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let caller = std::env::var(GWT_SESSION_ID_ENV).ok();
+    let candidates = plan_pane_recovery(
+        &windows,
+        &inventory.sessions,
+        after,
+        before,
+        caller.as_deref(),
+    );
+    let mut results = Vec::new();
+    if apply {
+        for candidate in &candidates {
+            let result = close_restored_pane(ws_url, project_root, candidate).await;
+            results.push(match result {
+                Ok(detail) => json!({"window_id": candidate.window_id, "session_id": candidate.session_id, "closed": true, "detail": detail.trim()}),
+                Err(reason) => json!({"window_id": candidate.window_id, "session_id": candidate.session_id, "closed": false, "reason": reason}),
+            });
+        }
+    }
+    Ok(format!(
+        "{}\n",
+        json!({
+            "apply": apply, "started_after": started_after, "started_before": started_before,
+            "selected_count": candidates.len(), "candidates": candidates, "results": results,
+            "observation_complete": inventory.uncertainties.is_empty(),
+            "uncertainties": inventory.uncertainties,
+        })
+    ))
+}
+
+async fn close_restored_pane(
+    ws_url: &str,
+    project_root: &str,
+    candidate: &PaneRecoveryCandidate,
+) -> Result<String, String> {
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(&mut socket, json!({"kind": "frontend_ready"})).await?;
+    let windows = next_workspace_windows(&mut socket, project_root, "pane recover").await?;
+    if !windows.iter().any(|window| {
+        window.id == candidate.window_id
+            && window.session_id.as_deref() == Some(&candidate.session_id)
+    }) {
+        return Err("pane recover: target Session changed or left the project".to_string());
+    }
+    // The backend repeats this identity/provenance check on its event loop,
+    // atomically with teardown, so a reused window ID cannot close a new launch.
+    send_frontend_event(
+        &mut socket,
+        json!({
+            "kind": "recover_restored_window", "id": candidate.window_id,
+            "session_id": candidate.session_id,
+            "child_pid": candidate.child_pid, "child_started_at": candidate.child_started_at,
+        }),
+    )
+    .await?;
+    let reply =
+        wait_for_pane_close_result(&mut socket, &candidate.window_id, BACKEND_RESPONSE_TIMEOUT)
+            .await?
+            .ok_or_else(|| "pane recover: no matching backend close result".to_string())?;
+    pane_close_verdict(&candidate.window_id, reply)
 }
 
 async fn close_pane(
@@ -858,10 +1037,12 @@ fn pane_backend_silence(context: &str, received: usize, budget: Duration) -> Str
     let budget = format!("{}ms", budget.as_millis());
     if received == 0 {
         format!(
-            "{context}: pane_backend_unresponsive — the gwt instance behind this pane WebSocket \
-             accepted the connection and then sent nothing within {budget}. It is running but not \
-             answering, which is what a saturated instance looks like from here. Nothing was \
-             changed; retry, or restart that instance."
+            "{context}: pane_backend_unresponsive — connected to the gwt instance behind this pane \
+             WebSocket, but it sent nothing within {budget}. Pane replies come from the GUI event \
+             loop, so a single long dispatch holds them. This may be a temporary GUI stall; \
+             replies resume when the dispatch finishes. Nothing was changed. Wait 2.5 seconds \
+             and retry; if the silence persists, check the gwt log for \
+             `gwt.frontend.timing` \"blocked the GUI event loop\" warnings at this time."
         )
     } else {
         format!(
@@ -914,10 +1095,9 @@ async fn next_pm_workspace_windows(
             else {
                 continue;
             };
-            let mut parsed = serde_json::from_value::<Vec<PersistedWindowState>>(
-                tab_windows.clone(),
-            )
-            .map_err(|error| format!("pm.message.send: invalid workspace projection: {error}"))?;
+            let mut parsed = parse_wire_windows(tab_windows, tab_root).map_err(|error| {
+                format!("pm.message.send: invalid workspace projection: {error}")
+            })?;
             windows.append(&mut parsed);
         }
         if !matched {
@@ -1116,7 +1296,7 @@ fn ensure_no_args(args: &[String]) -> Result<(), CliParseError> {
 }
 
 fn pane_websocket_url_from_env() -> Result<String, String> {
-    std::env::var(GWT_PANE_WS_URL_ENV)
+    let url = std::env::var(GWT_PANE_WS_URL_ENV)
         .ok()
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
@@ -1124,7 +1304,109 @@ fn pane_websocket_url_from_env() -> Result<String, String> {
             format!(
                 "{GWT_PANE_WS_URL_ENV} is not set; relaunch the Session from gwt before using pane.*"
             )
-        })
+        })?;
+    validate_pane_endpoint_home_scope(&url)?;
+    Ok(url)
+}
+
+fn validate_pane_endpoint_home_scope(url: &str) -> Result<(), String> {
+    let endpoint = reqwest::Url::parse(url)
+        .map_err(|error| format!("{GWT_PANE_WS_URL_ENV} is invalid: {error}"))?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| format!("{GWT_PANE_WS_URL_ENV} is missing a host"))?;
+    if is_reserved_container_bridge(host) {
+        return Ok(());
+    }
+    let normalized_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if !is_loopback_host(normalized_host) {
+        return Err(format!(
+            "{GWT_PANE_WS_URL_ENV} uses unsupported host '{host}'; relaunch the Session from gwt"
+        ));
+    }
+
+    let runtime_path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            format!(
+                "{} is not set; relaunch the Session from gwt before using pane.*",
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
+            )
+        })?;
+    let canonical_runtime_path = dunce::canonicalize(&runtime_path).map_err(|error| {
+        format!(
+            "pane launch runtime path {} is unavailable: {error}; relaunch the Session from gwt",
+            runtime_path.display()
+        )
+    })?;
+    let malformed_runtime_error = || {
+        format!(
+            "pane launch runtime path {} is malformed; relaunch the Session from gwt",
+            runtime_path.display()
+        )
+    };
+    if !std::fs::metadata(&canonical_runtime_path)
+        .map_err(|error| {
+            format!(
+                "pane launch runtime path {} is unavailable: {error}; relaunch the Session from gwt",
+                runtime_path.display()
+            )
+        })?
+        .is_file()
+    {
+        return Err(malformed_runtime_error());
+    }
+    let runtime_sessions =
+        pane_runtime_sessions_dir(&canonical_runtime_path).ok_or_else(malformed_runtime_error)?;
+    let expected_sessions = gwt_core::paths::gwt_sessions_dir();
+    if !same_pane_scope_path(runtime_sessions, &expected_sessions) {
+        return Err(format!(
+            "pane endpoint belongs to a different GWT home (launch sessions: {}; current sessions: {}); relaunch the Session from the current gwt instance",
+            runtime_sessions.display(),
+            expected_sessions.display()
+        ));
+    }
+    Ok(())
+}
+
+fn pane_runtime_sessions_dir(runtime_path: &Path) -> Option<&Path> {
+    let file_name = runtime_path.file_name()?.to_str()?;
+    let session_id = file_name.strip_suffix(".json")?;
+    gwt_agent::validate_session_id_path_component(session_id).ok()?;
+
+    let pid_dir = runtime_path.parent()?;
+    pid_dir.file_name()?.to_str()?.parse::<u32>().ok()?;
+    let runtime_dir = pid_dir.parent()?;
+    if runtime_dir.file_name()?.to_str()? != "runtime" {
+        return None;
+    }
+    runtime_dir.parent()
+}
+
+fn is_reserved_container_bridge(host: &str) -> bool {
+    host.eq_ignore_ascii_case("host.docker.internal")
+        || host.eq_ignore_ascii_case("host.containers.internal")
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn same_pane_scope_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn project_root_for_pane(default: &Path) -> String {
@@ -1192,7 +1474,7 @@ fn parse_workspace_windows_scoped(
             continue;
         };
         if let Ok(mut parsed) =
-            serde_json::from_value::<Vec<PersistedWindowState>>(tab_windows.clone())
+            parse_wire_windows(tab_windows, tab.get("project_root").and_then(Value::as_str))
         {
             let owns_caller = tab
                 .get("project_root")
@@ -1297,12 +1579,47 @@ fn render_snapshot_lines(snapshot: &str, lines: usize) -> String {
     out
 }
 
+/// Restore runtime hints and durable Session roles without changing disk restoration.
+fn parse_wire_windows(
+    value: &Value,
+    project_root: Option<&str>,
+) -> Result<Vec<PersistedWindowState>, serde_json::Error> {
+    let mut windows: Vec<PersistedWindowState> = serde_json::from_value(value.clone())?;
+    for (window, raw) in windows
+        .iter_mut()
+        .zip(value.as_array().into_iter().flatten())
+    {
+        window.is_pm = raw.get("is_pm").and_then(Value::as_bool).unwrap_or(false);
+        if !window.is_pm {
+            if let Some(session_id) = window.session_id.as_deref() {
+                let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+                if let Ok(session) = gwt_agent::Session::load(&path) {
+                    if session.id == session_id {
+                        window.is_pm = crate::pm_registry::pane_is_pm(
+                            project_root
+                                .map(Path::new)
+                                .unwrap_or(&session.worktree_path),
+                            Some(&session.worktree_path),
+                            Some(session_id),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(windows)
+}
+
 pub(crate) fn render_pane_list(windows: &[PersistedWindowState]) -> String {
+    render_pane_list_with_sessions(windows, &gwt_core::paths::gwt_sessions_dir())
+}
+
+fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir: &Path) -> String {
     let panes = windows.iter().filter(|window| is_agent_pane(window));
     let mut out = String::new();
     for window in panes {
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}",
             window.id,
             status_label(window.status),
             window
@@ -1315,6 +1632,32 @@ pub(crate) fn render_pane_list(windows: &[PersistedWindowState]) -> String {
                 .or(window.purpose_title.as_deref())
                 .unwrap_or(&window.title)
         ));
+        if let Some(session) = window.session_id.as_deref().and_then(|id| {
+            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
+                .ok()
+                .filter(|session| session.id == id)
+        }) {
+            let origin = serde_json::to_value(session.launch_origin)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string());
+            out.push_str(&format!(
+                "\torigin={origin}\tsession_created_at={}\tworktree={}\tsource_session={}",
+                session.created_at.to_rfc3339(),
+                session.worktree_path.display(),
+                session
+                    .restore_source_session_id
+                    .as_deref()
+                    .unwrap_or("none")
+            ));
+        } else {
+            out.push_str("\torigin=unknown");
+        }
+        out.push_str(if window.is_pm {
+            "\trole=pm\n"
+        } else {
+            "\trole=implementation_agent\n"
+        });
     }
     if out.is_empty() {
         out.push_str("no active agent panes\n");
@@ -1409,6 +1752,7 @@ fn config_error(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    use crate::cli::TestEnv;
     use crate::persistence::WindowGeometry;
     use gwt_core::test_support::ScopedEnvVar;
 
@@ -1416,6 +1760,13 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    fn persist_runtime_evidence(home: &Path) -> std::path::PathBuf {
+        let path = home.join(".gwt/sessions/runtime/123/session.json");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("runtime directory");
+        std::fs::write(&path, "{}").expect("runtime evidence");
+        path
     }
 
     fn window(id: &str, preset: WindowPreset, agent_id: Option<&str>) -> PersistedWindowState {
@@ -1443,6 +1794,8 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         }
     }
@@ -1471,6 +1824,121 @@ mod tests {
                 id: "agent-1".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn recovery_plan_selects_only_the_restore_burst_and_prioritizes_missing_worktrees() {
+        use crate::session_inventory::SessionObservation;
+        use gwt_agent::SessionLaunchOrigin;
+        let after = chrono::DateTime::parse_from_rfc3339("2026-09-14T05:00:00Z").unwrap();
+        let mut windows = Vec::new();
+        let sessions = [
+            ("restored", SessionLaunchOrigin::AutomaticRestore, true, 10),
+            ("missing", SessionLaunchOrigin::AutomaticRestore, false, 20),
+            ("launch", SessionLaunchOrigin::Launch, true, 10),
+            ("restart", SessionLaunchOrigin::UserRestart, true, 10),
+            ("legacy", SessionLaunchOrigin::Unknown, false, 10),
+            ("outside", SessionLaunchOrigin::AutomaticRestore, true, 61),
+            ("self", SessionLaunchOrigin::AutomaticRestore, true, 10),
+        ]
+        .into_iter()
+        .map(|(id, origin, exists, offset)| {
+            let mut pane = window(id, WindowPreset::Agent, Some("codex"));
+            pane.session_id = Some(id.to_string());
+            windows.push(pane);
+            SessionObservation {
+                session_id: id.to_string(),
+                issue_number: Some(4305),
+                agent_id: "codex".to_string(),
+                worktree_path: "/repo/work/issue-4305".into(),
+                worktree_exists: exists,
+                host_pid: 1,
+                child_pid: 2,
+                child_started_at: (after.timestamp() + offset) as u64,
+                started_at: (after + chrono::Duration::seconds(offset)).to_rfc3339(),
+                launch_origin: origin,
+                restore_source_session_id: Some("source".to_string()),
+            }
+        })
+        .collect::<Vec<_>>();
+        let plan = plan_pane_recovery(
+            &windows,
+            &sessions,
+            after.timestamp(),
+            after.timestamp() + 60,
+            Some("self"),
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["missing", "restored"]
+        );
+        windows[0].session_id = Some("replacement-launch".to_string());
+        assert_eq!(
+            plan_pane_recovery(
+                &windows,
+                &sessions,
+                after.timestamp(),
+                after.timestamp() + 60,
+                Some("self")
+            )
+            .len(),
+            1
+        );
+        assert!(parse_recovery_bounds("invalid", "2026-09-14T05:00:00Z").is_err());
+        assert!(parse_recovery_bounds("2026-09-14T06:00:00Z", "2026-09-14T05:00:00Z").is_err());
+    }
+
+    #[test]
+    fn pane_list_exposes_persisted_restore_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            gwt_agent::Session::new(temp.path(), "work/issue-4305", gwt_agent::AgentId::Codex);
+        session.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        session.restore_source_session_id = Some("source-session".to_string());
+        session.save(temp.path()).unwrap();
+        let mut pane = window("restored", WindowPreset::Agent, Some("codex"));
+        pane.session_id = Some(session.id);
+        let text = render_pane_list_with_sessions(&[pane], temp.path());
+        assert!(text.contains("origin=automatic_restore"), "{text}");
+        assert!(text.contains("source_session=source-session"), "{text}");
+        assert!(text.contains("session_created_at="), "{text}");
+    }
+
+    #[test]
+    fn recovery_close_sends_exact_process_identity_and_reports_backend_refusal() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut pane = window("restored", WindowPreset::Agent, Some("codex"));
+            pane.session_id = Some("restored-session".to_string());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                socket.send(Message::Text(workspace_state_for_test("/repo/test", vec![pane]).to_string().into())).await.unwrap();
+                let request = next_frontend_json(&mut socket).await;
+                assert_eq!(request, json!({"kind":"recover_restored_window", "id":"restored", "session_id":"restored-session", "child_pid":123, "child_started_at":456}));
+                socket.send(Message::Text(json!({"kind":"pane_close_result", "window_id":"restored", "ok":false, "reason":"process identity changed"}).to_string().into())).await.unwrap();
+            });
+            let candidate = PaneRecoveryCandidate {
+                window_id: "restored".to_string(), session_id: "restored-session".to_string(),
+                worktree_path: "/repo/test".into(), worktree_exists: true,
+                started_at: "1970-01-01T00:07:36Z".to_string(), child_pid: 123, child_started_at: 456,
+            };
+            let error = close_restored_pane(&format!("ws://{address}/internal/pane-ws"), "/repo/test", &candidate).await.unwrap_err();
+            assert!(error.contains("process identity changed"), "{error}");
+            server.await.unwrap();
+        });
     }
 
     #[test]
@@ -1681,6 +2149,11 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let runtime_path = persist_runtime_evidence(home.path());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
         let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:46234/ws");
         let _hook_url = ScopedEnvVar::set(
             gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
@@ -1691,6 +2164,167 @@ mod tests {
             pane_websocket_url_from_env().expect("dedicated pane endpoint"),
             "ws://127.0.0.1:46234/ws"
         );
+
+        let ipv6_url = "ws://[::1]:46234/internal/pane-ws";
+        let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, ipv6_url);
+        assert_eq!(
+            pane_websocket_url_from_env().expect("IPv6 loopback pane endpoint"),
+            ipv6_url
+        );
+    }
+
+    #[test]
+    fn pane_websocket_env_rejects_foreign_home_host_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let isolated_home = tempfile::tempdir().expect("isolated home");
+        let production_home = tempfile::tempdir().expect("production home");
+        let production_runtime = persist_runtime_evidence(production_home.path());
+        let _home = ScopedEnvVar::set("HOME", isolated_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", isolated_home.path());
+        let _runtime =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &production_runtime);
+        let _pane_url =
+            ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:46234/internal/pane-ws");
+
+        let error = pane_websocket_url_from_env()
+            .expect_err("foreign-HOME Host pane authority must fail closed");
+
+        assert!(error.contains("different GWT home"), "{error}");
+        let normalized_error = if cfg!(windows) {
+            error.to_lowercase()
+        } else {
+            error.clone()
+        };
+        let normalized_path = |path: &Path| {
+            let rendered = path.display().to_string();
+            if cfg!(windows) {
+                rendered.replace('/', "\\").to_lowercase()
+            } else {
+                rendered
+            }
+        };
+        let production_sessions = dunce::canonicalize(production_home.path())
+            .expect("canonical production home")
+            .join(".gwt/sessions");
+        assert!(
+            normalized_error.contains(&normalized_path(&production_sessions)),
+            "{error}"
+        );
+        assert!(
+            normalized_error.contains(&normalized_path(
+                &isolated_home.path().join(".gwt/sessions")
+            )),
+            "{error}"
+        );
+        assert!(error.contains("relaunch the Session"), "{error}");
+    }
+
+    #[test]
+    fn pane_websocket_env_requires_well_formed_runtime_evidence_for_host() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _pane_url =
+            ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:46234/internal/pane-ws");
+
+        let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let missing = pane_websocket_url_from_env()
+            .expect_err("Host pane authority without runtime evidence must fail closed");
+        assert!(missing.contains(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV));
+        drop(_runtime);
+
+        let malformed_runtime = home
+            .path()
+            .join(".gwt/sessions/not-runtime/123/session.json");
+        std::fs::create_dir_all(malformed_runtime.parent().unwrap())
+            .expect("malformed runtime directory");
+        std::fs::write(&malformed_runtime, "{}").expect("malformed runtime evidence");
+        let _runtime =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &malformed_runtime);
+        let malformed = pane_websocket_url_from_env()
+            .expect_err("malformed Host runtime evidence must fail closed");
+        assert!(malformed.contains("malformed"), "{malformed}");
+        drop(_runtime);
+
+        let runtime_directory = home.path().join(".gwt/sessions/runtime/123/session.json");
+        std::fs::create_dir_all(&runtime_directory).expect("runtime path directory");
+        let _runtime =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_directory);
+        let non_file = pane_websocket_url_from_env()
+            .expect_err("Host runtime evidence must be a regular file");
+        assert!(non_file.contains("malformed"), "{non_file}");
+    }
+
+    #[test]
+    fn pane_websocket_env_preserves_reserved_container_bridge_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("container home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            "/Users/host/.gwt/sessions/runtime/123/session.json",
+        );
+
+        for bridge in ["host.docker.internal", "host.containers.internal"] {
+            let url = format!("ws://{bridge}:46234/internal/pane-ws");
+            let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, &url);
+            assert_eq!(pane_websocket_url_from_env().unwrap(), url);
+        }
+
+        let _pane_url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            "ws://example.test:46234/internal/pane-ws",
+        );
+        let error = pane_websocket_url_from_env()
+            .expect_err("only managed Host and reserved bridge endpoints are valid");
+        assert!(error.contains("unsupported host"), "{error}");
+    }
+
+    #[test]
+    fn every_public_pane_command_rejects_foreign_home_before_connecting() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let isolated_home = tempfile::tempdir().expect("isolated home");
+        let production_home = tempfile::tempdir().expect("production home");
+        let repo = tempfile::tempdir().expect("repo");
+        let _home = ScopedEnvVar::set("HOME", isolated_home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", isolated_home.path());
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            persist_runtime_evidence(production_home.path()),
+        );
+        let _pane_url = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:9/internal/pane-ws");
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "foreign-capability");
+        let commands = [
+            PaneCommand::List,
+            PaneCommand::Read {
+                id: "agent-1".to_string(),
+                lines: 1,
+            },
+            PaneCommand::Close {
+                id: "agent-1".to_string(),
+            },
+            PaneCommand::Send {
+                id: Some("agent-1".to_string()),
+                text: "status".to_string(),
+            },
+        ];
+
+        for command in commands {
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            let error = run(&mut env, command, &mut String::new())
+                .expect_err("foreign-HOME command must fail before WebSocket connection");
+            assert!(error.to_string().contains("different GWT home"), "{error}");
+        }
     }
 
     #[test]
@@ -1751,6 +2385,57 @@ mod tests {
     }
 
     #[test]
+    fn pm_pane_list_preserves_wire_role_without_persisting_it() {
+        let mut pm = window("tab::pm", WindowPreset::Codex, Some("codex"));
+        pm.is_pm = true;
+        let agent = window("tab::agent", WindowPreset::Codex, Some("codex"));
+        let value = workspace_state_for_test("/repo", vec![pm, agent]);
+        let raw = &value["workspace"]["tabs"][0]["workspace"]["windows"][0];
+        let restored: PersistedWindowState = serde_json::from_value(raw.clone()).unwrap();
+        assert!(
+            !restored.is_pm,
+            "disk restoration must not trust a stored role"
+        );
+
+        let windows = parse_workspace_windows(&value, "/repo").unwrap();
+        assert!(
+            windows[0].is_pm,
+            "the wire PM role must survive CLI parsing"
+        );
+        let rows = render_pane_list(&windows);
+        let rows = rows.lines().collect::<Vec<_>>();
+        assert!(rows[0].ends_with("\trole=pm"), "{}", rows[0]);
+        assert!(
+            rows[1].ends_with("\trole=implementation_agent"),
+            "{}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn pm_pane_list_recognizes_replaced_pm_session_from_durable_role() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let session = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut pm = window("tab::old-pm", WindowPreset::Codex, Some("codex"));
+        pm.session_id = Some(session.id);
+        assert!(
+            !pm.is_pm,
+            "the GUI marker identifies only the resident registration"
+        );
+        let value = workspace_state_for_test(repo.to_str().unwrap(), vec![pm]);
+        let windows = parse_workspace_windows(&value, repo.to_str().unwrap()).unwrap();
+        assert!(render_pane_list(&windows).trim_end().ends_with("role=pm"));
+    }
+
+    #[test]
     fn render_pane_list_filters_to_agent_terminal_windows() {
         let windows = vec![
             window("tab-1::shell-1", WindowPreset::Shell, None),
@@ -1783,6 +2468,44 @@ mod tests {
         let rendered = render_pane_list(&windows);
 
         assert!(rendered.contains("tab-1::agent-1\twaiting\tcodex"));
+    }
+
+    // SPEC-3671 FR-005 / T-012: PM observability must never depend on placement. An
+    // Issue-preview window is listed, resolvable, and addressable exactly like a canvas
+    // window — losing this is what would take down autonomous operation.
+    #[test]
+    fn pm_operations_treat_issue_preview_windows_like_canvas_windows() {
+        let mut canvas = window("tab-1::agent-1", WindowPreset::Agent, Some("codex"));
+        canvas.session_id = Some("01JCANVASSESSION0000000000".to_string());
+        let mut preview = window("tab-1::agent-2", WindowPreset::Agent, Some("codex"));
+        preview.session_id = Some("01JPREVIEWSESSION0000000000".to_string());
+        preview.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "tab-1::issue-1".to_string(),
+            issue_number: 3671,
+        };
+        let windows = vec![canvas, preview];
+
+        // pane.list
+        let rendered = render_pane_list(&windows);
+        assert!(rendered.contains("tab-1::agent-1\trunning\tcodex"));
+        assert!(
+            rendered.contains("tab-1::agent-2\trunning\tcodex"),
+            "issue_preview panes must stay visible to pane.list: {rendered}"
+        );
+
+        // pane.read / pane.close target resolution
+        assert_eq!(
+            resolve_window_id(&windows, "agent-2"),
+            Some("tab-1::agent-2")
+        );
+
+        // pm.message.send target arbitration
+        assert_eq!(
+            resolve_pm_send_target(&windows, "tab-1::agent-2")
+                .expect("issue_preview pane must accept PM messages")
+                .id,
+            "tab-1::agent-2"
+        );
     }
 
     #[test]
@@ -2392,7 +3115,7 @@ mod tests {
     }
 
     #[test]
-    fn request_window_list_identifies_backend_response_timeout() {
+    fn request_window_list_recovers_on_retry_after_backend_stall() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2420,8 +3143,24 @@ mod tests {
                     .await
                     .expect("accept pane list websocket");
                 assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
-                let _socket = socket;
-                let _ = release_rx.await;
+                // Model a dispatch holding replies beyond both response budgets.
+                release_rx.await.expect("wait for the stall to clear");
+                drop(socket);
+
+                // The same backend answers a new request once the dispatch ends.
+                let (stream, _) = listener.accept().await.expect("accept pane list retry");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept retry websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
+                let state = workspace_state_for_test(
+                    "/repo/project",
+                    vec![window("tab::agent", WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send recovered pane list");
             });
 
             let error = request_window_list_with_timeout(
@@ -2432,7 +3171,15 @@ mod tests {
             .await
             .expect_err("pane list response must time out");
             release_tx.send(()).expect("release pane list mock");
+            let windows =
+                request_window_list(&format!("ws://{address}/internal/pane-ws"), "/repo/project")
+                    .await
+                    .expect(
+                        "retry must succeed after the stall clears without restarting the backend",
+                    );
             server.await.expect("pane list mock task");
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].id, "tab::agent");
 
             // Issue #3606 AC-3: a silent backend is named, not reported as a
             // bare give-up. #3510 raised the budget so a stalled instance still
@@ -3062,6 +3809,29 @@ mod tests {
                 error.contains("pane list"),
                 "the refusal must say which operation gave up: {error}"
             );
+            // Issue #4257 AC-2: report what was observed, not a guessed cause.
+            // The live case behind "saturated instance" was an idle process
+            // whose GUI event loop was held by one long dispatch.
+            assert!(
+                !error.contains("saturated"),
+                "the refusal must not assert a cause it did not observe: {error}"
+            );
+            assert!(
+                error.contains("connected") && error.contains("300ms"),
+                "the refusal must state the observed facts (connection, wait): {error}"
+            );
+            assert!(
+                error.contains("gwt.frontend.timing"),
+                "the refusal must point at the event-loop stall evidence: {error}"
+            );
+            assert!(
+                error.contains("temporary GUI stall") && error.contains("replies resume"),
+                "the refusal must explain that a dispatch stall can recover: {error}"
+            );
+            assert!(
+                error.contains("Wait 2.5 seconds and retry"),
+                "the refusal must recommend a concrete retry interval: {error}"
+            );
             server.abort();
             let _ = server.await;
         });
@@ -3332,6 +4102,10 @@ mod tests {
             for (status, reason) in [
                 ("unverified", "submit was not acknowledged"),
                 ("failed", "input mutation was refused"),
+                (
+                    "refused",
+                    "self-delivery to PM window tab::codex-1 is refused",
+                ),
             ] {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
@@ -3380,6 +4154,7 @@ mod tests {
 
             let unverified = &outcomes[0];
             let failed = &outcomes[1];
+            let refused = &outcomes[2];
             assert!(
                 unverified.contains("unverified")
                     && unverified.contains("submit was not acknowledged")
@@ -3390,6 +4165,13 @@ mod tests {
             assert!(
                 failed.contains("pm message failed") && !failed.contains("unverified"),
                 "{failed}"
+            );
+            assert!(
+                refused.contains("pm message refused")
+                    && refused.contains("self-delivery")
+                    && refused.contains("tab::codex-1")
+                    && !refused.contains("invalid status"),
+                "{refused}"
             );
         });
     }

@@ -176,10 +176,17 @@ The skill is considered green when **all** of the following hold:
 - the evidence bundle records no `failed: tooling-missing` entry
 - no visual / UI snapshot diff is unresolved (visual regression must be
   triaged before declaring PASS, not silently regenerated)
-- `User Verification Result` is one of `confirmed`, `n/a`, or
-  `skipped(<reason>)`. `pending` is not acceptable; `rejected(<reason>)`
-  forces `Overall: FAIL` and the implementation returns to Phase 2 (TDD
-  loop). The user's reason is preserved in the evidence bundle.
+- `User Verification Result` is one of `confirmed`, `n/a`, `n/a (autonomous)`,
+  `deferred (autonomous execution)`, or `skipped(<reason>)`. An autonomous
+  launch is recognized from `execution.status`'s `launch_route: autonomous`;
+  record `n/a (autonomous)` and waive the human handoff. UI work requires
+  `Agent Visual Check: pass` plus actual passing headed Chromium dark/light
+  results in the same fresh `verify.run` record, selected with
+  `params.headed_e2e_commands`. Existing autonomous PRs may retain the legacy
+  deferred body value without rewriting it or obtaining human confirmation.
+  Manual verification is unchanged. `pending` is not acceptable;
+  `rejected(<reason>)` forces `Overall: FAIL` and a return to Phase 2, preserving
+  the user's reason in the evidence bundle.
 
 In SPEC mode, also verify:
 
@@ -194,6 +201,10 @@ Handle PR operations autonomously using the `gwt-manage-pr` skill:
 - If there is no active PR for the branch, or prior PRs are already merged, use `gwt-manage-pr` to create one.
 - If the current PR has CI failures, conflicts, or review blockers, use `gwt-manage-pr` to fix.
 - Let `gwt-manage-pr` handle routine merge/push/fix loops.
+- In autonomous launches, continue through a Ready PR and the existing
+  CI auto-merge path until merged. Absent human visual confirmation does not
+  stop delivery; automated test / headed E2E / CI failures, known blockers, and
+  other Ready Gate failures still require repair.
 
 Do not create or update a Ready for review PR until Phase 3 verification
 passes and the Ready PR Gate confirms a releaseable slice. If work is

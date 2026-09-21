@@ -180,6 +180,74 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
   });
 
+  // Issue #4366 AC-6 / AC-6b: a provider hold never rewrites the saved Agent
+  // settings line; the launch target and its reason render on their own line
+  // and disappear when the hold clears.
+  test("keeps the saved agent settings and shows the held fallback on its own line", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page);
+    await page.goto(APP_URL);
+
+    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    await expect(issueSurface).toBeVisible();
+    const settings = issueSurface.locator(".knowledge-monitor-settings-copy");
+    const effective = issueSurface.locator(".knowledge-monitor-effective-copy");
+    const saved = {
+      enabled: true,
+      state: "active",
+      queue_len: 2,
+      active_count: 1,
+      max_active_agents: 1,
+      total_candidates: 2,
+      launch_profile_source: "saved",
+      launch_profile_summary: "codex / gpt-5 / high",
+    };
+
+    await page.evaluate((status) => {
+      window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status });
+    }, {
+      ...saved,
+      effective_launch_profile: {
+        index: 1,
+        agent_id: "claude",
+        summary: "claude / opus / high",
+        reason:
+          "codex held until 2026-09-21T08:41:00Z; re-verification launch at 2026-09-15T10:00:00Z",
+      },
+    });
+    await expect(settings).toHaveText("Agent settings Saved: codex / gpt-5 / high");
+    await expect(effective).toBeVisible();
+    await expect(effective).toHaveText(
+      "Launching with claude / opus / high (codex held until 2026-09-21T08:41:00Z; re-verification launch at 2026-09-15T10:00:00Z)",
+    );
+    // Operator tokens only: the line reads as secondary copy, like the
+    // settings line above it.
+    const [effectiveColor, mutedToken] = await effective.evaluate((node) => [
+      getComputedStyle(node).color,
+      getComputedStyle(document.documentElement).getPropertyValue("--color-text-muted").trim(),
+    ]);
+    expect(mutedToken).not.toEqual("");
+    expect(effectiveColor).toEqual(await settings.evaluate((node) => getComputedStyle(node).color));
+
+    await page.evaluate((status) => {
+      window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status });
+    }, saved);
+    await expect(settings).toHaveText("Agent settings Saved: codex / gpt-5 / high");
+    await expect(effective).toBeHidden();
+
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
   test("projects monitor state and controls through the canonical Issue surface", async ({
     page,
   }) => {
@@ -199,16 +267,16 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(issueSurface).toBeVisible();
     await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
     await expect(
-      issueSurface.locator('[data-issue-number="3273"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3273"] .knowledge-row-badge'),
     ).toHaveText("Queued");
     await expect(issueSurface.locator('[data-issue-number="3273"]')).toContainText(
       "Queue 1",
     );
     await expect(
-      issueSurface.locator('[data-issue-number="3096"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3096"] .knowledge-row-badge'),
     ).toHaveText("Needs human");
     await expect(
-      issueSurface.locator('[data-issue-number="3097"] .knowledge-monitor-chip'),
+      issueSurface.locator('[data-issue-number="3097"] .knowledge-row-badge'),
     ).toHaveText("On hold");
     await expect(issueSurface.locator('[data-issue-number="3097"]')).toContainText(
       "Excluded by label: hold",
@@ -221,13 +289,59 @@ test.describe("Issue Bridge load recovery", () => {
     await issueSurface
       .locator('[data-issue-number="3273"] [data-action="launch-now"]')
       .click();
-    await issueSurface
-      .locator('[data-issue-number="3095"] [data-action="move-up"]')
-      .click();
+    // SPEC #3885 AC-5: queue reordering lives in the row's overflow menu.
+    const menu3095 = issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu');
+    await menu3095.locator("summary").click();
+    await menu3095.locator('[data-action="move-up"]').click();
+    await expect(
+      issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu'),
+    ).not.toHaveAttribute("open", "");
     await issueSurface.locator(".knowledge-monitor-max-active input").fill("4");
     await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
-    await issueSurface.locator('[data-action="monitor-autonomous"]').click();
+    // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
+    // server state only. A click sends the request and nothing moves until an
+    // issue_monitor_status confirms it; the fixture stays silent on purpose.
+    const autonomous = issueSurface.locator('[data-action="monitor-autonomous"]');
+    const autonomousState = autonomous.locator(".knowledge-monitor-switch__state");
+    const autonomousTrack = autonomous.locator(".knowledge-monitor-switch__track");
+    await expect(autonomous).toHaveAttribute("role", "switch");
+    await expect(autonomous).toHaveAttribute("aria-label", "Autonomous mode");
+    await expect(autonomous).toHaveAttribute("aria-checked", "false");
+    await expect(autonomousState).toHaveText("Off");
+    const offTrackColor = await autonomousTrack.evaluate(
+      (element) => getComputedStyle(element).backgroundColor,
+    );
+    await autonomous.click();
+    await expect(autonomous).toHaveAttribute("aria-checked", "false");
+    await expect(autonomousState).toHaveText("Off");
+    await page.evaluate(() => {
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "issue_monitor_status",
+        status: {
+          enabled: false,
+          state: "disabled",
+          queue_len: 3,
+          active_count: 1,
+          max_active_agents: 4,
+          total_candidates: 5,
+          autonomous_mode: true,
+          launch_profile_source: "saved",
+          launch_profile_summary: "codex / host",
+        },
+      });
+    });
+    await expect(autonomous).toHaveAttribute("aria-checked", "true");
+    await expect(autonomousState).toHaveText("On");
+    // The track color animates (motion-fast transition), so poll until the
+    // computed value has left the Off color instead of sampling once.
+    await expect(autonomousTrack).not.toHaveCSS("background-color", offTrackColor);
+    // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
+    // toggle and reports the effective value the backend sent.
+    const autoApply = issueSurface.locator('[data-action="monitor-auto-apply"]');
+    await expect(autoApply).toHaveText("Auto-apply updates: OFF");
+    await expect(autoApply).toHaveAttribute("data-enabled", "false");
+    await autoApply.click();
     await issueSurface.locator('[data-action="monitor-settings"]').click();
     await issueSurface.locator(".knowledge-monitor-quick-title").fill(
       "Investigate flaky release gate",
@@ -256,11 +370,70 @@ test.describe("Issue Bridge load recovery", () => {
       kind: "set_issue_monitor_autonomous_mode",
       enabled: true,
     });
+    expect(messages).toContainEqual({
+      kind: "set_issue_monitor_auto_apply_updates",
+      enabled: true,
+    });
     expect(messages).toContainEqual({ kind: "issue_monitor_configure_profile" });
     expect(messages).toContainEqual({
       kind: "quick_register_issue",
       title: "Investigate flaky release gate",
       launch: true,
+    });
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
+  // Issue #3628 (AC-3/AC-5): the 2026-08-17 outage. A row whose launch died had
+  // no GUI recovery — only Launch Now, which opens the wizard — and the fleet
+  // running nothing at all showed up nowhere, because `last_error` was already
+  // occupied by one of the per-issue failures.
+  test("offers a requeue on a failed row and shows a fleet outage", async ({
+    page,
+  }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { blackedOutFleet: true });
+
+    await page.goto(APP_URL);
+
+    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    await expect(
+      issueSurface.locator('[data-issue-number="3098"] .knowledge-row-badge'),
+    ).toHaveText("Agent failed");
+
+    const blackout = issueSurface.locator(".knowledge-monitor-blackout");
+    await expect(blackout).toBeVisible();
+    await expect(blackout).toContainText("the fleet has been down since");
+    // FR-017: the per-issue failure is read in the notification center, not
+    // here. The outage renders anyway — it must not be masked by whichever
+    // launch happened to occupy `last_error` first.
+    await expect(issueSurface.locator(".knowledge-monitor-error")).toHaveCount(
+      0,
+    );
+
+    // A queued row has no failure hold to release, so it must not offer the
+    // recovery — a button that cannot change anything is worse than none.
+    await expect(
+      issueSurface.locator(
+        '[data-issue-number="3273"] [data-action="requeue-issue"]',
+      ),
+    ).toHaveCount(0);
+
+    await issueSurface
+      .locator('[data-issue-number="3098"] [data-action="requeue-issue"]')
+      .click();
+
+    const messages = await page.evaluate(() => window.__knowledgeLoadMessages);
+    expect(messages).toContainEqual({
+      kind: "issue_monitor_requeue",
+      issue_number: 3098,
     });
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
@@ -287,6 +460,222 @@ test.describe("Issue Bridge load recovery", () => {
       "Cached work items",
     );
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+test.describe("Issue Related Work Resume", () => {
+  test.use({
+    deviceScaleFactor: 1,
+    viewport: { width: 1440, height: 900 },
+  });
+
+  test("correlates one real click, ignores stale error, and visibly recovers from the exact error", async ({
+    page,
+  }, testInfo) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, {
+      includeRelatedWork: true,
+      theme,
+    });
+    await page.goto(APP_URL);
+    await page.addStyleTag({
+      content: "#fleet-minimap { pointer-events: none !important; }",
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+    await page
+      .locator(".surface-knowledge .knowledge-row[data-issue-number='3096']")
+      .click();
+    const resume = page.locator(
+      '.surface-knowledge [data-action="resume-related-session"]'
+        + '[data-session-id="related-gwt-session"]'
+        + '[data-agent-session-id="related-conversation"]',
+    );
+    await expect(resume).toBeVisible();
+
+    await resume.click();
+    await expect(resume).toBeDisabled();
+    await expect(resume).toHaveText("Resuming...");
+    await expect(resume).toHaveClass(/is-pending/);
+
+    const first = await page.evaluate(() => {
+      const messages = window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "resume_workspace_agent",
+      );
+      return messages[0];
+    });
+    expect(first).toBeTruthy();
+    expect(Object.keys(first).sort()).toEqual([
+      "agent_session_id",
+      "bounds",
+      "kind",
+      "operation_id",
+      "session_id",
+    ]);
+    expect(first.operation_id).toEqual(expect.stringMatching(/^resume-/));
+    expect(first.operation_id).not.toBe("");
+    expect(first.session_id).toBe("related-gwt-session");
+    expect(first.agent_session_id).toBe("related-conversation");
+    expect(first.bounds).toEqual(expect.objectContaining({
+      width: expect.any(Number),
+      height: expect.any(Number),
+    }));
+
+    // Bypass the native disabled guard once so the shared pending controller
+    // must also reject a duplicate event for the same Session.
+    await resume.dispatchEvent("click");
+    await expect.poll(() => page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "resume_workspace_agent",
+      ).length,
+    )).toBe(1);
+
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(
+        (message) => message.kind === "resume_workspace_agent",
+      );
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "workspace_resume_agent_error",
+        operation_id: `${request.operation_id}-stale`,
+        session_id: request.session_id,
+        message: "Stale Resume failure must stay invisible",
+      });
+    });
+    await expect(resume).toBeDisabled();
+    await expect(resume).toHaveText("Resuming...");
+    await expect(
+      page.locator('.toast-alerts__item[data-level="error"]').filter({
+        hasText: "Stale Resume failure must stay invisible",
+      }),
+    ).toHaveCount(0);
+
+    const loadCountBeforeError = await page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "load_knowledge_bridge",
+      ).length,
+    );
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(
+        (message) => message.kind === "resume_workspace_agent",
+      );
+      window.__issueBridgeFixtureSocket.emit({
+        kind: "workspace_resume_agent_error",
+        operation_id: request.operation_id,
+        session_id: request.session_id,
+        message: '<img src=x onerror="window.__resumeToastXss=true">Fixture backend rejected Related Work Resume',
+      });
+    });
+
+    await expect(resume).toBeEnabled();
+    await expect(resume).toHaveText("Resume");
+    await expect(resume).not.toHaveClass(/is-pending/);
+    await expect(page.locator("#workspace-resume-picker-modal")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+    const errorToast = page
+      .locator('.toast-alerts__item[data-level="error"]')
+      .filter({ hasText: "Fixture backend rejected Related Work Resume" });
+    await expect(errorToast).toBeVisible();
+    await expect(errorToast.locator(".toast-alerts__dismiss")).toBeVisible();
+    await expect(errorToast).toContainText(
+      '<img src=x onerror="window.__resumeToastXss=true">Fixture backend rejected Related Work Resume',
+    );
+    await expect(errorToast.locator("img, script")).toHaveCount(0);
+    expect(await page.evaluate(() => window.__resumeToastXss === true)).toBe(false);
+
+    await expect.poll(() => page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "load_knowledge_bridge",
+      ).length,
+    )).toBeGreaterThan(loadCountBeforeError);
+    const latestLoad = await page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "load_knowledge_bridge",
+      ).at(-1),
+    );
+    expect(latestLoad.refresh).toBe(false);
+
+    await errorToast.locator(".toast-alerts__dismiss").click();
+    await expect(errorToast).toHaveCount(0);
+    await resume.click();
+    await expect.poll(() => page.evaluate(() =>
+      window.__knowledgeLoadMessages.filter(
+        (message) => message.kind === "resume_workspace_agent",
+      ).length,
+    )).toBe(2);
+    const operations = await page.evaluate(() =>
+      window.__knowledgeLoadMessages
+        .filter((message) => message.kind === "resume_workspace_agent")
+        .map((message) => message.operation_id),
+    );
+    expect(operations[1]).toEqual(expect.stringMatching(/^resume-/));
+    expect(operations[1]).not.toBe(operations[0]);
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("re-enables Resume when the captured 20,000ms pending timeout fires", async ({
+    page,
+  }, testInfo) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, {
+      captureLaunchPendingTimeout: true,
+      includeRelatedWork: true,
+      theme,
+    });
+    await page.goto(APP_URL);
+    await page.addStyleTag({
+      content: "#fleet-minimap { pointer-events: none !important; }",
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+    await page
+      .locator(".surface-knowledge .knowledge-row[data-issue-number='3096']")
+      .click();
+    const resume = page.locator(
+      '.surface-knowledge [data-action="resume-related-session"]'
+        + '[data-session-id="related-gwt-session"]'
+        + '[data-agent-session-id="related-conversation"]',
+    );
+    await expect(resume).toBeVisible();
+    await resume.click();
+    await expect(resume).toBeDisabled();
+    await expect(resume).toHaveText("Resuming...");
+    await expect.poll(() => page.evaluate(
+      () => window.__launchPendingTimeoutDelays,
+    )).toEqual([20_000]);
+
+    await page.evaluate(() => window.__fireLaunchPendingTimeouts());
+
+    await expect(resume).toBeEnabled();
+    await expect(resume).toHaveText("Resume");
+    await expect(resume).not.toHaveClass(/is-pending/);
+    const timeoutToast = page
+      .locator('.toast-alerts__item[data-level="error"]')
+      .filter({ hasText: "Resume request timed out" });
+    await expect(timeoutToast).toBeVisible();
+    await expect(timeoutToast.locator(".toast-alerts__title")).toHaveText(
+      "Launch timed out",
+    );
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
@@ -1274,22 +1663,62 @@ async function installSpecPresetBackend(page, { theme }) {
 async function installIssueBridgeBackend(
   page,
   {
+    captureLaunchPendingTimeout = false,
     errorOnForcedRefresh = false,
+    includeRelatedWork = false,
     ignoreFirstLoad = false,
     legacyPreset = false,
     staleDetailBeforeWorkspace = false,
+    theme = null,
     triggerAutoRefreshOnce = false,
+    // Issue #3628: the 2026-08-17 shape — a row whose launch died beside a
+    // fleet that has been running nothing. Opt-in so the existing row-count
+    // assertions keep describing the fixture they were written for.
+    blackedOutFleet = false,
   } = {},
 ) {
   await page.addInitScript(
     ({
+      captureLaunchPendingTimeout: shouldCaptureLaunchPendingTimeout,
       errorOnForcedRefresh: shouldErrorOnForcedRefresh,
+      includeRelatedWork: shouldIncludeRelatedWork,
       ignoreFirstLoad: shouldIgnoreFirstLoad,
       legacyPreset: shouldUseLegacyPreset,
       staleDetailBeforeWorkspace: shouldSeedStaleDetail,
+      theme: selectedTheme,
       triggerAutoRefreshOnce: shouldTriggerAutoRefreshOnce,
+      blackedOutFleet: shouldBlackOutFleet,
     }) => {
       window.__knowledgeLoadMessages = [];
+      if (selectedTheme) {
+        localStorage.setItem("gwt:ui:theme", selectedTheme);
+      }
+      if (shouldCaptureLaunchPendingTimeout) {
+        const originalSetTimeout = window.setTimeout.bind(window);
+        const originalClearTimeout = window.clearTimeout.bind(window);
+        const callbacks = new Map();
+        let nextCapturedTimerId = -1;
+        window.__launchPendingTimeoutDelays = [];
+        window.__fireLaunchPendingTimeouts = () => {
+          const pendingCallbacks = [...callbacks.values()];
+          callbacks.clear();
+          for (const callback of pendingCallbacks) callback();
+        };
+        window.setTimeout = (callback, delay, ...args) => {
+          if (delay === 20_000 && typeof callback === "function") {
+            const timerId = nextCapturedTimerId;
+            nextCapturedTimerId -= 1;
+            window.__launchPendingTimeoutDelays.push(delay);
+            callbacks.set(timerId, () => callback(...args));
+            return timerId;
+          }
+          return originalSetTimeout(callback, delay, ...args);
+        };
+        window.clearTimeout = (timerId) => {
+          if (callbacks.delete(Number(timerId))) return;
+          originalClearTimeout(timerId);
+        };
+      }
       if (shouldTriggerAutoRefreshOnce) {
         window.__knowledgeAutoRefreshCallbacks = [];
         window.__triggerKnowledgeAutoRefresh = () => {
@@ -1383,6 +1812,23 @@ async function installIssueBridgeBackend(
           exclusion_reason: "Excluded by label: hold",
         },
       ];
+      if (shouldBlackOutFleet) {
+        entries.push({
+          number: 3098,
+          title: "Agent failed with no launch left to name",
+          state: "open",
+          meta: "Blackout fixture",
+          labels: ["bug"],
+          linked_branch_count: 0,
+          match_score: 91,
+          phase: null,
+          has_unknown_phase: false,
+          is_spec: false,
+          monitor_state: "agent_failed",
+          queue_position: null,
+          exclusion_reason: null,
+        });
+      }
 
       const workspaceState = {
         kind: "workspace_state",
@@ -1437,6 +1883,7 @@ async function installIssueBridgeBackend(
           super();
           this.url = url;
           this.readyState = FixtureWebSocket.CONNECTING;
+          window.__issueBridgeFixtureSocket = this;
           setTimeout(() => {
             this.readyState = FixtureWebSocket.OPEN;
             this.dispatchEvent(new Event("open"));
@@ -1470,17 +1917,33 @@ async function installIssueBridgeBackend(
           if (message.kind === "list_issue_monitor") {
             this.emit({
               kind: "issue_monitor_status",
-              status: {
-                enabled: false,
-                state: "disabled",
-                queue_len: 3,
-                active_count: 1,
-                max_active_agents: 2,
-                total_candidates: 5,
-                autonomous_mode: false,
-                launch_profile_source: "saved",
-                launch_profile_summary: "codex / host",
-              },
+              status: shouldBlackOutFleet
+                ? {
+                    enabled: true,
+                    state: "error",
+                    queue_len: 3,
+                    active_count: 0,
+                    max_active_agents: 2,
+                    total_candidates: 6,
+                    autonomous_mode: false,
+                    launch_profile_source: "saved",
+                    launch_profile_summary: "codex / host",
+                    last_error:
+                      "issue #3098: an execution generation already exists",
+                    agent_blackout:
+                      "No implementation agent has been running for 1800s while 4 issue(s) were runnable; the fleet has been down since 2026-08-17T00:00:00Z",
+                  }
+                : {
+                    enabled: false,
+                    state: "disabled",
+                    queue_len: 3,
+                    active_count: 1,
+                    max_active_agents: 2,
+                    total_candidates: 5,
+                    autonomous_mode: false,
+                    launch_profile_source: "saved",
+                    launch_profile_summary: "codex / host",
+                  },
             });
             return;
           }
@@ -1524,6 +1987,31 @@ async function installIssueBridgeBackend(
                 subtitle: "Cached Issue detail",
                 labels: ["bug"],
                 launch_issue_number: message.number,
+                related_works: shouldIncludeRelatedWork && message.number === 3096
+                  ? [
+                      {
+                        id: "related-work-1",
+                        title: "Issue Related Work Resume fixture",
+                        status_category: "idle",
+                        branch: "work/issue-related-resume",
+                        worktree_path: "/fixture/work/issue-related-resume",
+                        agents: [
+                          {
+                            session_id: "related-gwt-session",
+                            agent_id: "codex",
+                            display_name: "Codex",
+                            sessions: [
+                              {
+                                agent_session_id: "related-conversation",
+                                is_active: false,
+                                resumable: true,
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ]
+                  : [],
                 sections: [
                   {
                     title: "Description",
@@ -1561,11 +2049,15 @@ async function installIssueBridgeBackend(
       });
     },
     {
+      captureLaunchPendingTimeout,
       errorOnForcedRefresh,
+      includeRelatedWork,
       ignoreFirstLoad,
       legacyPreset,
       staleDetailBeforeWorkspace,
+      theme,
       triggerAutoRefreshOnce,
+      blackedOutFleet,
     },
   );
 }
