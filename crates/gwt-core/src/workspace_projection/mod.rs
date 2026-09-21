@@ -27,7 +27,8 @@ mod work_items;
 
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
 pub use identity::{
-    can_upgrade_work_owner, canonical_work_id, successor_work_id, workspace_group_key_for_item,
+    can_upgrade_work_owner, canonical_work_id, successor_work_id, work_owner_for_branch,
+    workspace_group_key_for_item,
 };
 pub use lifecycle::{
     decide_work_close, derive_merged_done_equivalent, recompute_lifecycle_stage,

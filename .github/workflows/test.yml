@@ -28,6 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      # SPEC #4551 T-055: the crates the PR touched, so the flake job can
+      # re-run only those twenty times instead of the whole workspace.
+      crates: ${{ steps.classify.outputs.crates }}
     steps:
       - name: Classify changed files
         id: classify
@@ -41,6 +44,7 @@ jobs:
           # embed is code: CHANGELOG.md (include_str! in gwt-core) and
           # .claude/ + .codex/ (include_dir! in gwt-skills).
           docs_only=true
+          crates=""
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
@@ -48,10 +52,22 @@ jobs:
               docs/*|*.md) ;;
               *) docs_only=false ;;
             esac
+            case "$file" in
+              crates/*/*)
+                crate="${file#crates/}"
+                crate="${crate%%/*}"
+                case " $crates " in
+                  *" $crate "*) ;;
+                  *) crates="${crates:+$crates }$crate" ;;
+                esac
+                ;;
+            esac
           done <<<"$files"
           echo "$files"
           echo "docs_only=$docs_only"
+          echo "crates=$crates"
           echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
+          echo "crates=$crates" >>"$GITHUB_OUTPUT"
 
   test:
     name: Test (Rust)
@@ -119,7 +135,16 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features
         timeout-minutes: 25
-      # Issue #4317: the step above enables the self dev-dependency's
+      # SPEC #4551 T-050 / AC-5: mechanism (C) -- a child the suite never
+      # reaped. It has no textual shape to scan for and it does not fail the
+      # run that caused it; it hangs the next one (#3845) or holds the host
+      # verification lease and starves the fleet (#4182). So it is observed
+      # here, immediately after the suite, while the orphan is still alive.
+      # Pinned by crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
+      - name: Check for processes the suite failed to reap
+        run: scripts/ci-check-orphan-processes.sh
+        timeout-minutes: 5
+      # Issue #4317: the workspace test step enables the self dev-dependency's
       # `test-gh-guard` feature, so the target/debug/gwtd it leaves behind
       # refuses every real `gh` spawn. This drives the real artifact through
       # refusal -> `cargo build -p gwt --bin gwtd` -> successful GitHub read,
@@ -152,6 +177,48 @@ jobs:
             echo "Skipping voice accuracy regression: tests/voice_eval/manifest.json not found."
           fi
         timeout-minutes: 10
+
+  # SPEC #4551 T-055 / AC-6: one green run says nothing about a test whose
+  # result is not a function of its source. All 16 issues this SPEC bundles
+  # were found by an unrelated PR turning red, never by the PR that introduced
+  # them. This re-runs only the crates the PR touched, at default parallelism
+  # (#4023 and #4182 reproduce only when the suite competes with itself), and
+  # fails when the outcome changes between runs.
+  #
+  # It depends on `changes`, so its name must stay off the develop required
+  # status checks: branch protection reads a skipped job as Success. Pinned by
+  # crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
+  flake-detection:
+    name: Flake detection (changed crates)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.crates != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache Linux GTK dependency packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/gwt-apt-archives
+          key: gwt-apt-gtk-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
+          restore-keys: |
+            gwt-apt-gtk-${{ runner.os }}-
+        timeout-minutes: 5
+      - name: Install tray + GTK dependencies (Linux)
+        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        timeout-minutes: 18
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+        continue-on-error: true
+      # N lives in the script, not here, so the number the gate actually runs
+      # is the number the contract test reads.
+      - name: Re-run the changed crates until the outcome wobbles
+        env:
+          GWT_FLAKE_CRATES: ${{ needs.changes.outputs.crates }}
+        run: scripts/ci-flake-detect.sh
+        timeout-minutes: 60
 
   test-python-runner:
     name: Test (Python runner)
