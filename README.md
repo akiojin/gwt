@@ -920,6 +920,13 @@ processes or unavailable samples do not imply low CPU usage. A warning is an
 observation, not proof that a particular worktree caused the load; inspect
 active filesystem consumers and Spotlight privacy settings before attributing it.
 
+Spotlight's own indexing daemon is reported from the Issue Monitor snapshot
+instead: `spotlight` in `issue.monitor.status` lists every `mds_stores`
+process with its CPU percentage and carries a `warning` once one of them
+exceeds 100%. On a host with hundreds of worktrees the daemon can outrank the
+agents themselves, which otherwise only reads as a slow host. The block is
+present with no processes and no warning on platforms without Spotlight.
+
 ## Development
 
 ### Build

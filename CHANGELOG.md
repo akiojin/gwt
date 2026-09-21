@@ -1,6 +1,38 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.101.1] - 2026-09-21
+
+### Bug Fixes
+
+- **runtime:** Pane を閉じたときに window 単位のバッファを解放する (#4234)
+- **workspace:** Container ambiguity の拒否文から死んだ導線を除く
+- **index:** Fsevent-sys 5.2.0 の deprecation で macOS の clippy が落ちるのを止める
+- **index:** MacOS watcher の deprecated allow の重複を develop 側に寄せる
+- **workspace:** Works.json の inline Work イベント履歴に上限を設ける
+- **workspace:** Work item の board_refs / agents も上限を設け snapshot 複製をやめる
+- **workspace:** Compaction の watermark から close kind を除外する
+- **workspace:** Compaction の watermark を導出にして works.json のスキーマを据え置く
+
+### Miscellaneous Tasks
+
+- **work:** #4234 の work event shard を記録する
+- **work:** #4234 の AC 再評価セッションの work event shard を記録する
+- **work:** #4234 の AC 再評価セッションの work event shard を記録する
+- **work:** #4234 の PR 作成に伴う work event shard を記録する
+- **work:** #4396 の Work イベントを記録する
+- **work:** #4396 の Work イベント shard を記録する
+- **work:** #4396 の Work イベント shard を記録する
+- **work:** #4396 の Work イベント shard を記録する
+- **work:** #4508 の Work イベントシャードを記録する
+- **work:** #4508 の Work イベントシャードを記録する
+- **work:** #4508 の Work イベントシャードを記録する
+- **work:** #4508 の Work イベントシャードを記録する
+
+### Testing
+
+- **skills:** Auto-merge を止める正規経路が規約から消えたら落ちるようにする
+
 ## [9.101.0] - 2026-09-21
 
 ### Bug Fixes
