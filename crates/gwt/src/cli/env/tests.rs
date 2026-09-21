@@ -1175,6 +1175,15 @@ fn dispatch_escalates_a_governance_refusal_to_the_board() {
     let code = dispatch(&mut env, &["gwtd".to_string()]);
     assert_ne!(code, 0, "the operation itself must still report failure");
 
+    let payload: serde_json::Value =
+        serde_json::from_slice(&env.stdout).expect("parse governed JSON response");
+    assert_eq!(
+        payload["refusal"]["reason_code"],
+        "execution_recovery_scope_unavailable"
+    );
+    assert_eq!(payload["refusal"]["recoverability"], "human_required");
+    assert_eq!(payload["refusal"]["escalation_kind"], "authority");
+
     let open = gwt_core::coordination::load_open_escalations(temp.path())
         .expect("read the escalation index");
     assert_eq!(
@@ -1185,6 +1194,11 @@ fn dispatch_escalates_a_governance_refusal_to_the_board() {
     assert!(
         open[0].body.contains("execution.adopt"),
         "the escalation must name the refused operation: {:?}",
+        open[0]
+    );
+    assert!(
+        open[0].body.contains("原因: authority"),
+        "the typed cause, not display wording, must explain the escalation: {:?}",
         open[0]
     );
 }
