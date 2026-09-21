@@ -219,6 +219,20 @@ gwtd <<'JSON'
 JSON
 ```
 
+`board.show` returns the latest 20 entries visible to the selected workspace or
+session, in chronological order. Set `params.limit` to a nonnegative integer
+(for example, `15`; `0` returns no entries). `params.all: true` selects all
+audiences and removes the default cap, but an explicit `limit` always wins.
+Provider retention still applies: `all` does not load the full historical archive.
+Unknown parameter keys are rejected with the accepted keys listed.
+The existing `board` field is preserved; `page.total_entries` counts the visible
+provider snapshot before the CLI limit, `page.returned_entries` counts returned
+entries, and `page.truncated` indicates clipping by that limit.
+
+Response cost is roughly the entry count times serialized entry size, plus
+metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte cap;
+long posts increase the size, and `all: true` can return hundreds of KiB or more.
+
 Managed hooks and runtime delegation use `gwtd`. On macOS and Linux,
 running JSON operation `daemon.start` brings up a per-project runtime daemon
 (Unix-domain socket IPC) that multi-instance event fan-out depends on
@@ -230,12 +244,20 @@ the live endpoint for diagnostics. Without JSON operation `daemon.start`,
 multi-instance fan-out is inactive but local file-based state and
 the file watcher continue to work as before.
 
-Windows currently has no long-running daemon: JSON operation `daemon.start`
-exits with "not yet implemented", and managed hooks fall back to
-synchronous `gwt hook ...` dispatch. Multi-instance fan-out is
-therefore unavailable on Windows pending follow-up work; JSON operation
-`daemon.status` still works there but always reports `stopped` until
-the named-pipe path lands.
+On Windows the daemon runs the same way: the GUI's Issue Monitor starts
+and supervises it as a user-session child process, and JSON operation
+`daemon.start` starts one by hand. The transport is a named pipe
+(`\\.\pipe\gwtd-<scope>-<hash>`, local clients only; the endpoint file
+under `~/.gwt` carries the auth token). `daemon.status`,
+`daemon.subscribe`, Issue Monitor controls, and multi-instance fan-out
+behave as on macOS / Linux. A hand-started daemon stops on Ctrl-C,
+Ctrl-Break, or console close; logoff and shutdown run the same cleanup,
+and a daemon terminated by the GUI is reclaimed by the liveness checks on
+the next start. gwt does not install a Windows Service: the daemon only
+scans and claims — agent panes are still created by the GUI — so a
+service would not enable headless autonomous runs and would fight the
+per-user `~/.gwt` state. Headless autonomous execution is not a goal of
+the daemon.
 
 ## Agent Workflow
 
@@ -269,7 +291,11 @@ Common windows include:
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view.
+  open this same Work Item view. Issue Monitor launches do not open a window on
+  the canvas: the agent is mirrored read-only in the Issue window's right pane,
+  and `Windowize` promotes it to a normal window when you want to type into it.
+  Each row also carries its Work's lifecycle, attention reason, and PR state,
+  with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
 - `File Tree` — live read-only repository tree
@@ -317,10 +343,54 @@ the `gwtd` JSON operations `issue.monitor.status`,
 `issue.monitor.config.set` operation can stop processing, disable autonomous
 mode, or set a positive `max_active` limit. For safety, it rejects
 `enabled=true` and `autonomous_mode=true`; enabling either capability requires
-an explicit action in the GUI. All operations accept an optional
+an explicit action in the GUI. Idle agent windows free their slot on
+their own: each scan classifies every launched window as
+`review_verdict_published`, `execution_settled`, `binding_dead`, or
+`stuck_unknown` (visible per row and in `idle_windows` in
+`issue.monitor.status`), releases the first three and closes their panes. A
+released Issue stays out of the queue, except when its window died before the
+agent settled its execution — an app restart that took the pane with it, for
+example — in which case the Issue is requeued so the next scan relaunches it
+on its existing branch. Only `stuck_unknown` — a window that is idle while its
+execution record is still active — stays for a human, and it asks for a
+decision once it has been idle for twice the stuck timeout.
+`issue.monitor.release_idle` runs the same release by hand for one Issue or
+every idle row, and `dry_run: true` reports the targets without touching
+anything. `issue.monitor.profiles` reads the launch
+candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
+candidates the Monitor launches each Issue with the first eligible candidate
+(rate-limit holds, the usage threshold, and `prefer_for` routing decide
+eligibility; the exact rules are specified in SPEC
+[#3914](https://github.com/akiojin/gwt/issues/3914)), so one rate-limited
+provider no longer stops the queue. Saving Agent settings for a second provider
+in the GUI appends it to the same pool. All operations accept an optional
 `project_root` and otherwise target the current worktree. Priority and
 daemon-absent configuration changes become visible to running instances on the
 next scan/rebase.
+
+Host free space is part of the same snapshot: `disk_space` in
+`issue.monitor.status` lists the volumes the worktrees and the verification
+coordinator live on and carries a `warning` once one of them falls below
+20 GiB or 5% free, so a filling host is visible before `verify.run` fails with
+`No space left on device`. The `worktree.gc_build_artifacts` operation
+reclaims the space: it removes the `target/` build cache of every worktree
+whose HEAD is merged into `origin/<base>` (`base` defaults to `develop`) and
+that has neither a running process nor a live gwt launch. An unqualified call
+is a dry run that lists the candidates with their sizes and every kept
+worktree with its reason (`active process …`, `tracked launch …`, `not
+merged …`); pass `dry_run: false` to delete, `include_unmerged: true` to
+also reclaim idle unmerged worktrees, and `include_protected_workspaces: true`
+to also reclaim the shared base-branch workspaces (`develop`, `main`), which
+are kept by default because their rebuild lands on whoever opens them next.
+Running worktrees, the main worktree, the calling worktree, and the worktree
+hosting the running `gwtd` are never touched, whatever the flags say.
+
+The Workspace panel's `Clean Up Ready` count uses the same idea for whole
+worktrees: a merged or change-free Workspace stays cleanup-ready when its only
+uncommitted difference is something gwt itself wrote — its `.gwt/` namespace,
+the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
+`.claude/settings.local.json` that still carries no hand-written content.
+Anything else you have not committed keeps the Workspace out of the count.
 
 ### Autonomous mode (opt-in)
 
@@ -342,6 +412,19 @@ pass first, failures escalate to a visible `NeedsHuman` state, and the
 `Autonomous` toggle is a kill switch that actively cancels any auto-merge the
 monitor armed. The full gate design and threat model live in SPEC
 [#3200](https://github.com/akiojin/gwt/issues/3200).
+
+Once a work branch merges into `develop`, the monitor settles the delivered
+Issue itself (`Closes #N` only fires on the default branch). When every
+acceptance criterion is checked — or the PR body / an Issue comment records
+that the remaining criteria were delegated to another Issue
+(`残 AC は別 Issue に委譲`) — it posts a comment carrying the PR number and
+merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
+`merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
+is closed only after every task phase is complete. Auto-close follows the
+`Autonomous` toggle by default; `issue.monitor.config.set` with
+`auto_close_merged_issues=true|false` overrides it, and when it is off the
+monitor only records a `merge 済み・close 待ち` comment. An Issue a human
+reopened is never closed again by the same merge.
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
@@ -431,6 +514,35 @@ and coordination-event summaries.
 - Outside a launch, gwt owns both Codex hook discovery locations — the
   worktree-local `.codex/hooks.json` and the workspace-home copy at the repo
   root — so hook health reporting and self-heal always target the same files.
+
+### Codex recommended config
+
+On every GUI startup gwt makes sure the host Codex config
+(`$CODEX_HOME/config.toml`, default `~/.codex/config.toml`) carries
+gwt's recommended `features.context_management.experimental_mode = true`, which
+keeps accumulated context as notes and searchable history instead of repeated
+single-summary compaction. gwt writes the key only when it is absent; every
+other table in the file is preserved and a config that already has the key is
+never rewritten. To opt out, set it explicitly in `config.toml`:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt respects any explicit value (`true` or `false`) and does not change it. A
+config that cannot be parsed or written never blocks startup; the path and
+cause are recorded in the error ledger (`errors.list`).
+
+Codex CLIs before 0.153.0 cannot load a table under `[features]`: a single
+`[features.context_management]` table makes the whole config unreadable
+(`invalid type: map, expected a boolean`), which also stops `codex login`. The
+codex gwt launches and the `codex` on your `PATH` can be different versions, so
+gwt checks the `PATH` one (`codex --version`) at startup. When it is older than
+0.153.0, or its version cannot be read, gwt does not write the key and removes
+an existing `[features.context_management]` table so that codex keeps working.
+After you upgrade the `PATH` codex to 0.153.0 or later, the next gwt startup
+writes the key again.
 
 When an agent is launched by gwt with a live GUI/browser backend, managed hooks
 also enable the local hook-forward bridge. The bridge posts hook events only to
@@ -650,6 +762,22 @@ delegated; app-only channel posting is not supported). You must be a
 **member** of the target team and channel — otherwise Graph returns `403` and
 gwt shows an actionable hint.
 
+## PM project configuration
+
+The resident PM starts in a gwt-owned runtime directory. Repository skills,
+hooks, `AGENTS.md`, and `CLAUDE.md` remain readable as project data; they are
+not loaded as PM configuration. Implementation agents keep their normal
+project configuration. Existing PM conversations are not migrated automatically;
+the isolated directory is used on the next PM session launch.
+
+To explicitly supply project policy, add `settings.project_policy_files` to
+`~/.gwt/projects/<project-hash>/project-state/pm.json`, preserving its other
+fields. For example, `"project_policy_files": ["docs/pm-policy.md"]` selects a
+file relative to the PM project checkout. The default is an empty list.
+Selected text is copied into the existing generated `gwt-pm` skill during
+managed asset refresh; no project symlink is added to the runtime. Removing
+an entry removes its copied policy on the next refresh.
+
 ## Canvas Operations
 
 - Zoom the canvas with the on-screen zoom buttons
@@ -657,8 +785,10 @@ gwt shows an actionable hint.
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
 - Use `Align` to arrange windows on a grid without changing their size
-- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
-  focused window is recentered
+- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle Canvas Agent
+  windows by activity: running/starting first, waiting/idle next, then the
+  remaining Agents. Non-Agent surfaces are skipped, hidden Agent tabs are
+  activated when selected, and the focused Agent is recentered
 
 ## Operator Design Language (SPEC-2356)
 
@@ -756,6 +886,28 @@ gwtd <<'JSON'
 JSON
 ```
 
+- Lint a SPEC artifact before handing it to a reviewer. The run checks FR / AS
+  / T numbering, traceability-table consistency, supersede inline annotations,
+  and section marker / roundtrip health, records the result in the Intake
+  Inspection Snapshot, seeds the Finding Disposition Ledger, and prints the
+  reviewer checklist. It exits non-zero when a critical finding is present.
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.lint","params":{"number":1784}}
+JSON
+```
+
+- Check whether the SPEC may be declared complete. Every section needs a
+  GitHub-entity readback matching the snapshot, and every critical finding
+  needs a disposition:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.inspection.complete","params":{"number":1784}}
+JSON
+```
+
 ## Logs
 
 - App logs:
@@ -765,6 +917,45 @@ JSON
 - Project workspace state:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### macOS filesystem activity and Spotlight
+
+The per-worktree index watcher excludes the root `target/` directory's
+descendants from its own macOS FSEvents stream, including when `target/` is
+created after watching starts. A change to the directory entry itself can
+still arrive from its parent and is filtered by the index path policy.
+This controls only that gwt stream; it does not disable system-wide FSEvents
+or other applications' subscriptions. The index watcher currently has no
+production startup caller, so this exclusion alone does not establish the
+cause of high `fseventsd` CPU usage.
+
+For an existing worktree, open **System Settings → Spotlight → Search Privacy**
+and add its `target` directory. For a new worktree, add `target` after the
+first build creates it. Follow Apple's
+[Spotlight privacy instructions](https://support.apple.com/en-gb/guide/mac-help/mchl1bb43b84/mac)
+for your macOS version. gwt does not change Spotlight settings automatically.
+
+To inspect host CPU alongside gwt diagnostics:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"diagnostics.cpu","params":{}}
+JSON
+```
+
+The `host_cpu` result includes the latest `fseventsd` process sample and the
+sampling count and interval. On macOS, it samples three times one second apart
+and warns when the same process exceeds 100% CPU in all three samples. Missing
+processes or unavailable samples do not imply low CPU usage. A warning is an
+observation, not proof that a particular worktree caused the load; inspect
+active filesystem consumers and Spotlight privacy settings before attributing it.
+
+Spotlight's own indexing daemon is reported from the Issue Monitor snapshot
+instead: `spotlight` in `issue.monitor.status` lists every `mds_stores`
+process with its CPU percentage and carries a `warning` once one of them
+exceeds 100%. On a host with hundreds of worktrees the daemon can outrank the
+agents themselves, which otherwise only reads as a slow host. The block is
+present with no processes and no warning on platforms without Spotlight.
+
 ## Development
 
 ### Build
@@ -772,6 +963,10 @@ JSON
 ```bash
 cargo build -p gwt --bin gwt --bin gwtd
 ```
+
+The `browser-check` skill (isolated GUI verification of this checkout) also
+needs `jq` on `PATH` to read `hook.doctor` evidence. It is not required to run
+gwt itself.
 
 ### Run
 
@@ -794,23 +989,11 @@ cargo test -p gwt-core -p gwt --all-features
 
 ### Serializing heavy verification
 
-Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
-Playwright, `verify.run`) contends for host CPU. Running two of them at once
-on the same machine makes wall-clock fixtures fail for no reason and pollutes
-coverage numbers, so gwt serializes them behind a host-wide lease — one
-holder per machine, across every repository and worktree.
-
-Take the lease before the heavy command and release it afterwards:
-
-```bash
-gwtd <<'JSON'
-{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
-JSON
-```
-
-The answer is immediate. `verification lease: granted` returns a `lease_id`
-to release with; `verification lease: unavailable` returns the current holder
-and its remaining TTL, so nothing has to watch another process:
+Only canonical `verify.run` acquires the host-wide verification lease.
+Register the verification matrix with `verify.plan`, then run it with
+`verify.run`; each run manages its own admission and release. A `deferred`
+result means admission timed out without a verification record. Inspect the
+holder before retrying:
 
 ```bash
 gwtd <<'JSON'
@@ -818,17 +1001,76 @@ gwtd <<'JSON'
 JSON
 ```
 
+Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
+lint, coverage, direct headed browser checks, and pre-push checks run
+directly without a verification lease. Completion still requires canonical
+verification evidence.
+
+The `pre-push` hook deliberately runs only checks that do not compile the
+workspace: `cargo fmt --all -- --check`, Markdownlint, and the SKILL.md
+frontmatter validation. A Git hook runs under `git push` rather than under
+`gwtd`, so it cannot take the verification lease, and a heavy Cargo job
+started there saturates the host while another worktree holds the lease.
+Clippy, the test suites, and the 90% coverage threshold are enforced per
+pull request by the Lint, Test, and Coverage workflows instead.
+
+**Migration:** `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` now return an error without creating a holder or
+reservation. Replace manual acquisition around canonical verification with
+`verify.run`; remove acquisition around ordinary Cargo commands. Existing
+legacy holders can be drained explicitly without killing their processes:
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
 JSON
 ```
 
-Use `verify.lease.extend` with the same `lease_id` when a run outlasts its
-TTL. The default TTL is 45 minutes; a lease that lapses is released
-automatically, and a holder that is killed releases immediately. Lease
-transitions are recorded in
-`~/.gwt/runtime/index-coordinator/lease-events.jsonl`.
+Lease transitions are recorded in
+`~/.gwt/runtime/verification-coordinator/lease-events.jsonl`. Verification
+has its own coordinator lane: semantic search and index builds keep excluding
+each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
+a time), and neither lane waits for the other.
+
+### GitHub API budget
+
+Every `gh` call gwt makes shares one GitHub account budget across all
+machines, worktrees, and agents. The `pr.list` inventory is cache-first: a
+snapshot under `~/.gwt/projects/<hash>/pr-inventory-cache.json` answers
+repeated reads for 5 minutes without touching GitHub, the bulk query stays
+light, and `statusCheckRollup` / `body` are fetched per PR only when that PR
+changed. Pass `params.refresh:true` when a decision needs the live state and
+`params.include` (`["checks","body"]`, default `["checks"]`) to choose the
+heavy fields. Every answer reports `source`, `cache_age_secs`, `throttled`,
+`github_calls`, `hydrated` (successful per-PR fetches), and `skipped_unchanged`
+(unchanged PRs skipped during a live read; zero on cache hits); when the budget is below its reserve the last snapshot is
+served and `throttled` says why.
+
+Empty checks on unchanged Draft/CI-not-started PRs are reused after snapshot
+expiry too. Changes to `updatedAt` or the head commit invalidate their data;
+running checks are polled every 10 minutes by default. Hydration runs with at
+most five concurrent requests and 30 requests per read. Configure both refresh
+intervals independently in `~/.gwt/config.toml` (zero disables that interval):
+
+```toml
+[pr_inventory]
+cache_ttl_secs = 300
+checks_refresh_secs = 600
+```
+
+Observe the budget with a free endpoint:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"github.budget","params":{}}
+JSON
+```
+
+The answer lists the primary windows GitHub reports (`graphql` / `core`),
+a local estimate of the per-minute secondary limit (GitHub does not expose
+it; the estimate comes from this machine's spawn ledger under
+`~/.gwt/github-budget/`), the newest rate-limit refusal, and the throttle
+decision a periodic read would get right now.
 
 ### Releasing
 
@@ -837,10 +1079,21 @@ Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
 and bumps the version, regenerates the `CHANGELOG`, and opens a
 `develop → main` Release PR — so you can release from any branch without
 switching to `develop` locally. The `bump` input is `auto` (default),
-`patch`, `minor`, or `major`. Review and merge the generated Release PR;
+`patch`, `minor`, or `major`. `auto` never produces a major release:
+breaking markers in commits are only listed in the Release PR body, and a
+major bump requires choosing `major` explicitly. Review and merge the
+generated Release PR;
 merging to `main` then runs the release pipeline (tag, GitHub Release,
 cross‑platform binaries). The manual fallback procedure lives in
 `.claude/commands/release.md`.
+
+The Release PR body is reference-only: it lists delivered Issues as bare
+`#N` references and never carries a closing keyword, because `main` is the
+default branch and `Closes #N` there would close an Issue whose acceptance
+criteria are still open. Issues are settled when their work merges into
+`develop` (see above). After the merge, `release.yml` runs
+`scripts/release_close_guard.py`, which reopens any Issue the Release PR
+merge itself closed and leaves a marker comment.
 
 ### Release Asset Contract
 

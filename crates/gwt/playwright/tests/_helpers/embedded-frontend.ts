@@ -19,13 +19,14 @@ const ROOT_MODULES = new Set([
   "agent-kanban-surface.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
-  // SPEC #3200 Phase 5 — autonomous Issue Monitor toast stack.
-  "autonomous-notifications.js",
-  // SPEC #3206 — shared floating-toast primitive (autonomous log region).
+  // SPEC #3206 — shared floating-toast primitive (alerts + notification history).
   "toast-host.js",
+  // SPEC #3206 v2 — notification center (bell + unread badge + drawer).
+  "notification-center.js",
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",
+  "recovery-center-modal.js",
   "branch-cleanup-modal.js",
   // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
   // self-heal / last-known retention / stale-load guard.
@@ -48,8 +49,8 @@ const ROOT_MODULES = new Set([
   // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
   "fleet-minimap.js",
   "focus-trap.js",
+  "startup-metrics.js",
   "hotkey.js",
-  "improvement-inbox-surface.js",
   "index-settings-panel.js",
   // SPEC-3431 FR-026 — PM settings panel.
   "pm-settings-panel.js",

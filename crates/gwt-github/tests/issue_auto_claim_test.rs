@@ -136,6 +136,7 @@ impl IssueClient for PatchFaultClient {
         &self,
         _number: IssueNumber,
         _state: IssueState,
+        _reason: Option<gwt_github::IssueCloseReason>,
     ) -> Result<IssueSnapshot, ApiError> {
         unreachable!("unused by claim fault tests")
     }
@@ -217,8 +218,13 @@ impl IssueClient for OmittedClaimReadbackClient {
         self.inner.set_labels(number, labels)
     }
 
-    fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError> {
-        self.inner.set_state(number, state)
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: IssueState,
+        reason: Option<gwt_github::IssueCloseReason>,
+    ) -> Result<IssueSnapshot, ApiError> {
+        self.inner.set_state(number, state, reason)
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Mutex, PoisonError},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +46,147 @@ pub struct BranchCleanupProgressEntry {
     pub total: usize,
     pub phase: BranchCleanupProgressPhase,
     pub message: String,
+}
+
+/// Issue #4433: the latest state of a cleanup operation, as a reconnecting
+/// client needs to see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchCleanupOperationSnapshot {
+    Progress(BranchCleanupProgressEntry),
+    Result(Vec<BranchCleanupResultEntry>),
+}
+
+#[derive(Debug, Clone)]
+struct TrackedBranchCleanupOperation {
+    operation_id: String,
+    snapshot: BranchCleanupOperationSnapshot,
+}
+
+/// Issue #4433: the latest cleanup status per cleanup surface, keyed by window
+/// id and tagged with the frontend-generated operation id.
+///
+/// Cleanup progress and results are broadcast, so a client that reconnects
+/// mid-run still misses everything the worker emitted while it was away. This
+/// store lets that client pull the current state back by
+/// `(window id, operation id)`.
+///
+/// Only the most recent operation per window is kept: a cleanup surface runs
+/// one cleanup at a time, so the next run evicts the previous snapshot. That
+/// bounds the store by the number of cleanup surfaces and makes a stale result
+/// unreachable once a new operation id is in flight.
+#[derive(Debug, Default)]
+pub struct BranchCleanupOperationStore {
+    operations: Mutex<HashMap<String, TrackedBranchCleanupOperation>>,
+}
+
+impl BranchCleanupOperationStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Remember the latest progress for `operation_id`. Untagged operations
+    /// (an older frontend that does not send `operation_id`) are not tracked:
+    /// there is no key a reconnecting client could ask for.
+    pub fn record_progress(
+        &self,
+        id: &str,
+        operation_id: Option<&str>,
+        progress: &BranchCleanupProgressEntry,
+    ) {
+        self.store(
+            id,
+            operation_id,
+            BranchCleanupOperationSnapshot::Progress(progress.clone()),
+        );
+    }
+
+    /// Replace any remembered progress with the operation's final result.
+    pub fn record_result(
+        &self,
+        id: &str,
+        operation_id: Option<&str>,
+        results: &[BranchCleanupResultEntry],
+    ) {
+        self.store(
+            id,
+            operation_id,
+            BranchCleanupOperationSnapshot::Result(results.to_vec()),
+        );
+    }
+
+    /// The current state of `operation_id`, or `None` when the operation was
+    /// cleared or superseded. `None` means "nothing to replay" and must never
+    /// be rendered as a cleanup failure.
+    pub fn snapshot(&self, id: &str, operation_id: &str) -> Option<BranchCleanupOperationSnapshot> {
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations
+            .get(id)
+            .filter(|tracked| tracked.operation_id == operation_id)
+            .map(|tracked| tracked.snapshot.clone())
+    }
+
+    /// Every tracked operation as `(id, operation_id, snapshot)`.
+    ///
+    /// A WebView reload wipes the page's JS state, so the reloaded client
+    /// cannot name the operation it was watching. The initial per-client sync
+    /// hands it the live operations instead.
+    pub fn live_operations(&self) -> Vec<(String, String, BranchCleanupOperationSnapshot)> {
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations
+            .iter()
+            .map(|(id, tracked)| {
+                (
+                    id.clone(),
+                    tracked.operation_id.clone(),
+                    tracked.snapshot.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Drop the operation once the client has consumed its result. A clear for
+    /// an operation that has already been superseded is a no-op, so a late
+    /// modal close cannot wipe the run that is currently in flight.
+    pub fn clear(&self, id: &str, operation_id: &str) {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if operations
+            .get(id)
+            .is_some_and(|tracked| tracked.operation_id == operation_id)
+        {
+            operations.remove(id);
+        }
+    }
+
+    fn store(
+        &self,
+        id: &str,
+        operation_id: Option<&str>,
+        snapshot: BranchCleanupOperationSnapshot,
+    ) {
+        let Some(operation_id) = operation_id else {
+            return;
+        };
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations.insert(
+            id.to_string(),
+            TrackedBranchCleanupOperation {
+                operation_id: operation_id.to_string(),
+                snapshot,
+            },
+        );
+    }
 }
 
 pub fn cleanup_selected_branches(
@@ -155,12 +300,61 @@ pub fn cleanup_selected_branches_with_progress(
                 return result;
             }
 
-            let cleanup_result = if options.force_filesystem_delete {
-                manager.cleanup_branch_with_force_filesystem_delete(&target_branch, true)
+            let worktree_path = if is_gwt_workspace_branch(&target_branch) {
+                match manager.list() {
+                    Ok(worktrees) => worktrees
+                        .into_iter()
+                        .find(|worktree| worktree.branch.as_deref() == Some(&target_branch))
+                        .map(|worktree| worktree.path),
+                    Err(error) => {
+                        let result = BranchCleanupResultEntry {
+                            branch: entry.name.clone(),
+                            execution_branch: Some(target_branch),
+                            status: BranchCleanupResultStatus::Failed,
+                            message: format!("Cleanup failed: {error}"),
+                        };
+                        emit_result_progress(&mut progress, &result, index, total);
+                        return result;
+                    }
+                }
             } else {
-                manager.cleanup_branch(&target_branch)
+                None
+            };
+
+            let cleanup = || {
+                if let Some(worktree_path) = worktree_path.as_deref() {
+                    manager.cleanup_branch_at_path_with_force_filesystem_delete(
+                        &target_branch,
+                        worktree_path,
+                        options.force_filesystem_delete,
+                    )
+                } else if options.force_filesystem_delete {
+                    manager.cleanup_branch_with_force_filesystem_delete(&target_branch, true)
+                } else {
+                    manager.cleanup_branch(&target_branch)
+                }
+                .map_err(|error| std::io::Error::other(error.to_string()))
+            };
+            let cleanup_result = match worktree_path.as_deref() {
+                Some(worktree_path) => {
+                    crate::managed_assets::cleanup_worktree_with_codex_project_trust(
+                        worktree_path,
+                        cleanup,
+                    )
+                }
+                None => cleanup(),
             };
             let result = match cleanup_result {
+                Err(error) => {
+                    let result = BranchCleanupResultEntry {
+                        branch: entry.name.clone(),
+                        execution_branch: Some(target_branch),
+                        status: BranchCleanupResultStatus::Failed,
+                        message: format!("Cleanup failed: {error}"),
+                    };
+                    emit_result_progress(&mut progress, &result, index, total);
+                    return result;
+                }
                 Ok(()) => {
                     // SPEC-2009 FR-071: never delete a protected base branch
                     // from the remote, regardless of the delete-remote flag.
@@ -205,12 +399,6 @@ pub fn cleanup_selected_branches_with_progress(
                         }
                     }
                 }
-                Err(error) => BranchCleanupResultEntry {
-                    branch: entry.name.clone(),
-                    execution_branch: Some(target_branch),
-                    status: BranchCleanupResultStatus::Failed,
-                    message: format!("Cleanup failed: {error}"),
-                },
             };
             emit_result_progress(&mut progress, &result, index, total);
             result
@@ -271,6 +459,8 @@ fn blocked_reason_message(reason: BranchCleanupBlockedReason) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -290,6 +480,54 @@ mod tests {
             resume: crate::BranchResumeInfo::unavailable(),
             start_work_eligibility: None,
         }
+    }
+
+    fn init_cleanup_repo(repo: &Path) {
+        fs::create_dir_all(repo).expect("create repository");
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test User"].as_slice(),
+            ["commit", "--allow-empty", "-m", "init"].as_slice(),
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn project_trust_level(config_path: &Path, project_key: &str) -> Option<String> {
+        let root = fs::read_to_string(config_path)
+            .ok()
+            .and_then(|content| toml::from_str::<toml::Value>(&content).ok())?;
+        root.get("projects")?
+            .as_table()?
+            .get(project_key)?
+            .as_table()?
+            .get("trust_level")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    fn local_branch_exists(repo: &Path, branch: &str) -> bool {
+        gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("inspect local branch")
+            .success()
     }
 
     #[test]
@@ -396,6 +634,124 @@ mod tests {
         assert_eq!(
             results[0].message,
             "Only gwt-managed workspaces can be cleaned up"
+        );
+    }
+
+    #[test]
+    fn cleanup_selected_branch_revokes_codex_project_trust_before_removal() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+        let repo = temp.path().join("repo");
+        init_cleanup_repo(&repo);
+        let branch = "work/issue-3729";
+        let worktree = temp.path().join("issue-3729");
+        gwt_git::WorktreeManager::new(&repo)
+            .create_from_base("HEAD", branch, &worktree)
+            .expect("create managed worktree");
+        let config_path = temp.path().join(".codex/config.toml");
+        let report = gwt_skills::register_codex_managed_project_trust(&worktree, &config_path)
+            .expect("seed Codex project trust");
+        let project_key = report.project_path.to_string_lossy().into_owned();
+        let mut entry = sample_entry(branch);
+        entry.cleanup.availability = BranchCleanupAvailability::Safe;
+        entry.cleanup.execution_branch = Some(branch.to_string());
+
+        let results = cleanup_selected_branches(&repo, &[entry], &[branch.to_string()], false);
+
+        assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
+        assert!(!worktree.exists(), "eligible managed worktree is removed");
+        assert_eq!(
+            project_trust_level(&config_path, &project_key),
+            None,
+            "worktree cleanup must revoke the exact Codex project trust entry"
+        );
+    }
+
+    #[test]
+    fn cleanup_selected_branch_keeps_worktree_when_codex_config_is_malformed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+        let repo = temp.path().join("repo");
+        init_cleanup_repo(&repo);
+        let branch = "work/issue-3730";
+        let worktree = temp.path().join("issue-3730");
+        gwt_git::WorktreeManager::new(&repo)
+            .create_from_base("HEAD", branch, &worktree)
+            .expect("create managed worktree");
+        let config_path = temp.path().join(".codex/config.toml");
+        fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+            .expect("create Codex config parent");
+        fs::write(&config_path, "projects = [\n").expect("write malformed Codex config");
+        let mut entry = sample_entry(branch);
+        entry.cleanup.availability = BranchCleanupAvailability::Safe;
+        entry.cleanup.execution_branch = Some(branch.to_string());
+
+        let results = cleanup_selected_branches(&repo, &[entry], &[branch.to_string()], false);
+
+        assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);
+        assert!(
+            results[0].message.contains("Codex project trust"),
+            "failure must identify the cleanup boundary: {}",
+            results[0].message
+        );
+        assert!(
+            worktree.exists(),
+            "trust revocation failure must prevent filesystem deletion"
+        );
+    }
+
+    #[test]
+    fn cleanup_selected_branch_revokes_trust_for_missing_prunable_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _codex_home =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+        let repo = temp.path().join("repo");
+        init_cleanup_repo(&repo);
+        let branch = "work/issue-3731";
+        let worktree = temp.path().join("issue-3731");
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        manager
+            .create_from_base("HEAD", branch, &worktree)
+            .expect("create managed worktree");
+        let config_path = temp.path().join(".codex/config.toml");
+        let project_key = gwt_skills::register_codex_managed_project_trust(&worktree, &config_path)
+            .expect("seed Codex project trust")
+            .project_path
+            .to_string_lossy()
+            .into_owned();
+        fs::remove_dir_all(&worktree).expect("simulate externally missing worktree path");
+        let inventory = manager.list().expect("list stale worktree inventory");
+        assert!(inventory.iter().any(|item| {
+            item.branch.as_deref() == Some(branch) && item.prunable && !item.path.exists()
+        }));
+        let mut entry = sample_entry(branch);
+        entry.cleanup.availability = BranchCleanupAvailability::Safe;
+        entry.cleanup.execution_branch = Some(branch.to_string());
+
+        let results = cleanup_selected_branches(&repo, &[entry], &[branch.to_string()], false);
+
+        assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
+        assert_eq!(project_trust_level(&config_path, &project_key), None);
+        assert!(
+            !local_branch_exists(&repo, branch),
+            "existing prune-and-branch-delete recovery must remain usable"
         );
     }
 }

@@ -347,13 +347,13 @@ pub fn apply_store_consolidation(
     // be mid-write in a store that this function then renamed away. The locks
     // are tried, never waited on, so a busy project is a bounded refusal rather
     // than a migration parked behind whatever writer happens to be running.
-    let mut lock_targets = vec![work_items_lock_path(&plan.canonical_store)];
-    lock_targets.extend(
+    let mut leases = WorkStoreLeases::acquire(
+        vec![work_items_lock_path(&plan.canonical_store)],
         plan.orphans
             .iter()
-            .map(|orphan| work_items_lock_path(&orphan.store_dir)),
-    );
-    let _leases = WorkStoreLeases::acquire(lock_targets)?;
+            .map(|orphan| work_items_lock_path(&orphan.store_dir))
+            .collect(),
+    )?;
 
     // Re-plan under the locks: a writer may have moved between the dry run and
     // now, and the locks are what make this observation stable.
@@ -370,6 +370,8 @@ pub fn apply_store_consolidation(
     let canonical_works = gwt_project_state_works_path(&confirmed.canonical_hash);
     let works_snapshot = fs::read(&canonical_works).ok();
     let mut moved: Vec<MovedStore> = Vec::new();
+
+    leases.release_source_leases_before_move();
 
     let result = (|| -> ConsolidationResult<usize> {
         for orphan in &confirmed.orphans {
@@ -532,15 +534,8 @@ fn quarantine_store(
         )
     })?;
     let destination = quarantine_root.join(&orphan.source_hash);
-    fs::rename(&orphan.store_dir, &destination).map_err(|error| {
-        NeedsHuman::new(
-            StoreConsolidationRefusal::CorruptInput,
-            format!(
-                "could not quarantine {}: {error}",
-                orphan.store_dir.display()
-            ),
-        )
-    })?;
+    fs::rename(&orphan.store_dir, &destination)
+        .map_err(|error| quarantine_move_refusal(&orphan.store_dir, &destination, &error))?;
     let manifest_path = quarantine_manifest_path(canonical_store, &orphan.source_hash);
     let manifest = QuarantineManifest {
         version: QUARANTINE_MANIFEST_VERSION,
@@ -566,6 +561,56 @@ fn quarantine_store(
         quarantined: destination,
         manifest: manifest_path,
     })
+}
+
+/// Issue #4296: classify a quarantine move that the filesystem refused.
+///
+/// Windows will not rename a directory while any process holds a handle to a
+/// file beneath it, and reports that as a bare `ERROR_ACCESS_DENIED`
+/// (`os error 5`) naming neither the file nor the process. Handed back as
+/// `CorruptInput` it reads as a damaged store and is marked unretryable, which
+/// is the opposite of the truth: nothing is wrong with the bytes and closing
+/// the reader clears it. A sharing failure is therefore reported as the
+/// retryable `WriterBusy` it is, with a detail that says what has to change.
+fn quarantine_move_refusal(
+    source: &Path,
+    destination: &Path,
+    error: &std::io::Error,
+) -> NeedsHuman {
+    if is_open_handle_conflict(error) {
+        return NeedsHuman::new(
+            StoreConsolidationRefusal::WriterBusy,
+            format!(
+                "could not quarantine {}: a process holds an open handle to a file under that \
+                 store, so it cannot be moved to {} ({error}); close every process reading this \
+                 project's store and retry",
+                source.display(),
+                destination.display()
+            ),
+        );
+    }
+    NeedsHuman::new(
+        StoreConsolidationRefusal::CorruptInput,
+        format!("could not quarantine {}: {error}", source.display()),
+    )
+}
+
+/// Whether the filesystem refused a move because something still has the tree
+/// open. Only Windows reports this; on Unix a denied rename is a real
+/// permission problem, so it stays `CorruptInput`.
+#[cfg(windows)]
+fn is_open_handle_conflict(error: &std::io::Error) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    matches!(
+        error.raw_os_error(),
+        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+    )
+}
+
+#[cfg(not(windows))]
+fn is_open_handle_conflict(_error: &std::io::Error) -> bool {
+    false
 }
 
 /// Rebuild `works.json` from the durable event logs of the canonical store and
@@ -737,15 +782,29 @@ fn work_items_lock_path(store_dir: &Path) -> PathBuf {
 /// against each other, and tried rather than waited on so a live writer is a
 /// refusal instead of an unbounded stall.
 struct WorkStoreLeases {
-    files: Vec<fs::File>,
+    /// Leases on the stores that stay where they are. Held for the whole
+    /// migration.
+    resident: Vec<fs::File>,
+    /// Leases on the stores that are about to be quarantined. See
+    /// [`WorkStoreLeases::release_source_leases_before_move`].
+    sources: Vec<fs::File>,
 }
 
 impl WorkStoreLeases {
-    fn acquire(lock_paths: Vec<PathBuf>) -> ConsolidationResult<Self> {
-        let mut lock_paths = lock_paths;
+    /// Lock `resident_paths` and `source_paths`, in one globally sorted order
+    /// regardless of role so the deadlock-free ordering still holds.
+    fn acquire(
+        resident_paths: Vec<PathBuf>,
+        source_paths: Vec<PathBuf>,
+    ) -> ConsolidationResult<Self> {
+        let sources: HashSet<PathBuf> = source_paths.iter().cloned().collect();
+        let mut lock_paths: Vec<PathBuf> = resident_paths.into_iter().chain(source_paths).collect();
         lock_paths.sort();
         lock_paths.dedup();
-        let mut files = Vec::with_capacity(lock_paths.len());
+        let mut leases = Self {
+            resident: Vec::new(),
+            sources: Vec::new(),
+        };
         for path in lock_paths {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
@@ -773,15 +832,40 @@ impl WorkStoreLeases {
                     format!("a Work writer holds {}: {error}", path.display()),
                 )
             })?;
-            files.push(file);
+            if sources.contains(&path) {
+                leases.sources.push(file);
+            } else {
+                leases.resident.push(file);
+            }
         }
-        Ok(Self { files })
+        Ok(leases)
+    }
+
+    /// Issue #4296: drop the leases on the stores that are about to be moved.
+    ///
+    /// `works.lock` lives *inside* the store being quarantined, and Windows
+    /// refuses to rename a directory while any handle under it is open — so on
+    /// Windows the consolidation's own lease is what makes its own move fail
+    /// with `ERROR_ACCESS_DENIED`. The lease cannot outlive the move there.
+    ///
+    /// Releasing it does not give up what the lease buys. It has already done
+    /// its two jobs: proving no live writer was in the store, and holding the
+    /// re-plan stable. From here Windows itself excludes a writer that arrives
+    /// late — its own open handle makes the rename fail, which
+    /// [`quarantine_store`] reports as the retryable `WriterBusy` refusal. On
+    /// Unix an open handle does not block the rename, so there the lease is the
+    /// only thing that excludes that writer and is held across the move.
+    fn release_source_leases_before_move(&mut self) {
+        #[cfg(windows)]
+        for file in self.sources.drain(..) {
+            let _ = fs2::FileExt::unlock(&file);
+        }
     }
 }
 
 impl Drop for WorkStoreLeases {
     fn drop(&mut self) {
-        for file in &self.files {
+        for file in self.resident.iter().chain(self.sources.iter()) {
             let _ = fs2::FileExt::unlock(file);
         }
     }

@@ -24,6 +24,28 @@ pub struct Manifest {
     pub entries: Vec<ManifestEntry>,
 }
 
+/// Generation-local Phase 71 manifest entry. Unlike the mutable legacy
+/// manifest above, identity is content-addressed and independent of mtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIndexV2ManifestEntry {
+    pub path: String,
+    pub source_object: String,
+    pub source_digest: String,
+    pub payload_digest: String,
+    pub metadata_digest: String,
+    pub scope: String,
+    pub cas_key: String,
+    pub input_digest: String,
+    pub vector_checksum: String,
+    pub dimension: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIndexV2Manifest {
+    pub schema_version: u32,
+    pub entries: Vec<FileIndexV2ManifestEntry>,
+}
+
 impl Manifest {
     pub fn new(scope: impl Into<String>, entries: Vec<ManifestEntry>) -> Self {
         Self {
@@ -147,5 +169,30 @@ mod tests {
         assert_eq!(diff.added, vec!["c"]);
         assert_eq!(diff.changed, vec!["a"]);
         assert_eq!(diff.removed, vec!["b"]);
+    }
+
+    #[test]
+    fn file_index_v2_manifest_roundtrips_without_legacy_mtime_identity() {
+        let manifest = FileIndexV2Manifest {
+            schema_version: 1,
+            entries: vec![FileIndexV2ManifestEntry {
+                path: "src/lib.rs".into(),
+                source_object: "git:0123".into(),
+                source_digest: "source".into(),
+                payload_digest: "payload".into(),
+                metadata_digest: "metadata".into(),
+                scope: "files".into(),
+                cas_key: "cas".into(),
+                input_digest: "input".into(),
+                vector_checksum: "vector".into(),
+                dimension: 768,
+            }],
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert_eq!(
+            serde_json::from_str::<FileIndexV2Manifest>(&json).unwrap(),
+            manifest
+        );
+        assert!(!json.contains("mtime"));
     }
 }

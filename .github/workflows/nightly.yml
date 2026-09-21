@@ -1,0 +1,140 @@
+name: Nightly
+
+# Scheduled verification that does not belong on the pull-request path.
+#
+# Issue #4134 AC-1: `test-windows-default-parallel` measured 2806s and was the
+# whole critical path of `test.yml` (median 51.1 min). What it proves — that
+# the deadline-sensitive suites survive Windows' default parallelism — is a
+# property of the code on develop, not of an individual pull request, so it
+# runs once a night instead of once per push.
+
+on:
+  schedule:
+    # 18:00 UTC = 03:00 JST.
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+# Issue #4119: a manual dispatch supersedes a still-running scheduled run. The
+# three-pass job below costs ~47 minutes, so without this group a dispatch
+# during the nightly window would hold two Windows runners for the same proof.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # Issue #3404 AC-3. The targeted Windows steps in test.yml pin
+  # --test-threads=1 per fixture because they own external resources (a real
+  # PTY, a real probe binary, a console subsystem). That serialization is a
+  # fixture contract, not a suite-wide requirement, so it cannot prove the
+  # deadline-sensitive suites survive Windows' default parallelism. This job
+  # removes RUST_TEST_THREADS entirely and runs the suites that hold the
+  # inventoried deadline tests three times in a row on one SHA: a single green
+  # run cannot distinguish a deterministic suite from a flake that happened to
+  # win the race.
+  test-windows-default-parallel:
+    name: Test (Rust default parallelism, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      # Compiling inside the timed loop would charge the first iteration for the
+      # build and let a slow compile read as an unstable suite — the exact
+      # confusion this job exists to remove. Build first, on its own budget.
+      - name: Build the default-parallel suites
+        run: cargo test -p gwt --lib --bin gwt --all-features --no-run
+        timeout-minutes: 45
+      # windows-latest gives 4 logical processors, and one pass over these
+      # suites costs ~16 minutes for `--lib` and about as much again for
+      # `--bin gwt` there, so three passes need a budget in the 100-minute
+      # range before runner variance. A cap that the honest run brushes
+      # against is itself a wall-clock deadline, and this job would then fail
+      # on timing rather than on determinism.
+      # `-p gwt --bin gwt` is part of the loop again. Its first Windows run at
+      # default parallelism stalled for 74 minutes with four app_runtime tests
+      # reported as "running for over 60 seconds" and nothing completing after
+      # them. Only one of the four was actually working: the window close
+      # finalizer joined the PTY reader thread while the pane still held the
+      # pseudoconsole open, and Windows ConPTY does not signal EOF on the
+      # output pipe until the pseudoconsole is closed, so the join could never
+      # return. The finalizer runs under `env_test_lock`, so the other three
+      # were only queued behind it — which is why the stall looked like a
+      # four-test deadlock rather than one hung teardown. #4014 releases the
+      # descriptors before the join and re-added the target here; that is the
+      # remaining half of #3404 AC-3.
+      #
+      # `-p gwt-core` is absent on its own evidence, not on this one.
+      # Its first default-parallel Windows run failed four tests that no CI
+      # path had ever exercised there: two index_coordinator lease tests built
+      # on a 50ms TTL, an update installer test whose expected timeout stopped
+      # firing, and windows_process_priority_class_roundtrips_on_a_live_child,
+      # which asserts a fresh child is Normal but read BelowNormal because a
+      # child inherits the priority class of a test binary another test
+      # already lowered. Those are reported on #3404 and await their own owner.
+      #
+      # #4210 took stock of that list and closed the lease half of it. Neither
+      # index_coordinator lease test holds a wall-clock deadline any more:
+      # lease_ttl_expires_and_records_the_reason moves the deadline into the
+      # past instead of sleeping up to it, lease_extension_pushes_the_expiry_out
+      # no longer sleeps out the TTL it extended past, and
+      # expired_heavy_reservation_is_swept_and_ignored reserves for zero rather
+      # than reserving for 1ms and sleeping 20ms. The two non-lease failures
+      # still own this target's absence.
+      - name: Prove default-parallel Rust suites are stable
+        shell: pwsh
+        run: |
+          Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
+          Write-Host "logical processors: $([Environment]::ProcessorCount)"
+          1..3 | ForEach-Object {
+            Write-Host "default-parallel run $_ of 3"
+            cargo test -p gwt --lib --bin gwt --all-features
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+        timeout-minutes: 150
+
+  # A scheduled run has no pull request to turn red, so a failure that only
+  # lands in the Actions tab is a failure nobody sees. This is the named
+  # notification target Issue #4134 AC-1 asks for: one open Issue assigned to
+  # the maintainer, with every later failure appended to it as a comment.
+  report-nightly-failure:
+    name: Report nightly failure
+    runs-on: ubuntu-latest
+    needs: [test-windows-default-parallel]
+    if: failure()
+    steps:
+      - name: File or update the nightly failure Issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: 'fix(ci): nightly Windows default-parallel determinism run failed'
+          # The title carries `fix(ci):` for commitlint-shaped consistency, but
+          # a colon and parentheses are search operators, so the lookup uses the
+          # punctuation-free part of the same title.
+          SEARCH: 'nightly Windows default-parallel determinism in:title'
+        run: |
+          set -euo pipefail
+          existing=$(
+            gh issue list --repo "$REPO" --state open --search "$SEARCH" \
+              --json number --jq '.[0].number // empty'
+          )
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" \
+              --body "The nightly determinism run failed again: $RUN_URL"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --assignee akiojin \
+              --body "$(printf 'The nightly Windows default-parallel determinism job failed.\n\nRun: %s\n\nThis job left pull-request CI in Issue #4134 AC-1; this Issue is its notification target.\n' "$RUN_URL")"
+          fi
