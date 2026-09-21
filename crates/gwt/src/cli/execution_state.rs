@@ -27220,14 +27220,16 @@ exit 1
                 "recovery extension tamper must fail its independent hash chain"
             );
 
-            // Reopen advances the same generation's ledger head. The
-            // recovery evidence remains in the audit, but exact-binding
-            // completion/PR gates require a fresh plan/run for the reopened
-            // head rather than accepting the superseded Blocked binding.
-            assert!(pr_handoff_refusal(dir.path(), true)
-                .is_some_and(|reason| reason.contains("predecessor")));
-            save_covering_evidence(dir.path(), "sess-reopen", true);
-            assert_eq!(pr_handoff_refusal(dir.path(), true), None);
+            // Issue #4523: reopen advances the same generation's ledger head,
+            // but the record it consumed is that generation's own same-Session
+            // lifecycle prefix, not a predecessor. The PR handoff gate accepts
+            // it, so one terminal recovery costs one verification matrix rather
+            // than two identical ones.
+            assert_eq!(
+                pr_handoff_refusal(dir.path(), true),
+                None,
+                "the verification record execution.reopen consumed must still hand off a PR"
+            );
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
             let completed = load(dir.path()).unwrap().unwrap();
@@ -27470,6 +27472,122 @@ exit 1
                     "{reason}: execution.reopen must restore Active"
                 );
             }
+        }
+
+        // Issue #4523: `execution.reopen` appends a Blocked -> Active lifecycle
+        // event to the same generation, which advances the ledger head hash
+        // inside `ExecutionBindingIdentity`. The record the reopen consumed must
+        // stay valid for the PR mutation that follows, or every terminal
+        // recovery costs two identical full verification matrices. Tree
+        // freshness stays enforced by the fingerprint gate.
+        #[test]
+        fn reopen_preserves_the_verification_evidence_it_consumed() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
+            let dir = tempfile::tempdir().unwrap();
+            let worktree = dir.path().to_path_buf();
+            crate::cli::trusted_store::init_git_repo_with_origin(&worktree);
+            let git = |args: &[&str]| {
+                let status = gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(&worktree)
+                    .args(args)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            };
+            git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+            git(&["checkout", "-q", "-b", "work/issue-4523"]);
+
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(&worktree, &active_record("sess-reopen")).unwrap();
+            ensure_generation_ledger(&worktree, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            persist_generation_session_binding(&worktree, owner, "sess-reopen", binding.clone());
+            settle_blocked(&worktree, "sess-reopen");
+
+            let mut env = TestEnv::new(worktree.clone());
+            let (plan_code, plan_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: Vec::new(),
+                    derive: true,
+                }),
+            )
+            .unwrap();
+            assert_eq!(plan_code, 0, "{plan_out}");
+            let mut env = TestEnv::new(worktree.clone());
+            let (run_code, run_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                    commands: Vec::new(),
+                    max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
+                    user_verification_result: None,
+                }),
+            )
+            .unwrap();
+            assert_eq!(run_code, 0, "{run_out}");
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "post-block evidence must be fresh before the reopen consumes it"
+            );
+
+            let mut out = String::new();
+            assert_eq!(
+                run_reopen(&worktree, "sess-reopen", "blocker resolved", &mut out).unwrap(),
+                0,
+                "{out}"
+            );
+            assert!(out.contains("reopened"), "{out}");
+            let reopened_binding = current_execution_binding(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                reopened_binding, binding,
+                "the reopen lifecycle event is expected to advance the ledger head"
+            );
+            assert_eq!(
+                reopened_binding.generation_id, binding.generation_id,
+                "reopen stays inside the same execution generation"
+            );
+
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "the record execution.reopen consumed must still authorize the first PR mutation"
+            );
+
+            fs::write(worktree.join("changed-after-reopen.txt"), "dirty").unwrap();
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::StaleFingerprint,
+                "relaxing the generation gate must not relax the tree freshness gate"
+            );
         }
 
         #[test]

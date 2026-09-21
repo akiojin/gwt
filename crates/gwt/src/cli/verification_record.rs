@@ -2028,6 +2028,37 @@ pub(crate) fn work_event_receipt_authorizes_current_generation(
     }
 }
 
+/// #4523: `execution.reopen` appends its Blocked -> Active lifecycle event to
+/// the same generation, which advances `ledger_head_hash` and would otherwise
+/// invalidate the very record the reopen consumed — forcing a second, identical
+/// full verification matrix before the first PR mutation.
+///
+/// A run record may therefore name the exact current binding or an authentic
+/// same-Session lifecycle prefix of the current generation, exactly as
+/// [`work_event_receipt_authorizes_current_generation`] already allows for Work
+/// settlement receipts. Predecessors, successors, takeovers, and foreign
+/// Sessions stay refused, and worktree freshness remains a separate gate.
+fn record_binding_authorizes_current_generation(
+    worktree: &Path,
+    session_id: &str,
+    record: &VerificationRunRecord,
+) -> bool {
+    let Some(recorded) = record.execution_binding.as_ref() else {
+        return false;
+    };
+    let Ok(Some(execution)) = execution_state::load(worktree) else {
+        return false;
+    };
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    };
+    execution_state::execution_binding_authorizes_current_generation(
+        worktree, owner, session_id, recorded,
+    )
+    .unwrap_or(false)
+}
+
 /// #4011: a stale-generation receipt on a live canonical Work is repairable
 /// only by this generation's own terminal update, never by committing or
 /// pushing what the predecessor left behind. Name both generations so the
@@ -3707,7 +3738,9 @@ fn evaluate_evidence_snapshot_inner(
             Ok((_, binding)) => binding,
             Err(_) => return EvidenceStatus::Unreadable,
         };
-        if record.execution_binding != current_binding {
+        if record.execution_binding != current_binding
+            && !record_binding_authorizes_current_generation(worktree, session_id, record)
+        {
             return EvidenceStatus::WrongGeneration;
         }
     }
