@@ -9,17 +9,32 @@
 :root {
   color-scheme: light dark;
 
-  /* SPEC #3206 FR-015 — stacking tiers (lower = further back). Persistent
-     chrome (rail, drawers) sits below modals, and everything persistent sits
-     below the transient notice stack so a toast is never covered by UI that
-     stays on screen. Reference ladder of the remaining raw tiers:
-     palette 1200 < wizard 2000 < degradation banner 3500 <
-     connection overlay 4000 < notice stack 9999 < context menu 10000 <
-     update modal 10100. */
+  /* SPEC #3206 FR-015 — persistent canvas chrome (lower = further back).
+     The rail and the drawers that dock to it stay below every shared
+     interaction layer, and below the transient notice stack, so a toast is
+     never covered by UI that stays on screen. */
   --z-rail: 30;
   --z-notification-center: 31;
-  --z-modal: 1000;
+
+  /* Issue #3753 — shared interaction layers inside the #app stacking context.
+     A popover that launches a dialog must stay reachable above blocking
+     project overlays, an aria-modal command surface must own popovers, and a
+     shared dialog must own every ordinary interaction layer. */
+  --z-project-overlay: 1200;
+  --z-popover: 1300;
+  --z-overlay: 1800;
+  --z-modal: 2000;
+
+  /* Issue #3753 — body-level safety and recovery surfaces sit above the whole
+     #app interaction stack so a recovery affordance is never covered. Their
+     established ordering is unchanged; only the raw values move here. */
+  --z-system-degradation: 3500;
+  --z-system-connection: 4000;
   --z-notice-stack: 9999;
+  --z-system-context-menu: 10000;
+  --z-system-popover: 10001;
+  --z-system-window: 10050;
+  --z-system-modal: 10100;
 }
 
 :root[data-theme="dark"] {

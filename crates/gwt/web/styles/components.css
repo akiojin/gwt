@@ -343,7 +343,7 @@ body::after {
   justify-content: center;
   padding: var(--space-4);
   background: var(--color-scrim);
-  z-index: 10100;
+  z-index: var(--z-system-modal);
 }
 
 .update-modal__panel {
@@ -516,7 +516,7 @@ body::after {
   border-radius: var(--radius-md);
   background: var(--color-surface-elevated);
   box-shadow: var(--shadow-2);
-  z-index: 10000;
+  z-index: var(--z-system-context-menu);
 }
 
 .terminal-context-menu[hidden] {
@@ -978,7 +978,7 @@ button.op-status-strip__cell {
 
 .op-runtime-health-detail {
   position: fixed;
-  z-index: 1100;
+  z-index: var(--z-popover);
   display: flex;
   flex-direction: column;
   width: min(420px, calc(100vw - 16px));
@@ -1528,7 +1528,7 @@ button.op-runtime-health-detail__process {
   position: fixed;
   inset: 0;
   background: var(--color-scrim);
-  z-index: 1200;
+  z-index: var(--z-overlay);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--motion-curve);
@@ -1881,7 +1881,7 @@ kbd.op-kbd {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  z-index: 10050;
+  z-index: var(--z-system-window);
   display: flex;
   flex-direction: column;
   width: min(880px, 92vw);
@@ -5645,7 +5645,7 @@ button.workspace-board-ref:focus-visible {
 /* Consolidated hover popover (everything at once, anchored above the strip). */
 .op-usage-hover {
   position: fixed;
-  z-index: 1100;
+  z-index: var(--z-popover);
   width: min(440px, 92vw);
   max-height: 70vh;
   overflow: auto;
@@ -5919,7 +5919,7 @@ button.workspace-board-ref:focus-visible {
 .op-usage-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6151,7 +6151,7 @@ button.workspace-board-ref:focus-visible {
 .connection-overlay {
   position: fixed;
   inset: 0;
-  z-index: 4000;
+  z-index: var(--z-system-connection);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6208,7 +6208,7 @@ button.workspace-board-ref:focus-visible {
   top: var(--space-3);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 3500;
+  z-index: var(--z-system-degradation);
   display: flex;
   align-items: center;
   gap: var(--space-3);

@@ -103,6 +103,37 @@ fn workspace_scan_reaches_integration_and_unit_test_sources() {
     }
 }
 
+/// A unit-test module declared as `#[cfg(test)] mod tests;` lives in its own
+/// file, and nothing inside that file carries the attribute. Classifying it by
+/// its contents therefore made the whole file unscannable, which is how
+/// `crates/gwt/src/app_runtime/tests.rs` kept a `Duration::from_millis(25)`
+/// with a green gate and no baseline row. The workspace has 15 such modules,
+/// and several of the issues SPEC #4551 bundles live in them — which is exactly
+/// the code the gate exists to cover.
+#[test]
+fn an_externally_declared_cfg_test_module_is_scanned_as_whole_file_test_code() {
+    let root = workspace_root();
+    let sources = target_sources(&root);
+
+    let app_runtime = sources
+        .iter()
+        .find(|source| source.relative_path == "crates/gwt/src/app_runtime/tests.rs")
+        .expect("`#[cfg(test)] mod tests;` files must be part of the scanned corpus");
+    assert_eq!(
+        app_runtime.kind,
+        SourceKind::WholeFileIsTest,
+        "a file that exists only because a `#[cfg(test)] mod` declaration names it \
+         is test code from its first line"
+    );
+
+    // A production module sitting beside it must keep the narrow treatment.
+    let production = sources
+        .iter()
+        .find(|source| source.relative_path == "crates/gwt/src/app_runtime/mod.rs")
+        .expect("the declaring module is still a crate source");
+    assert_eq!(production.kind, SourceKind::CfgTestBlocksOnly);
+}
+
 // ---------------------------------------------------------------------------
 // Scanner unit tests — fixtures, so the rules themselves are covered without
 // depending on whatever the workspace happens to contain today.
@@ -603,6 +634,62 @@ mod hygiene {
         pub kind: SourceKind,
     }
 
+    /// Files a `#[cfg(test)] mod <name>;` declaration pulls in.
+    ///
+    /// Such a file holds nothing but test code, yet the attribute that says so
+    /// sits in the *declaring* module. Classifying it by its own contents made
+    /// every line of it unscannable — 15 modules in this workspace, including
+    /// `app_runtime/tests.rs`, which kept a `Duration::from_millis(25)` with a
+    /// green gate and no baseline row.
+    fn externally_declared_test_modules(files: &[PathBuf]) -> std::collections::BTreeSet<PathBuf> {
+        let declaration = Regex::new(r"^\s*#\[cfg\(test\)\]\s*$").expect("cfg(test) line");
+        let module = Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+            .expect("mod declaration");
+
+        let mut declared = std::collections::BTreeSet::new();
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !declaration.is_match(line) {
+                    continue;
+                }
+                // The attribute may be followed by other attributes before the
+                // declaration itself; skip them rather than give up.
+                let Some(next) = lines[index + 1..]
+                    .iter()
+                    .find(|candidate| !candidate.trim().starts_with("#["))
+                else {
+                    continue;
+                };
+                let Some(captures) = module.captures(next) else {
+                    continue;
+                };
+                let name = &captures[1];
+                // `foo/mod.rs` and `lib.rs` declare siblings; `foo.rs` declares
+                // children of its own directory.
+                let base = match file.file_name().and_then(|n| n.to_str()) {
+                    Some("mod.rs") | Some("lib.rs") | Some("main.rs") => {
+                        file.parent().map(Path::to_path_buf)
+                    }
+                    _ => file.parent().map(|dir| dir.join(file.file_stem().unwrap())),
+                };
+                let Some(base) = base else { continue };
+                for candidate in [
+                    base.join(format!("{name}.rs")),
+                    base.join(name).join("mod.rs"),
+                ] {
+                    if candidate.is_file() {
+                        declared.insert(candidate);
+                    }
+                }
+            }
+        }
+        declared
+    }
+
     /// Every Rust file in the workspace that can hold test code.
     pub fn target_sources(root: &Path) -> Vec<Source> {
         let mut sources = Vec::new();
@@ -627,12 +714,21 @@ mod hygiene {
                 let mut files = Vec::new();
                 collect_rust_files(&dir, &mut files);
                 files.sort();
+                let declared_test_modules = match kind {
+                    SourceKind::WholeFileIsTest => Default::default(),
+                    SourceKind::CfgTestBlocksOnly => externally_declared_test_modules(&files),
+                };
                 for file in files {
                     let relative = file
                         .strip_prefix(root)
                         .expect("scanned file lives under the workspace root")
                         .to_string_lossy()
                         .replace('\\', "/");
+                    let kind = if declared_test_modules.contains(&file) {
+                        SourceKind::WholeFileIsTest
+                    } else {
+                        kind
+                    };
                     sources.push(Source {
                         relative_path: relative,
                         kind,

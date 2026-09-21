@@ -29,7 +29,7 @@ const FLAKE_SCRIPT: &str = "scripts/ci-flake-detect.sh";
 const CHANGES_JOB: &str = "changes";
 const RUST_TEST_JOB: &str = "test";
 const FLAKE_JOB: &str = "flake-detection";
-const CRATES_OUTPUT: &str = "crates";
+const TARGETS_OUTPUT: &str = "flake_targets";
 
 /// SPEC #4551 plan: "N = 20, 対象は変更されたクレートの test target のみ, 毎 PR".
 const REQUIRED_FLAKE_RUNS: u32 = 20;
@@ -116,10 +116,14 @@ fn the_orphan_process_check_reports_the_surviving_command_lines() {
 }
 
 /// T-055 / AC-6: the classification job already walks the PR's files, so the
-/// flake job reads the changed crates from it rather than paying for a second
-/// pass — and rather than re-running the whole workspace twenty times.
+/// flake job reads its targets from there rather than paying for a second pass.
+///
+/// Target granularity, not crate granularity: measured on this runner class a
+/// single `cargo test --workspace --all-features` costs 11m23s, so twenty runs
+/// of a changed `gwt` could not fit any step budget. Per target the SPEC's own
+/// cost model holds ("54 テスト 0.53 秒で、20 回でも 11 秒").
 #[test]
-fn the_change_classifier_publishes_the_changed_crates() {
+fn the_change_classifier_publishes_the_changed_test_targets() {
     let doc = test_workflow();
     let outputs = job(&doc, CHANGES_JOB)
         .get("outputs")
@@ -128,8 +132,8 @@ fn the_change_classifier_publishes_the_changed_crates() {
         .expect("the `changes` job must declare outputs");
 
     assert!(
-        outputs.contains_key(Value::String(CRATES_OUTPUT.to_string())),
-        "the `changes` job must publish a `{CRATES_OUTPUT}` output (SPEC #4551 T-055)"
+        outputs.contains_key(Value::String(TARGETS_OUTPUT.to_string())),
+        "the `changes` job must publish a `{TARGETS_OUTPUT}` output (SPEC #4551 T-055)"
     );
 }
 
@@ -168,8 +172,8 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
         "`{FLAKE_JOB}`: a failed classification must fall open, got {condition:?}"
     );
     assert!(
-        condition.contains(&format!("needs.{CHANGES_JOB}.outputs.{CRATES_OUTPUT}")),
-        "`{FLAKE_JOB}` must skip when no crate changed, got {condition:?}"
+        condition.contains(&format!("needs.{CHANGES_JOB}.outputs.{TARGETS_OUTPUT}")),
+        "`{FLAKE_JOB}` must skip when no test target changed, got {condition:?}"
     );
 }
 
