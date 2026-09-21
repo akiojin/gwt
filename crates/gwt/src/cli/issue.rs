@@ -89,6 +89,8 @@ pub(super) fn run<E: CliEnv>(
             | IssueCommand::SpecPull { .. }
             | IssueCommand::SpecRepair { .. }
             | IssueCommand::SpecRename { .. }
+            | IssueCommand::SpecLint { .. }
+            | IssueCommand::SpecInspectionComplete { .. }
     ) {
         return super::issue_spec::run(env, cmd, out);
     }
