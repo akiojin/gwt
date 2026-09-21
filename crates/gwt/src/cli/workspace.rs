@@ -7813,7 +7813,8 @@ pub(crate) mod tests {
         let worktree = project_root.join("work").join("issue-3412");
         let session_id = "session-ownerless-canonical-work";
         write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
-        let work_id = seed_exact_workspace_work(&project_root, &worktree, session_id, None, "codex");
+        let work_id =
+            seed_exact_workspace_work(&project_root, &worktree, session_id, None, "codex");
         let before_events = load_tracked_work_events(&worktree);
 
         let result = ensure_workspace_for_agent(
