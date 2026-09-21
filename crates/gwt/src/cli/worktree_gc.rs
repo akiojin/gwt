@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gwt_github::SpecOpsError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use super::verification_lease::admission::attribute_worktree;
@@ -216,43 +216,44 @@ pub(super) fn run<E: CliEnv>(
     }
 }
 
-#[derive(Debug, Serialize)]
-struct GcRemoval {
-    worktree: PathBuf,
-    target: PathBuf,
-    bytes: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcRemoval {
+    pub worktree: PathBuf,
+    pub target: PathBuf,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcFailure {
+    pub worktree: PathBuf,
+    pub target: PathBuf,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
-struct GcFailure {
-    worktree: PathBuf,
-    target: PathBuf,
-    reason: String,
+pub(crate) struct GcReport {
+    pub dry_run: bool,
+    pub base: String,
+    pub include_unmerged: bool,
+    pub include_protected_workspaces: bool,
+    pub candidates: Vec<GcCandidate>,
+    pub kept: Vec<GcKept>,
+    pub reclaimable_bytes: u64,
+    pub removed: Vec<GcRemoval>,
+    pub failed: Vec<GcFailure>,
+    pub reclaimed_bytes: u64,
+    pub disk_space: crate::disk_space::DiskSpaceStatus,
 }
 
-#[derive(Debug, Serialize)]
-struct GcReport {
-    dry_run: bool,
-    base: String,
-    include_unmerged: bool,
-    include_protected_workspaces: bool,
-    candidates: Vec<GcCandidate>,
-    kept: Vec<GcKept>,
-    reclaimable_bytes: u64,
-    removed: Vec<GcRemoval>,
-    failed: Vec<GcFailure>,
-    reclaimed_bytes: u64,
-    disk_space: crate::disk_space::DiskSpaceStatus,
-}
-
-fn run_gc(
+pub(crate) fn run_gc(
     repo_path: &Path,
     base: &str,
     options: GcOptions,
     dry_run: bool,
 ) -> Result<GcReport, SpecOpsError> {
     let repo_path = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
-    let worktrees = gwt_git::worktree::WorktreeManager::new(&repo_path)
+    let git_root = git_root_for(&repo_path);
+    let worktrees = gwt_git::worktree::WorktreeManager::new(&git_root)
         .list()
         .map_err(|error| unexpected(format!("git worktree list failed: {error}")))?;
     let roots: Vec<(PathBuf, Option<String>)> = worktrees
@@ -279,7 +280,7 @@ fn run_gc(
             has_build_artifacts: root.join(BUILD_ARTIFACT_DIR).is_dir(),
             active_processes: processes.get(root).cloned().unwrap_or_default(),
             tracked_sessions: tracked.get(root).cloned().unwrap_or_default(),
-            merged: head_is_merged_into(&repo_path, root, base),
+            merged: head_is_merged_into(&git_root, root, base),
         })
         .collect();
     let protected = protected_roots(&repo_path, &root_paths);
@@ -328,6 +329,34 @@ fn run_gc(
         reclaimed_bytes,
         disk_space,
     })
+}
+
+/// The directory every `git` call in the sweep runs from (Issue #4566 AC-1).
+///
+/// `run_gc` is handed a worktree by the CLI and the *project root* by the
+/// Issue Monitor scan. In the Nested Bare + Worktree layout that project root
+/// is the container holding `<repo>.git` next to `work/`, `develop/`, … — not
+/// a repository at all — so `git worktree list` there failed with `not a git
+/// repository` and the automatic sweep reported zero candidates while the CLI
+/// listed dozens. Resolving the repository here makes the enumeration depend
+/// on the repository rather than on which directory the caller started in, so
+/// both callers see the same worktrees.
+///
+/// A path that already is a repository is used unchanged: that is the CLI's
+/// working path, and redirecting it to the shared git directory would change
+/// nothing but the ways it can go wrong.
+fn git_root_for(repo_path: &Path) -> PathBuf {
+    if is_repository(repo_path) {
+        return repo_path.to_path_buf();
+    }
+    gwt_core::repo_hash::resolve_repository_common_dir(repo_path)
+        .unwrap_or_else(|| repo_path.to_path_buf())
+}
+
+/// A working tree (`.git` directory or worktree link file) or a git directory
+/// itself (bare repositories included).
+fn is_repository(path: &Path) -> bool {
+    path.join(".git").exists() || (path.join("HEAD").is_file() && path.join("objects").is_dir())
 }
 
 /// The calling worktree and the worktree whose `target/` hosts the running
@@ -841,5 +870,107 @@ mod tests {
         assert_eq!(report["reclaimed_bytes"], 4096, "{out}");
         assert!(!sibling.join(BUILD_ARTIFACT_DIR).exists());
         assert!(repo.join(BUILD_ARTIFACT_DIR).is_dir());
+    }
+
+    /// Issue #4566 AC-1 / AC-3: the Issue Monitor hands the sweep the project
+    /// root — the Nested Bare + Worktree container that holds `<repo>.git`
+    /// next to `work/`, `develop/`, … — which is not itself a repository.
+    /// Enumerating from there used to fail with `not a git repository` and
+    /// report zero candidates while the CLI, given a real worktree, listed
+    /// dozens. The sweep now resolves the repository itself, so both callers
+    /// see the same worktrees.
+    #[test]
+    fn gc_enumerates_from_a_project_root_that_is_not_a_repository() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        // A seed checkout only exists to give the bare repository a commit.
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir_all(&seed).expect("seed dir");
+        git(&seed, &["init", "-q", "-b", "develop"]);
+        git(&seed, &["config", "user.email", "t@example.com"]);
+        git(&seed, &["config", "user.name", "t"]);
+        std::fs::write(seed.join("README.md"), "x").expect("write");
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "init"]);
+
+        // The layout the daemon actually points at: a container directory with
+        // no `.git` of its own, holding the bare repository and the worktrees.
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+        let bare = project_root.join("repo.git");
+        git(
+            &project_root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                seed.to_str().expect("utf8"),
+                bare.to_str().expect("utf8"),
+            ],
+        );
+        // The container is identified through the bare child's `origin`.
+        git(
+            &bare,
+            &["remote", "set-url", "origin", "https://example.com/gwt.git"],
+        );
+        git(
+            &bare,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        assert!(
+            !project_root.join(".git").exists(),
+            "the container must not be a repository, or the test proves nothing"
+        );
+
+        let worktree = project_root.join("work").join("issue-1");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work/issue-1",
+                worktree.to_str().expect("utf8"),
+            ],
+        );
+        let artifacts = worktree.join(BUILD_ARTIFACT_DIR).join("debug");
+        std::fs::create_dir_all(&artifacts).expect("target dir");
+        std::fs::write(artifacts.join("blob.bin"), vec![7u8; 4096]).expect("blob");
+
+        let report = run_gc(&project_root, "develop", GcOptions::default(), true)
+            .expect("enumeration from a non-repository project root");
+
+        let candidates: Vec<&PathBuf> = report.candidates.iter().map(|c| &c.worktree).collect();
+        assert_eq!(candidates.len(), 1, "{report:?}");
+        assert!(
+            candidates[0].ends_with("issue-1"),
+            "{:?}",
+            report.candidates
+        );
+        assert_eq!(report.reclaimable_bytes, 4096, "{report:?}");
+        // The merge check runs against the same repository, so a merged
+        // worktree is not kept for an unreadable merge state.
+        assert!(
+            !report
+                .kept
+                .iter()
+                .any(|kept| kept.reason.contains("merge state")),
+            "{:?}",
+            report.kept
+        );
     }
 }

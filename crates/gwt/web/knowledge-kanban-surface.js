@@ -156,6 +156,12 @@ const ISSUE_ROW_STOPPABLE_AGENT_STATUSES = new Set([
   "waiting",
 ]);
 const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_failed"]);
+// Issue #3628 (AC-3): the states that hold a row out of the queue. Launch Now
+// only opens the wizard and never touches the hold, so returning a row to the
+// queue *without* starting an agent had no control at all and meant hand-editing
+// issue-monitor.json. Offered only where such a hold exists, so the button never
+// promises a change that cannot happen.
+const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed"]);
 const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
   closed: Object.freeze({ label: "Done", tone: "done" }),
   remote: Object.freeze({ label: "Remote", tone: "remote" }),
@@ -207,7 +213,12 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
   if (Number.isFinite(entry?.queue_position)) {
-    items.push({ kind: "chip", key: "queue", label: `Queue ${entry.queue_position}` });
+    const terminal = String(entry?.queue_terminal || "").trim();
+    items.push({
+      kind: "chip",
+      key: "queue",
+      label: terminal ? `Queue ${entry.queue_position} · ${terminal}` : `Queue ${entry.queue_position}`,
+    });
   }
   if (work?.pr_number) {
     const prState = String(work.pr_state || "").trim();
@@ -247,12 +258,19 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   switch (monitor?.state) {
     case "queued":
       return {
-        order: ["launch-now", "configure-issue", "move-up", "move-down", ...workActions],
+        order: ["launch-now", "configure-issue", "queue-remove", "move-up", "move-down", ...workActions],
       };
     case "launch_failed":
     case "agent_failed":
       return {
-        order: ["launch-now", "continue-work", "resume-work", "configure-issue", "cleanup-work"],
+        order: [
+          "launch-now",
+          "requeue-issue",
+          "continue-work",
+          "resume-work",
+          "configure-issue",
+          "cleanup-work",
+        ],
       };
     case "merged":
     case "released":
@@ -275,7 +293,12 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
           : workActions,
     };
   }
-  return { order: issueEntryStateKey(entry) === "open" ? ["launch-agent"] : [] };
+  // SPEC #3165 TQ-9: a Backlog Issue is the one the user puts into the queue.
+  // This is the requested feature's main direction, so it sits on the row next
+  // to "Launch agent" rather than behind a separate surface.
+  return {
+    order: issueEntryStateKey(entry) === "open" ? ["queue-push", "launch-agent"] : [],
+  };
 }
 
 function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, canvasWindow }) {
@@ -290,6 +313,12 @@ function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, can
     }
     case "launch-now":
       return ISSUE_ROW_LAUNCH_NOW_STATES.has(monitor?.state);
+    case "queue-push":
+      return issueEntryStateKey(entry) === "open" && !monitor;
+    case "queue-remove":
+      return Boolean(Number.isFinite(entry?.queue_position));
+    case "requeue-issue":
+      return ISSUE_ROW_REQUEUE_STATES.has(monitor?.state);
     case "configure-issue":
       return Boolean(monitor);
     case "move-up":
@@ -609,6 +638,23 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
+      // Issue #4366 AC-6b: what launches actually use while a provider hold
+      // diverts them. Rendered on its own line so the saved settings above it
+      // never appear to change because of a hold.
+      function issueMonitorEffectiveLaunchText(effective) {
+        if (!effective || typeof effective !== "object" || Array.isArray(effective)) {
+          return "";
+        }
+        const reason = typeof effective.reason === "string" ? effective.reason.trim() : "";
+        if (!reason) return "";
+        const summary = typeof effective.summary === "string" ? effective.summary.trim() : "";
+        const agent = typeof effective.agent_id === "string" ? effective.agent_id.trim() : "";
+        const target = summary || agent;
+        return target
+          ? `Launching with ${target} (${reason})`
+          : `No launch candidate (${reason})`;
+      }
+
       function normalizedIssueMonitorQuotaHold(status) {
         const quotaHold = status?.quota_hold;
         if (!quotaHold || typeof quotaHold !== "object" || Array.isArray(quotaHold)) {
@@ -660,6 +706,7 @@ export function createKnowledgeKanbanSurface({
             parts.push(`Total ${issueMonitorStatus.total_candidates}`);
           }
           summary.textContent = parts.join(" | ");
+          summary.title = state === "error" ? String(issueMonitorStatus.last_error || "") : "";
         }
         const settings = panel.querySelector(".knowledge-monitor-settings-copy");
         if (settings) {
@@ -669,6 +716,14 @@ export function createKnowledgeKanbanSurface({
           const profile =
             issueMonitorStatus.launch_profile_summary || "configure before auto start";
           settings.textContent = `Agent settings ${source}: ${profile}`;
+        }
+        const effective = panel.querySelector(".knowledge-monitor-effective-copy");
+        if (effective) {
+          const text = issueMonitorEffectiveLaunchText(
+            issueMonitorStatus.effective_launch_profile,
+          );
+          effective.textContent = text;
+          effective.hidden = !text;
         }
         const maxActiveInput = panel.querySelector(".knowledge-monitor-max-active input");
         if (maxActiveInput && document.activeElement !== maxActiveInput) {
@@ -704,6 +759,15 @@ export function createKnowledgeKanbanSurface({
           autoApply.dataset.enabled = enabled ? "true" : "false";
           autoApply.classList.toggle("primary", enabled);
         }
+        // Issue #3628 (AC-5): a fleet-wide outage is not a per-issue failure,
+        // so it gets a line of its own. `last_error` is reported through the
+        // notification path and is always occupied by whichever launch failed
+        // first, which is how the 2026-08-17 outage stayed invisible.
+        const blackout = panel.querySelector(".knowledge-monitor-blackout");
+        if (blackout) {
+          blackout.textContent = issueMonitorStatus.agent_blackout || "";
+          blackout.hidden = !issueMonitorStatus.agent_blackout;
+        }
       }
 
       function renderAllIssueMonitorControls() {
@@ -718,6 +782,9 @@ export function createKnowledgeKanbanSurface({
           ...issueMonitorStatus,
           ...(nextStatus || {}),
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+          // Issue #4366 AC-6b: omitted once the hold clears, so it must not
+          // survive from the previous status the way merged fields do.
+          effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
         };
         // FR-017: the monitor's last_error is a notification-center error
         // row, not a banner. Report once per changed text; resolve on clear.
@@ -2984,6 +3051,14 @@ export function createKnowledgeKanbanSurface({
           label: "Settings",
           aria: "Project Agent settings for",
         }),
+        "queue-push": Object.freeze({
+          label: "Add to queue",
+          aria: "Add to queue",
+        }),
+        "queue-remove": Object.freeze({
+          label: "Remove from queue",
+          aria: "Remove from queue",
+        }),
         "move-up": Object.freeze({ label: "↑ Move up", aria: "Move up" }),
         "move-down": Object.freeze({ label: "↓ Move down", aria: "Move down" }),
         "continue-work": Object.freeze({ label: "Continue work", aria: "Continue work on" }),
@@ -3002,6 +3077,11 @@ export function createKnowledgeKanbanSurface({
         "stop-agent": Object.freeze({
           label: "Stop agent",
           aria: "Stop the agent for",
+        }),
+        // Issue #3628 (AC-3): release the failure hold without launching.
+        "requeue-issue": Object.freeze({
+          label: "Return to queue",
+          aria: "Return to the queue",
         }),
       });
       // Actions rendered inside the agent status row rather than the row's
@@ -3028,6 +3108,18 @@ export function createKnowledgeKanbanSurface({
               kind: "issue_monitor_configure_issue",
               issue_number: entry.number,
               linked_issue_kind: entry.is_spec ? "spec" : "issue",
+            });
+            return;
+          case "queue-push":
+            send({
+              kind: "issue_monitor_queue_push",
+              issue_numbers: [entry.number],
+            });
+            return;
+          case "queue-remove":
+            send({
+              kind: "issue_monitor_queue_remove",
+              issue_numbers: [entry.number],
             });
             return;
           case "move-up":
@@ -3066,6 +3158,15 @@ export function createKnowledgeKanbanSurface({
             if (target?.id) {
               send({ kind: "stop_window", id: target.id });
             }
+            return;
+          // Issue #3628 (AC-3): identity-free by design — the rows this exists
+          // for have no launch left to name. The driver refuses any row a live
+          // launch still owns, so the button cannot kill a running agent.
+          case "requeue-issue":
+            send({
+              kind: "issue_monitor_requeue",
+              issue_number: entry.number,
+            });
             return;
           default:
             return;
@@ -3500,6 +3601,7 @@ export function createKnowledgeKanbanSurface({
                   <div class="knowledge-monitor-overview">
                     <div class="knowledge-monitor-summary" aria-live="polite">Stopped | Queue 0 | Active 0/1</div>
                     <div class="knowledge-monitor-settings-copy">Agent settings Missing saved profile: configure before auto start</div>
+                    <div class="knowledge-monitor-effective-copy" aria-live="polite" hidden></div>
                   </div>
                   <div class="knowledge-monitor-controls">
                     <button type="button" class="wizard-button" data-action="monitor-settings">Agent settings</button>
@@ -3519,6 +3621,7 @@ export function createKnowledgeKanbanSurface({
                     <input class="knowledge-monitor-quick-title" type="text" placeholder="Quick issue title…" aria-label="Quick issue title" />
                     <button type="button" class="wizard-button" data-action="quick-register-launch">⚡ Register &amp; Launch</button>
                   </div>
+                  <div class="knowledge-monitor-blackout" role="alert" hidden></div>
                 </section>
                 <div class="knowledge-status"></div>
                 <div class="knowledge-split workspace-split issue-list-shell">

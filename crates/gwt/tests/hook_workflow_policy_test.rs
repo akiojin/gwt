@@ -88,6 +88,32 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
         ("pr.draft", json!({}), GovernanceEffect::Reversible),
         ("workspace.update", json!({}), GovernanceEffect::Reversible),
+        (
+            "issue.label",
+            json!({"action":"add","labels":["bug"]}),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["bug"]}),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["hold"]}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["gwt-spec"]}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "issue.label",
+            json!({"action":"add","labels":["auto-merge"]}),
+            GovernanceEffect::Protected,
+        ),
+        ("issue.label", json!({}), GovernanceEffect::Protected),
         ("execution.continue", json!({}), GovernanceEffect::Protected),
         ("execution.adopt", json!({}), GovernanceEffect::Protected),
         ("execution.repair", json!({}), GovernanceEffect::Protected),

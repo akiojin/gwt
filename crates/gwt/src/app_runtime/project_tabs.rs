@@ -528,6 +528,7 @@ impl AppRuntime {
                         tab.project_root.clone(),
                         switch.project_key,
                         false,
+                        None,
                     );
                 }
                 Vec::new()
@@ -593,6 +594,7 @@ impl AppRuntime {
                 prepared.target.project_root.clone(),
                 prepared.project_key,
                 true,
+                None,
             );
         }
         // Window restore and PM ensure may report intermediate PM state.
@@ -831,6 +833,15 @@ impl AppRuntime {
         }
 
         self.tabs.remove(index);
+        let project_still_open = self
+            .tabs
+            .iter()
+            .any(|tab| same_worktree_path(&tab.project_root, &closing_project_root));
+        self.discard_active_work_projection_for_closed_tab(
+            tab_id,
+            &closing_project_root,
+            project_still_open,
+        );
         self.project_tab_incarnations.remove(tab_id);
         self.invalidate_project_navigation();
         if self.tabs.is_empty() {

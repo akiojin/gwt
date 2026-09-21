@@ -863,8 +863,14 @@ fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
         gwt_skills::pm_guidance::generate_pm_guidance(worktree).expect("pre-write guidance");
     });
 
-    let skill = std::fs::read_to_string(worktree.join(".claude/skills/gwt-pm/SKILL.md"))
-        .expect("gwt-pm skill must survive distribution");
+    let skill = std::fs::read_to_string(
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md"),
+    )
+    .expect("gwt-pm skill must survive distribution");
     assert_eq!(skill, gwt_skills::pm_guidance::render_skill_md());
 }
 
@@ -875,7 +881,11 @@ fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
 fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
     let home = tempdir().expect("tempdir");
     let worktree = materialize_into_pm_worktree(home.path(), &AgentId::ClaudeCode, |_| {});
-    let path = worktree.join(".claude/skills/gwt-pm/SKILL.md");
+    let path = worktree
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join(".claude/skills/gwt-pm/SKILL.md");
     assert_eq!(
         std::fs::read_to_string(&path).expect("guidance generated without a pre-write"),
         gwt_skills::pm_guidance::render_skill_md()
@@ -913,8 +923,9 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
     ] {
         let home = tempdir().expect("tempdir");
         let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
-        let rendered = std::fs::read_to_string(worktree.join(mirror))
-            .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
+        let rendered =
+            std::fs::read_to_string(worktree.parent().unwrap().join("runtime").join(mirror))
+                .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
         assert_eq!(
             rendered, canonical,
             "{mirror} must be the canonical pm_guidance source verbatim"
@@ -943,9 +954,19 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
 fn pm_worktree_codex_only_target_writes_only_the_codex_mirror() {
     let home = tempdir().expect("tempdir");
     let worktree = materialize_into_pm_worktree(home.path(), &AgentId::Codex, |_| {});
-    assert!(worktree.join(".codex/skills/gwt-pm/SKILL.md").exists());
+    assert!(worktree
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join(".codex/skills/gwt-pm/SKILL.md")
+        .exists());
     assert!(
-        !worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
+        !worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md")
+            .exists(),
         "a Codex-only target must not write the Claude mirror"
     );
 }
@@ -969,17 +990,30 @@ fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror(
     });
 
     assert!(
-        worktree.join(".claude/skills/gwt-pm/SKILL.md").is_file(),
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md")
+            .is_file(),
         "Grok PM must receive the canonical Claude-compatible gwt-pm skill"
     );
     assert!(
         worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
             .join(".claude/skills/gwt-coordination/SKILL.md")
             .is_file(),
         "Grok PM must receive Claude-compatible coordination guidance"
     );
     assert!(
-        worktree.join(".claude/settings.local.json").is_file(),
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/settings.local.json")
+            .is_file(),
         "Grok PM must receive Claude-compatible managed hook settings"
     );
     assert_eq!(
@@ -989,7 +1023,12 @@ fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror(
         "persistent PM materialization must preserve tracked project assets"
     );
     assert!(
-        !worktree.join(".grok").exists(),
+        !worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".grok")
+            .exists(),
         "Claude compatibility must not create a duplicate .grok managed tree"
     );
 }

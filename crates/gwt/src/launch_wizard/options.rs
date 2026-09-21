@@ -1396,11 +1396,17 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions).expect("chmod stub");
         // PATH is replaced wholesale so no real agent leaks in, but tests that
-        // spawn `git` without the env lock still run concurrently; keep git
-        // reachable through the scoped PATH.
+        // spawn `git` or `sh` without the env lock still run concurrently;
+        // keep both reachable through the scoped PATH (Issue #4497).
         let git = which::which("git").expect("git on the test runner");
         std::os::unix::fs::symlink(&git, dir.path().join("git")).expect("link git");
+        let sh = which::which("sh").expect("sh on the test runner");
+        std::os::unix::fs::symlink(&sh, dir.path().join("sh")).expect("link sh");
         let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", dir.path());
+        assert!(
+            which::which("sh").is_ok(),
+            "scoped PATH must retain sh for parallel runner probes"
+        );
         let _no_custom = gwt_core::test_support::ScopedEnvVar::set(
             gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
             "1",

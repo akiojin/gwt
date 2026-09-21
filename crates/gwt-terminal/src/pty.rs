@@ -825,6 +825,22 @@ impl PtyHandle {
             })
     }
 
+    /// Issue #4405 AC-2: lift this tree's CPU cap while it contains the
+    /// host-wide verification lease holder, and restore it afterwards.
+    /// Returns whether the cap changed.
+    pub fn relieve_cap_for_lease_holder(
+        &self,
+        holder_pid: Option<u32>,
+    ) -> Result<bool, TerminalError> {
+        let mut group = match self.process_group.lock() {
+            Ok(group) => group,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group
+            .relieve_cap_for_lease_holder(holder_pid)
+            .map_err(|details| TerminalError::PtyIoError { details })
+    }
+
     /// `Child::kill` sends SIGHUP and sleeps up to ~200ms; that wait used to
     /// run on the GUI event loop and freeze every `pane.*` operation during
     /// consecutive live-PTY closes (Issue #3705).
@@ -1448,9 +1464,9 @@ mod tests {
 
     use super::*;
     use crate::test_util::{
-        answer_cursor_position_query, echo_command, env_command, lock_pty_test, pwd_command,
-        read_until_contains, read_with_timeout, sleep_command, stdin_echo_command, success_command,
-        TestCommand,
+        answer_cursor_position_query, echo_command, env_command, lock_pty_test, program_text,
+        pwd_command, read_until_contains, read_with_timeout, sleep_command, stdin_echo_command,
+        success_command, TestCommand,
     };
     use tracing::{
         field::{Field, Visit},
@@ -1720,6 +1736,9 @@ mod tests {
     fn cwd_output_matches(text: &str, canonical_cwd: &str) -> bool {
         let normalized_text = text.replace('/', "\\").to_ascii_lowercase();
         let normalized_cwd = canonical_cwd.replace('/', "\\").to_ascii_lowercase();
+        if normalized_text.trim().is_empty() {
+            return false;
+        }
         if normalized_text.contains(&normalized_cwd)
             || normalized_cwd.contains(normalized_text.trim())
         {
@@ -1812,7 +1831,8 @@ mod tests {
         let handle = PtyHandle::spawn(echo_config("hello")).expect("spawn failed");
         answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output =
+            read_until_contains(reader, Duration::from_secs(5), "hello").expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(text.contains("hello"), "Expected 'hello' in: {text}");
     }
@@ -1900,6 +1920,56 @@ mod tests {
         );
     }
 
+    /// Issue #4014: on Windows the ConPTY output pipe stays open after the
+    /// child exits, so a reader only observes EOF once the pseudoconsole is
+    /// closed. Pane teardown relies on that to join the reader thread.
+    #[test]
+    fn releasing_descriptors_ends_a_blocked_reader_after_the_child_is_reaped() {
+        use std::io::Read as _;
+
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("60")).expect("spawn failed");
+        let mut reader = handle.reader().expect("reader");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        handle.kill().expect("kill should succeed");
+        let mut reaped = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = handle.try_wait() {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(reaped, "killed child must be reaped");
+        handle.release_descriptors();
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "reader must observe EOF once the master is closed"
+        );
+        // Issue #4142 hands a released handle an already-drained reader rather
+        // than an error, so a reader thread that arrives after the release
+        // still finishes on EOF instead of reporting the pane as errored.
+        let mut late = handle
+            .reader()
+            .expect("released handle still hands out a reader");
+        let mut buffer = [0u8; 16];
+        assert_eq!(
+            late.read(&mut buffer).expect("drained reader read"),
+            0,
+            "a released master hands out an already-drained reader"
+        );
+    }
+
     #[test]
     fn test_try_wait_running() {
         let _pty_guard = lock_pty_test();
@@ -1944,7 +2014,8 @@ mod tests {
         let handle = PtyHandle::spawn(config).expect("spawn failed");
         answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output = read_until_contains(reader, Duration::from_secs(5), "GWT_TEST_VAR=test_value")
+            .expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("GWT_TEST_VAR=test_value"),
@@ -1966,11 +2037,6 @@ mod tests {
             remove_env: Vec::new(),
             cwd: Some(temp.clone()),
         };
-        let handle = PtyHandle::spawn(config).expect("spawn failed");
-        answer_cursor_position_query(&handle);
-        let reader = handle.reader().expect("reader failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
-        let text = String::from_utf8_lossy(&output).trim().to_string();
         // The output should be the canonical path of the temp dir.
         // On macOS, /tmp -> /private/tmp or /var -> /private/var.
         let canonical_temp = std::fs::canonicalize(&temp)
@@ -1981,9 +2047,52 @@ mod tests {
             .strip_prefix(r"\\?\")
             .unwrap_or(&canonical_temp)
             .to_string();
+        let handle = PtyHandle::spawn(config).expect("spawn failed");
+        answer_cursor_position_query(&handle);
+        let reader = handle.reader().expect("reader failed");
+        let output = read_with_timeout(reader, Duration::from_secs(5), |text| {
+            cwd_output_matches(text.trim(), &canonical_temp)
+        })
+        .expect("read failed");
+        let text = program_text(&output).trim().to_string();
         assert!(
             cwd_output_matches(&text, &canonical_temp),
             "Expected temp dir path in output.\n  output: {text}\n  expected: {canonical_temp}"
+        );
+    }
+
+    /// Issue #4407: the line discipline echoes the DSR answer immediately, in
+    /// caret notation under ECHOCTL, while a slow program prints its cwd later.
+    /// The read must wait for the cwd instead of settling on the echo.
+    #[cfg(unix)]
+    #[test]
+    fn cwd_is_read_when_program_output_follows_the_echoed_dsr_answer() {
+        let _pty_guard = lock_pty_test();
+        let temp = std::env::temp_dir();
+        let config = SpawnConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 0.5; pwd".to_string()],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: Some(temp.clone()),
+        };
+        let handle = PtyHandle::spawn(config).expect("spawn failed");
+        answer_cursor_position_query(&handle);
+        let reader = handle.reader().expect("reader failed");
+        let canonical_temp = std::fs::canonicalize(&temp)
+            .unwrap_or(temp)
+            .display()
+            .to_string();
+        let output = read_with_timeout(reader, Duration::from_secs(5), |text| {
+            cwd_output_matches(text.trim(), &canonical_temp)
+        })
+        .expect("read failed");
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains(&canonical_temp),
+            "Expected temp dir path in output.\n  output: {text:?}\n  expected: {canonical_temp}"
         );
     }
 
@@ -2021,7 +2130,9 @@ mod tests {
         let handle = PtyHandle::spawn(config).expect("spawn failed");
         answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output =
+            read_until_contains(reader, Duration::from_secs(5), "GWT_REMOVE_CHECK=expected")
+                .expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("GWT_REMOVE_CHECK=expected"),

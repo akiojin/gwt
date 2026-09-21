@@ -529,22 +529,44 @@ impl OrphanIntakePrunePlan {
 }
 
 pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntakePrunePlan> {
-    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
-        return None;
-    };
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let Ok(worktrees) = manager.list() else {
-        return None;
-    };
+    let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
+    let worktrees = gwt_git::WorktreeManager::new(&main_repo_path).list().ok()?;
+    Some(orphan_intake_prune_plan(
+        main_repo_path,
+        worktrees
+            .into_iter()
+            .map(|worktree| (worktree.path, worktree.branch)),
+    ))
+}
+
+/// Issue #4378 AC-1: the same plan from a worktree listing the caller holds,
+/// so startup does not list the worktrees a second time. The listing omits
+/// prunable entries; their directory is gone, so the prune always kept them.
+pub fn plan_orphan_intake_worktree_prune_from_inventory(
+    repo_path: &Path,
+    inventory: &[gwt::worktree_inventory::WorktreeEntry],
+) -> Option<OrphanIntakePrunePlan> {
+    let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
+    Some(orphan_intake_prune_plan(
+        main_repo_path,
+        inventory
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.branch.clone())),
+    ))
+}
+
+fn orphan_intake_prune_plan(
+    main_repo_path: PathBuf,
+    worktrees: impl Iterator<Item = (PathBuf, Option<String>)>,
+) -> OrphanIntakePrunePlan {
     let worktree_paths = worktrees
-        .into_iter()
-        .filter(|worktree| is_ephemeral_worktree_path(&worktree.path) && worktree.branch.is_none())
-        .map(|worktree| worktree.path)
+        .filter(|(path, branch)| is_ephemeral_worktree_path(path) && branch.is_none())
+        .map(|(path, _)| path)
         .collect();
-    Some(OrphanIntakePrunePlan {
+    OrphanIntakePrunePlan {
         main_repo_path,
         worktree_paths,
-    })
+    }
 }
 
 pub fn execute_orphan_intake_worktree_prune(
@@ -1440,7 +1462,13 @@ mod tests {
         run_git(root, &["init", "--bare", origin.to_str().unwrap()]);
         run_git(
             root,
-            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+            &[
+                "clone",
+                "--config",
+                "core.autocrlf=false",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
         );
         run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
         run_git(&repo, &["config", "user.name", "gwt"]);
@@ -1748,7 +1776,15 @@ mod tests {
         assert!(error.contains("needs_human"), "{error}");
         assert!(error.contains("unique commits present"), "{error}");
         assert!(error.contains(&session.id), "{error}");
-        assert!(error.contains(&worktree.display().to_string()), "{error}");
+        let reported_worktree = error
+            .split_once("Residual worktree location: `")
+            .and_then(|(_, suffix)| suffix.split_once('`'))
+            .map(|(path, _)| Path::new(path))
+            .expect("diagnostic must identify the residual worktree");
+        assert!(
+            crate::same_worktree_path(reported_worktree, &worktree),
+            "{error}"
+        );
         assert!(working_dir.is_none());
         assert_eq!(
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),

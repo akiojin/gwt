@@ -294,8 +294,9 @@ fn handle_at(
          follows its `fallback` (triage → rerun a flake → fresh-launch a regression → escalate); \
          stale (no update for `stale_after_hours`), SUPERSEDED, owner-Issue-closed, and \
          `escalation_due` rows are digest escalations — never auto-close them. \
-         A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change \
-         cycle: advance one or escalate with the reason. \
+         A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is \
+         never a no-change cycle: advance one or escalate with the reason. A READY_TO_PROMOTE \
+         row is advanced by running `pr.ready` on it, with no user confirmation. \
          Run `concern.list`, execute the stored measurement for every `open` and `fix_landed` \
          Concern, and submit its structured result and owner progress with `concern.measure`. \
          Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, \
@@ -427,6 +428,8 @@ mod tests {
         run_git(&repo, &["add", "tracked.txt"]);
         run_git(&repo, &["commit", "-m", "A"]);
         run_git(&repo, &["push", "-u", "origin", "develop"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "--auto"]);
 
         let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
         std::fs::create_dir_all(worktree.parent().expect("PM parent")).expect("PM parent");
@@ -711,7 +714,7 @@ mod tests {
             // Issue #3868 AC-2 / AC-3: the fallback order and the red-PR
             // exception to the silent cycle are in the Stop hook itself.
             "a row with `default_action_executable` false follows its `fallback`",
-            "A cycle with any CI-RED, CONFLICTED, or `escalation_due` open PR is never a no-change cycle",
+            "A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is",
             "Treat that required advance or handoff as a reportable milestone or escalation",
             "Re-report every unresolved wait in every cycle using the window title and required user action",
             "identify the owning Issue and say `title unavailable`",
@@ -755,15 +758,17 @@ mod tests {
         );
         assert_ne!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
 
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
         handle_user_prompt_submit(&worktree).expect("pre-turn refresh");
 
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
         assert!(
-            worktree.join(".codex/skills/gwt-pm/SKILL.md").exists(),
+            runtime.join(".codex/skills/gwt-pm/SKILL.md").exists(),
             "pre-turn refresh must materialize Codex PM guidance before the model runs"
         );
         assert!(
-            worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
+            runtime.join(".claude/skills/gwt-pm/SKILL.md").exists(),
             "pre-turn refresh must materialize Claude PM guidance before the model runs"
         );
     }
@@ -780,8 +785,10 @@ mod tests {
         )
         .expect("make origin unavailable without changing project identity");
         let old_head = run_git(&worktree, &["rev-parse", "HEAD"]);
-        let codex_guidance = worktree.join(".codex/skills/gwt-pm/SKILL.md");
-        let claude_guidance = worktree.join(".claude/skills/gwt-pm/SKILL.md");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        let codex_guidance = runtime.join(".codex/skills/gwt-pm/SKILL.md");
+        let claude_guidance = runtime.join(".claude/skills/gwt-pm/SKILL.md");
         let _ = std::fs::remove_file(&codex_guidance);
         let _ = std::fs::remove_file(&claude_guidance);
 
@@ -804,7 +811,9 @@ mod tests {
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
         let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
-        let codex_root = worktree.join(".codex");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        let codex_root = runtime.join(".codex");
         std::fs::create_dir_all(&codex_root).expect("create Codex root");
         std::fs::write(codex_root.join("skills"), b"blocking non-directory node\n")
             .expect("create deterministic managed-asset collision");
@@ -818,6 +827,7 @@ mod tests {
         .expect("write legacy memory");
         let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
         let prior_tree = snapshot_worktree(&worktree);
+        let prior_runtime = snapshot_worktree(&runtime);
 
         handle_user_prompt_submit(&worktree)
             .expect_err("a pre-turn phase must fail closed when assets are incomplete");
@@ -831,6 +841,12 @@ mod tests {
             snapshot_worktree(&worktree),
             prior_tree,
             "managed-asset failure must restore every worktree node, not leave partial materialization"
+        );
+
+        assert_eq!(
+            snapshot_worktree(&runtime),
+            prior_runtime,
+            "failed generation must restore the runtime"
         );
 
         let project_state = worktree
@@ -866,9 +882,11 @@ mod tests {
         let (_env_lock, _fixture_home, repo, worktree, _target) = pm_refresh_fixture();
         handle_user_prompt_submit(&worktree)
             .expect("initial refresh materializes generated hook configs");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
         for generated in [".claude/settings.local.json", ".codex/hooks.json"] {
             assert!(
-                worktree.join(generated).is_file(),
+                runtime.join(generated).is_file(),
                 "fixture requires prior generated config {generated}"
             );
         }
@@ -885,8 +903,18 @@ mod tests {
                 worktree.join(path)
             }
         };
-        std::fs::write(&exclude, b"# gwt-managed-begin\n")
-            .expect("seed malformed managed exclude block");
+        // Opt-in policy is read after runtime assets have been regenerated.
+        // A missing source therefore exercises the late rollback boundary.
+        crate::pm_registry::mutate_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            |prefs| prefs.settings.project_policy_files = vec!["missing-policy.md".into()],
+        )
+        .expect("opt into a missing policy file");
+        std::fs::write(
+            runtime.join(".codex/skills/gwt-pm/SKILL.md"),
+            b"prior runtime guidance\n",
+        )
+        .expect("seed distinguishable prior runtime guidance");
         let legacy_memory = worktree.join("tasks/memory.md");
         std::fs::create_dir_all(legacy_memory.parent().expect("legacy memory parent"))
             .expect("create legacy memory parent");
@@ -894,13 +922,23 @@ mod tests {
             .expect("write legacy memory");
         let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
         let prior_tree = snapshot_worktree(&worktree);
-        let prior_exclude = std::fs::read(&exclude).expect("snapshot malformed exclude");
+        let prior_exclude = std::fs::read(&exclude).expect("snapshot Git exclude");
+        let prior_runtime = snapshot_worktree(&runtime);
 
-        handle_user_prompt_submit(&worktree)
-            .expect_err("late Git-exclude failure must fail the pre-turn refresh");
+        let error = handle_user_prompt_submit(&worktree)
+            .expect_err("missing opted-in policy must fail after runtime regeneration");
+        assert!(
+            error.to_string().contains("read opted-in PM policy"),
+            "{error}"
+        );
 
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
         assert_eq!(snapshot_worktree(&worktree), prior_tree);
+        assert_eq!(
+            snapshot_worktree(&runtime),
+            prior_runtime,
+            "late failure must restore prior runtime asset bytes"
+        );
         assert_eq!(
             std::fs::read(&exclude).expect("read restored exclude"),
             prior_exclude,
@@ -910,24 +948,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn managed_asset_refresh_rejects_indirect_roots_without_touching_external_content() {
+    fn managed_asset_refresh_preserves_project_indirect_roots_without_touching_external_content() {
         use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().expect("gwt home");
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
-        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let (_env_lock, _fixture_home, _repo, worktree, target) = pm_refresh_fixture();
         let external = home.path().join("external-claude");
         std::fs::create_dir_all(&external).expect("external Claude root");
         std::fs::write(external.join("sentinel.txt"), b"external content\n")
             .expect("external sentinel");
         symlink(&external, worktree.join(".claude")).expect("indirect managed root");
-        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
 
+        let prior_link = std::fs::read_link(worktree.join(".claude")).expect("source link target");
         handle_user_prompt_submit(&worktree)
-            .expect_err("indirect managed roots must fail before materialization");
+            .expect("project-owned root symlink must not block isolated runtime generation");
 
-        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        assert!(runtime.join(".claude/skills/gwt-pm/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_link(worktree.join(".claude")).unwrap(),
+            prior_link
+        );
         assert!(std::fs::symlink_metadata(worktree.join(".claude"))
             .expect("managed-root symlink metadata")
             .file_type()
@@ -947,14 +992,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn managed_asset_refresh_rejects_indirect_nested_skill_roots_without_touching_external_content()
-    {
+    fn managed_asset_refresh_preserves_project_indirect_nested_skill_roots_without_touching_external_content(
+    ) {
         use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().expect("gwt home");
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
-        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let (_env_lock, _fixture_home, _repo, worktree, target) = pm_refresh_fixture();
         let external = home.path().join("external-skills");
         let external_skill = external.join("gwt-stale");
         std::fs::create_dir_all(&external_skill).expect("external skills root");
@@ -964,20 +1009,28 @@ mod tests {
             .expect("external stale skill");
         std::fs::create_dir_all(worktree.join(".claude")).expect("Claude root");
         symlink(&external, worktree.join(".claude/skills")).expect("indirect nested managed root");
-        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
         let prior_external = snapshot_worktree(&external);
 
+        let prior_link =
+            std::fs::read_link(worktree.join(".claude/skills")).expect("source link target");
         handle_user_prompt_submit(&worktree)
-            .expect_err("indirect nested skill roots must fail before materialization");
+            .expect("project-owned skills symlink must not block isolated runtime generation");
 
-        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        assert!(runtime.join(".claude/skills/gwt-pm/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_link(worktree.join(".claude/skills")).unwrap(),
+            prior_link
+        );
         assert_eq!(snapshot_worktree(&external), prior_external);
         assert!(
             std::fs::symlink_metadata(worktree.join(".claude/skills"))
                 .expect("nested managed-root symlink metadata")
                 .file_type()
                 .is_symlink(),
-            "the rejected nested symlink must remain byte-for-byte owned by the prior checkout"
+            "the project-owned symlink must remain intact outside runtime generation"
         );
     }
 
@@ -995,7 +1048,9 @@ mod tests {
         let _hermes_guard = ScopedEnvVar::set("HERMES_HOME", &hermes_source);
 
         handle_user_prompt_submit(&worktree).expect("initial managed asset refresh");
-        let managed_env = worktree.join(".gwt/hermes/.env");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        let managed_env = runtime.join(".gwt/hermes/.env");
         assert!(
             std::fs::symlink_metadata(&managed_env)
                 .expect("managed Hermes credential metadata")
@@ -1077,7 +1132,8 @@ mod tests {
         )
         .expect("prepare receipt");
         let input = serde_json::json!({
-            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+            "prompt": pm_registry::protected_pm_delivery_prompt(operation_id, body)
+                .expect("protected PM prompt")
         })
         .to_string();
 

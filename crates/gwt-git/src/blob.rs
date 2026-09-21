@@ -126,7 +126,9 @@ where
     let mut command = gwt_core::process::hidden_command("git");
     command
         .args(["cat-file", "--batch"])
-        .current_dir(repo_path)
+        // Issue #4371: callers hand over a project root, which for the
+        // workspace-home layout is not a repository; git exits 128 there.
+        .current_dir(crate::worktree::effective_repo_root(repo_path))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -174,6 +176,14 @@ where
         .join()
         .map_err(|_| GwtError::Git("cat-file --batch: stderr reader panicked".to_string()))?;
     if let Err(error) = result {
+        // Issue #4371: a git that exited early reaches the parser as an empty
+        // stream (`missing header terminator`); git's own reason comes first.
+        if !status.success() {
+            return Err(GwtError::Git(format!(
+                "cat-file --batch exited {status}: {} ({error})",
+                String::from_utf8_lossy(&stderr).trim()
+            )));
+        }
         return Err(error);
     }
     if !status.success() {
@@ -1280,6 +1290,82 @@ mod tests {
             .iter()
             .flatten()
             .all(|blob| blob.content.is_none()));
+    }
+
+    /// Issue #4371: a project tab opened on a workspace-home layout root (no
+    /// `.git` of its own, a nested bare repository) hands that root to the
+    /// Work events ingest. `git cat-file --batch` run there exits 128, so every
+    /// ingest failed ref discovery, deferred its rebuild, and read every
+    /// worktree's event shards again on the next trigger.
+    #[test]
+    fn work_event_blobs_batch_reads_through_a_workspace_home_layout_root() {
+        let source = init_repo();
+        std::fs::create_dir_all(source.path().join(".gwt/work")).expect("mk .gwt/work");
+        std::fs::write(
+            source.path().join(".gwt/work/events.jsonl"),
+            "{\"id\":\"evt-1\"}\n",
+        )
+        .expect("write events");
+        run(gwt_core::process::hidden_command("git")
+            .args(["add", ".gwt/work/events.jsonl"])
+            .current_dir(source.path()));
+        run(gwt_core::process::hidden_command("git")
+            .args(["commit", "-m", "events"])
+            .current_dir(source.path()));
+        let commit = head_sha(source.path());
+        let layout = TempDir::new().unwrap();
+        run(gwt_core::process::hidden_command("git")
+            .args([
+                "clone",
+                "--bare",
+                source.path().to_str().expect("utf-8 source path"),
+                "gwt.git",
+            ])
+            .current_dir(layout.path()));
+
+        let blobs = work_event_blobs_batch(
+            layout.path(),
+            &[commit],
+            ".gwt/work/events.jsonl",
+            ".gwt/work/events",
+            |descriptors| {
+                descriptors
+                    .iter()
+                    .flatten()
+                    .map(|descriptor| descriptor.oid.clone())
+                    .collect()
+            },
+        )
+        .expect("the layout root resolves to its nested bare repository");
+
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].len(), 1);
+        assert_eq!(
+            blobs[0][0].content.as_deref(),
+            Some(&b"{\"id\":\"evt-1\"}\n"[..])
+        );
+    }
+
+    /// Issue #4371: when git itself refuses the directory, the error carries
+    /// git's reason instead of the parser's view of an empty stream
+    /// (`missing header terminator`), which hid the cause for weeks.
+    #[test]
+    fn work_event_blobs_batch_reports_why_git_exited() {
+        let not_a_repo = TempDir::new().unwrap();
+
+        let error = work_event_blobs_batch(
+            not_a_repo.path(),
+            &["0123456789abcdef0123456789abcdef01234567".to_string()],
+            ".gwt/work/events.jsonl",
+            ".gwt/work/events",
+            |_| HashSet::new(),
+        )
+        .expect_err("a directory outside any repository cannot be read");
+
+        assert!(
+            error.to_string().contains("not a git repository"),
+            "{error}"
+        );
     }
 
     #[test]

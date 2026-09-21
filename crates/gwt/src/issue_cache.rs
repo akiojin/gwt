@@ -124,6 +124,24 @@ pub fn load_issue_title_from_cache(cache_root: &Path, issue_number: u64) -> Opti
     }
 }
 
+/// Whether `issue_number` is OPEN according to `<cache_root>/<n>/meta.json`.
+///
+/// `None` means the cache cannot answer — no entry, unreadable, or an
+/// unrecognized `state`. Callers that use this to decide whether to *surface*
+/// an Issue (Issue #4542's denial advisory) must treat `None` as "do not
+/// surface": the cache is the only local source of Issue state, and reaching
+/// GitHub to settle it is not available on a latency-bound path.
+pub fn issue_is_open_in_cache(cache_root: &Path, issue_number: u64) -> Option<bool> {
+    let path = cache_root.join(issue_number.to_string()).join("meta.json");
+    let bytes = fs::read(&path).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    match value.get("state")?.as_str()?.trim() {
+        "open" => Some(true),
+        "closed" => Some(false),
+        _ => None,
+    }
+}
+
 pub fn issue_cache_source_fingerprint(
     cache_root: &Path,
 ) -> Result<Option<IssueCacheSourceFingerprint>, String> {
@@ -610,7 +628,7 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
 fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
     let pages = gwt_git::gh_rest::read_pages_with(
         "repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc",
-        |path| run_gh_issue_command(repo_path, &["api", path], "gh api issues"),
+        |path| run_gh_issue_command(repo_path, &["api", path, "--include"], "gh api issues"),
     )?;
     Ok(issue_list_snapshots(&pages.rows))
 }
@@ -937,6 +955,8 @@ if /I \"%FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh api down\r\n\
   exit /b 1\r\n\
 )\r\n\
+echo HTTP/2.0 200 OK\r\n\
+echo.\r\n\
 if /I \"%FAKE_GH_MODE%\"==\"empty\" (\r\n\
   echo []\r\n\
   exit /b 0\r\n\
@@ -1013,6 +1033,8 @@ set \"gwt_arg2=%~2\"\r\n\
 if /I \"%gwt_arg1%\"==\"api\" set \"GWT_FAKE_LIST=1\"\r\n\
 if /I \"%gwt_arg1% %gwt_arg2%\"==\"issue list\" set \"GWT_FAKE_LIST=1\"\r\n\
 if /I \"%GWT_FAKE_LIST%\"==\"1\" (\r\n\
+  echo HTTP/2.0 200 OK\r\n\
+  echo.\r\n\
   echo [{\"number\":7,\"title\":\"Cached spec\",\"body\":\"<!-- gwt-spec id=7 version=1 -->\\n<!-- sections:\\nplan=comment:700\\nspec=body\\ntasks=body\\n-->\\n\\n<!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n<!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/7\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
   exit /b 0\r\n\
 )\r\n\
@@ -1087,6 +1109,7 @@ exit /b 1\r\n",
         let script = format!(
             "#!/bin/sh\n\
 if [ \"$1 $2\" = \"issue list\" ] || [ \"$1\" = \"api\" ]; then\n\
+  printf 'HTTP/2.0 200 OK\\n\\r\\n'\n\
   cat <<'JSON'\n\
 {list_json}\n\
 JSON\n\
@@ -1372,6 +1395,7 @@ if [ \"$PWD\" != '{}' ]; then\n\
   exit 1\n\
 fi\n\
 if [ \"$1 $2\" = \"issue list\" ] || [ \"$1\" = \"api\" ]; then\n\
+  printf 'HTTP/2.0 200 OK\\n\\r\\n'\n\
   printf '%s\\n' '[{{\"number\":43,\"title\":\"Workspace issue\",\"body\":\"Body\",\"labels\":[{{\"name\":\"bug\"}}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-05-23T00:00:00Z\"}}]'\n\
   exit 0\n\
 fi\n\
@@ -1731,6 +1755,7 @@ printf '%s\n' "$*" >> '{log}'
 updated_43="${{FAKE_UPDATED_43:-{v1}}}"
 case "$1 $2" in
   "issue list" | "api repos/"*)
+    if [ "$1" = "api" ]; then printf 'HTTP/2.0 200 OK\n\r\n'; fi
     printf '[{{"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
     exit 0
     ;;
@@ -1767,7 +1792,7 @@ exit 1
 
     /// The REST issue list as [`invocations`] journals it.
     const LIST_CALL: &str =
-        "api repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc&per_page=100&page=1";
+        "api repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc&per_page=100&page=1 --include";
 
     fn invocations(log: &Path) -> Vec<String> {
         fs::read_to_string(log)

@@ -59,7 +59,9 @@ fn main() -> ExitCode {
 
     match args.as_slice() {
         [pr, list, ..] if pr == "pr" && list == "list" => {
-            if mode == "multi-pr-current" {
+            if mode == "foreign-fork-fallback" {
+                println!("[]");
+            } else if mode == "multi-pr-current" {
                 println!("{}", r#"[
 {"number":2537,"title":"Older PR","state":"CLOSED","url":"https://github.com/akiojin/gwt/pull/2537","createdAt":"2026-05-07T08:05:00Z","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"UNKNOWN","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}},
 {"number":2538,"title":"Newer PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}}
@@ -75,15 +77,25 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
+            if mode == "foreign-fork-fallback" {
+                let mut pr = pr_json("12", "Foreign fork PR");
+                pr.pop();
+                pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"other-user"}, "headRepository":{"name":"gwt"}}"#);
+                println!("{pr}");
+                return ExitCode::SUCCESS;
+            }
             if mode == "no-current-pr" {
                 eprintln!("no pull requests found for branch");
                 return ExitCode::from(1);
             }
-            if mode == "behind" {
-                println!("{}", behind_pr_json("12", "Current PR"));
+            let mut pr = if mode == "behind" {
+                behind_pr_json("12", "Current PR")
             } else {
-                println!("{}", pr_json("12", "Current PR"));
-            }
+                pr_json("12", "Current PR")
+            };
+            pr.pop();
+            pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"akiojin"}, "headRepository":{"name":"gwt"}}"#);
+            println!("{pr}");
             return ExitCode::SUCCESS;
         }
         [pr, view, number, repo_flag, _, json_flag, ..]
@@ -348,9 +360,10 @@ pub fn sample_issue_snapshot() -> IssueSnapshot {
 
 pub fn sample_pr_status() -> gwt_git::PrStatus {
     gwt_git::PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 128,
         title: "Enforce coverage".to_string(),
-        head_ref_name: String::new(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://github.com/akiojin/gwt/pull/128".to_string(),
         created_at: None,
@@ -374,4 +387,24 @@ pub fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<
         .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
         .filter_map(|hook| hook["command"].as_str())
         .collect()
+}
+
+/// Declare that this test accepts its runner's own scheduling priority for
+/// verification children (Issue #4409).
+///
+/// `verify.run` refuses to launch verification from a process running at a
+/// degraded nice value when no daemon can launch it instead, because spawning
+/// in place would hand the workload the agent launch policy's priority. A test
+/// runner inherits whatever priority its parent had and cannot change it, so a
+/// test that drives the real operation would pass or fail on where it happened
+/// to be started from — green in CI and in a terminal, red inside an agent.
+///
+/// These tests are about the record, the settlement rules, and the PR
+/// lifecycle, not about where verification is hosted; the placement decision
+/// has its own tests in `gwt_core::verification_priority` and
+/// `cli::daemon::verification_host`. Hold [`gwt_core::test_support::env_lock`]
+/// before calling this, like any other environment override.
+#[must_use]
+pub fn declare_inherited_spawn_host() -> ScopedEnvVar {
+    ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit")
 }
