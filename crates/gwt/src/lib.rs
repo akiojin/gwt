@@ -73,7 +73,7 @@ mod test_guard;
 mod recovery_delivery_tests;
 
 #[cfg(test)]
-pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+pub(crate) fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
     gwt_core::test_support::env_lock()
 }
 
