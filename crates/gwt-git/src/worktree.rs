@@ -1742,7 +1742,7 @@ fn is_gwt_materialized_asset_entry(entry: &str) -> bool {
 /// into the worktree: its own `.gwt/` namespace, or a materialized managed
 /// asset. Issue #4009.
 ///
-/// Deliberately broader than [`is_disposable_worktree_entry`], which fails
+/// Deliberately broader than `is_disposable_worktree_entry`, which fails
 /// closed on durable Work shards because the ephemeral-intake reaper
 /// force-removes a worktree the moment it decides and a just-written shard may
 /// not be ingested yet. This predicate serves the Workspace cleanup-readiness
