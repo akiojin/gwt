@@ -5257,6 +5257,10 @@ pub fn worktree_sources_needing_backfill(
 /// re-ingested copy of this event (W-16 intake on another machine) cannot
 /// regress a terminal item; the Idle surface state comes from the kind
 /// mapping in `workspace_work_event_status`.
+///
+/// Issue #4479 AC-1: the owner the branch already names travels on the event,
+/// so a Work materialized here is never created with `owner: null` while its
+/// execution container points at an Issue branch.
 pub fn record_workspace_backfill_event_paths(
     work_items_path: &Path,
     events_path: &Path,
@@ -5277,6 +5281,7 @@ fn workspace_backfill_event(
 ) -> WorkEvent {
     let mut event = WorkEvent::new(WorkEventKind::Backfill, work_id, updated_at);
     event.title = Some(branch.to_string());
+    event.owner = work_owner_for_branch(branch);
     event.execution_container = Some(WorkspaceExecutionContainerRef {
         branch: Some(branch.to_string()),
         worktree_path: Some(worktree_path.to_path_buf()),
