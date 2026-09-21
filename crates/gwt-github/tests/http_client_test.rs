@@ -1109,6 +1109,27 @@ fn owner_mutation_classifies_connection_refusal_as_pre_submit_network_failure() 
     ));
 }
 
+/// Blocks until the caller's deadline has provably expired.
+///
+/// SPEC #4551 T-030, mechanism (A). The predicate is the deadline's own
+/// absolute expiry, not a wall-clock constant chosen to be larger than
+/// another wall-clock constant, so a saturated runner can stall this thread
+/// for any length of time and the ordering the caller asserts still holds.
+/// [`ResolutionDeadline::remaining`] treats a zero remainder as expired, so
+/// waiting until `checked_duration_since` yields `None` leaves the deadline
+/// strictly past.
+fn wait_until_the_deadline_has_expired(deadline: &ResolutionDeadline) {
+    let expires_at = deadline.expires_at();
+    while let Some(remaining) = expires_at.checked_duration_since(Instant::now()) {
+        std::thread::sleep(remaining);
+    }
+}
+
+/// Answers successfully, but only once the caller's deadline is already past.
+///
+/// Prefer this shape over "sleep a little and hope the deadline was shorter"
+/// whenever a test needs a response that arrives too late: it makes the
+/// lateness an observed fact instead of a race between two constants.
 struct LateResponseTransport;
 
 impl HttpTransport for LateResponseTransport {
@@ -1119,11 +1140,17 @@ impl HttpTransport for LateResponseTransport {
     fn execute_with_deadline(
         &self,
         _request: HttpRequest,
-        _deadline: &ResolutionDeadline,
+        deadline: &ResolutionDeadline,
     ) -> Result<HttpResponse, HttpError> {
-        std::thread::sleep(Duration::from_millis(25));
+        wait_until_the_deadline_has_expired(deadline);
         Ok(owner_page(Vec::new(), false, None))
     }
+}
+
+/// The deadline the [`LateResponseTransport`] tests hand the client. Its value
+/// only bounds how long they take; the transport waits it out either way.
+fn late_response_deadline() -> ResolutionDeadline {
+    ResolutionDeadline::new(Duration::from_millis(100), Duration::from_millis(100))
 }
 
 #[test]
@@ -1134,10 +1161,12 @@ fn owner_read_rejects_a_response_returned_after_the_absolute_deadline() {
         "akiojin",
         "gwt",
     );
-    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
 
     let error = client
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .list_issues(
+            &RepositoryIdentity::gwt_upstream(),
+            &late_response_deadline(),
+        )
         .expect_err("late owner response");
 
     assert!(matches!(error, ApiError::Timeout { .. }));
@@ -1184,7 +1213,6 @@ fn owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown
         "akiojin",
         "gwt",
     );
-    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
 
     let error = client
         .create_owner_issue(
@@ -1194,7 +1222,7 @@ fn owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown
                 body: "Body".to_string(),
                 labels: Vec::new(),
             },
-            &deadline,
+            &late_response_deadline(),
         )
         .expect_err("late mutation response");
 
