@@ -742,7 +742,10 @@ mod tests {
         let augmented = augment_denial_with(
             AdvisoryPaths::for_repo(temp.path()),
             denial(),
-            Duration::from_millis(50),
+            // The budget is the premise, not a wait: it must stay far below
+            // the 2s bound asserted below and far above a loaded runner's
+            // scheduling jitter.
+            Duration::from_millis(200),
             Box::new(|_paths, _tokens| {
                 std::thread::sleep(Duration::from_secs(5));
                 Ok(vec![memory_candidate_hit("too late", "never rendered")])
