@@ -896,7 +896,6 @@ mod store_consolidation {
                 duplicate_event_containers: Default::default(),
                 discarded: false,
                 discarded_at: None,
-                events_compacted_through: None,
             });
             save_workspace_work_items_projection_to_path(&works_path, &projection)
                 .expect("seed eventless orphan Work");

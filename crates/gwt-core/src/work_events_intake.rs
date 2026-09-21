@@ -206,7 +206,7 @@ fn ingest_work_events_sources_locked(
         .work_items
         .iter()
         .filter_map(|item| {
-            item.events_compacted_through
+            item.events_compacted_through()
                 .map(|through| (item.id.clone(), through))
         })
         .collect::<HashMap<_, _>>();
@@ -804,16 +804,17 @@ fn fold_work_events(
 }
 
 fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy: WorkItem) {
+    // Issue #4508: a compacted item keeps deriving its replay base from
+    // itself. Storing the copy back would re-add a duplicate of every field
+    // the compaction just dropped, and a projection that gained a snapshot
+    // counts as changed, so every pass would rewrite works.json without any
+    // state change. Leaving the snapshot empty also preserves the watermark
+    // that `WorkItem::events_compacted_through` reads back, which is what
+    // stops the next intake pass from replaying the folded prefix. Read it
+    // before forcing `legacy_metadata_authoritative`, which would otherwise
+    // make an eventless legacy row look compacted.
+    let retain_snapshot = legacy.events_compacted_through().is_none();
     legacy.legacy_metadata_authoritative = true;
-    // Issue #4508: a refold rebuilds the item from its replay base, so the
-    // compaction watermark has to be carried across explicitly or the next
-    // intake pass would replay the prefix that base already contains. A
-    // compacted item also keeps deriving its base from itself: storing the
-    // copy back would re-add a duplicate of every field the compaction just
-    // dropped, and a projection that gained a snapshot counts as changed, so
-    // every pass would rewrite works.json without any state change.
-    let events_compacted_through = legacy.events_compacted_through;
-    let retain_snapshot = events_compacted_through.is_none();
     let legacy_snapshot_at = legacy
         .legacy_metadata_snapshot_at
         .unwrap_or(legacy.updated_at);
@@ -831,7 +832,6 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
     legacy_base.legacy_metadata_authoritative = true;
     legacy_base.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
     legacy_base.duplicate_event_containers.clear();
-    legacy_base.events_compacted_through = events_compacted_through;
     let Some(rebuilt) = projection
         .work_items
         .iter_mut()
@@ -858,7 +858,6 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
     legacy.legacy_metadata_snapshot = retain_snapshot.then_some(immutable_snapshot);
     legacy.legacy_metadata_authoritative = true;
     legacy.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
-    legacy.events_compacted_through = events_compacted_through;
     legacy.events = rebuilt_events;
     for agent in std::mem::take(&mut rebuilt.agents) {
         if !legacy
@@ -3503,7 +3502,6 @@ mod tests {
             duplicate_event_containers: BTreeMap::new(),
             discarded: false,
             discarded_at: None,
-            events_compacted_through: None,
         };
         merge_eventless_legacy_item(&mut projection, legacy);
 

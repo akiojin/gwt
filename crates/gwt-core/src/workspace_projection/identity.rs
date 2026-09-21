@@ -150,7 +150,6 @@ mod tests {
             duplicate_event_containers: Default::default(),
             discarded: false,
             discarded_at: None,
-            events_compacted_through: None,
         };
         let mut item_b = item_a.clone();
         item_b.id = "work-session-bbbb".to_string();

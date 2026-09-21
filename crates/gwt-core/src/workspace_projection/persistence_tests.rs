@@ -109,6 +109,104 @@ fn legacy_uncompacted_works_json_loads_with_every_work_item_and_owner_intact() {
     }
 }
 
+/// Issue #4508 AC-6: the field inventory `WorkItem` carried before inline
+/// compaction shipped, read with `deny_unknown_fields` exactly as the real
+/// `WorkItem` is. It stands in for a binary that does not contain this change:
+/// on 2026-09-19 one added field in `works.json` stopped `workspace.*` across
+/// every running gwt on the host, so a compacted projection has to stay inside
+/// this inventory.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreCompactionWorkItem {
+    id: String,
+    title: serde_json::Value,
+    #[serde(default)]
+    intent: serde_json::Value,
+    #[serde(default)]
+    summary: serde_json::Value,
+    #[serde(default)]
+    progress_summary: serde_json::Value,
+    status_category: serde_json::Value,
+    #[serde(default)]
+    owner: serde_json::Value,
+    created_at: serde_json::Value,
+    updated_at: serde_json::Value,
+    #[serde(default)]
+    completed_at: serde_json::Value,
+    #[serde(default)]
+    agents: serde_json::Value,
+    #[serde(default)]
+    execution_containers: serde_json::Value,
+    #[serde(default)]
+    board_refs: serde_json::Value,
+    #[serde(default)]
+    related_work_item_ids: serde_json::Value,
+    #[serde(default)]
+    events: serde_json::Value,
+    #[serde(default)]
+    legacy_metadata_snapshot: Option<Box<PreCompactionWorkItem>>,
+    #[serde(default)]
+    legacy_metadata_authoritative: serde_json::Value,
+    #[serde(default)]
+    legacy_metadata_snapshot_at: serde_json::Value,
+    #[serde(default)]
+    duplicate_event_containers: serde_json::Value,
+    #[serde(default)]
+    discarded: serde_json::Value,
+    #[serde(default)]
+    discarded_at: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreCompactionProjection {
+    updated_at: serde_json::Value,
+    #[serde(default)]
+    work_items: Vec<PreCompactionWorkItem>,
+}
+
+/// Issue #4508 AC-6: a `works.json` written after compaction must still load
+/// in a reader that predates it. Compaction is only allowed to remove history,
+/// never to widen the schema.
+#[test]
+fn a_compacted_works_json_still_loads_in_a_reader_that_predates_compaction() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let projection = WorkItemsProjection {
+        updated_at: started_at,
+        work_items: vec![legacy_uncompacted_work_item(
+            "work-forward-compat",
+            "#4508",
+            MAX_INLINE_WORK_EVENTS * 6,
+            started_at,
+        )],
+    };
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection).expect("save");
+
+    let reloaded = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load")
+        .expect("projection");
+    let item = &reloaded.work_items[0];
+    assert_eq!(item.events.len(), MAX_INLINE_WORK_EVENTS);
+    assert!(
+        item.legacy_metadata_authoritative && item.legacy_metadata_snapshot_at.is_some(),
+        "the fixture must really have been compacted"
+    );
+
+    let written = std::fs::read_to_string(&work_items_path).expect("read works.json");
+    let legacy: PreCompactionProjection = serde_json::from_str(&written)
+        .expect("a binary that predates compaction must still read works.json");
+    assert_eq!(legacy.work_items.len(), 1);
+    assert_eq!(legacy.work_items[0].id, "work-forward-compat");
+}
+
 /// Issue #4508 AC-4: what `WorkItemsCache` keeps resident must be bounded by
 /// the inline cap, not by how many events the project ever recorded.
 #[test]
@@ -12044,7 +12142,6 @@ fn seeded_work_item(
         duplicate_event_containers: Default::default(),
         discarded,
         discarded_at: discarded.then_some(at),
-        events_compacted_through: None,
     }
 }
 

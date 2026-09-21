@@ -299,17 +299,32 @@ pub struct WorkItem {
     /// not move when later metadata or heartbeat events are folded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discarded_at: Option<DateTime<Utc>>,
-    /// Issue #4508: watermark of the inline history dropped by
-    /// [`WorkItemsProjection::compact_inline_events`]. Every event at or before
-    /// this instant was folded into `legacy_metadata_snapshot` before being
-    /// dropped, so re-reading a source that still carries it must not replay it
-    /// or the truncated history would grow straight back. `None` marks an item
-    /// whose inline history is still complete.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub events_compacted_through: Option<DateTime<Utc>>,
 }
 
 impl WorkItem {
+    /// Issue #4508: watermark of the inline history that
+    /// [`WorkItemsProjection::compact_inline_events`] dropped, or `None` while
+    /// the inline history is still complete. Every event at or before this
+    /// instant is already folded into the item's own fields, so a source that
+    /// still carries it must not replay it or the truncated history would grow
+    /// straight back.
+    ///
+    /// This is derived rather than stored. `WorkItem` deserializes with
+    /// `deny_unknown_fields`, so one added field in `works.json` stops every
+    /// binary that predates it — on 2026-09-19 that halted `workspace.*` across
+    /// the whole host. The existing fields already say it: an authoritative
+    /// replay base that stores no snapshot *is* the item itself, valid through
+    /// `legacy_metadata_snapshot_at`. Compaction is the only thing that
+    /// produces that combination, because every other writer of
+    /// `legacy_metadata_authoritative` stores the snapshot alongside it.
+    pub fn events_compacted_through(&self) -> Option<DateTime<Utc>> {
+        if self.legacy_metadata_authoritative && self.legacy_metadata_snapshot.is_none() {
+            self.legacy_metadata_snapshot_at
+        } else {
+            None
+        }
+    }
+
     /// A Work is incomplete while it is neither completed (Done) nor discarded.
     /// Both Done and Discarded are terminal closes (FR-352).
     pub fn is_incomplete(&self) -> bool {
@@ -436,7 +451,6 @@ impl WorkItemsProjection {
                 duplicate_event_containers: BTreeMap::new(),
                 discarded: false,
                 discarded_at: None,
-                events_compacted_through: None,
             });
             self.work_items.len() - 1
         });
@@ -766,7 +780,6 @@ fn compact_work_item(item: &mut WorkItem) -> usize {
         .iter()
         .map(|event| event.updated_at)
         .chain(std::iter::once(item.updated_at))
-        .chain(item.events_compacted_through)
         .chain(item.legacy_metadata_snapshot_at)
         .max()
         .unwrap_or(item.updated_at);
@@ -791,11 +804,12 @@ fn compact_work_item(item: &mut WorkItem) -> usize {
     // duplicating every field here is what made the projection large in the
     // first place. `merge_eventless_legacy_item` rebuilds it on demand, and an
     // older snapshot must not survive a moved boundary — replaying only the
-    // newer events onto stale metadata would roll the Work item back.
+    // newer events onto stale metadata would roll the Work item back. This
+    // trio is also what [`WorkItem::events_compacted_through`] reads back, so
+    // the watermark needs no field of its own in `works.json`.
     item.legacy_metadata_snapshot = None;
     item.legacy_metadata_snapshot_at = Some(boundary);
     item.legacy_metadata_authoritative = true;
-    item.events_compacted_through = Some(boundary);
     dropped_events + dropped_board_refs + dropped_agents
 }
 
@@ -1163,7 +1177,7 @@ mod tests {
         assert_eq!(item.execution_containers, before.execution_containers);
         assert_eq!(item.progress_summary, before.progress_summary);
         assert_eq!(
-            item.events_compacted_through,
+            item.events_compacted_through(),
             Some(before.updated_at),
             "the compaction watermark marks the folded-and-dropped prefix"
         );

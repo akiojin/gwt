@@ -34225,7 +34225,6 @@ fn app_runtime_list_resumable_agents_uses_workspace_branch_ledger_candidates() {
         duplicate_event_containers: Default::default(),
         discarded: false,
         discarded_at: None,
-        events_compacted_through: None,
     };
     let work_items = gwt_core::workspace_projection::WorkItemsProjection {
         updated_at,
@@ -57501,7 +57500,6 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
         duplicate_event_containers: Default::default(),
         discarded: false,
         discarded_at: None,
-        events_compacted_through: None,
     };
     let projection = gwt_core::workspace_projection::WorkItemsProjection {
         updated_at: completed_at,

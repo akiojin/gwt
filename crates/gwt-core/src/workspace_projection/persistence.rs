@@ -7645,7 +7645,6 @@ fn synthesize_workspace_work_item_from_legacy(
         duplicate_event_containers: Default::default(),
         discarded: false,
         discarded_at: None,
-        events_compacted_through: None,
     };
     if let Some(projection) = projection {
         item.agents
