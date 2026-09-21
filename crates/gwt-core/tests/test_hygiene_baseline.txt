@@ -81,12 +81,9 @@ short-wall-clock|crates/gwt-github/src/client/http.rs|corpus_generation_rejects_
 short-wall-clock|crates/gwt-github/src/client/http.rs|delayed_loopback_request
 short-wall-clock|crates/gwt-github/src/client/http.rs|reqwest_execute_rejects_expired_scoped_deadline_before_submission
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|accept_loopback_with_timeout
-short-wall-clock|crates/gwt-github/tests/http_client_test.rs|execute_with_deadline
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|expired_owner_deadline_performs_no_http_request
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|expired_owner_deadline_rejects_auth_before_spawning_gh
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|owner_environment_override_rejects_an_expired_deadline_before_client_construction
-short-wall-clock|crates/gwt-github/tests/http_client_test.rs|owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown
-short-wall-clock|crates/gwt-github/tests/http_client_test.rs|owner_read_rejects_a_response_returned_after_the_absolute_deadline
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|reqwest_owner_read_stops_within_the_absolute_deadline_when_response_stalls
 short-wall-clock|crates/gwt-terminal/src/pane.rs|check_status_captures_the_exit_receipt_once
 short-wall-clock|crates/gwt-terminal/src/pane.rs|process_exit_probe_does_not_treat_display_error_as_child_exit
