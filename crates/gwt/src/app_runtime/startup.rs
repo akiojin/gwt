@@ -1179,21 +1179,21 @@ impl AppRuntime {
                 session.status,
                 gwt_agent::AgentStatus::Idle | gwt_agent::AgentStatus::Stopped
             )
-            && !session.last_exit_code.is_some_and(|code| code != 0)
+            && session.last_exit_code.is_none_or(|code| code == 0)
             && session.last_exit_signal.is_none()
             && !self.runtimes.contains_key(id)
-            && !self
+            && self
                 .window_details
                 .get(id)
-                .is_some_and(|text| !text.trim().is_empty())
-            && !self
+                .is_none_or(|text| text.trim().is_empty())
+            && self
                 .launch_error_terminal_details
                 .get(id)
-                .is_some_and(|text| !text.trim().is_empty())
-            && !window
+                .is_none_or(|text| text.trim().is_empty())
+            && window
                 .dynamic_title_detail
                 .as_ref()
-                .is_some_and(|text| !text.trim().is_empty())
+                .is_none_or(|text| text.trim().is_empty())
             && gwt::cli::execution_state::diagnose_for_projection(
                 &session.worktree_path,
                 Some(&session.id),
