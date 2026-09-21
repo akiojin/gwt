@@ -771,6 +771,12 @@ mod store_consolidation {
     /// A Nested Bare + Worktree layout plus the orphaned, path-keyed store that
     /// a pre-#3466 build left behind for its layout root.
     struct SplitStoreFixture {
+        /// Issue #4296 AC-5: every project store these tests touch must live
+        /// under this fixture's own temp dir, never under the gwt home a live
+        /// host is writing to. The guard is declared first so it is dropped
+        /// before `_temp` removes the directories it points at.
+        _home_guard: gwt_core::test_support::ScopedGwtHome,
+        home: PathBuf,
         _temp: tempfile::TempDir,
         layout_root: PathBuf,
         worktree: PathBuf,
@@ -781,6 +787,12 @@ mod store_consolidation {
     impl SplitStoreFixture {
         fn new(origin: &str) -> Self {
             let temp = tempfile::tempdir().expect("tempdir");
+            // Redirect `gwt_home()` before the first `gwt_project_*` call below.
+            // `ScopedGwtHome` is thread-local, so it isolates this test without
+            // serializing against siblings that mutate process-global `HOME`.
+            let home = temp.path().join("home");
+            std::fs::create_dir_all(&home).expect("isolated home");
+            let _home_guard = gwt_core::test_support::ScopedGwtHome::set(&home);
             let layout_root = temp.path().join("workbench");
             let bare = layout_root.join("gwt.git");
             let bootstrap = layout_root.join(".bootstrap");
@@ -845,6 +857,8 @@ mod store_consolidation {
             );
 
             Self {
+                _home_guard,
+                home,
                 _temp: temp,
                 layout_root,
                 worktree,
@@ -950,6 +964,35 @@ mod store_consolidation {
             content.push('\n');
         }
         std::fs::write(path, content).expect("write event log");
+    }
+
+    /// Issue #4296 AC-5: these tests quarantine and rebuild whole project
+    /// stores, so a fixture that resolved `gwt_home()` to the caller's real
+    /// home would be renaming directories a live gwt host is writing to. The
+    /// isolation is asserted rather than assumed: `gwt_home()` falls back to
+    /// `HOME` / `USERPROFILE` whenever its cargo-test sandbox does not apply.
+    #[test]
+    fn the_fixture_keeps_every_project_store_inside_its_own_temp_dir() {
+        let fixture = SplitStoreFixture::new("https://example.invalid/acme/consolidate-home.git");
+        let isolated_gwt_home = fixture.home.join(".gwt");
+
+        for (label, store) in [
+            ("orphan store", fixture.orphan_store.clone()),
+            ("canonical store", fixture.canonical_store()),
+            ("canonical works", fixture.canonical_works.clone()),
+        ] {
+            assert!(
+                store.starts_with(&isolated_gwt_home),
+                "{label} must stay inside the fixture's gwt home: {} is not under {}",
+                store.display(),
+                isolated_gwt_home.display()
+            );
+        }
+
+        assert!(
+            fixture.orphan_store.is_dir(),
+            "the seeded orphan store must exist under the isolated home"
+        );
     }
 
     /// AC-8 dry run: planning names the orphan and writes nothing.
