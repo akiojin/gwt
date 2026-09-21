@@ -39,7 +39,7 @@ use std::{
 use gwt_core::daemon::{
     persist_endpoint, resolve_daemon_socket_path, validate_handshake, ClientFrame, DaemonEndpoint,
     DaemonFrame, DaemonSocketPlacement, DaemonStatus, IpcHandshakeRequest, IpcHandshakeResponse,
-    RuntimeScope, DAEMON_PROTOCOL_VERSION,
+    RuntimeScope, VerificationSpawnFinished, DAEMON_PROTOCOL_VERSION,
 };
 use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
@@ -1660,6 +1660,15 @@ enum IssueMonitorControl {
     Heartbeat {
         issue_number: u64,
         at: String,
+        /// Issue #4366 AC-4: the agent that showed the activity, so activity
+        /// on a held provider can prove that provider has recovered.
+        agent_id: Option<String>,
+    },
+    /// Issue #4366 AC-5: the usage poller reads a held provider as usable, so
+    /// its re-verification launch is brought forward to `at`.
+    QuotaHoldReverify {
+        provider: String,
+        at: String,
     },
     /// Issue #3844 AC-1: the launched agent declared it is waiting; stuck
     /// detection skips the issue while the declaration is within its cap.
@@ -1684,6 +1693,11 @@ enum IssueMonitorControl {
     },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
+    /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
+    /// the user's own act, so the entries are attributed to the operator.
+    TerminalQueuePush(Vec<u64>),
+    /// SPEC #3165 TQ-9: remove Issues from this terminal's explicit queue.
+    TerminalQueueRemove(Vec<u64>),
     /// SPEC-3431 FR-006: request one immediate scan without changing any
     /// state. The PM's `launch_now` writes the new priority order to prefs
     /// (the SOT the driver re-reads each scan) and then sends this so the
@@ -2345,9 +2359,20 @@ fn apply_routine_issue_monitor_control(
             monitor.apply_review_verdict(issue_number, &reviewed_sha, &verdict_raw);
             true
         }
-        IssueMonitorControl::Heartbeat { issue_number, at } => {
+        IssueMonitorControl::Heartbeat {
+            issue_number,
+            at,
+            agent_id,
+        } => {
             monitor.record_autonomous_heartbeat(issue_number, &at);
-            false
+            // Issue #4366 AC-4: activity on a held provider can release it,
+            // and a released hold readmits Issues, so that case scans.
+            agent_id.is_some_and(|agent_id| {
+                monitor.record_provider_activity(issue_number, &agent_id, &at)
+            })
+        }
+        IssueMonitorControl::QuotaHoldReverify { provider, at } => {
+            monitor.hasten_provider_quota_reverification(&provider, &at)
         }
         IssueMonitorControl::WaitDeclared {
             issue_number,
@@ -2381,6 +2406,18 @@ fn apply_routine_issue_monitor_control(
         }
         IssueMonitorControl::PriorityOrder(issue_numbers) => {
             monitor.set_priority_order(issue_numbers);
+            true
+        }
+        IssueMonitorControl::TerminalQueuePush(issue_numbers) => {
+            monitor.terminal_queue_push(
+                &issue_numbers,
+                "operator",
+                &chrono::Utc::now().to_rfc3339(),
+            );
+            true
+        }
+        IssueMonitorControl::TerminalQueueRemove(issue_numbers) => {
+            monitor.terminal_queue_remove(&issue_numbers, &chrono::Utc::now().to_rfc3339());
             true
         }
         IssueMonitorControl::Launched {
@@ -2898,7 +2935,28 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     .get("at")
                     .and_then(serde_json::Value::as_str)?
                     .to_string();
-                return Some(IssueMonitorControl::Heartbeat { issue_number, at });
+                let agent_id = heartbeat
+                    .get("agent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|agent_id| !agent_id.is_empty())
+                    .map(str::to_string);
+                return Some(IssueMonitorControl::Heartbeat {
+                    issue_number,
+                    at,
+                    agent_id,
+                });
+            }
+            if let Some(reverify) = payload.get("quota_hold_reverify") {
+                let provider = reverify.get("provider")?.as_str()?.trim();
+                let at = reverify.get("at")?.as_str()?.trim();
+                if provider.is_empty() || at.is_empty() {
+                    return None;
+                }
+                return Some(IssueMonitorControl::QuotaHoldReverify {
+                    provider: provider.to_string(),
+                    at: at.to_string(),
+                });
             }
             if let Some(wait) = payload.get("wait") {
                 let issue_number = wait.get("issue_number")?.as_u64()?;
@@ -3141,6 +3199,24 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                 };
                 return Some(IssueMonitorControl::TerminalDelivered { target });
             }
+            if let Some(push) = payload.get("terminal_queue_push") {
+                let issue_numbers = push
+                    .get("issue_numbers")?
+                    .as_array()?
+                    .iter()
+                    .map(serde_json::Value::as_u64)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(IssueMonitorControl::TerminalQueuePush(issue_numbers));
+            }
+            if let Some(remove) = payload.get("terminal_queue_remove") {
+                let issue_numbers = remove
+                    .get("issue_numbers")?
+                    .as_array()?
+                    .iter()
+                    .map(serde_json::Value::as_u64)
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(IssueMonitorControl::TerminalQueueRemove(issue_numbers));
+            }
             if let Some(requeue) = payload.get("requeue") {
                 let issue_number = requeue.get("issue_number")?.as_u64()?;
                 let reason = requeue
@@ -3238,6 +3314,13 @@ fn spawn_issue_monitor_scan_with_deadline(
         #[cfg(not(all(test, unix)))]
         let _ = test_hooks;
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        // Issue #4391 AC-1: once free space crosses the threshold the
+        // `disk_space` warning reports, reclaim merged, idle worktrees'
+        // build caches. The sweep runs on its own thread and never holds the
+        // scan. Unit tests drive this worker against scratch repositories and
+        // must not start a host-wide sweep on a CI runner that is low on disk.
+        #[cfg(not(test))]
+        crate::worktree::gc::maybe_spawn(&scope.project_root);
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
     })
 }
@@ -3810,6 +3893,7 @@ fn execute_issue_monitor_effect(
                         crate::issue_monitor_settlement::settle_merged_issue(
                             &client,
                             &repository,
+                            &scope.project_root,
                             *issue_number,
                             *pr_number,
                             merge_sha.as_deref(),
@@ -4317,11 +4401,7 @@ fn scan_issue_monitor_once_blocking(
             detail: error.to_string(),
         });
     }
-    let monitor_owner = format!(
-        "{}:{}",
-        crate::process::current_username(),
-        std::process::id()
-    );
+    let monitor_owner = crate::process::current_claim_owner();
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
         &mut monitor,
         &loaded,
@@ -4370,13 +4450,15 @@ fn scan_issue_monitor_once_blocking(
                         loaded.issues[index] = refreshed;
                         confirmed.insert(issue_number);
                     }
-                    Err(failure)
-                        if crate::issue_monitor_worker::is_rate_limit_failure(&failure.detail) =>
-                    {
+                    // Issue #4436 AC-1: a per-candidate readback failure used to
+                    // abort the whole scan (`launch_suppressed`), so one Issue
+                    // whose cache entry could not be parsed stopped every other
+                    // Issue from launching. The candidate is left unconfirmed —
+                    // exactly as for a rate-limit refusal — and the pass goes on.
+                    Err(failure) => {
                         deferred_candidates.insert(issue_number);
                         deferral.get_or_insert(failure);
                     }
-                    Err(failure) => return Err(failure),
                 }
             }
             if let Some(failure) = deferral {
@@ -4765,6 +4847,10 @@ async fn handle_connection(
 
     let mut line = String::new();
     let mut materializer_lease = None;
+    // Binds any verification child to this connection. Dropped on every exit
+    // from the loop below, which is what makes a dead or disconnected caller
+    // reclaim its workload instead of orphaning it (Issue #4409 AC-2).
+    let mut verification_reclaim: Option<super::verification_spawn::VerificationReclaim> = None;
     let mut subscribed_channels = HashSet::new();
     loop {
         line.clear();
@@ -4899,6 +4985,55 @@ async fn handle_connection(
                     break;
                 }
             }
+            Ok(ClientFrame::SpawnVerification(request)) => {
+                // One verification child per connection. A second request
+                // would orphan the first one's reclamation handle, which is
+                // the exact failure this whole path exists to prevent.
+                if verification_reclaim.is_some() {
+                    if out_tx
+                        .send(DaemonFrame::Error {
+                            message: "this connection already owns a verification child; open a \
+                                      second connection to run a second command"
+                                .to_string(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                match super::verification_spawn::spawn(&request) {
+                    Err(message) => {
+                        if out_tx.send(DaemonFrame::Error { message }).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(child) => {
+                        let accepted = child.accepted().clone();
+                        // The connection keeps the reclamation right while the
+                        // child is waited on elsewhere: when this connection
+                        // ends for any reason, the handle drops and the whole
+                        // group goes with it (Issue #4409 AC-2 / AC-7).
+                        verification_reclaim = Some(child.reclaim_handle());
+                        let finished_tx = out_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let (exit_code, reclaimed_survivors) = child.wait();
+                            let _ = finished_tx.send(DaemonFrame::VerificationFinished(
+                                VerificationSpawnFinished {
+                                    exit_code,
+                                    reclaimed_survivors,
+                                },
+                            ));
+                        });
+                        if out_tx
+                            .send(DaemonFrame::VerificationAccepted(accepted))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
             Ok(ClientFrame::Status) => {
                 let snapshot = DaemonStatus {
                     protocol_version: endpoint.protocol_version,
@@ -4979,6 +5114,13 @@ async fn handle_connection(
     // `None` and the task ends, allowing this connection task (and
     // its `ConnectionGuard`) to be released.
     drop(materializer_lease.take());
+    // Issue #4409 AC-2: reclaim here rather than by letting the handle fall out
+    // of scope. The `writer.await` below cannot finish while the verification
+    // child is alive — the task waiting on that child holds an `out_tx` clone
+    // so it can report the exit code — so a handle dropped at the end of this
+    // function would only fire once the workload had already run to completion,
+    // which is precisely the orphan the binding exists to prevent.
+    drop(verification_reclaim.take());
     forwarder_cancel.store(true, Ordering::SeqCst);
     forwarder_notify.notify_waiters();
     drop(out_tx);
@@ -5504,6 +5646,9 @@ mod tests {
             &fake_gh,
             r###"#!/bin/sh
 case "$*" in
+  *" --include") printf 'HTTP/2.0 200 OK\n\r\n' ;;
+esac
+case "$*" in
   *"--method POST"*|*"--method PATCH"*|*"-X POST"*|*"-X PATCH"*|*"pr merge"*)
     if [ -n "$GWT_FAKE_GH_MUTATION_MARKER" ]; then
       : > "$GWT_FAKE_GH_MUTATION_MARKER"
@@ -5674,7 +5819,7 @@ if [ "$GWT_FAKE_GH_MODE" = "open_pr_inventory" ]; then
   # The REST list is paged: only the first page carries rows, like GitHub
   # (a fixture larger than per_page would otherwise page forever).
   case "$*" in
-    *"issue list"* | *"/issues?"*"&page=1")
+    *"issue list"* | *"/issues?"*"&page=1 --include")
       cat "$GWT_FAKE_GH_ISSUE_LIST_FILE"
       exit 0
       ;;
@@ -6681,6 +6826,79 @@ exit 0
         drop(same_connection_overlay);
         assert!(!super::issue_monitor_gui_connected(&hub));
         drop(issue_monitor);
+    }
+
+    /// Issue #4409 AC-2, observed failing against a live daemon before the
+    /// fix: the reclamation handle used to be dropped when the connection task
+    /// returned, but that task cannot return while a verification child is
+    /// running — the task reporting its exit code holds a writer-channel
+    /// sender, so the handler parks on `writer.await`. The handle therefore
+    /// fired only *after* the workload had run to completion, which is exactly
+    /// the orphan the binding exists to prevent (#3845).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_disconnected_caller_reclaims_its_verification_child_immediately() {
+        use crate::cli::daemon::client::DaemonClient;
+        use gwt_core::daemon::VerificationSpawnRequest;
+
+        let temp = TempDir::new().expect("tempdir");
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint = sample_endpoint(sample_scope(&temp), &socket_path, "token");
+        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let hub = BroadcastHub::new();
+        let server_hub = hub.clone();
+        let server_endpoint = Arc::new(endpoint.clone());
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let guard = ConnectionGuard::new(connections);
+            handle_connection(
+                super::IpcStream::Unix(stream),
+                server_endpoint,
+                server_hub,
+                Instant::now(),
+                &guard,
+            )
+            .await
+        });
+
+        let mut client = DaemonClient::connect(&endpoint).await.expect("connect");
+        client
+            .send_frame(&ClientFrame::SpawnVerification(VerificationSpawnRequest {
+                program: "/bin/sh".to_string(),
+                // A shell that outlives its own foreground command, so the
+                // survivor is a grandchild only group-wide reclamation reaches.
+                args: vec!["-c".to_string(), "sleep 120 & sleep 120".to_string()],
+                cwd: temp.path().to_path_buf(),
+                env: std::env::vars().collect(),
+                stdout_path: temp.path().join("stdout"),
+                stderr_path: temp.path().join("stderr"),
+            }))
+            .await
+            .expect("send spawn request");
+        let accepted = match client.read_frame::<DaemonFrame>().await.expect("accepted") {
+            DaemonFrame::VerificationAccepted(accepted) => accepted,
+            other => panic!("expected VerificationAccepted, got {other:?}"),
+        };
+        let alive = |pid: u32| unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        assert!(alive(accepted.pid), "the child should be running");
+
+        // Dropping the client is what a dead `gwtd` or a closed pane looks
+        // like from the daemon's side.
+        drop(client);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while alive(accepted.pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !alive(accepted.pid),
+            "a caller that disconnected must not leave its verification workload running"
+        );
+        server
+            .await
+            .expect("connection task joins")
+            .expect("handle connection");
     }
 
     #[tokio::test]
@@ -8253,6 +8471,7 @@ exit 0
                 IssueMonitorControl::Heartbeat {
                     issue_number: 42,
                     at: "2026-07-27T00:05:00Z".to_string(),
+                    agent_id: None,
                 },
                 false,
             ),
@@ -8957,6 +9176,7 @@ exit 0
     /// human handoff.
     #[test]
     fn a_provider_usage_limit_control_holds_the_issue_instead_of_failing_it() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
@@ -9040,6 +9260,7 @@ exit 0
     /// after reset.
     #[test]
     fn a_provider_usage_limit_control_gates_claim_planning_until_reset() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut profile = sample_issue_monitor_profile();
         profile.agent_id = "codex".to_string();
         let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -9104,12 +9325,18 @@ exit 0
         restored.record_candidate(sample_issue_monitor_issue(42));
         restored.record_candidate(sample_issue_monitor_issue(43));
 
-        let before_reset_result: Result<usize, std::convert::Infallible> = restored
-            .try_prepare_claim_effects_with_probe("host/session", &before_reset, 1, |_| Ok(false));
+        // Issue #4366 AC-4: the hold admits one re-verification launch every
+        // interval instead of waiting for reset, so the gate is asserted while
+        // the hold is in force and that launch is not yet due.
+        let while_held = (chrono::Utc::now() + chrono::Duration::seconds(60))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(while_held < before_reset);
+        let while_held_result: Result<usize, std::convert::Infallible> = restored
+            .try_prepare_claim_effects_with_probe("host/session", &while_held, 1, |_| Ok(false));
         assert_eq!(
-            before_reset_result.expect("infallible probe"),
+            while_held_result.expect("infallible probe"),
             0,
-            "the exhausted provider must gate every queued Issue before reset"
+            "the exhausted provider must gate every queued Issue while it is held"
         );
         assert!(
             restored.pending_effects().is_empty(),
@@ -9148,6 +9375,7 @@ exit 0
 
     #[test]
     fn typed_provider_usage_limit_primary_path_preserves_the_reported_provider() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
@@ -9213,6 +9441,7 @@ exit 0
 
     #[test]
     fn typed_provider_usage_limit_routine_defense_preserves_the_reported_provider() {
+        let _quota_hold = crate::issue_monitor::hold_provider_quota_on_first_failure_in_this_test();
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig {
                 enabled: true,
@@ -9600,6 +9829,37 @@ exit 0
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+    }
+
+    // SPEC #3165 TQ-9: the GUI's "Remove from queue" reaches the daemon as a
+    // decodable control and drops the Issue from this terminal's queue.
+    #[test]
+    fn issue_monitor_terminal_queue_remove_control_decodes_and_applies() {
+        let control =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "terminal_queue_remove": { "issue_numbers": [42] } }),
+                std::process::id() + 1,
+            ))
+            .expect("queue remove control decodes");
+        assert_eq!(control, IssueMonitorControl::TerminalQueueRemove(vec![42]));
+
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42, 43], "operator", "2026-09-10T00:00:00Z");
+        assert!(apply_issue_monitor_control(&mut monitor, control));
+        let queue = monitor
+            .prefs()
+            .terminal_queues
+            .remove(&crate::process::current_hostname())
+            .expect("local queue");
+        assert_eq!(
+            queue
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            vec![43]
+        );
     }
 
     // SPEC-3431 T-021 (FR-006): `scan_now` asks the driver for one immediate
@@ -10773,6 +11033,13 @@ exit 0
     /// Issue #3933 AC-2 (review follow-up): if the authoritative state cannot be
     /// read either, the fallback has nothing trustworthy to launch from and the
     /// scan fails closed rather than guessing the candidate is still open.
+    ///
+    /// Issue #4436 AC-1: the fail-closed contract is the `confirmed_previous_candidates`
+    /// allowlist, not an aborted pass. The candidate whose readback failed is
+    /// left unconfirmed and cannot be claimed, exactly as a rate-limited one
+    /// already was; every other candidate and stage keeps running. Aborting
+    /// instead suppressed the launch stage for every unrelated Issue in the
+    /// same scan.
     #[test]
     fn the_fallback_fails_closed_when_the_candidate_state_cannot_be_confirmed() {
         let _env_lock = crate::env_test_lock()
@@ -10828,13 +11095,32 @@ exit 0
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
         preserved.set_gui_connected(true);
 
-        let failure = super::scan_issue_monitor_once_blocking(scope, preserved, true)
-            .expect_err("an unconfirmable candidate state must not authorize a launch");
+        let scanned = super::scan_issue_monitor_once_blocking(scope, preserved, true)
+            .expect("one unconfirmable candidate must not abort the pass");
 
-        assert_eq!(
-            failure.stage,
-            crate::issue_monitor_worker::IssueMonitorScanStage::CandidateLoad
+        assert!(
+            !scanned.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. }
+            )),
+            "an unconfirmable candidate state must not authorize a launch: {:?}",
+            scanned.pending_effects()
         );
+        assert!(
+            scanned.status_view().active_count == 0,
+            "nothing may be launched from a state that could not be confirmed"
+        );
+        let last_error = scanned
+            .status_view()
+            .last_error
+            .expect("a degraded scan still reports why");
+        for expected in [
+            "candidate-load",
+            "continued_with_deferred_candidates",
+            "#44",
+        ] {
+            assert!(last_error.contains(expected), "{expected}: {last_error}");
+        }
     }
 
     /// Issue #3928 AC-1 / AC-2: while a rate-limit window persisted by another

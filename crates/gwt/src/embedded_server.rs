@@ -192,7 +192,7 @@ fn queue_class_for_kind(kind: &str) -> QueueClass {
 /// by operation without being mistaken for a terminal pane needing repair
 /// (Issue #3315).
 pub(super) struct PreparedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     repair_pane_id: Option<String>,
@@ -222,7 +222,7 @@ fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
         _ => (None, None, None),
     };
     PreparedOutbound {
-        payload: serde_json::to_string(event).expect("backend event json"),
+        payload: Arc::from(serde_json::to_string(event).expect("backend event json")),
         kind,
         coalesce_key,
         repair_pane_id,
@@ -280,12 +280,12 @@ pub(super) fn prepare_outbound_event(outbound: &OutboundEvent) -> PreparedOutbou
             );
         }
     }
-    prepared.payload = serde_json::to_string(&payload).expect("backend event json");
+    prepared.payload = Arc::from(serde_json::to_string(&payload).expect("backend event json"));
     prepared
 }
 
 struct QueuedOutbound {
-    payload: String,
+    payload: Arc<str>,
     kind: &'static str,
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
@@ -522,7 +522,7 @@ impl ClientQueue {
             Vec::new()
         };
         Some(DrainStep::Message {
-            payload: entry.payload,
+            payload: entry.payload.to_string(),
             repair_panes,
         })
     }
@@ -809,6 +809,60 @@ impl ClientHub {
             }
         }
     }
+
+    /// Issue #3777: enqueue a background-serialized Active Work snapshot
+    /// without reserializing its large Work/event graph on the tao thread.
+    pub(super) fn dispatch_prepared_active_work(&self, payload: Arc<str>, target: DispatchTarget) {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+            let clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients
+                .iter()
+                .map(|(id, registration)| {
+                    (
+                        id.clone(),
+                        registration.queue.clone(),
+                        registration.receives_broadcasts,
+                    )
+                })
+                .collect()
+        };
+        let kind = "active_work_projection";
+        let prepared = PreparedOutbound {
+            payload,
+            kind,
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: queue_class_for_kind(kind),
+            // Not a PTY event: it belongs to no terminal pane and carries no
+            // position in a pane's output stream (Issue #4095).
+            terminal_pane: None,
+            stream_seq: None,
+        };
+        let mut dead_clients = Vec::new();
+        for (client_id, queue, receives_broadcasts) in snapshot {
+            let selected = match &target {
+                DispatchTarget::Broadcast => receives_broadcasts,
+                DispatchTarget::Client(target_id) => target_id == &client_id,
+            };
+            if selected && queue.enqueue(&prepared) {
+                dead_clients.push(client_id);
+            }
+        }
+        if !dead_clients.is_empty() {
+            let mut clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for client_id in dead_clients {
+                if let Some(registration) = clients.remove(&client_id) {
+                    registration.queue.close();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -914,6 +968,12 @@ pub(crate) enum AgentFrontendRequest {
         request_id: Option<String>,
         responder: Option<AgentSelfCloseResponder>,
     },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
+    },
     SendInput {
         text: String,
     },
@@ -936,6 +996,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
+            Self::RecoverRestoredWindow { .. } => {
+                formatter.write_str("AgentFrontendRequest::RecoverRestoredWindow(<redacted>)")
+            }
             Self::SendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
             }
@@ -954,6 +1017,7 @@ impl AgentFrontendRequest {
         matches!(
             self,
             Self::CloseWindow { .. }
+                | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }
                 | Self::PmSendInput { .. }
                 | Self::IssueMonitorScanNow { .. }
@@ -3747,6 +3811,19 @@ impl AgentPaneSessionScope {
             {
                 Some(AgentFrontendRequest::SendInput { text })
             }
+            FrontendEvent::RecoverRestoredWindow {
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } if self.allowed_window_ids.contains(&id) => {
+                Some(AgentFrontendRequest::RecoverRestoredWindow {
+                    id,
+                    session_id,
+                    child_pid,
+                    child_started_at,
+                })
+            }
             FrontendEvent::PmPaneSendInput {
                 operation_id,
                 window_id,
@@ -5642,6 +5719,33 @@ mod tests {
     /// pane inside its own project scope, and the close reply kind must pass
     /// the outbound filter so the caller hears the outcome.
     #[test]
+    fn agent_pane_scope_limits_recovery_to_project_windows() {
+        let project = tempfile::tempdir().expect("project");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let principal = AgentSessionPrincipal::new(project.path(), "pm-session")
+            .expect("observation principal");
+        let mut scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "test-capability".to_string(),
+            principal,
+        ));
+        scope.allowed_window_ids.insert("owned-window".to_string());
+        let request = |id: &str| {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": id, "session_id": "restored-session",
+                "child_pid": 123, "child_started_at": 456
+            }))
+            .expect("recovery request")
+        };
+
+        assert!(scope
+            .filter_inbound(request("owned-window"))
+            .is_some_and(
+                |request| request.mutates_host_state() && !request.requires_producing_authority()
+            ));
+        assert!(scope.filter_inbound(request("foreign-window")).is_none());
+    }
+
+    #[test]
     fn agent_pane_scope_allows_observation_grant_close_and_passes_close_result() {
         let project = tempfile::tempdir().expect("project tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
@@ -6253,19 +6357,21 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{ "id": window_id }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{ "id": window_id }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6435,24 +6541,26 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": { "windows": [{
-                                "id": window_id,
-                                "preset": "agent",
-                                "status": "idle",
-                                "session_id": "target-session"
-                            }] }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [{
+                                    "id": window_id,
+                                    "preset": "agent",
+                                    "status": "idle",
+                                    "session_id": "target-session"
+                                }] }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -6702,21 +6810,23 @@ mod tests {
             .await
             .expect("pane client registration");
             assert!(!pane_queue.enqueue(&PreparedOutbound {
-                payload: serde_json::json!({
-                    "kind": "workspace_state",
-                    "workspace": {
-                        "active_tab_id": "tab-owned",
-                        "recent_projects": [],
-                        "tabs": [{
-                            "id": "tab-owned",
-                            "project_root": project.path(),
-                            "workspace": {
-                                "windows": [{ "id": "tab-owned::agent-1" }]
-                            }
-                        }]
-                    }
-                })
-                .to_string(),
+                payload: Arc::from(
+                    serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": {
+                                    "windows": [{ "id": "tab-owned::agent-1" }]
+                                }
+                            }]
+                        }
+                    })
+                    .to_string()
+                ),
                 kind: "workspace_state",
                 coalesce_key: None,
                 repair_pane_id: None,
@@ -9028,6 +9138,33 @@ mod tests {
             retryable: true,
             retry_after_ms: KNOWLEDGE_SEMANTIC_RETRY_INITIAL_DELAY_MS,
         }
+    }
+
+    #[test]
+    fn prepared_active_work_enqueue_reuses_the_background_payload_allocation() {
+        let queue = ClientQueue::default();
+        let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
+        let prepared = PreparedOutbound {
+            payload: payload.clone(),
+            kind: "active_work_projection",
+            coalesce_key: None,
+            repair_pane_id: None,
+            class: QueueClass::IdempotentLatest,
+            terminal_pane: None,
+            stream_seq: None,
+        };
+
+        assert!(!queue.enqueue(&prepared));
+
+        let state = queue
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued = state.entries.front().expect("queued Active Work payload");
+        assert!(
+            Arc::ptr_eq(&queued.payload, &payload),
+            "tao-side enqueue must retain the background Arc instead of cloning 4 MB"
+        );
     }
 
     #[test]

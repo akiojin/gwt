@@ -10,7 +10,10 @@
 //! the only injection mechanisms; `generated guidance` is now backed by
 //! this module.
 
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use crate::settings_local::write_text_atomically;
 
@@ -320,9 +323,18 @@ ledger. This includes Issue, PR, and Actions inspection, REST GET requests,
 and GraphQL queries. Prefer gwtd `pr.list` and `issue.view` when cached data
 or workflow lifecycle context is useful.
 
-Mutations must use gwtd JSON-envelope operations, including `pr.merge` and
-`actions.rerun`; direct `gh` writes and API mutations are blocked. Read
-permission does not bypass PR gates or the long PR/CI polling restriction.
+Mutations must use gwtd JSON-envelope operations, such as `pr.ready`,
+`pr.draft`, and `actions.rerun`; direct `gh` writes and API mutations are
+blocked. Read permission does not bypass PR gates or the long PR/CI polling
+restriction.
+
+gwtd has no merge operation. A PR is merged by the repository's own merge
+automation (GitHub auto-merge, or a workflow that merges non-Draft PRs) or by
+a human. Keep auto-merge enabled across routine pushes; verify code changes
+before pushing. For a BEHIND PR use `pr.update_branch`, or hand synchronization
+to the PM when assigned. An explicit owner-requested hold uses `pr.draft`:
+a Draft PR cannot be merged. Resume with `pr.ready` only after the Ready PR
+Gate passes again; routine pushes do not require a Draft/Ready cycle.
 
 ## Canonical verification admission
 
@@ -780,8 +792,13 @@ pub fn generate_coordination_guidance_for_codex(worktree: &Path) -> io::Result<(
     write_skill_md(&worktree.join(".codex").join("skills"))
 }
 
+/// Path of the generated guidance within a provider's skills root.
+pub fn skill_path(skills_root: &Path) -> PathBuf {
+    skills_root.join(SKILL_NAME).join("SKILL.md")
+}
+
 fn write_skill_md(skills_root: &Path) -> io::Result<()> {
-    let path = skills_root.join(SKILL_NAME).join("SKILL.md");
+    let path = skill_path(skills_root);
     write_text_atomically(&path, &render_skill_md())
 }
 

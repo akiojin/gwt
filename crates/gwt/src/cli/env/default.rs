@@ -135,8 +135,29 @@ impl IssueClient for LazyIssueClient {
         &self,
         number: IssueNumber,
         state: gwt_github::client::IssueState,
+        reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
-        self.resolve()?.set_state(number, state)
+        self.resolve()?.set_state(number, state, reason)
+    }
+
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .add_labels_mutation(number, labels)
+    }
+
+    fn remove_label_mutation(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .remove_label_mutation(number, label)
     }
 
     fn list_spec_issues(
@@ -204,7 +225,9 @@ impl DefaultCliEnv {
     /// The inner `HttpIssueClient` is constructed with an empty token
     /// and empty owner/repo strings.
     pub fn new_for_hooks() -> Self {
-        Self::new_for_hooks_at(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project = crate::pm_registry::pm_worktree_for_runtime_dir(&cwd).unwrap_or(cwd);
+        Self::new_for_hooks_at(project)
     }
 
     /// Build a hook environment for an explicitly resolved worktree.

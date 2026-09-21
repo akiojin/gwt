@@ -27,6 +27,10 @@ fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
     let mut child = command
         .env("HOME", home)
         .env("USERPROFILE", home)
+        // Issue #4409: this suite is about the lease surface, not about where
+        // verification is hosted. Declaring the host keeps the result from
+        // depending on the priority the test runner happened to inherit.
+        .env("GWT_VERIFY_SPAWN_HOST", "inherit")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -116,14 +120,12 @@ fn manual_acquire_is_rejected_without_creating_a_holder() {
     assert!(!ok, "manual acquisition must be retired: {output}");
     assert!(output.contains("verify.run"), "{output}");
     assert!(output.contains("directly"), "{output}");
-    assert!(
-        !arena
-            .home
-            .path()
-            .join(".gwt/runtime/index-coordinator")
-            .exists(),
-        "refusal must not create control, holder, ticket, or reservation state"
-    );
+    for root in ["index-coordinator", "verification-coordinator"] {
+        assert!(
+            !arena.home.path().join(".gwt/runtime").join(root).exists(),
+            "refusal must not create control, holder, ticket, or reservation state ({root})"
+        );
+    }
 }
 
 #[test]
@@ -136,14 +138,12 @@ fn manual_hold_and_extend_are_rejected_without_creating_state() {
         let (ok, output) = gwtd(arena.home.path(), arena.worktree.path(), request);
         assert!(!ok, "manual holding must be retired: {output}");
         assert!(output.contains("verify.run"), "{output}");
-        assert!(
-            !arena
-                .home
-                .path()
-                .join(".gwt/runtime/index-coordinator")
-                .exists(),
-            "refusal must leave existing leases untouched and create no new state"
-        );
+        for root in ["index-coordinator", "verification-coordinator"] {
+            assert!(
+                !arena.home.path().join(".gwt/runtime").join(root).exists(),
+                "refusal must leave existing leases untouched and create no new state ({root})"
+            );
+        }
     }
 }
 
@@ -204,6 +204,11 @@ fn legacy_holder_can_still_be_observed_and_released() {
     // kernel lease. The new binary must never spawn a replacement holder.
     let release_path = control.join("release");
     let old_holder = std::thread::spawn(move || {
+        // Waiting for the path is sound only because the release channel is
+        // published by rename (Issue #4360): the file appears already holding
+        // its whole payload. An empty reason is a legitimate value here, so
+        // "non-empty" cannot be the readiness signal — do not weaken the
+        // writer back to a plain `fs::write`.
         let deadline = Instant::now() + Duration::from_secs(10);
         while !release_path.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
@@ -222,8 +227,11 @@ fn legacy_holder_can_still_be_observed_and_released() {
     assert!(!control.exists(), "legacy control state must be cleaned up");
 }
 
+/// Issue #4285 AC-4: an index job or query encode on the model lane is not a
+/// verification holder. `verify.lease.status` reads the verification lane
+/// only, and `verify.lease.release` no longer arbitrates index leases.
 #[test]
-fn releasing_an_index_lease_requests_a_yield_instead_of_failing() {
+fn an_index_lease_is_invisible_to_the_verification_lane() {
     use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
     use std::time::Duration;
 
@@ -241,8 +249,17 @@ fn releasing_an_index_lease_requests_a_yield_instead_of_failing() {
             Duration::from_secs(5),
             gwt_core::index_coordinator::INDEX_HEAVY_LEASE_TTL,
         )
-        .expect("index job takes the idle host");
+        .expect("index job takes the idle model lane");
     let lease_id = index_lease.id().to_string();
+
+    let status = arena.run(STATUS);
+    assert_eq!(
+        headline(&status),
+        "verification lease: free",
+        "an index holder must not read as a verification holder:
+{status}"
+    );
+    assert_eq!(field_u64(&status, "pending"), 0, "{status}");
 
     let (ok, output) = gwtd(
         arena.home.path(),
@@ -252,28 +269,54 @@ fn releasing_an_index_lease_requests_a_yield_instead_of_failing() {
         ),
     );
     assert!(
-        ok,
-        "arbitrating an index lease is a normal answer:\n{output}"
+        !ok,
+        "an index lease is not a verification lease:
+{output}"
     );
-    assert_eq!(
-        headline(&output),
-        "verification lease: yield requested",
-        "{output}"
-    );
-    assert_eq!(field(&output, "holder_kind"), "index", "{output}");
-    assert_eq!(
-        field_u64(&output, "pending"),
-        1,
-        "the arbitration leaves a reservation the runner yields to:\n{output}"
-    );
+    assert!(output.contains("no live verification lease"), "{output}");
     assert!(
-        coordinator
+        !coordinator
             .pending_higher_priority(JobPriority::Background)
             .unwrap(),
-        "the index runner must observe a higher-priority pending claimant"
+        "the release must leave no reservation behind on the model lane"
     );
     drop(index_lease);
     index_guard
         .complete(gwt_core::index_coordinator::JobOutcome::Completed)
         .unwrap();
+}
+
+/// Issue #4280 AC-2 / AC-4: a waiter reads how far the holder's `verify.run`
+/// has got (commands left and a paced estimate) instead of the TTL alone.
+#[test]
+fn status_reports_the_verification_holders_remaining_commands() {
+    use gwt_core::index_coordinator::{JobAdmission, JobOutcome, JobPriority, TargetKey};
+
+    let arena = Arena::new();
+    let coordinator = index_coordinator(arena.home.path());
+    let key = TargetKey::verification("repo", "holder");
+    let JobAdmission::Owner(guard) = coordinator
+        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(5))
+        .unwrap()
+    else {
+        panic!("holder target must be free");
+    };
+    let lease = guard
+        .acquire_heavy_with_ttl(Duration::from_secs(5), Duration::from_secs(2_700))
+        .unwrap();
+    // Two of five commands finished at 45 s each: three are left.
+    lease.publish_progress(2, 5, 45_000).unwrap();
+
+    let status = arena.run(STATUS);
+    assert_eq!(headline(&status), "verification lease: held", "{status}");
+    assert_eq!(field(&status, "holder_kind"), "verification", "{status}");
+    assert_eq!(field_u64(&status, "remaining_batches"), 3, "{status}");
+    assert_eq!(
+        field_u64(&status, "estimated_remaining_ms"),
+        135_000,
+        "{status}"
+    );
+
+    drop(lease);
+    guard.complete(JobOutcome::Completed).unwrap();
 }
