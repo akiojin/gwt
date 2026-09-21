@@ -9,6 +9,7 @@ pub mod distribute;
 pub mod git_exclude;
 pub mod git_hooks;
 pub mod hooks;
+pub mod inspection_guidance;
 pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;

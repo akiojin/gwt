@@ -342,6 +342,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
         }),
+        "issue.spec.lint" => CliCommand::Issue(IssueCommand::SpecLint {
+            number: required_u64(params, "number")?,
+            sections: optional_string_vec(params, "sections")?,
+            snapshot: optional_bool(params, "snapshot")?.unwrap_or(true),
+            directive_epoch: optional_string(params, "directive_epoch")?,
+            phase_slice: optional_string(params, "phase_slice")?,
+        }),
+        "issue.spec.inspection.complete" | "issue.spec.inspection-complete" => {
+            CliCommand::Issue(IssueCommand::SpecInspectionComplete {
+                number: required_u64(params, "number")?,
+            })
+        }
         "issue.spec.rename" => CliCommand::Issue(IssueCommand::SpecRename {
             number: required_u64(params, "number")?,
             title: required_string(params, "title")?,

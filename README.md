@@ -879,6 +879,28 @@ gwtd <<'JSON'
 JSON
 ```
 
+- Lint a SPEC artifact before handing it to a reviewer. The run checks FR / AS
+  / T numbering, traceability-table consistency, supersede inline annotations,
+  and section marker / roundtrip health, records the result in the Intake
+  Inspection Snapshot, seeds the Finding Disposition Ledger, and prints the
+  reviewer checklist. It exits non-zero when a critical finding is present.
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.lint","params":{"number":1784}}
+JSON
+```
+
+- Check whether the SPEC may be declared complete. Every section needs a
+  GitHub-entity readback matching the snapshot, and every critical finding
+  needs a disposition:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.inspection.complete","params":{"number":1784}}
+JSON
+```
+
 ## Logs
 
 - App logs:
