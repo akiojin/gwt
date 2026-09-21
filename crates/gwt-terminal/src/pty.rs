@@ -1920,6 +1920,56 @@ mod tests {
         );
     }
 
+    /// Issue #4014: on Windows the ConPTY output pipe stays open after the
+    /// child exits, so a reader only observes EOF once the pseudoconsole is
+    /// closed. Pane teardown relies on that to join the reader thread.
+    #[test]
+    fn releasing_descriptors_ends_a_blocked_reader_after_the_child_is_reaped() {
+        use std::io::Read as _;
+
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("60")).expect("spawn failed");
+        let mut reader = handle.reader().expect("reader");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        handle.kill().expect("kill should succeed");
+        let mut reaped = false;
+        for _ in 0..50 {
+            if let Ok(Some(_)) = handle.try_wait() {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(reaped, "killed child must be reaped");
+        handle.release_descriptors();
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "reader must observe EOF once the master is closed"
+        );
+        // Issue #4142 hands a released handle an already-drained reader rather
+        // than an error, so a reader thread that arrives after the release
+        // still finishes on EOF instead of reporting the pane as errored.
+        let mut late = handle
+            .reader()
+            .expect("released handle still hands out a reader");
+        let mut buffer = [0u8; 16];
+        assert_eq!(
+            late.read(&mut buffer).expect("drained reader read"),
+            0,
+            "a released master hands out an already-drained reader"
+        );
+    }
+
     #[test]
     fn test_try_wait_running() {
         let _pty_guard = lock_pty_test();
