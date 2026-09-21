@@ -3945,6 +3945,54 @@ pub(crate) mod tests {
             assert_eq!(reason("w-open"), Some("owner_open"));
         }
 
+        // Issue #4508 AC-3: inline-history compaction marks a Work item as
+        // carrying authoritative legacy metadata. Prune classification reads
+        // owner state, not history, so a compacted Work whose owner is still
+        // open must stay skipped as `owner_open` rather than become a
+        // destruction candidate.
+        #[test]
+        fn a_compacted_work_with_an_open_owner_is_still_skipped_as_owner_open() {
+            let mut compacted = work("w-open", Some("4508"), WorkspaceStatusCategory::Active);
+            for index in 0..(gwt_core::workspace_projection::MAX_INLINE_WORK_EVENTS * 3) {
+                compacted.events.push(WorkEvent::new(
+                    WorkEventKind::Update,
+                    "w-open",
+                    compacted.created_at + chrono::Duration::seconds(index as i64),
+                ));
+            }
+            let mut projection = WorkItemsProjection {
+                updated_at: compacted.updated_at,
+                work_items: vec![
+                    compacted,
+                    work("w-closed", Some("4234"), WorkspaceStatusCategory::Active),
+                ],
+            };
+            assert!(projection.compact_inline_events() > 0);
+            assert!(projection.work_items[0].legacy_metadata_authoritative);
+
+            let plan =
+                super::super::classify_stale_works(&projection.work_items, |number| match number {
+                    4508 => Some(true),
+                    _ => Some(false),
+                });
+
+            assert_eq!(
+                plan.skipped
+                    .iter()
+                    .find(|item| item.work_id == "w-open")
+                    .map(|item| item.reason.as_str()),
+                Some("owner_open"),
+                "compaction must not turn an open owner's Work into a prune candidate"
+            );
+            assert_eq!(
+                plan.candidates
+                    .iter()
+                    .map(|candidate| candidate.work_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["w-closed"]
+            );
+        }
+
         #[test]
         fn already_terminal_work_is_not_reclosed() {
             let mut done = work("w-done", Some("3327"), WorkspaceStatusCategory::Done);
