@@ -4,13 +4,13 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 // SPEC-2008 camera-focus / FR-094 (2026-07-03 再改訂) — Fleet Minimap
 // (zoom-synced centered radar).
 //
-// The always-on minimap (`#fleet-minimap`) mirrors the canvas frame of
-// reference: the camera viewport is FIXED at the minimap centre and the world
-// (window cells, inside `.fleet-minimap__world`) MOVES under it as the camera
-// pans — like `#canvas-stage`. The radar scale is DERIVED from the live
-// viewport, so it tracks the canvas zoom: the cyan `.fleet-minimap__camera`
-// frame keeps a CONSTANT px size (a fixed fraction of the minimap) and is
-// always visible, while the cells rescale with the canvas zoom. The radar
+// The collapsible, default-on minimap (`#fleet-minimap`) mirrors the canvas
+// frame of reference: the camera viewport is FIXED at the minimap centre and
+// the world (window cells, inside `.fleet-minimap__world`) MOVES under it as
+// the camera pans — like `#canvas-stage`. The radar scale is DERIVED from the
+// live viewport, so it tracks the canvas zoom: the cyan
+// `.fleet-minimap__camera` frame keeps a CONSTANT px size (a fixed fraction of
+// the minimap) while the cells rescale with the canvas zoom. The radar
 // zoom buttons (`.fleet-minimap__zoom-button`) adjust that fraction (frame
 // and cells scale together). Clicking a cell flies the LOCAL camera to that
 // window (frameWindow), translating the world layer and marking the cell
@@ -153,6 +153,48 @@ test.describe("Fleet Minimap centered radar", () => {
     await expect
       .poll(() => cell.evaluate((el) => parseFloat(el.style.width)))
       .toBeGreaterThan(widthBefore);
+  });
+
+  test("visibility toggle hides and restores the radar and persists across reload", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installMinimapBackend(page);
+    await page.goto(APP_URL);
+
+    const minimap = page.locator("#fleet-minimap");
+    const cell = minimap.locator('.fleet-minimap__cell[data-window-id="agent-1"]');
+    const hide = minimap.getByRole("button", { name: "Hide minimap" });
+    await expect(hide).toBeVisible({ timeout: 10_000 });
+    await expect(cell).toBeVisible();
+    await expect(minimap).toHaveAttribute("data-collapsed", "false");
+    const expandedCellWidth = await cell.evaluate(
+      (element) => element.getBoundingClientRect().width,
+    );
+
+    await hide.click();
+
+    await expect(minimap).toHaveAttribute("data-collapsed", "true");
+    await expect(minimap.getByRole("button", { name: "Show minimap" })).toBeVisible();
+    await expect(minimap.locator(".fleet-minimap__world")).toBeHidden();
+    await expect(minimap.locator(".fleet-minimap__camera")).toBeHidden();
+    await expect(minimap.locator(".fleet-minimap__zoom")).toBeHidden();
+
+    await page.reload();
+
+    await expect(minimap).toHaveAttribute("data-collapsed", "true");
+    const show = minimap.getByRole("button", { name: "Show minimap" });
+    await expect(show).toBeVisible();
+    await expect(cell).toBeHidden();
+
+    await show.click();
+
+    await expect(minimap).toHaveAttribute("data-collapsed", "false");
+    await expect(minimap.getByRole("button", { name: "Hide minimap" })).toBeVisible();
+    await expect(cell).toBeVisible();
+    await expect
+      .poll(() => cell.evaluate((element) => element.getBoundingClientRect().width))
+      .toBeCloseTo(expandedCellWidth, 3);
   });
 });
 
