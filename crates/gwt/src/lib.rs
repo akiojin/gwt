@@ -211,7 +211,8 @@ pub use launch_wizard::{
     ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
-    refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    managed_asset_lock_path, refresh_existing_managed_gwt_assets_for_worktree,
+    refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     refresh_managed_gwt_assets_for_worktree, ManagedAssetMaterialization,
 };

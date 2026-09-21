@@ -1,9 +1,11 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs, io,
     io::Write,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use crate::cli::gwtd_resolver::default_installed_candidates;
@@ -31,23 +33,90 @@ use gwt_skills::{
 /// Codex version it is actually about to run.
 pub const MANAGED_CODEX_HOOK_DISCOVERY_MODE: CodexHookDiscoveryMode = CodexHookDiscoveryMode::Both;
 
+/// The lock file that serializes managed-asset materialization for `worktree`.
+///
+/// Issue #4283: this used to be keyed on the repository's main worktree root,
+/// so a single exclusive lock covered every worktree of the repository. Almost
+/// everything a materialization writes is worktree-local, yet every pane
+/// launch, every fresh-worktree SessionStart self-heal and every startup
+/// hook-config self-heal held that one lock for the whole ~350 ms of work. The
+/// fleet serialized on it — `phase:pane.create.managed_assets` measured a p50
+/// of 34,001 ms against a 330–660 ms uncontended cost. Keying on the worktree
+/// leaves only the genuinely shared writes serialized, under
+/// [`shared_repo_asset_lock_path`].
+pub fn managed_asset_lock_path(worktree: &Path) -> PathBuf {
+    let identity = gwt_core::repo_hash::compute_path_hash(&canonical_lock_identity(worktree));
+    managed_asset_lock_dir().join(format!("{identity}.lock"))
+}
+
+/// The lock file that serializes the managed-asset writes shared by every
+/// worktree of one repository.
+///
+/// Two writes leave the worktree: `.git/info/exclude`, which `git rev-parse
+/// --git-path` resolves into the common directory, and the workspace-home
+/// `.codex/hooks.json`, which for a linked worktree resolves to the main
+/// checkout's copy. Both are single small files, so holding this lock costs a
+/// fraction of a full materialization.
+pub fn shared_repo_asset_lock_path(worktree: &Path) -> PathBuf {
+    let root = gwt_git::worktree::main_worktree_root(worktree)
+        .unwrap_or_else(|_| canonical_lock_identity(worktree));
+    let identity = gwt_core::repo_hash::compute_path_hash(&root);
+    managed_asset_lock_dir().join(format!("repo-{identity}.lock"))
+}
+
+fn canonical_lock_identity(worktree: &Path) -> PathBuf {
+    dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf())
+}
+
+fn managed_asset_lock_dir() -> PathBuf {
+    gwt_core::paths::gwt_home().join("locks/managed-assets")
+}
+
 fn with_managed_asset_lock<T>(
     worktree: &Path,
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    let identity_root = gwt_git::worktree::main_worktree_root(worktree).unwrap_or_else(|_| {
-        dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf())
-    });
-    let identity = gwt_core::repo_hash::compute_path_hash(&identity_root);
-    let lock_dir = gwt_core::paths::gwt_home().join("locks/managed-assets");
-    fs::create_dir_all(&lock_dir)?;
+    with_lock_at(&managed_asset_lock_path(worktree), operation)
+}
+
+/// Run `operation` under the repository-wide asset lock.
+///
+/// Only ever taken from inside [`with_managed_asset_lock`], never the other way
+/// round, so the two locks cannot deadlock against each other.
+fn with_shared_repo_asset_lock<T>(
+    worktree: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_lock_at(&shared_repo_asset_lock_path(worktree), operation)
+}
+
+thread_local! {
+    /// How long the locks taken by the materialization running on this thread
+    /// have waited. Issue #4283 AC-5: the launch route reports this as
+    /// `phase:pane.create.asset_lock_wait`, a split of the `managed_assets`
+    /// phase rather than a sibling of it, so a future regression says whether
+    /// materialization got slower or merely queued.
+    static ASSET_LOCK_WAIT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+fn take_asset_lock_wait() -> Duration {
+    ASSET_LOCK_WAIT.with(|waited| waited.replace(Duration::ZERO))
+}
+
+fn with_lock_at<T>(path: &Path, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let lock = fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(lock_dir.join(format!("{identity}.lock")))?;
+        .open(path)?;
+    let started = Instant::now();
     gwt_core::operation_deadline::lock_exclusive(&lock)?;
+    let waited = started.elapsed();
+    ASSET_LOCK_WAIT.with(|total| total.set(total.get().saturating_add(waited)));
     let result = operation();
     let unlock = FileExt::unlock(&lock);
     match (result, unlock) {
@@ -247,8 +316,10 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
             MANAGED_CODEX_HOOK_DISCOVERY_MODE,
             worktree_is_ephemeral(worktree),
         )?;
-        update_git_exclude(worktree).map_err(|error| {
-            io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+        with_shared_repo_asset_lock(worktree, || {
+            update_git_exclude(worktree).map_err(|error| {
+                io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+            })
         })?;
         Ok(())
     })
@@ -293,7 +364,10 @@ fn refresh_pm_runtime_assets(
         )?;
         materialize_pm_project_policy(worktree, &runtime, targets)?;
         gwt_skills::materialize_managed_git_hooks(worktree)?;
-        Ok(ManagedAssetMaterialization { hook_bin })
+        Ok(ManagedAssetMaterialization {
+            hook_bin,
+            lock_wait: Duration::ZERO,
+        })
     })();
     match refresh {
         Ok(result) => {
@@ -1464,6 +1538,10 @@ fn reject_pm_managed_asset_indirection(path: &Path, metadata: &fs::Metadata) -> 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedAssetMaterialization {
     pub hook_bin: Option<String>,
+    /// How long this materialization spent waiting for its asset locks
+    /// (Issue #4283 AC-5). A launch reports it as a split of the
+    /// `managed_assets` phase.
+    pub lock_wait: Duration,
 }
 
 pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId) -> io::Result<()> {
@@ -1482,7 +1560,8 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
     is_ephemeral: bool,
 ) -> io::Result<ManagedAssetMaterialization> {
-    with_managed_asset_lock(worktree, || {
+    take_asset_lock_wait();
+    let mut materialization = with_managed_asset_lock(worktree, || {
         if crate::pm_registry::is_canonical_pm_worktree(worktree) {
             let runtime = crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(worktree)?;
             return refresh_pm_runtime_assets(
@@ -1498,11 +1577,18 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
             is_ephemeral,
         )?;
         let exclude_targets = detect_existing_managed_asset_targets(worktree);
-        update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
-            io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+        with_shared_repo_asset_lock(worktree, || {
+            update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
+                io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+            })
         })?;
-        Ok(ManagedAssetMaterialization { hook_bin })
-    })
+        Ok(ManagedAssetMaterialization {
+            hook_bin,
+            lock_wait: Duration::ZERO,
+        })
+    })?;
+    materialization.lock_wait = take_asset_lock_wait();
+    Ok(materialization)
 }
 
 pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
@@ -1517,8 +1603,10 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
             MANAGED_CODEX_HOOK_DISCOVERY_MODE,
             worktree_is_ephemeral(worktree),
         )?;
-        update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
-            io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+        with_shared_repo_asset_lock(worktree, || {
+            update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
+                io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+            })
         })?;
         Ok(())
     })
@@ -1659,8 +1747,12 @@ fn regenerate_managed_hook_configs_for_targets(
         })?;
     }
     if targets.contains(&ManagedAssetTarget::Codex) {
-        generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
-            io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+        // The workspace-home copy of `.codex/hooks.json` resolves to the main
+        // checkout for every linked worktree, so this one write is shared.
+        with_shared_repo_asset_lock(worktree, || {
+            generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
+                io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+            })
         })?;
     }
     if targets.contains(&ManagedAssetTarget::OpenCode) {
