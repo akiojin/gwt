@@ -12,6 +12,7 @@ mod board;
 pub(crate) mod branch;
 mod build;
 mod commands;
+mod concern;
 pub mod daemon;
 mod diagnostics;
 mod discuss;
@@ -23,6 +24,7 @@ pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
 pub(crate) mod index;
+pub(crate) mod intake_inspection;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
 mod issue_spec;
@@ -30,6 +32,7 @@ mod json_envelope;
 pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
+pub mod operation_catalog;
 mod pane;
 pub(crate) mod perf;
 mod plan;
@@ -39,6 +42,7 @@ pub(crate) mod register;
 mod release;
 pub(crate) mod search;
 mod skill_state_runtime;
+pub(crate) mod spec_artifact_lint;
 #[cfg(test)]
 mod test_support;
 mod title_summary_guard;
@@ -56,7 +60,7 @@ use std::{io, path::PathBuf};
 
 pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
-pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
+pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;
@@ -67,7 +71,7 @@ pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use pr::types::{
     LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
-    PrReviewThread, PrReviewThreadComment,
+    PrReviewThread, PrReviewThreadComment, PrUpdateBranchOutcome, PrUpdateBranchResult,
 };
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
@@ -91,6 +95,7 @@ pub enum CliCommand {
     Intake(intake_outcome::IntakeCommand),
     Diagnostics(DiagnosticsCommand),
     Memory(MemoryCommand),
+    Concern(Box<concern::ConcernCommand>),
     Discuss(DiscussCommand),
     Discussion(DiscussionCommand),
     /// SPEC-3248 P8a: execution settlement, adoption, and verified recovery.
@@ -282,6 +287,12 @@ pub enum PaneCommand {
     Read { id: String, lines: usize },
     /// `pane.close` / `pane.stop`.
     Close { id: String },
+    /// Preview or recover automatic restores in an explicit start-time interval.
+    Recover {
+        started_after: String,
+        started_before: String,
+        apply: bool,
+    },
     /// `pane.send` (SPEC-3050: self-only injection
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },
@@ -331,7 +342,15 @@ impl std::fmt::Display for CliParseError {
             CliParseError::InvalidValue { flag, reason } => {
                 write!(f, "invalid value for {flag}: {reason}")
             }
-            CliParseError::UnknownSubcommand(s) => write!(f, "unknown subcommand: {s}"),
+            // Issue #4449 AC-4: a mistyped operation answers with the names it
+            // could have meant. The bare wording stays the first line, so log
+            // greps still match; the candidates follow it. `workspace.prune`
+            // is a real refusal message's recommendation that does not exist,
+            // and three agents lost over an hour to it before anyone found
+            // `workspace.projection_prune` by reading the dispatch source.
+            CliParseError::UnknownSubcommand(s) => {
+                write!(f, "{}", operation_catalog::unknown_subcommand_message(s))
+            }
         }
     }
 }
@@ -568,6 +587,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
+        CliCommand::Concern(inner) => concern::run(env, *inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,

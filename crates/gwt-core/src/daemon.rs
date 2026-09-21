@@ -30,7 +30,18 @@ use crate::{
 ///   to exchange frames they cannot parse.
 /// - `3`: connection-bound GUI materializer subscription frame. Ordinary
 ///   subscribers remain read-only observers regardless of channel selection.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 3;
+/// - `4`: connection-bound verification spawn frames (Issue #4409). The
+///   daemon launches a verification workload outside the caller's process
+///   tree and reclaims it when the connection drops.
+pub const DAEMON_PROTOCOL_VERSION: u32 = 4;
+
+/// Lowest protocol version that understands [`ClientFrame::SpawnVerification`].
+///
+/// Separate from [`DAEMON_PROTOCOL_VERSION`] so a client can tell "this daemon
+/// is too old to launch verification" apart from "this daemon is too old to
+/// talk to at all" — the first is a refusal the caller can act on
+/// (Issue #4409 AC-5), the second is a handshake failure.
+pub const VERIFICATION_SPAWN_MIN_PROTOCOL_VERSION: u32 = 4;
 
 /// Runtime backend target for daemon-managed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +506,70 @@ pub enum ClientFrame {
     Publish { channel: String, payload: Value },
     /// Request a snapshot of the daemon's current runtime stats.
     Status,
+    /// Launch one verification command from the daemon instead of from the
+    /// caller's process tree (Issue #4409).
+    ///
+    /// The daemon replies with [`DaemonFrame::VerificationAccepted`] once the
+    /// child exists and with [`DaemonFrame::VerificationFinished`] when it
+    /// exits. The child's lifetime is bound to *this connection*: if the
+    /// caller dies or disconnects first, the daemon reclaims the whole
+    /// dedicated process group, so escaping the caller's tree never leaves
+    /// orphans behind (AC-2 / AC-7, Issue #3845).
+    SpawnVerification(VerificationSpawnRequest),
+}
+
+/// One verification command, described completely enough that the daemon can
+/// reproduce the child the caller would otherwise have spawned itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSpawnRequest {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Working directory; normally the worktree under verification.
+    pub cwd: PathBuf,
+    /// The child's **complete** environment. The daemon clears its own
+    /// environment before applying it, because a test runner whose
+    /// environment differs from an ordinary shell produces verdicts nobody
+    /// can reproduce — and the daemon's environment is not the caller's.
+    pub env: Vec<(String, String)>,
+    /// Files the daemon redirects the child's streams into. The caller owns
+    /// and reads them; streaming the transcript back through newline-
+    /// delimited JSON would have to escape and re-frame every byte of a
+    /// multi-megabyte `cargo test` log for no gain.
+    pub stdout_path: PathBuf,
+    pub stderr_path: PathBuf,
+}
+
+/// The daemon accepted a spawn request and the child is running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSpawnAccepted {
+    pub pid: u32,
+    /// The dedicated process group the child leads. Reclamation targets this
+    /// group and nothing above it, so the daemon is never caught in its own
+    /// cleanup (AC-7).
+    pub process_group: u32,
+    /// The nice value the child *actually* got, read back after the spawn
+    /// rather than assumed from what was requested.
+    pub nice: Option<i32>,
+    /// Why the child is not at baseline priority, when it is not.
+    ///
+    /// This is a record, not a refusal: an environment that will not let the
+    /// daemon reach nice 0 is not something the caller can fix, so the run
+    /// proceeds and says what it got (AC-6). A *missing* daemon is the
+    /// opposite case and is refused before the request is ever sent (AC-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nice_reason: Option<String>,
+}
+
+/// The daemon's verification child exited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSpawnFinished {
+    /// Exit code, or `-1` when the child was killed by a signal.
+    pub exit_code: i32,
+    /// Whether the daemon had to kill the child's process group after it
+    /// exited because descendants were still alive. Recorded so an orphan
+    /// left by a runner is visible instead of silently reclaimed.
+    #[serde(default)]
+    pub reclaimed_survivors: bool,
 }
 
 /// Tagged frame envelope returned by `gwtd`.
@@ -517,6 +592,10 @@ pub enum DaemonFrame {
     /// Snapshot of daemon runtime stats, returned in response to a
     /// [`ClientFrame::Status`] request.
     Status(DaemonStatus),
+    /// A [`ClientFrame::SpawnVerification`] child is running.
+    VerificationAccepted(VerificationSpawnAccepted),
+    /// That child exited.
+    VerificationFinished(VerificationSpawnFinished),
 }
 
 /// Runtime stats snapshot returned by a [`DaemonFrame::Status`] frame.
@@ -601,7 +680,11 @@ pub fn persist_endpoint(path: &Path, endpoint: &DaemonEndpoint) -> Result<()> {
     ensure_dir(parent)?;
     let payload = serde_json::to_vec_pretty(endpoint)
         .map_err(|e| GwtError::Other(format!("serialize daemon endpoint failed: {e}")))?;
-    fs::write(path, payload)?;
+    // Issue #3911: a plain write leaves the descriptor existing but empty
+    // between create and fill, and the heal loop's readers check for the path
+    // before parsing it — that gap is what fails them with "EOF while parsing
+    // a value" on a loaded host.
+    crate::atomic_file::write_atomic(path, &payload)?;
     Ok(())
 }
 

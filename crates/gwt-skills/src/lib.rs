@@ -7,7 +7,9 @@ pub mod codex_managed_config;
 pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
+pub mod git_hooks;
 pub mod hooks;
+pub mod inspection_guidance;
 pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
@@ -22,11 +24,15 @@ pub use codex_home::{
 pub use codex_hook_trust::{
     collect_codex_managed_hook_trust_entries, collect_codex_managed_hook_trust_entries_for_mode,
     register_codex_managed_hook_trust, register_codex_managed_hook_trust_for_mode,
-    CodexHookTrustEntry, CodexHookTrustExpectation, CodexHookTrustReport,
+    register_codex_managed_hook_trust_for_mode_with_expected_bin,
+    register_codex_managed_project_trust, revoke_codex_managed_project_trust,
+    revoke_codex_managed_project_trust_with_cleanup, CodexHookTrustEntry,
+    CodexHookTrustExpectation, CodexHookTrustReport, CodexProjectTrustReport,
 };
 pub use codex_managed_config::{
-    ensure_codex_context_management_experimental_mode, CodexManagedConfigOutcome,
-    CodexManagedConfigReport, CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY,
+    ensure_codex_context_management_experimental_mode, CodexFeaturesSchema,
+    CodexManagedConfigOutcome, CodexManagedConfigReport,
+    CODEX_CONTEXT_MANAGEMENT_EXPERIMENTAL_MODE_KEY, CODEX_FEATURE_TABLE_MIN_VERSION,
 };
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
@@ -34,11 +40,15 @@ pub use coordination_guidance::{
 };
 pub use distribute::{
     distribute_to_worktree, distribute_to_worktree_for_targets,
-    distribute_to_worktree_for_targets_with_policy, prune_stale_gwt_assets,
-    prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
-    TrackedAssetWritePolicy,
+    distribute_to_worktree_for_targets_with_policy, is_gwt_managed_skill_or_command_path,
+    prune_stale_gwt_assets, prune_stale_gwt_assets_for_targets, DistributeReport,
+    ManagedAssetTarget, TrackedAssetWritePolicy,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
+pub use git_hooks::{
+    materialize_managed_git_hooks, missing_managed_git_hooks, plan_managed_git_hooks, GitHookPlan,
+    GitHookPlanEntry,
+};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
@@ -924,12 +934,11 @@ mod tests {
                 "params.derive:true",
                 "execution.repair",
                 "execution.status",
-                // Issue #3913 AC-2: raw cargo in the TDD loop goes through
-                // the host-wide lease, and verify.run's own admission is
-                // documented where the loop is defined.
-                "verify.lease.acquire",
-                "verify.lease.release",
-                "issue.monitor.wait",
+                // SPEC #3576 AC-C6: bootstrap and TDD remain independent
+                // from canonical verification admission.
+                "Only canonical `verify.run` acquires the host-wide lease",
+                "cargo build -p gwt --bin gwtd",
+                "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
             ] {
@@ -944,8 +953,7 @@ mod tests {
             );
         }
 
-        // Issue #3913 AC-2: the verification skill's serialization section
-        // covers raw `cargo test` / `cargo clippy` and verify.run's admission.
+        // SPEC #3576 AC-C6: verification admission belongs to verify.run.
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
@@ -956,8 +964,8 @@ mod tests {
                 "## Heavy verification serialization",
                 "`cargo test`",
                 "`cargo clippy`",
-                "verify.lease.acquire",
-                "issue.monitor.wait",
+                "Only canonical `verify.run` acquires the host-wide lease",
+                "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
             ] {
@@ -1492,8 +1500,10 @@ mod tests {
     }
 
     #[test]
-    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+    fn gwt_execute_documents_issue_bound_build_lifecycle() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().expect("materialization target");
+        distribute_to_worktree(materialized.path()).expect("materialize managed skills");
         let claude =
             std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
                 .expect("read Claude gwt-execute skill");
@@ -1509,11 +1519,95 @@ mod tests {
             (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
             (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
         ] {
+            assert_eq!(
+                std::fs::read_to_string(materialized.path().join(relative)).unwrap(),
+                guidance,
+                "{relative} must distribute the current lifecycle contract"
+            );
+            for required in [
+                "`build.start` with `params.spec:<n>` for every Issue owner",
+                "`build.phase` with the same `params.spec:<n>`",
+                "`build.complete` with the same `params.spec:<n>`",
+                "`build.abort` with the same `params.spec:<n>`",
+                "Without an owner Issue, do not call `build.*`",
+            ] {
+                assert!(
+                    guidance.contains(required),
+                    "{relative} must document the accepted lifecycle params: {required}"
+                );
+            }
+            assert!(
+                !guidance.contains("params.task"),
+                "{relative} must not recommend the unsupported task parameter"
+            );
             assert!(
                 guidance.contains(
                     "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
                 ),
                 "{relative} must require scoped abort-before-blocked order"
+            );
+        }
+    }
+
+    /// Issue #4352 AC-1 / AC-3: gwt-verify, gwt-search, and AGENTS.md carry
+    /// the same bootstrap order as the canonical coordination guidance.
+    #[test]
+    fn gwtd_bootstrap_contract_is_mirrored_in_verify_search_and_agents_md() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let shared = [
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`GWT_BIN_PATH`",
+        ];
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-search/SKILL.md",
+            ".codex/skills/gwt-search/SKILL.md",
+        ] {
+            let skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in shared.iter().chain(["lease-free bootstrap step"].iter()) {
+                assert!(
+                    skill.contains(required),
+                    "expected gwtd bootstrap contract in {relative}: {required}"
+                );
+            }
+        }
+        for pair in [
+            (
+                ".claude/skills/gwt-verify/SKILL.md",
+                ".codex/skills/gwt-verify/SKILL.md",
+            ),
+            (
+                ".claude/skills/gwt-search/SKILL.md",
+                ".codex/skills/gwt-search/SKILL.md",
+            ),
+        ] {
+            let claude = std::fs::read_to_string(workspace_root.join(pair.0)).unwrap();
+            let codex = std::fs::read_to_string(workspace_root.join(pair.1)).unwrap();
+            assert_eq!(
+                claude, codex,
+                "{} and {} must be byte-identical",
+                pair.0, pair.1
+            );
+        }
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in shared
+            .iter()
+            .chain(["lease \u{4e0d}\u{8981}\u{306e} bootstrap step"].iter())
+        {
+            assert!(
+                agents.contains(required),
+                "expected AGENTS.md local verification rule to match canonical guidance: {required}"
             );
         }
     }
@@ -2352,8 +2446,8 @@ mod tests {
             let content = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
-                // Launch mode is detected from the launcher's own environment,
-                // not from the agent's judgement.
+                // The environment is a legacy signal; execution.status owns
+                // the launch route, not the agent's judgement.
                 "GWT_AUTONOMOUS_EXECUTION",
                 "Launch mode",
                 // The recorded value for an autonomous run.
@@ -2417,6 +2511,144 @@ mod tests {
             assert!(
                 agents.contains(required),
                 "AGENTS.md must document the autonomous verification waiver: {required}"
+            );
+        }
+    }
+
+    /// Issue #4217 AC-2: the launch route is read from the execution record.
+    ///
+    /// The environment marker is written only when the project opted into
+    /// unattended mode, so a skill that concludes "manual" from its absence
+    /// sends monitor-launched agents looking for a human who is not there
+    /// (#3777, #3697). Every skill that decides the launch mode has to name
+    /// `execution.status` / `launch_route` and has to say that the absent
+    /// variable proves nothing.
+    #[test]
+    fn launch_mode_is_read_from_the_execution_record_not_the_environment() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in ["execution.status", "launch_route"] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must derive the launch mode from the execution record: {required}"
+                );
+            }
+            assert!(
+                content.contains("absence proves nothing"),
+                "{relative} must say that a missing GWT_AUTONOMOUS_EXECUTION is not evidence of a manual launch"
+            );
+        }
+    }
+
+    /// Issue #4326: existing deferred results remain readable as migration
+    /// compatibility, without falsely claiming a human confirmed the check.
+    #[test]
+    fn legacy_deferred_user_verification_remains_documented() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-verify/references/user-verification-guide.md",
+            ".codex/skills/gwt-verify/references/user-verification-guide.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+            ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-build-spec/references/completion-gate.md",
+            ".codex/skills/gwt-build-spec/references/completion-gate.md",
+            ".claude/skills/gwt-fix-issue/SKILL.md",
+            ".codex/skills/gwt-fix-issue/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("deferred (autonomous execution)"),
+                "{relative} must document the legacy deferred User Verification Result"
+            );
+        }
+    }
+
+    /// Issue #4326: verified autonomous work proceeds through Ready and the
+    /// existing CI auto-merge path, without waiting for a human visual check.
+    #[test]
+    fn an_autonomous_launch_delivers_through_ci_auto_merge() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in ["Ready PR", "CI auto-merge", "fresh", "legacy"] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document {required}"
+                );
+            }
+            for obsolete in [
+                "Automation ends at PR creation",
+                "authorizes a **Draft** PR only",
+                "reaches a **Draft** PR only",
+                "**stays Draft**",
+            ] {
+                assert!(
+                    !content.contains(obsolete),
+                    "{relative} must retire {obsolete}"
+                );
+            }
+        }
+    }
+
+    /// The list field remains available for inspecting legacy deferred PRs.
+    #[test]
+    fn legacy_deferred_prs_remain_listable() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("deferred_user_verification"),
+                "{relative} must name the legacy pr.list field"
+            );
+        }
+    }
+
+    /// AC-8: the repository's own Ready PR Gate must agree with the skills it
+    /// distributes, or agents get contradictory instructions.
+    #[test]
+    fn agents_md_ready_pr_gate_distinguishes_the_launch_route() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in [
+            "launch_route",
+            "deferred (autonomous execution)",
+            "deferred_user_verification",
+            "execution.blocked",
+            "CI 自動マージ",
+            "headed_e2e_commands",
+        ] {
+            assert!(
+                agents.contains(required),
+                "AGENTS.md Ready PR Gate must distinguish the launch route: {required}"
             );
         }
     }
@@ -2568,11 +2800,16 @@ mod tests {
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        // `Ready PR 禁止` used to be required here. That phrase encoded the
+        // retired rule "incomplete work may only be a Draft PR"; keeping it
+        // would pin AGENTS.md to a policy this repository no longer has.
+        // The gate still exists — it moved from "Ready vs Draft" to
+        // "PR vs no PR" — so assert the phrase that carries it now.
         for required in [
             "Ready PR Gate",
             "Draft PR",
             "単独で配信可能",
-            "Ready PR 禁止",
+            "Draft PR を作成しない",
         ] {
             assert!(
                 agents.contains(required),
@@ -2620,10 +2857,12 @@ mod tests {
         // SPEC #3197: gwt-manage-pr must document the drive-to-merge delivery
         // loop (auto-merge + CI/review fix loop + watch until merged), gated by
         // the Ready PR Gate.
+        // Issue #4396: gwtd has no merge operation, so the skill must say who
+        // merges instead of naming one.
         for required in [
             "Deliver",
             "drive to merge",
-            "gh pr merge --auto",
+            "gwtd has no merge operation",
             "merged_at",
             "Ready PR Gate",
             "Loop Safety Guard",
@@ -2723,24 +2962,25 @@ mod tests {
 
             for required in [
                 "drive-to-merge",
-                "gh pr merge --auto",
+                "gwtd has no merge operation",
+                "JSON\noperation `pr.ready`",
                 "merged_at",
                 "Loop Safety Guard",
-                // Re-gate invariant: never keep auto-merge armed across a
-                // code-changing push.
-                "--disable-auto",
-                "re-arm",
+                // Keep the repository's existing auto-merge delivery policy.
+                "Keep auto-merge enabled",
+                "pr.update_branch",
+                "pr.draft",
             ] {
                 assert!(
                     deliver.contains(required),
                     "{relative} Mode: Deliver section must document: {required}"
                 );
             }
-            // Deliver is opt-in only — auto-detection must never enable
-            // auto-merge on its own.
+            // Manual Deliver remains opt-in; autonomous delivery is covered
+            // by the launch-route contract above.
             assert!(
                 deliver.contains("opt-in") && deliver.contains("never auto-routed"),
-                "{relative} Mode: Deliver must state it is opt-in only and never auto-routed"
+                "{relative} Mode: Deliver must preserve the manual opt-in contract"
             );
             // Hard gate: pending verification must not enable auto-merge.
             assert!(
@@ -2760,26 +3000,26 @@ mod tests {
             for required in [
                 // Composes the existing Fix flow rather than reimplementing it.
                 "fix-flow.md",
-                // Hard PR gate before enabling auto-merge.
+                // Hard PR gate before handing the PR to merge automation.
                 "Ready PR Gate",
                 "pending",
-                // Auto-merge enablement via the allowed gh command.
-                "gh pr merge --auto",
-                // Project-agnostic merge-method selection (no hardcoded method).
-                "viewerDefaultMergeMethod",
+                // Issue #4396: gwtd cannot merge; `pr.ready` hands the PR to
+                // the repository's merge automation, which must exist.
+                "gwtd has no merge operation",
+                "`pr.ready` hands the PR to that automation",
+                "Confirm the PR has merge automation",
                 // Merged-state watch surface and completion signal.
                 "pr.view",
                 "merged_at",
                 // Transient CI classification + bounded re-run, like /release.
                 "transient",
-                "gh run rerun",
+                "`actions.rerun`",
                 // Bounded drive loop.
                 "Loop Safety Guard",
-                // Safety invariant: auto-merge must never stay armed across a
-                // code-changing push. Disable, re-gate, and re-arm per push so
-                // GitHub only ever merges a verified, gated snapshot.
-                "gh pr merge --disable-auto",
-                "re-arm",
+                // Routine pushes and base updates do not suspend auto-merge.
+                "Keep auto-merge enabled",
+                "pr.update_branch",
+                "pr.draft",
             ] {
                 assert!(
                     content.contains(required),

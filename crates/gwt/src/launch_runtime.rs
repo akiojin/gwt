@@ -430,9 +430,9 @@ fn fast_forward_stale_launch_ref(
 /// The id of a live Session whose worktree is `worktree`, when one exists
 /// (Issue #4074 AC-2).
 ///
-/// "Live" means a runtime sidecar under a Host PID that still answers. A
-/// Session record left behind by a crashed or replaced Host holds nothing, so
-/// it must not keep an owner Issue parked forever.
+/// Exact child process evidence decides whether a runtime still holds the
+/// worktree. Legacy sidecars without it retain the conservative Host check.
+/// A surviving GUI Host alone must not keep an exited agent's worktree held.
 fn live_session_holding_worktree(sessions_dir: &Path, worktree: &Path) -> Option<String> {
     let target = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
@@ -471,13 +471,18 @@ fn session_runtime_host_is_alive(sessions_dir: &Path, session_id: &str) -> bool 
         let Ok(runtime) = gwt_agent::SessionRuntimeState::load(&sidecar) else {
             continue;
         };
-        if matches!(
-            runtime.status,
-            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-        ) {
-            continue;
-        }
-        if gwt::process::is_host_process_alive(host_pid) {
+        let alive = match runtime.child_pid.zip(runtime.child_started_at) {
+            Some((child_pid, child_started_at)) if child_pid > 0 && child_started_at > 0 => {
+                gwt::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
+            }
+            _ => {
+                !matches!(
+                    runtime.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                ) && gwt::process::is_host_process_alive(host_pid)
+            }
+        };
+        if alive {
             return true;
         }
     }
@@ -524,22 +529,44 @@ impl OrphanIntakePrunePlan {
 }
 
 pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntakePrunePlan> {
-    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
-        return None;
-    };
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let Ok(worktrees) = manager.list() else {
-        return None;
-    };
+    let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
+    let worktrees = gwt_git::WorktreeManager::new(&main_repo_path).list().ok()?;
+    Some(orphan_intake_prune_plan(
+        main_repo_path,
+        worktrees
+            .into_iter()
+            .map(|worktree| (worktree.path, worktree.branch)),
+    ))
+}
+
+/// Issue #4378 AC-1: the same plan from a worktree listing the caller holds,
+/// so startup does not list the worktrees a second time. The listing omits
+/// prunable entries; their directory is gone, so the prune always kept them.
+pub fn plan_orphan_intake_worktree_prune_from_inventory(
+    repo_path: &Path,
+    inventory: &[gwt::worktree_inventory::WorktreeEntry],
+) -> Option<OrphanIntakePrunePlan> {
+    let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
+    Some(orphan_intake_prune_plan(
+        main_repo_path,
+        inventory
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.branch.clone())),
+    ))
+}
+
+fn orphan_intake_prune_plan(
+    main_repo_path: PathBuf,
+    worktrees: impl Iterator<Item = (PathBuf, Option<String>)>,
+) -> OrphanIntakePrunePlan {
     let worktree_paths = worktrees
-        .into_iter()
-        .filter(|worktree| is_ephemeral_worktree_path(&worktree.path) && worktree.branch.is_none())
-        .map(|worktree| worktree.path)
+        .filter(|(path, branch)| is_ephemeral_worktree_path(path) && branch.is_none())
+        .map(|(path, _)| path)
         .collect();
-    Some(OrphanIntakePrunePlan {
+    OrphanIntakePrunePlan {
         main_repo_path,
         worktree_paths,
-    })
+    }
 }
 
 pub fn execute_orphan_intake_worktree_prune(
@@ -556,9 +583,23 @@ pub fn execute_orphan_intake_worktree_prune(
             intake_hook_config_is_disposable(&worktree_path, entry)
         }) {
             Ok(false) => {
-                if manager.remove_force(&worktree_path).is_ok() {
-                    removed += 1;
+                let cleanup = gwt::managed_assets::cleanup_worktree_with_codex_project_trust(
+                    &worktree_path,
+                    || {
+                        manager
+                            .remove_force(&worktree_path)
+                            .map_err(|error| std::io::Error::other(error.to_string()))
+                    },
+                );
+                if let Err(error) = cleanup {
+                    tracing::warn!(
+                        worktree_path = %worktree_path.display(),
+                        %error,
+                        "keeping orphaned intake worktree because locked trust cleanup failed"
+                    );
+                    continue;
                 }
+                removed += 1;
             }
             // Has local work or unknown → keep it (fail closed).
             _ => {
@@ -1421,7 +1462,13 @@ mod tests {
         run_git(root, &["init", "--bare", origin.to_str().unwrap()]);
         run_git(
             root,
-            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+            &[
+                "clone",
+                "--config",
+                "core.autocrlf=false",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
         );
         run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
         run_git(&repo, &["config", "user.name", "gwt"]);
@@ -1646,6 +1693,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn worktree_holder_with_dead_child_is_not_kept_alive_by_gui_host() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(temp.path(), std::process::id(), "dead-child");
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        runtime.host_started_at = gwt::process::host_process_start_time(std::process::id());
+        runtime.child_pid = Some(i32::MAX as u32);
+        runtime.child_started_at = Some(1);
+        runtime.save(&runtime_path).unwrap();
+
+        assert!(!session_runtime_host_is_alive(temp.path(), "dead-child"));
+    }
+
+    #[test]
+    fn worktree_holder_with_live_child_is_kept_despite_stopped_sidecar() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let process_id = std::process::id();
+        let process_started_at = gwt::process::host_process_start_time(process_id).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(temp.path(), process_id, "live-child");
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped);
+        runtime.host_started_at = Some(process_started_at);
+        runtime.child_pid = Some(process_id);
+        runtime.child_started_at = Some(process_started_at);
+        runtime.save(&runtime_path).unwrap();
+
+        assert!(session_runtime_host_is_alive(temp.path(), "live-child"));
+    }
+
     /// Issue #4074 AC-2: inheritance stops at a worktree an agent is still
     /// working in. Two agents in one worktree is the only loss the guard has
     /// left to prevent, so a live holder keeps the `needs_human` refusal.
@@ -1697,7 +1776,15 @@ mod tests {
         assert!(error.contains("needs_human"), "{error}");
         assert!(error.contains("unique commits present"), "{error}");
         assert!(error.contains(&session.id), "{error}");
-        assert!(error.contains(&worktree.display().to_string()), "{error}");
+        let reported_worktree = error
+            .split_once("Residual worktree location: `")
+            .and_then(|(_, suffix)| suffix.split_once('`'))
+            .map(|(path, _)| Path::new(path))
+            .expect("diagnostic must identify the residual worktree");
+        assert!(
+            crate::same_worktree_path(reported_worktree, &worktree),
+            "{error}"
+        );
         assert!(working_dir.is_none());
         assert_eq!(
             fs::read_to_string(worktree.join("unique.txt")).expect("preserved worktree"),

@@ -11,11 +11,11 @@ pub mod port;
 
 pub use compose::{parse_compose_file, ComposeService};
 pub use container::{
-    compose_restart, compose_restart_with_files, compose_service_exec_capture,
-    compose_service_exec_capture_with_files, compose_service_has_command,
-    compose_service_has_command_with_files, compose_service_is_running,
-    compose_service_is_running_with_files, compose_service_logs, compose_service_status,
-    compose_service_status_with_files, compose_service_user_is_root,
+    compose_exec_capture_with_resolved_runtime_args, compose_restart, compose_restart_with_files,
+    compose_service_exec_capture, compose_service_exec_capture_with_files,
+    compose_service_has_command, compose_service_has_command_with_files,
+    compose_service_is_running, compose_service_is_running_with_files, compose_service_logs,
+    compose_service_status, compose_service_status_with_files, compose_service_user_is_root,
     compose_service_user_is_root_with_files, compose_stop, compose_up, compose_up_force_recreate,
     compose_up_force_recreate_with_files, compose_up_force_recreate_with_files_output,
     compose_up_force_recreate_with_output, compose_up_with_files, compose_up_with_files_output,

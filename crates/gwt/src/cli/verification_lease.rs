@@ -1,36 +1,22 @@
-//! SPEC #3576: `verify.lease.*` — host-wide serialization of heavy
-//! verification runs.
+//! SPEC #3576: only canonical `verify.run` owns verification leases.
 //!
-//! Heavy verification (`cargo test --all-features`, `cargo llvm-cov`, headed
-//! Playwright, `verify.run`) contends for host CPU, so it claims the same
-//! host-wide heavy lease that Project Index jobs already use
-//! ([`gwt_core::index_coordinator`]). Nothing here invents a second exclusion
-//! mechanism; verification simply becomes another claimant under the existing
-//! lock order (target job -> heavy).
+//! A lease lives inside its runner rather than a detached process with no
+//! workload. The retired acquire/hold/extend operations keep actionable
+//! diagnostics; status/release remain available to drain pre-upgrade holders.
 //!
-//! A lease has to outlive the invocation that asked for it, and its liveness
-//! must stay a kernel fact rather than a PID guess — PID probing is exactly
-//! the false signal that broke the manual Board token protocol. Those two
-//! requirements together mean the lease needs a process to live in, so
-//! `verify.lease.acquire` spawns a detached `verify.lease.hold` holder that
-//! keeps both kernel locks and parks. Consequences that fall out of that:
-//!
-//! - acquisition is atomic, because the heavy kernel lock decides it (FR-8);
-//! - a killed or crashed holder releases immediately, because the kernel
-//!   drops its locks (T-IDX-383 / AC-3 is preserved);
-//! - TTL bounds crash residue, because the holder self-terminates (AC-4);
-//! - a running command is never interrupted: release happens after the holder
-//!   observes the request, not by signalling the workload (AC-Y3).
+//! Issue #4285: the lease lives on the verification lane
+//! (`~/.gwt/runtime/verification-coordinator`), not on the model lane that
+//! searches and index builds share. A pre-upgrade binary still runs its
+//! canonical verification on the model lane; that holder stays observable
+//! and drainable here until every binary on the host has moved.
 
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{
-    coordinator_root, HeavyHolderKind, HeavyLeaseStatus, IndexCoordinator, JobAdmission,
-    JobPriority, TargetKey, VERIFICATION_RESERVATION_TTL,
+    coordinator_root, verification_coordinator_root, HeavyHolderKind, HeavyLeaseStatus,
+    HeavyQueueEntry, IndexCoordinator, TargetKey,
 };
 use gwt_core::paths::{project_scope_hash, resolve_current_worktree_root};
 use gwt_core::worktree_hash::compute_worktree_hash;
@@ -41,30 +27,169 @@ use crate::cli::CliEnv;
 
 /// Issue #3913: `verify.run` host admission — the lease's in-process claimant.
 pub(crate) mod admission;
+/// Issue #4405: starved-versus-progressing reading of the lease holder.
+pub(crate) mod holder_activity;
+
+const CARGO_SCOPED_SUBCOMMANDS: &[&str] = &["test", "t", "nextest"];
+/// Flags that widen a `cargo test` past a single target, wherever they sit.
+const CARGO_SCOPE_WIDENING_FLAGS: &[&str] = &[
+    "--workspace",
+    "--all",
+    "--all-features",
+    "--all-targets",
+    "--benches",
+    "--bins",
+    "--examples",
+    "--tests",
+    "--doc",
+    "--bench",
+    "--exclude",
+];
+/// Flags that name one target, so they narrow a `cargo test` on their own.
+const CARGO_NAMED_TARGET_SELECTORS: &[&str] = &["--test", "--bin", "--example"];
+
+/// How much of the shared host one *requested* verification command needs.
+///
+/// Classify the requested command line before canonical verification starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandWeight {
+    /// Narrow enough that several worktrees can run it side by side.
+    Light,
+    /// Builds or runs enough of the tree to need the host to itself.
+    Heavy,
+}
+
+/// Classify one command `verify.run` was asked to execute (Issue #4196).
+///
+/// The host lease exists to stop several worktrees compiling the world at
+/// once, and every `cargo test` used to claim it whatever its scope: a single
+/// `--test <name>` queued behind `cargo test --workspace --all-features`, and
+/// the fleet's verification throughput was pinned at one window at a time. So
+/// the weight follows the scope the command will actually build — a widening
+/// flag is heavy, and a run narrowed to named targets of at most one package
+/// is light.
+///
+/// Anything this module cannot bound stays heavy. An unrecognized program may
+/// compile the world, and guessing light for it would trade one window's wait
+/// for the host-wide oversubscription the lease was built to prevent
+/// (Issue #3913).
+pub(crate) fn classify_command(command: &str) -> CommandWeight {
+    let Ok(args) = crate::cli::verification_record::split_command_line(command) else {
+        return CommandWeight::Heavy;
+    };
+    let Some(program) = args.first() else {
+        return CommandWeight::Heavy;
+    };
+    if Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        != Some("cargo")
+    {
+        return CommandWeight::Heavy;
+    }
+    // Cargo's own arguments end at a bare `--`; everything after it is the
+    // test binary's filter and says nothing about what cargo will build.
+    let cargo_args: Vec<&str> = args[1..]
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| *arg != "--")
+        .collect();
+    // Only skip global arguments known not to consume a value. Otherwise a
+    // --config path (even one named "fmt") could be mistaken for a command.
+    let mut args = cargo_args.iter().copied();
+    let subcommand = loop {
+        let Some(arg) = args.next() else {
+            return CommandWeight::Heavy;
+        };
+        if arg.starts_with('+')
+            || matches!(
+                arg,
+                "-v" | "--verbose" | "-q" | "--quiet" | "--offline" | "--locked" | "--frozen"
+            )
+        {
+            continue;
+        }
+        if arg.starts_with('-') {
+            return CommandWeight::Heavy;
+        }
+        break arg;
+    };
+    if matches!(subcommand, "fmt" | "metadata") {
+        return CommandWeight::Light;
+    }
+    if !CARGO_SCOPED_SUBCOMMANDS.contains(&subcommand) {
+        return CommandWeight::Heavy;
+    }
+    classify_cargo_scope(&cargo_args)
+}
+
+/// Weigh a scoped `cargo test` by the selection it builds.
+///
+/// `--lib` is deliberately not enough on its own. This repository is a virtual
+/// workspace with `default-members`, so `cargo test --lib` with no package
+/// selects the lib target of *every* default member — the workspace-wide build
+/// this classification exists to catch, wearing a narrowing flag.
+fn classify_cargo_scope(cargo_args: &[&str]) -> CommandWeight {
+    let mut named_targets = 0usize;
+    let mut lib_target = false;
+    let mut packages = 0usize;
+    let mut args = cargo_args.iter().copied();
+    while let Some(arg) = args.next() {
+        // `--test=name` and `--test name` select the same target.
+        let (flag, inline_value) = arg
+            .split_once('=')
+            .map_or((arg, None), |(name, value)| (name, Some(value)));
+        if CARGO_SCOPE_WIDENING_FLAGS.contains(&flag) {
+            return CommandWeight::Heavy;
+        }
+        if flag == "--lib" {
+            lib_target = true;
+        }
+        let attached_package = flag.strip_prefix("-p").filter(|value| !value.is_empty());
+        let package = flag == "-p" || flag == "--package" || attached_package.is_some();
+        if package || CARGO_NAMED_TARGET_SELECTORS.contains(&flag) {
+            let Some(value) = attached_package.or(inline_value).or_else(|| args.next()) else {
+                return CommandWeight::Heavy;
+            };
+            // Cargo expands these itself, including quoted package patterns.
+            if value.is_empty() || value.starts_with('-') || value.contains(['*', '?', '[', ']']) {
+                return CommandWeight::Heavy;
+            }
+            if package {
+                packages += 1;
+            } else {
+                named_targets += 1;
+            }
+        }
+    }
+    if packages > 1 || named_targets + usize::from(lib_target) > 1 {
+        return CommandWeight::Heavy;
+    }
+    if named_targets == 1 || (lib_target && packages == 1) {
+        CommandWeight::Light
+    } else {
+        CommandWeight::Heavy
+    }
+}
+
+/// The first command of a matrix that needs the host to itself, if any.
+///
+/// A matrix is only as light as its heaviest command, and naming the command
+/// that forces the wait is what lets an agent see in advance whether the run
+/// will queue — previously that was only discoverable by idling.
+pub(crate) fn first_heavy_command(commands: &[String]) -> Option<&String> {
+    commands
+        .iter()
+        .find(|command| classify_command(command) == CommandWeight::Heavy)
+}
 
 /// PM operational value: 45 minutes covered every observed heavy matrix.
 pub const DEFAULT_TTL_MINUTES: u64 = 45;
-/// Upper bound so a typo cannot park the host for a day.
-const MAX_TTL_MINUTES: u64 = 12 * 60;
 const CONTROL_DIR: &str = "verification.control";
 const OUTCOME_FILE: &str = "outcome.json";
 const RELEASE_FILE: &str = "release";
-const EXTEND_FILE: &str = "extend-to-ms";
-/// The holder is parked, so this poll only decides how fast it reacts to a
-/// release request — it never watches another process.
-const HOLDER_POLL: Duration = Duration::from_millis(100);
-/// Bounds process startup only; the acquisition attempt itself never blocks.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_POLL: Duration = Duration::from_millis(50);
-/// A contended attempt answers immediately with the current holder instead of
-/// queueing, so no agent ever sits in a wait loop (US-1 / FR-3).
-const NON_BLOCKING: Duration = Duration::from_millis(250);
-/// How long a control directory is treated as "still being set up" rather than
-/// residue left by a killed holder. Mirrors the coordinator's own
-/// `REGISTRATION_RESIDUE_GRACE`, and must stay comfortably above
-/// [`HANDSHAKE_TIMEOUT`] so a slow-starting holder is never swept.
-const CONTROL_RESIDUE_GRACE: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationLeaseCommand {
@@ -81,8 +206,7 @@ pub enum VerificationLeaseCommand {
         ttl_minutes: u64,
     },
     Status,
-    /// Internal: the foreground holder spawned by `Acquire`. Not intended for
-    /// direct use; it blocks until released or until its TTL lapses.
+    /// Retired internal operation; parsed only to explain the migration.
     Hold {
         ttl_minutes: u64,
         control: PathBuf,
@@ -91,108 +215,45 @@ pub enum VerificationLeaseCommand {
 }
 
 pub(super) fn run<E: CliEnv>(
-    env: &mut E,
+    _env: &mut E,
     command: VerificationLeaseCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
         VerificationLeaseCommand::Status => {
-            render(out, "held", "free", &status()?);
+            let mut status = status()?;
+            observe_holder_activity(&mut status);
+            render(out, "held", "free", &status);
             Ok(0)
         }
-        VerificationLeaseCommand::Acquire {
-            ttl_minutes,
-            reason,
-        } => acquire(env, ttl_minutes, reason, out),
+        VerificationLeaseCommand::Acquire { .. }
+        | VerificationLeaseCommand::Extend { .. }
+        | VerificationLeaseCommand::Hold { .. } => Err(unexpected(
+            "manual verification leases are retired: use `verify.run` for canonical verification; \
+             it acquires and releases its own lease. Run development builds, tests, lint, and \
+             bootstrap builds directly without a lease. Use `verify.lease.status` and \
+             `verify.lease.release` to inspect and drain a legacy holder."
+                .to_string(),
+        )),
         VerificationLeaseCommand::Release { lease_id, reason } => {
-            release(env, &lease_id, reason.as_deref(), out)
+            release(&lease_id, reason.as_deref(), out)
         }
-        VerificationLeaseCommand::Extend {
-            lease_id,
-            ttl_minutes,
-        } => extend(&lease_id, ttl_minutes, out),
-        VerificationLeaseCommand::Hold {
-            ttl_minutes,
-            control,
-            reason,
-        } => hold(env, ttl_minutes, &control, reason.as_deref()),
     }
 }
 
-pub fn validate_ttl_minutes(ttl_minutes: u64) -> Result<Duration, SpecOpsError> {
-    if ttl_minutes == 0 || ttl_minutes > MAX_TTL_MINUTES {
-        return Err(unexpected(format!(
-            "ttl_minutes must be between 1 and {MAX_TTL_MINUTES}, got {ttl_minutes}"
-        )));
-    }
-    Ok(Duration::from_secs(ttl_minutes * 60))
-}
-
-// ---------------------------------------------------------------------------
-// Operations
-// ---------------------------------------------------------------------------
-
-fn acquire<E: CliEnv>(
-    env: &mut E,
-    ttl_minutes: u64,
-    reason: Option<String>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
-    validate_ttl_minutes(ttl_minutes)?;
-    let root = coordinator_root();
-    sweep_abandoned_control_dirs(&root, status()?.lease_id.as_deref());
-    let control = root
-        .join(CONTROL_DIR)
-        .join(uuid::Uuid::new_v4().to_string());
-    fs::create_dir_all(&control).map_err(|err| {
-        unexpected(format!(
-            "failed to prepare the lease control directory {}: {err}",
-            control.display()
-        ))
-    })?;
-
-    spawn_holder(env, ttl_minutes, &control, reason.as_deref())?;
-    let outcome = await_outcome(&control)?;
-    if let Some(error) = &outcome.error {
-        let _ = fs::remove_dir_all(&control);
-        return Err(unexpected(format!(
-            "verification lease holder failed: {error}"
-        )));
-    }
-    if outcome.granted {
-        out.push_str("verification lease: granted\n");
-    } else {
-        // A refusal names the *current* holder, so leaving this directory
-        // behind would make it answer to that holder's lease id.
-        let _ = fs::remove_dir_all(&control);
-        out.push_str("verification lease: unavailable\n");
-    }
-    push_status_fields(out, &outcome.status);
-    if !outcome.granted {
-        out.push_str(
-            "note: the current holder finishes its run before the lease is released; \
-             re-run verify.lease.acquire after it reports done. Your turn is reserved: \
-             background index jobs defer to this worktree until the retry is granted \
-             or the reservation lapses\n",
-        );
-    }
-    Ok(0)
-}
-
-fn release<E: CliEnv>(
-    env: &mut E,
-    lease_id: &str,
-    reason: Option<&str>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
+fn release(lease_id: &str, reason: Option<&str>, out: &mut String) -> Result<i32, SpecOpsError> {
     let Some(control) = control_dir_for(lease_id) else {
-        if held_index_lease(lease_id)? {
-            return request_index_yield(env, lease_id, reason, out);
-        }
         return Err(missing_lease(lease_id));
     };
-    fs::write(control.join(RELEASE_FILE), reason.unwrap_or("").as_bytes())
-        .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
+    // Issue #4360: the holder waits for this file to exist and then reads the
+    // reason out of it, so a plain write lets it read the empty moment between
+    // create and fill. Publishing by rename makes "exists" mean "complete" —
+    // which also keeps an intentionally empty reason readable as itself.
+    gwt_core::atomic_file::write_atomic(
+        &control.join(RELEASE_FILE),
+        reason.unwrap_or("").as_bytes(),
+    )
+    .map_err(|err| unexpected(format!("failed to signal release for {lease_id}: {err}")))?;
     await_settled(lease_id)?;
     // A holder that exited normally already removed this; a holder that was
     // killed cannot, so clean up on the caller's side too.
@@ -204,188 +265,6 @@ fn release<E: CliEnv>(
     }
     push_status_fields(out, &status()?);
     Ok(0)
-}
-
-fn extend(lease_id: &str, ttl_minutes: u64, out: &mut String) -> Result<i32, SpecOpsError> {
-    let ttl = validate_ttl_minutes(ttl_minutes)?;
-    let control = control_dir_for(lease_id).ok_or_else(|| missing_lease(lease_id))?;
-    let target = now_ms().saturating_add(ttl.as_millis() as u64);
-    fs::write(control.join(EXTEND_FILE), target.to_string().as_bytes())
-        .map_err(|err| unexpected(format!("failed to request extend for {lease_id}: {err}")))?;
-
-    // The republished ticket is the acknowledgement: only the holder writes
-    // it, so seeing the new deadline proves the holder applied the request.
-    let deadline = Instant::now() + CONTROL_ACK_TIMEOUT;
-    loop {
-        let status = status()?;
-        if status.lease_id.as_deref() == Some(lease_id) && status.expires_at_ms == Some(target) {
-            out.push_str("verification lease: extended\n");
-            out.push_str(&format!("ttl_minutes: {ttl_minutes}\n"));
-            push_status_fields(out, &status);
-            return Ok(0);
-        }
-        if Instant::now() >= deadline {
-            return Err(unexpected(format!(
-                "verification lease {lease_id} did not apply the extend request within {}s",
-                CONTROL_ACK_TIMEOUT.as_secs()
-            )));
-        }
-        std::thread::sleep(CONTROL_POLL);
-    }
-}
-
-/// Foreground holder: take both kernel locks, publish the outcome, then park
-/// until released or expired.
-fn hold<E: CliEnv>(
-    env: &mut E,
-    ttl_minutes: u64,
-    control: &Path,
-    reason: Option<&str>,
-) -> Result<i32, SpecOpsError> {
-    ensure_control_dir_is_ours(control)?;
-    // Past this point the caller is waiting on `outcome.json`, so a failure
-    // has to be published rather than returned: the spawning invocation reads
-    // our stdout from `Stdio::null()` and would otherwise learn nothing until
-    // its handshake timeout.
-    let prepared = validate_ttl_minutes(ttl_minutes)
-        .and_then(|ttl| verification_key(env).map(|key| (ttl, key)))
-        .and_then(|(ttl, key)| open_coordinator().map(|coordinator| (ttl, key, coordinator)));
-    let (ttl, key, coordinator) = match prepared {
-        Ok(prepared) => prepared,
-        Err(err) => {
-            publish_outcome(control, &LeaseOutcome::failed(err.to_string()));
-            return Err(err);
-        }
-    };
-
-    let admission = match coordinator.request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING) {
-        Ok(admission) => admission,
-        Err(err) => {
-            let message = format!("verification job admission failed: {err}");
-            publish_outcome(control, &LeaseOutcome::failed(message.clone()));
-            return Err(unexpected(message));
-        }
-    };
-    let guard = match admission {
-        JobAdmission::Owner(guard) => guard,
-        JobAdmission::Joined(waiter) => {
-            // Another verification run already owns this exact worktree.
-            drop(waiter);
-            publish_outcome(control, &LeaseOutcome::refused(status()?));
-            return Ok(0);
-        }
-    };
-    let mut lease = match guard.acquire_heavy_with_ttl(NON_BLOCKING, ttl) {
-        Ok(lease) => lease,
-        Err(_) => {
-            // Issue #4086 AC-1: the refusal answers immediately, but the
-            // claimant's turn stays reserved so background index jobs defer
-            // to this worktree between retries.
-            let _ = coordinator.reserve_heavy(
-                &key,
-                JobPriority::ManualRebuild,
-                VERIFICATION_RESERVATION_TTL,
-                reason,
-            );
-            publish_outcome(control, &LeaseOutcome::refused(status()?));
-            return Ok(0);
-        }
-    };
-    if let Some(reason) = reason {
-        let _ = fs::write(control.join("reason"), reason.as_bytes());
-    }
-    publish_outcome(control, &LeaseOutcome::granted(status()?));
-
-    let release_path = control.join(RELEASE_FILE);
-    let extend_path = control.join(EXTEND_FILE);
-    loop {
-        if release_path.exists() {
-            break;
-        }
-        if let Some(expires_at_ms) = read_extend_request(&extend_path) {
-            let _ = lease.extend_until(expires_at_ms);
-            let _ = fs::remove_file(&extend_path);
-        }
-        if lease.is_expired() {
-            break;
-        }
-        std::thread::sleep(HOLDER_POLL);
-    }
-    // `release` records `expired` with a reason when the TTL lapsed and
-    // `released` otherwise, so the ledger distinguishes the two exits.
-    let _ = lease.release();
-    let _ = guard.complete(gwt_core::index_coordinator::JobOutcome::Completed);
-    let _ = fs::remove_dir_all(control);
-    Ok(0)
-}
-
-// ---------------------------------------------------------------------------
-// Holder handshake
-// ---------------------------------------------------------------------------
-
-fn spawn_holder<E: CliEnv>(
-    env: &mut E,
-    ttl_minutes: u64,
-    control: &Path,
-    reason: Option<&str>,
-) -> Result<(), SpecOpsError> {
-    let exe = std::env::current_exe()
-        .map_err(|err| unexpected(format!("cannot resolve the gwtd binary path: {err}")))?;
-    let envelope = serde_json::json!({
-        "schema_version": 1,
-        "operation": "verify.lease.hold",
-        "params": {
-            "ttl_minutes": ttl_minutes,
-            "control": control.to_string_lossy(),
-            "reason": reason,
-        }
-    })
-    .to_string();
-
-    // The holder must not inherit our stdout/stderr: the caller reads our
-    // output to EOF, and an inherited pipe would keep it open for the whole
-    // lease. Redirecting the holder's stdio to NUL is only half of that on
-    // Windows, where `CreateProcess` also copies every inheritable handle
-    // into the child; `hidden_command` clears the inherit flag on our own
-    // standard handles so the pipe does not travel that way either (Issue
-    // #4105).
-    let mut child = gwt_core::process::hidden_command(exe)
-        .current_dir(env.repo_path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| unexpected(format!("failed to spawn the lease holder: {err}")))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| unexpected("lease holder stdin unavailable".to_string()))?
-        .write_all(envelope.as_bytes())
-        .map_err(|err| unexpected(format!("failed to hand the holder its request: {err}")))?;
-    // Deliberately not awaited: the holder outlives this invocation.
-    Ok(())
-}
-
-fn await_outcome(control: &Path) -> Result<LeaseOutcome, SpecOpsError> {
-    let path = control.join(OUTCOME_FILE);
-    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    loop {
-        if let Some(outcome) = read_json::<LeaseOutcome>(&path) {
-            return Ok(outcome);
-        }
-        if Instant::now() >= deadline {
-            // Deliberately leave the directory in place: the holder may still
-            // be starting and would lose its release channel — and therefore
-            // hold the lease until its TTL — if we removed it here. The
-            // grace-gated sweep collects it if the holder never arrives.
-            return Err(unexpected(format!(
-                "the verification lease holder did not answer within {}s — check \
-                 `verify.lease.status`; if a lease is now held, release it with its lease_id",
-                HANDSHAKE_TIMEOUT.as_secs()
-            )));
-        }
-        std::thread::sleep(CONTROL_POLL);
-    }
 }
 
 fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
@@ -408,11 +287,14 @@ fn await_settled(lease_id: &str) -> Result<(), SpecOpsError> {
 /// Locate the control directory of a live lease. At most one lease is held
 /// host-wide, so this scan sees one candidate in practice. Only a *granted*
 /// outcome may answer: a refusal snapshot names the lease it lost to, so
-/// matching on the lease id alone would route release and extend requests to
-/// a directory with nobody listening.
+/// matching on the lease id alone would route release requests to
+/// a directory with nobody listening. Pre-upgrade detached holders wrote
+/// their channel under the model lane, so both lanes are scanned.
 fn control_dir_for(lease_id: &str) -> Option<PathBuf> {
-    fs::read_dir(coordinator_root().join(CONTROL_DIR))
-        .ok()?
+    [verification_coordinator_root(), coordinator_root()]
+        .into_iter()
+        .filter_map(|root| fs::read_dir(root.join(CONTROL_DIR)).ok())
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .find(|dir| {
@@ -422,73 +304,7 @@ fn control_dir_for(lease_id: &str) -> Option<PathBuf> {
         })
 }
 
-/// Drop control directories whose holder is gone. A killed holder cannot
-/// clean up after itself, and its directory would otherwise sit next to the
-/// live one forever.
-///
-/// `current_lease_id` is a snapshot taken before this scan, so it can go stale
-/// the moment another claimant wins the lease. Deleting a live holder's
-/// directory would be unrecoverable — the holder watches it for the release
-/// signal, and `control_dir_for` needs it to route `release` / `extend` — so a
-/// directory is only swept once it has sat untouched for
-/// [`CONTROL_RESIDUE_GRACE`]. A directory that appeared or was published
-/// during the snapshot gap is younger than that by construction, which is the
-/// same protection [`gwt_core::index_coordinator`] gives its own registration
-/// files.
-fn sweep_abandoned_control_dirs(root: &Path, current_lease_id: Option<&str>) {
-    let Ok(entries) = fs::read_dir(root.join(CONTROL_DIR)) else {
-        return;
-    };
-    for dir in entries.flatten().map(|entry| entry.path()) {
-        let outcome_path = dir.join(OUTCOME_FILE);
-        match read_json::<LeaseOutcome>(&outcome_path) {
-            // A granted directory naming the current holder is the live
-            // control channel; anything else granted belonged to a holder
-            // that is no longer on the lease.
-            Some(outcome)
-                if outcome.granted && outcome.status.lease_id.as_deref() == current_lease_id =>
-            {
-                continue
-            }
-            // A directory with no published outcome may belong to a holder
-            // that is still starting up; the grace window covers that.
-            Some(_) | None => {}
-        }
-        if older_than(&outcome_path, CONTROL_RESIDUE_GRACE)
-            .unwrap_or_else(|| older_than(&dir, CONTROL_RESIDUE_GRACE).unwrap_or(false))
-        {
-            let _ = fs::remove_dir_all(&dir);
-        }
-    }
-}
-
-/// `Some(true)` when `path` was last modified more than `grace` ago,
-/// `None` when the timestamp cannot be read (never treat that as abandoned).
-fn older_than(path: &Path, grace: Duration) -> Option<bool> {
-    let age = fs::metadata(path).ok()?.modified().ok()?.elapsed().ok()?;
-    Some(age > grace)
-}
-
-fn publish_outcome(control: &Path, outcome: &LeaseOutcome) {
-    let Ok(payload) = serde_json::to_vec(outcome) else {
-        return;
-    };
-    let tmp = control.join(".outcome.tmp");
-    if fs::write(&tmp, payload).is_ok() {
-        let _ = fs::rename(&tmp, control.join(OUTCOME_FILE));
-    }
-}
-
-fn read_extend_request(path: &Path) -> Option<u64> {
-    fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Mirrors [`HeavyLeaseStatus`] so the holder can hand a race-free snapshot to
-/// the invocation that spawned it.
+/// Status rendering and the pre-upgrade detached holder wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LeaseStatusSnapshot {
     held: bool,
@@ -508,12 +324,51 @@ struct LeaseStatusSnapshot {
     expired: bool,
     #[serde(default)]
     pending: usize,
+    /// Issue #4169: who is waiting, in the order they will be served.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    queue: Vec<HeavyQueueEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     holder_kind: Option<String>,
+    /// Issue #4409 AC-4: the holder's own priority, and whether it launches
+    /// verification inside or outside the agent process tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_nice: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_spawn_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remaining_batches: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     estimated_remaining_ms: Option<u64>,
+    /// Issue #4405 AC-3: how long the holder has held the lease, the CPU
+    /// its process tree gets, and whether that reads as starved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_held_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_cpu_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_state: Option<String>,
+    /// Issue #4470 AC-3: whether the ticket's owner process still exists and
+    /// what job status it last published, so a waiter can tell a working
+    /// holder from residue without reading the coordinator's files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_job_status: Option<String>,
+    #[serde(default)]
+    holder_stale: bool,
+}
+
+/// Fill in the holder's activity; only the status report pays for the
+/// process-table read.
+fn observe_holder_activity(status: &mut LeaseStatusSnapshot) {
+    let Some(pid) = status.owner_pid.filter(|_| status.held) else {
+        return;
+    };
+    if let Some(activity) = holder_activity::observe(pid, status.acquired_at_ms) {
+        status.holder_held_ms = Some(activity.held_ms);
+        status.holder_cpu_percent = Some(activity.cpu_percent);
+        status.holder_state = Some(activity.state().to_string());
+    }
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
@@ -528,9 +383,18 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             remaining_ms: status.remaining_ms,
             expired: status.expired,
             pending: status.pending,
+            queue: status.queue,
             holder_kind: status.holder_kind.map(|kind| kind.as_str().to_string()),
+            holder_nice: status.holder_nice,
+            holder_spawn_host: status.holder_spawn_host,
             remaining_batches: status.remaining_batches,
             estimated_remaining_ms: status.estimated_remaining_ms,
+            holder_held_ms: None,
+            holder_cpu_percent: None,
+            holder_state: None,
+            holder_alive: status.holder_alive,
+            holder_job_status: status.holder_job_status.map(|job| job.as_str().to_string()),
+            holder_stale: status.holder_stale,
         }
     }
 }
@@ -544,60 +408,27 @@ struct LeaseOutcome {
     error: Option<String>,
 }
 
-impl LeaseOutcome {
-    fn granted(status: LeaseStatusSnapshot) -> Self {
-        Self {
-            granted: true,
-            status,
-            error: None,
-        }
-    }
-
-    fn refused(status: LeaseStatusSnapshot) -> Self {
-        Self {
-            granted: false,
-            status,
-            error: None,
-        }
-    }
-
-    fn failed(error: String) -> Self {
-        Self {
-            granted: false,
-            status: LeaseStatusSnapshot::default(),
-            error: Some(error),
-        }
-    }
-}
-
+/// The verification lane's lease. While the lane is free, a canonical
+/// verification that a pre-upgrade binary still runs on the model lane is
+/// reported in its place (Issue #4285 transition); index jobs and searches
+/// on the model lane are never verification holders.
 fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
-    Ok(open_coordinator()?
+    let status = open_coordinator()?
         .heavy_lease_status()
-        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?
-        .into())
+        .map_err(|err| unexpected(format!("failed to read the verification lease: {err}")))?;
+    if status.held || status.pending > 0 {
+        return Ok(status.into());
+    }
+    let legacy = IndexCoordinator::open_default()
+        .and_then(|coordinator| coordinator.heavy_lease_status())
+        .ok()
+        .filter(|legacy| legacy.held && legacy.holder_kind == Some(HeavyHolderKind::Verification));
+    Ok(legacy.unwrap_or(status).into())
 }
 
 pub(super) fn open_coordinator() -> Result<IndexCoordinator, SpecOpsError> {
-    IndexCoordinator::open_default()
+    IndexCoordinator::open_default_verification()
         .map_err(|err| unexpected(format!("verification lease coordinator unavailable: {err}")))
-}
-
-/// `verify.lease.hold` is reachable through the ordinary envelope dispatcher,
-/// so refuse a control directory outside the coordinator runtime. A holder
-/// pointed elsewhere would take the real host-wide lease while
-/// [`control_dir_for`] could never find it, leaving it unreleasable until its
-/// TTL.
-fn ensure_control_dir_is_ours(control: &Path) -> Result<(), SpecOpsError> {
-    let expected_parent = coordinator_root().join(CONTROL_DIR);
-    if control.parent() == Some(expected_parent.as_path()) {
-        return Ok(());
-    }
-    Err(unexpected(format!(
-        "verify.lease.hold is internal: params.control must be a directory directly under {} \
-         (got {}). Use verify.lease.acquire instead.",
-        expected_parent.display(),
-        control.display()
-    )))
 }
 
 pub(super) fn verification_key<E: CliEnv>(env: &mut E) -> Result<TargetKey, SpecOpsError> {
@@ -614,50 +445,6 @@ fn render(out: &mut String, held_label: &str, free_label: &str, status: &LeaseSt
     let label = if status.held { held_label } else { free_label };
     out.push_str(&format!("verification lease: {label}\n"));
     push_status_fields(out, status);
-}
-
-/// The live lease named by `lease_id` when it belongs to an index job
-/// (Issue #4086): such a lease has no verification control directory, so
-/// release requests are arbitrated through the coordinator instead.
-fn held_index_lease(lease_id: &str) -> Result<bool, SpecOpsError> {
-    let status = status()?;
-    Ok(status.held
-        && status.lease_id.as_deref() == Some(lease_id)
-        && status.holder_kind.as_deref() == Some(HeavyHolderKind::Index.as_str()))
-}
-
-/// PM arbitration of an index lease (Issue #4086): leave a verification-
-/// priority reservation for the caller's worktree. The runner observes it at
-/// its next batch boundary and yields; the host then defers to the
-/// reservation instead of re-taking the lease.
-fn request_index_yield<E: CliEnv>(
-    env: &mut E,
-    lease_id: &str,
-    reason: Option<&str>,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
-    let key = verification_key(env)?;
-    open_coordinator()?
-        .reserve_heavy(
-            &key,
-            JobPriority::ManualRebuild,
-            VERIFICATION_RESERVATION_TTL,
-            Some(reason.unwrap_or("verify.lease.release arbitration")),
-        )
-        .map_err(|err| unexpected(format!("failed to reserve the heavy lease: {err}")))?;
-    out.push_str("verification lease: yield requested\n");
-    out.push_str(&format!("lease_id: {lease_id}\n"));
-    if let Some(reason) = reason {
-        out.push_str(&format!("reason: {reason}\n"));
-    }
-    push_status_fields(out, &status()?);
-    out.push_str(&format!(
-        "note: an index job holds this lease; it releases at its next batch boundary \
-         (at most {}s after this request when progress is published) and background index \
-         jobs defer to the reservation left for this worktree\n",
-        VERIFICATION_RESERVATION_TTL.as_secs()
-    ));
-    Ok(0)
 }
 
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
@@ -685,43 +472,65 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     if let Some(kind) = &status.holder_kind {
         out.push_str(&format!("holder_kind: {kind}\n"));
     }
+    if let Some(nice) = status.holder_nice {
+        out.push_str(&format!("holder_nice: {nice}\n"));
+    }
+    if let Some(spawn_host) = &status.holder_spawn_host {
+        out.push_str(&format!("holder_spawn_host: {spawn_host}\n"));
+    }
+    if let Some(alive) = status.holder_alive {
+        out.push_str(&format!("holder_alive: {alive}\n"));
+    }
+    if let Some(job) = &status.holder_job_status {
+        out.push_str(&format!("holder_job_status: {job}\n"));
+    }
+    if status.holder_stale {
+        out.push_str("holder_stale: true\n");
+    }
     if let Some(batches) = status.remaining_batches {
         out.push_str(&format!("remaining_batches: {batches}\n"));
     }
     if let Some(estimate) = status.estimated_remaining_ms {
         out.push_str(&format!("estimated_remaining_ms: {estimate}\n"));
     }
+    if let Some(held) = status.holder_held_ms {
+        out.push_str(&format!("holder_held_ms: {held}\n"));
+    }
+    if let Some(cpu) = status.holder_cpu_percent {
+        out.push_str(&format!("holder_cpu_percent: {cpu:.1}\n"));
+    }
+    if let Some(state) = &status.holder_state {
+        out.push_str(&format!("holder_state: {state}\n"));
+    }
     out.push_str(&format!("pending: {}\n", status.pending));
+    // Issue #4169 AC-2: `pending` is a count, and a count cannot tell an agent
+    // whether it is next or fifth. The queue names every claimant and how long
+    // it has been waiting, in the order the lease will be handed over.
+    for (position, entry) in status.queue.iter().enumerate() {
+        out.push_str(&format!(
+            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={}\n",
+            entry.target.as_deref().unwrap_or("unknown"),
+            entry.priority.as_str(),
+            entry.queued_at_ms,
+            entry.waiting_ms,
+        ));
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Distinguish "that lease is already gone" from "that lease is held but its
-/// control channel is missing" — the second is not resolvable by retrying, so
-/// saying the holder died would send the caller down the wrong path.
 fn missing_lease(lease_id: &str) -> SpecOpsError {
     let held = status()
         .ok()
         .filter(|status| status.held && status.lease_id.as_deref() == Some(lease_id));
     match held {
-        Some(status) => unexpected(format!(
-            "verification lease {lease_id} is still held but has no control channel, so it \
-             cannot be released or extended. It lapses on its own at expires_at_ms={}. \
-             This means the control directory under the coordinator runtime was removed \
-             while the holder was alive.",
-            status
-                .expires_at_ms
-                .map(|at| at.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+        Some(_) => unexpected(format!(
+            "verification lease {lease_id} is held without a legacy control channel. \
+             Canonical leases are owned by `verify.run` and release when the runner finishes; \
+             they cannot be released or extended through the manual API. \
+             Check `verify.lease.status` for the current holder."
         )),
         None => unexpected(format!(
             "no live verification lease {lease_id} — check `verify.lease.status`; \
@@ -736,17 +545,129 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    fn command_strings(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
 
+    /// Issue #4196 AC-1 / AC-3: what a requested command weighs follows the
+    /// scope it will actually build, not merely the fact that it says
+    /// `cargo test`. AC-3 pins the two ends down: a workspace-wide run is
+    /// heavy and a single named test target is light.
     #[test]
-    fn ttl_bounds_are_enforced() {
-        assert!(validate_ttl_minutes(0).is_err());
-        assert!(validate_ttl_minutes(MAX_TTL_MINUTES + 1).is_err());
+    fn classify_command_reads_the_scope_of_a_cargo_run() {
+        // AC-3: the two cases the Issue fixes by name.
         assert_eq!(
-            validate_ttl_minutes(DEFAULT_TTL_MINUTES).unwrap(),
-            Duration::from_secs(45 * 60)
+            classify_command("cargo test --workspace --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test -p gwt --test verification_lease"),
+            CommandWeight::Light
+        );
+
+        // A widening flag wins wherever it sits on the line.
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test --all-targets --test admission"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test --workspace --exclude gwt --lib"),
+            CommandWeight::Heavy
+        );
+        // Global option values and Cargo's glob/attached selector syntax must
+        // not let a broad run masquerade as one package and one target.
+        for command in [
+            "cargo --config net.offline=true test --workspace --all-features",
+            "cargo test -p 'gwt-*' --lib",
+            "cargo test -p gwt --test '*'",
+            "cargo test -pgwt -pgwt-core --test admission",
+            "cargo test -p gwt --test admission --test verification_lease",
+            "cargo test -p gwt --lib --test admission",
+            "cargo test -p gwt --test admission --bench benchmark",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+        }
+        assert_eq!(
+            classify_command("cargo test -pgwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Nothing narrows these: they build every target of the selected
+        // packages, which is the run the lease exists for.
+        assert_eq!(classify_command("cargo test"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test -p gwt-core"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(
+            classify_command("cargo test -p gwt -p gwt-core --lib"),
+            CommandWeight::Heavy,
+            "several packages is not one narrow target"
+        );
+        // `--lib` names a target *per package*, and this is a virtual
+        // workspace with `default-members`: with no package selected it builds
+        // every member's lib, so it must not read as narrow.
+        assert_eq!(classify_command("cargo test --lib"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Cargo's own arguments end at `--`; the rest is the test binary's
+        // filter and says nothing about what cargo builds.
+        assert_eq!(
+            classify_command("cargo test -p gwt --lib -- --all-features"),
+            CommandWeight::Light
+        );
+        assert_eq!(
+            classify_command("cargo +nightly test -p gwt --lib"),
+            CommandWeight::Light
+        );
+
+        // Other cargo subcommands keep the weight they already had.
+        assert_eq!(
+            classify_command("cargo clippy --all-targets --all-features"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(classify_command("cargo fmt --check"), CommandWeight::Light);
+        assert_eq!(classify_command("cargo metadata"), CommandWeight::Light);
+
+        // Anything this module cannot bound stays heavy: guessing light for an
+        // unrecognized program would trade one window's wait for the host-wide
+        // oversubscription the lease was built to prevent.
+        assert_eq!(
+            classify_command("npx playwright test --headed"),
+            CommandWeight::Heavy
+        );
+        assert_eq!(classify_command("cargo"), CommandWeight::Heavy);
+        assert_eq!(
+            classify_command("cargo test 'unbalanced"),
+            CommandWeight::Heavy
         );
     }
+
+    /// Issue #4196 AC-2 / AC-4: a matrix is only as light as its heaviest
+    /// command, and the caller can name the one that forces the wait instead
+    /// of leaving the agent to discover it by idling.
+    #[test]
+    fn first_heavy_command_names_what_forces_the_host_lease() {
+        let light = command_strings(&["cargo fmt --check", "cargo test -p gwt --test admission"]);
+        assert_eq!(first_heavy_command(&light), None);
+        assert_eq!(first_heavy_command(&[]), None);
+
+        let mixed = command_strings(&["cargo test -p gwt --lib", "cargo test --workspace"]);
+        assert_eq!(
+            first_heavy_command(&mixed).map(String::as_str),
+            Some("cargo test --workspace")
+        );
+    }
+
+    use super::*;
+    use gwt_core::index_coordinator::JobPriority;
 
     #[test]
     fn free_status_renders_without_holder_fields() {
@@ -772,11 +693,37 @@ mod tests {
                 remaining_ms: Some(60_000),
                 expired: false,
                 pending: 2,
+                queue: vec![
+                    HeavyQueueEntry {
+                        target: Some("repo--verification--early".to_string()),
+                        priority: JobPriority::ManualRebuild,
+                        queued_at_ms: 500,
+                        waiting_ms: 90_000,
+                    },
+                    HeavyQueueEntry {
+                        target: Some("repo--verification--late".to_string()),
+                        priority: JobPriority::ManualRebuild,
+                        queued_at_ms: 900,
+                        waiting_ms: 89_600,
+                    },
+                ],
                 holder_kind: Some("verification".to_string()),
+                holder_nice: Some(10),
+                holder_spawn_host: Some("daemon".to_string()),
                 remaining_batches: None,
                 estimated_remaining_ms: Some(60_000),
+                holder_held_ms: None,
+                holder_cpu_percent: None,
+                holder_state: None,
+                holder_alive: Some(true),
+                holder_job_status: Some("running".to_string()),
+                holder_stale: false,
             },
         );
+        // Issue #4169 AC-2: the waiters are named in service order, each with
+        // the moment it joined and how long it has been waiting. Issue #4409
+        // AC-4 adds the holder's own priority and where it launches from, so a
+        // waiter can tell a slow holder from a starved one.
         assert_eq!(
             out,
             "verification lease: held\n\
@@ -788,159 +735,56 @@ mod tests {
              remaining_ms: 60000\n\
              expired: false\n\
              holder_kind: verification\n\
+             holder_nice: 10\n\
+             holder_spawn_host: daemon\n\
+             holder_alive: true\n\
+             holder_job_status: running\n\
              estimated_remaining_ms: 60000\n\
-             pending: 2\n"
+             pending: 2\n\
+             queue[0]: target=repo--verification--early priority=manual-rebuild \
+             queued_at_ms=500 waiting_ms=90000\n\
+             queue[1]: target=repo--verification--late priority=manual-rebuild \
+             queued_at_ms=900 waiting_ms=89600\n"
         );
     }
 
+    /// Issue #4352 AC-2: the retired manual acquire never reserves a lease
+    /// and tells the caller that bootstrap builds run without one.
     #[test]
-    fn outcome_round_trips_through_the_control_file() {
-        let dir = tempfile::tempdir().expect("control dir");
-        let outcome = LeaseOutcome::refused(LeaseStatusSnapshot {
-            held: true,
-            lease_id: Some("lease-9".to_string()),
-            remaining_ms: Some(1_234),
-            ..LeaseStatusSnapshot::default()
-        });
-        publish_outcome(dir.path(), &outcome);
-        let parsed: LeaseOutcome =
-            read_json(&dir.path().join(OUTCOME_FILE)).expect("published outcome");
-        assert!(!parsed.granted);
-        assert_eq!(parsed.status.lease_id.as_deref(), Some("lease-9"));
-        assert_eq!(parsed.status.remaining_ms, Some(1_234));
-    }
-
-    fn control_dir(root: &Path, name: &str) -> PathBuf {
-        let path = root.join(CONTROL_DIR).join(name);
-        fs::create_dir_all(&path).expect("control dir");
-        path
-    }
-
-    fn published(root: &Path, name: &str, granted: bool, lease_id: &str) -> PathBuf {
-        let path = control_dir(root, name);
-        publish_outcome(
-            &path,
-            &LeaseOutcome {
-                granted,
-                status: LeaseStatusSnapshot {
-                    held: true,
-                    lease_id: Some(lease_id.to_string()),
-                    ..LeaseStatusSnapshot::default()
-                },
-                error: None,
+    fn manual_acquire_is_retired_and_exempts_bootstrap_builds() {
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let mut out = String::new();
+        let err = run(
+            &mut env,
+            VerificationLeaseCommand::Acquire {
+                ttl_minutes: DEFAULT_TTL_MINUTES,
+                reason: Some("cargo build -p gwt --bin gwtd".to_string()),
             },
-        );
-        path
-    }
-
-    #[cfg(windows)]
-    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
-        use std::fs::OpenOptions;
-        use std::os::windows::fs::OpenOptionsExt;
-
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
-        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
-
-        if path.is_dir() {
-            return OpenOptions::new()
-                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-                .open(path);
-        }
-        fs::File::options().write(true).open(path)
-    }
-
-    #[cfg(not(windows))]
-    fn open_for_backdating(path: &Path) -> std::io::Result<fs::File> {
-        fs::File::options()
-            .write(true)
-            .open(path)
-            .or_else(|_| fs::File::open(path))
-    }
-
-    /// Backdate a directory and its outcome past the grace window so the sweep
-    /// treats it as residue without the test having to wait.
-    fn age_out(dir: &Path) {
-        let stale = std::time::SystemTime::now() - CONTROL_RESIDUE_GRACE * 2;
-        for path in [dir.join(OUTCOME_FILE), dir.to_path_buf()] {
-            if path.exists() {
-                let file = open_for_backdating(&path).expect("open for backdating");
-                file.set_modified(stale).expect("backdate");
-            }
-        }
-    }
-
-    #[test]
-    fn sweep_removes_only_aged_out_residue() {
-        let root = tempfile::tempdir().expect("coordinator root");
-        let live = published(root.path(), "live", true, "lease-live");
-        let abandoned = published(root.path(), "abandoned", true, "lease-dead");
-        let starting_up = control_dir(root.path(), "starting-up");
-        age_out(&live);
-        age_out(&abandoned);
-        age_out(&starting_up);
-
-        sweep_abandoned_control_dirs(root.path(), Some("lease-live"));
-
-        assert!(live.is_dir(), "the live control channel must survive");
+            &mut out,
+        )
+        .expect_err("manual acquire must be refused");
+        let message = err.to_string();
         assert!(
-            !abandoned.is_dir(),
-            "a dead holder's aged-out directory is swept"
+            message.contains("bootstrap builds directly without a lease"),
+            "retired acquire must name bootstrap builds as lease-free: {message}"
         );
         assert!(
-            !starting_up.is_dir(),
-            "a directory that never published an outcome is residue once aged out"
-        );
-    }
-
-    /// The regression that matters: `current_lease_id` is a snapshot taken
-    /// before the scan, so a claimant that wins the lease during that gap is
-    /// invisible to it. Deleting that holder's directory would strand the
-    /// host-wide lease until its TTL, because the holder watches that
-    /// directory for the release signal.
-    #[test]
-    fn sweep_never_removes_a_freshly_published_control_dir() {
-        let root = tempfile::tempdir().expect("coordinator root");
-        let raced_in = published(root.path(), "raced-in", true, "lease-new");
-        let starting_up = control_dir(root.path(), "starting-up");
-
-        // Snapshot said the lease was free; another claimant took it since.
-        sweep_abandoned_control_dirs(root.path(), None);
-
-        assert!(
-            raced_in.is_dir(),
-            "a holder that published during the snapshot gap must not be swept"
+            message.contains("use `verify.run` for canonical verification"),
+            "retired acquire must route to verify.run: {message}"
         );
         assert!(
-            starting_up.is_dir(),
-            "a holder that has not published yet must not be swept"
+            out.is_empty(),
+            "a refused acquire must not render a lease: {out}"
         );
     }
 
     #[test]
-    fn hold_refuses_a_control_dir_outside_the_coordinator_runtime() {
-        let outside = tempfile::tempdir().expect("outside dir");
-        let error = ensure_control_dir_is_ours(&outside.path().join("lease-1"))
-            .expect_err("an out-of-tree control dir must be refused");
-        assert!(
-            error.to_string().contains("verify.lease.hold is internal"),
-            "the refusal must name the cause: {error}"
-        );
-        assert!(
-            ensure_control_dir_is_ours(&coordinator_root().join(CONTROL_DIR).join("lease-1"))
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn extend_requests_parse_only_whole_deadlines() {
-        let dir = tempfile::tempdir().expect("control dir");
-        let path = dir.path().join(EXTEND_FILE);
-        assert_eq!(read_extend_request(&path), None);
-        fs::write(&path, b" 1750000000000\n").unwrap();
-        assert_eq!(read_extend_request(&path), Some(1_750_000_000_000));
-        fs::write(&path, b"soon").unwrap();
-        assert_eq!(read_extend_request(&path), None);
+    fn legacy_granted_outcome_remains_readable() {
+        let parsed: LeaseOutcome =
+            serde_json::from_str(r#"{"granted":true,"held":true,"lease_id":"legacy-lease"}"#)
+                .expect("pre-upgrade holder outcome");
+        assert!(parsed.granted);
+        assert_eq!(parsed.status.lease_id.as_deref(), Some("legacy-lease"));
     }
 }

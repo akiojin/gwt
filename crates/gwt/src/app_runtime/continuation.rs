@@ -116,7 +116,8 @@ fn invoke_fresh_execution_pre_work_commit_hook() {
 fn invoke_fresh_execution_pre_work_commit_hook() {}
 
 use super::workspace::{
-    apply_workspace_launch_transition, WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
+    apply_workspace_launch_for_current_work, apply_workspace_launch_transition,
+    WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
 };
 use super::{
     continue_work_readiness_decision, launch_config_from_persisted_session,
@@ -810,6 +811,7 @@ pub(super) fn continuation_launch_config(
         }
     };
     config.linked_issue_number = Some(owner.number);
+    config.launch_route = gwt_agent::LaunchRoute::Manual;
     (config, outcome)
 }
 
@@ -6689,17 +6691,15 @@ impl AppRuntime {
                         &pending.project_root,
                         &pending.worktree_path,
                         &pending.operation_id,
-                        |projection, _work_items, _| {
+                        |projection, work_items, _| {
                             let now = chrono::Utc::now();
-                            let event = apply_workspace_launch_transition(
+                            let event = apply_workspace_launch_for_current_work(
+                                &pending.project_root,
                                 projection,
+                                work_items,
                                 &active_session,
                                 WorkspaceLaunchTransition {
-                                    work_id: gwt_core::workspace_projection::canonical_work_id(
-                                        &pending.project_root,
-                                        Some(active_session.branch_name.as_str()),
-                                        Some(active_session.worktree_path.as_path()),
-                                    ),
+                                    work_id: None,
                                     base_branch: pending.base_branch.as_deref(),
                                     linked_issue_number: pending.linked_issue_number,
                                     canonical_owner: Some(pending.owner),
@@ -6716,7 +6716,7 @@ impl AppRuntime {
                                     live_session_ids: &live_session_ids,
                                     now,
                                 },
-                            );
+                            )?;
                             Ok(((), vec![event]))
                         },
                         || {

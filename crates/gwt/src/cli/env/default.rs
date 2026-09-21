@@ -135,8 +135,29 @@ impl IssueClient for LazyIssueClient {
         &self,
         number: IssueNumber,
         state: gwt_github::client::IssueState,
+        reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
-        self.resolve()?.set_state(number, state)
+        self.resolve()?.set_state(number, state, reason)
+    }
+
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .add_labels_mutation(number, labels)
+    }
+
+    fn remove_label_mutation(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.resolve()
+            .map_err(gwt_github::client::OwnerMutationError::PreSubmit)?
+            .remove_label_mutation(number, label)
     }
 
     fn list_spec_issues(
@@ -204,7 +225,9 @@ impl DefaultCliEnv {
     /// The inner `HttpIssueClient` is constructed with an empty token
     /// and empty owner/repo strings.
     pub fn new_for_hooks() -> Self {
-        Self::new_for_hooks_at(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project = crate::pm_registry::pm_worktree_for_runtime_dir(&cwd).unwrap_or(cwd);
+        Self::new_for_hooks_at(project)
     }
 
     /// Build a hook environment for an explicitly resolved worktree.
@@ -339,7 +362,15 @@ impl CliEnv for DefaultCliEnv {
         let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path);
         let history_path = project_dir.join(gwt_git::PR_INVENTORY_HISTORY_FILE);
         let cache_path = project_dir.join(gwt_git::PR_INVENTORY_CACHE_FILE);
-        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, &cache_path, options)
+        let settings =
+            gwt_config::Settings::load_from_path(&gwt_core::paths::gwt_home().join("config.toml"))
+                .unwrap_or_default();
+        let options = gwt_git::PrInventoryOptions {
+            cache_ttl_secs: settings.pr_inventory.cache_ttl_secs,
+            checks_refresh_secs: settings.pr_inventory.checks_refresh_secs,
+            ..options.clone()
+        };
+        gwt_git::fetch_pr_inventory_tracked(&self.repo_path, &history_path, &cache_path, &options)
             .map_err(|err| io::Error::other(err.to_string()))
     }
     fn probe_github_rate_limit(&mut self) -> io::Result<String> {
@@ -356,6 +387,17 @@ impl CliEnv for DefaultCliEnv {
     fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::pr::convert_pr_to_draft_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
+    fn update_pr_branch(
+        &mut self,
+        number: u64,
+    ) -> io::Result<crate::cli::pr::types::PrUpdateBranchResult> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::update_pr_branch_via_gh(
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,

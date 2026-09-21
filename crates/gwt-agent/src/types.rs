@@ -464,6 +464,46 @@ pub enum SessionMode {
     Resume,
 }
 
+/// Who started a session (Issue #4217 FR-002).
+///
+/// The launcher is the only party that knows this for certain, so it is
+/// stamped onto the durable Session record at launch instead of being
+/// inferred later from ambient environment variables. `GWT_AUTONOMOUS_EXECUTION`
+/// is set only when the project opted into unattended autonomous mode, so an
+/// Issue Monitor launch made while that preference reads false used to
+/// classify itself as human-driven and then stall waiting for a human who was
+/// never there (#3777, #3697).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchRoute {
+    /// A human started this launch from the GUI (Start Work / Continue work).
+    /// Legacy Session records without the field deserialize as this, which
+    /// keeps every pre-#4217 session on the human-gated behavior.
+    #[default]
+    Manual,
+    /// The Issue Monitor claimed the owner Issue and launched this session
+    /// with nobody watching.
+    Autonomous,
+}
+
+impl LaunchRoute {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Autonomous => "autonomous",
+        }
+    }
+
+    /// Whether a human is expected to be watching this session.
+    ///
+    /// The single question every visual-verification gate actually asks.
+    #[must_use]
+    pub fn is_attended(self) -> bool {
+        matches!(self, Self::Manual)
+    }
+}
+
 /// Runtime target for launching an agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LaunchRuntimeTarget {

@@ -88,6 +88,32 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
         ("pr.draft", json!({}), GovernanceEffect::Reversible),
         ("workspace.update", json!({}), GovernanceEffect::Reversible),
+        (
+            "issue.label",
+            json!({"action":"add","labels":["bug"]}),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["bug"]}),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["hold"]}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["gwt-spec"]}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "issue.label",
+            json!({"action":"add","labels":["auto-merge"]}),
+            GovernanceEffect::Protected,
+        ),
+        ("issue.label", json!({}), GovernanceEffect::Protected),
         ("execution.continue", json!({}), GovernanceEffect::Protected),
         ("execution.adopt", json!({}), GovernanceEffect::Protected),
         ("execution.repair", json!({}), GovernanceEffect::Protected),
@@ -617,6 +643,9 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
             json!({ "number": 1935, "section": "spec" }),
         ),
         ("issue.spec.list", json!({ "state": "open" })),
+        // Issue #4146 AC-4: auditing which SPECs were misjudged as complete
+        // is a read, so it must not be gated by an owner either.
+        ("issue.spec.audit", json!({ "state": "closed" })),
         (
             "issue.create",
             json!({ "title": "bug", "body": "body", "labels": ["bug"] }),
@@ -1093,15 +1122,18 @@ fn allows_leading_comment_line_before_read_only_pipeline_without_owner() {
 }
 
 #[test]
-fn safety_policy_still_blocks_github_workflow_cli_in_the_chain() {
+fn safety_policy_still_blocks_github_workflow_mutations_in_the_chain() {
     // The consolidated Bash safety policy stays first in the chain even after
     // the owner guard removal (SPEC #3245 FR-009).
-    let event = event("Bash", json!({ "command": "gh issue view 1935" }));
+    let event = event(
+        "Bash",
+        json!({ "command": "gh issue edit 1935 --title updated" }),
+    );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("github workflow cli must still be blocked by the safety policy");
+        .expect("github workflow mutations must still be blocked by the safety policy");
     assert!(decision
         .permission_decision_reason()
-        .contains("GitHub workflow CLI"));
+        .contains("GitHub workflow mutations"));
 }
 
 // SPEC #3245 FR-009 / AC-7 — the owner guard is removed entirely. The six

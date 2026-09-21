@@ -19,6 +19,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+mod context;
 pub mod coordination_event;
 pub mod diagnostics;
 pub mod effect_classifier;
@@ -66,7 +67,22 @@ pub(crate) use identity::{
 /// must be deterministic per worktree so an ambient value from another session
 /// can never redirect policy.
 pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
-    crate::pm_registry::is_pm_worktree(&gwt_core::paths::resolve_current_worktree_root(worktree))
+    // Hooks may supply a nested cwd. Find the PM root without repeatedly
+    // spawning git on the warm prompt path, and retain the full canonical
+    // registry check so an ordinary branch named pm/worktree cannot match.
+    worktree.ancestors().any(|ancestor| {
+        if ancestor.file_name() != Some(std::ffi::OsStr::new("worktree"))
+            || ancestor.parent().and_then(std::path::Path::file_name)
+                != Some(std::ffi::OsStr::new("pm"))
+        {
+            return false;
+        }
+        if crate::pm_registry::is_pm_worktree(ancestor) {
+            return true;
+        }
+        let canonical = dunce::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+        crate::pm_registry::is_canonical_pm_worktree(&canonical)
+    })
 }
 
 /// Every hook name exposed via `gwtd hook <name>`.
@@ -84,6 +100,7 @@ pub enum HookKind {
     WorkflowPolicy,
     Forward,
     RegisterCodexManagedHookTrust,
+    RegisterCodexManagedProjectTrust,
     SkillDiscussionStopCheck,
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
@@ -106,6 +123,7 @@ impl HookKind {
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
             "register-codex-managed-hook-trust" => Some(Self::RegisterCodexManagedHookTrust),
+            "register-codex-managed-project-trust" => Some(Self::RegisterCodexManagedProjectTrust),
             "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
@@ -269,6 +287,29 @@ pub(crate) fn refresh_managed_assets_for_hook_front_door(
         .map_err(|err| err.to_string())
 }
 
+/// A denial does not park an Issue. Report only the owning Session's observed
+/// phase; missing identity or unreadable preferences cannot establish a park.
+fn parked_owner_issue() -> Option<u64> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    let session = gwt_agent::Session::load_and_migrate(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    let issue = session.linked_issue_number?;
+    let prefs = crate::issue_monitor::load_issue_monitor_prefs(
+        &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&session.worktree_path),
+    )
+    .ok()?;
+    prefs
+        .autonomous_records
+        .iter()
+        .any(|record| {
+            record.issue_number == issue
+                && record.phase == crate::issue_monitor::AutonomousPhase::NeedsHuman
+        })
+        .then_some(issue)
+}
+
 pub fn run_daemon_hook<E: CliEnv>(
     env: &mut E,
     name: &str,
@@ -310,12 +351,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                     // than Claude's hookSpecificOutput JSON envelope.
                     let headline = deny_reason.lines().next().unwrap_or(deny_reason).trim();
                     // Grok truncates the first stderr line to 256 characters.
-                    // Keep the terminal action in that bounded prefix; the
+                    // Keep each gate's recovery in that bounded prefix; the
                     // full provider-neutral detail remains in stdout for
                     // adapters that consume the structured envelope.
-                    let grok_reason = format!(
-                        "{headline}. Stop working on this Issue now if human judgment is still required; it is parked in NeedsHuman."
-                    );
+                    // Name which kind of gate this is, so the agent never has
+                    // to infer a park from a gate it can clear itself.
+                    let grok_reason = match parked_owner_issue() {
+                        Some(issue) => format!(
+                            "{headline}. Issue #{issue} is parked in NeedsHuman: a human must decide before it continues."
+                        ),
+                        None => format!(
+                            "{headline}. This denial does not park the Issue; clear the stated gate and keep working."
+                        ),
+                    };
                     let _ = writeln!(env.stderr(), "{grok_reason}");
                 }
                 Ok(output.exit_code())
@@ -524,10 +572,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                 },
                 None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+            // #3967: compare against the binary managed hook generation embeds,
+            // resolved the same way materialization resolves it. Guessing here
+            // is what left every hook untrusted for a gwt started from a
+            // development build.
+            let expected_hook_bin = match crate::managed_assets::managed_hook_bin() {
+                Ok(hook_bin) => hook_bin,
+                Err(err) => return Ok(emit_hook_error(env, name, err)),
+            };
+            match gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
                 &project_root,
                 &codex_config_path,
                 discovery_mode,
+                Some(expected_hook_bin.as_str()),
             ) {
                 Ok(report) => {
                     let _ = writeln!(
@@ -535,9 +592,91 @@ pub fn run_daemon_hook<E: CliEnv>(
                         "trusted {} gwt-managed Codex hooks",
                         report.trusted_entries.len()
                     );
-                    Ok(0)
+                    // #3967 AC-4: a silent success here is how an operator was
+                    // told the pre-registration had worked while Codex was
+                    // still going to stop the launch. Report the hooks gwt
+                    // could not vouch for, and fail — this is the front door an
+                    // operator runs to check a real machine.
+                    match report.hooks_need_review_reason() {
+                        Some(reason) => {
+                            let _ = writeln!(env.stdout(), "{reason}");
+                            Ok(1)
+                        }
+                        None => Ok(0),
+                    }
                 }
                 Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::RegisterCodexManagedProjectTrust => {
+            let project_root = option_value(rest, "--project-root")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let explicit_config =
+                option_value(rest, "--codex-config").map(std::path::PathBuf::from);
+            let docker_local = option_value(rest, "--runtime-target") == Some("docker");
+            let codex_config_path = if docker_local {
+                if explicit_config.is_some() {
+                    return Err(io_as_api_error(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Docker-local project trust derives its config from the effective environment; --codex-config is not accepted",
+                    )));
+                }
+                default_codex_config_path()
+            } else {
+                let stable_config =
+                    crate::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                        &project_root,
+                        std::env::var_os("CODEX_HOME").as_deref(),
+                        dirs::home_dir().as_deref(),
+                    );
+                if let Some(explicit_config) = explicit_config {
+                    if !explicit_config.is_absolute() {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    let Some(stable_config) = stable_config else {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    };
+                    if !crate::managed_assets::codex_config_paths_equivalent(
+                        &explicit_config,
+                        &stable_config,
+                    ) {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    Some(stable_config)
+                } else {
+                    stable_config
+                }
+            };
+            let Some(codex_config_path) = codex_config_path else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "hook.register_codex_managed_project_trust: process-stable/default Codex config is unavailable"
+                );
+                return Ok(2);
+            };
+            match gwt_skills::register_codex_managed_project_trust(
+                &project_root,
+                &codex_config_path,
+            ) {
+                Ok(report) => {
+                    let _ = writeln!(
+                        env.stdout(),
+                        "trusted gwt-managed Codex worktree {}",
+                        report.project_path.display()
+                    );
+                    Ok(0)
+                }
+                Err(err) => Err(io_as_api_error(err)),
             }
         }
         HookKind::SkillDiscussionStopCheck => {
@@ -590,9 +729,15 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn default_codex_config_path() -> Option<std::path::PathBuf> {
-    gwt_core::paths::gwt_home()
-        .parent()
-        .map(|home| home.join(".codex/config.toml"))
+    std::env::var_os("CODEX_HOME")
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("config.toml"))
+        .or_else(|| {
+            gwt_core::paths::gwt_home()
+                .parent()
+                .map(|home| home.join(".codex/config.toml"))
+        })
 }
 
 #[cfg(test)]
@@ -611,6 +756,24 @@ mod tests {
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
 
     use super::*;
+
+    #[test]
+    fn resident_pm_policy_recognizes_nested_cwd_only_under_canonical_pm_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let pm = gwt_core::paths::gwt_projects_dir().join("repo-hash/pm/worktree");
+        let nested = pm.join("crates/gwt/src");
+        fs::create_dir_all(&nested).expect("nested PM cwd");
+
+        assert!(is_resident_pm_worktree(&pm));
+        assert!(is_resident_pm_worktree(&nested));
+        assert!(is_resident_pm_worktree(
+            &dunce::canonicalize(&nested).expect("canonical cwd")
+        ));
+        assert!(!is_resident_pm_worktree(
+            &temp.path().join("production/pm/worktree/crates/gwt/src")
+        ));
+    }
 
     #[test]
     fn invalid_hook_event_is_written_to_the_error_ledger() {

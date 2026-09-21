@@ -1500,11 +1500,13 @@ mod tests {
             repo.path(),
             &crate::cli::verification_record::VerificationRunRecord {
                 record_id: "vrr-typed-build".to_string(),
+                user_verification_result: None,
                 session_id: session_id.to_string(),
                 owner_number: Some(3248),
                 execution_binding: binding,
                 worktree_fingerprint: plan.worktree_fingerprint.clone(),
                 commands: vec![crate::cli::verification_record::VerificationCommandResult {
+                    headed_e2e: None,
                     command: command.clone(),
                     exit_code: 101,
                     output_tail: format!(

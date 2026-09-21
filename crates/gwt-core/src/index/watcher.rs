@@ -7,7 +7,8 @@
 //!
 //! The watcher does NOT trigger ChromaDB writes itself; consumers
 //! drain `WatcherHandle::recv_batch()` and dispatch the appropriate
-//! `runner index-* --mode incremental` job per batch.
+//! index job per batch. The consumer selects incremental reuse only when the
+//! current store and manifest support it; otherwise the runner rebuilds in full.
 
 use std::{
     path::{Path, PathBuf},
@@ -15,8 +16,18 @@ use std::{
 };
 
 use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
+use notify_debouncer_mini::{
+    new_debouncer_opt, Config as DebouncerConfig, DebounceEventResult, Debouncer,
+};
 use tokio::sync::mpsc;
+
+#[cfg(target_os = "macos")]
+#[path = "watcher_macos.rs"]
+mod macos;
+#[cfg(target_os = "macos")]
+type NativeWatcher = macos::WorktreeWatcher;
+#[cfg(not(target_os = "macos"))]
+type NativeWatcher = notify::RecommendedWatcher;
 
 use crate::{
     error::{GwtError, Result},
@@ -51,9 +62,11 @@ pub struct WatcherBatch {
 /// Handle returned from `start_watcher`. Drop or call `shutdown()` to stop.
 pub struct WatcherHandle {
     rx: mpsc::Receiver<WatcherBatch>,
-    _debouncer: Debouncer<notify::RecommendedWatcher>,
+    _debouncer: Debouncer<NativeWatcher>,
     _shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     forwarder: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(all(test, target_os = "macos"))]
+    observed_paths: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 
 impl WatcherHandle {
@@ -97,16 +110,24 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
 
     // Bridge sync notify callback → tokio mpsc.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    let mut debouncer: Debouncer<notify::RecommendedWatcher> =
-        new_debouncer(cfg.debounce, move |res: DebounceEventResult| {
+    #[cfg(all(test, target_os = "macos"))]
+    let observed_paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    #[cfg(all(test, target_os = "macos"))]
+    let callback_paths = observed_paths.clone();
+    let mut debouncer: Debouncer<NativeWatcher> = new_debouncer_opt(
+        DebouncerConfig::default().with_timeout(cfg.debounce),
+        move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
+                #[cfg(all(test, target_os = "macos"))]
+                callback_paths.lock().unwrap().extend(paths.iter().cloned());
                 if !paths.is_empty() {
                     let _ = raw_tx.send(paths);
                 }
             }
-        })
-        .map_err(|e| GwtError::Other(format!("debouncer init: {e}")))?;
+        },
+    )
+    .map_err(|e| GwtError::Other(format!("debouncer init: {e}")))?;
 
     debouncer
         .watcher()
@@ -161,6 +182,8 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
         _debouncer: debouncer,
         _shutdown_tx: Some(shutdown_tx),
         forwarder: Some(forwarder),
+        #[cfg(all(test, target_os = "macos"))]
+        observed_paths,
     })
 }
 
@@ -185,6 +208,51 @@ fn is_ignored(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn target_descendants_are_excluded_before_path_filtering() {
+        for target_exists in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = dunce::canonicalize(temp.path()).unwrap();
+            let target = root.join("target");
+            if target_exists {
+                std::fs::create_dir(&target).unwrap();
+            }
+            let mut watcher = start_watcher(
+                &root,
+                WatcherConfig {
+                    debounce: Duration::from_millis(100),
+                    batch_limit: 100,
+                },
+            )
+            .unwrap();
+            std::fs::create_dir_all(&target).unwrap();
+            for n in 0..50 {
+                std::fs::write(target.join(format!("artifact-{n}.rs")), "generated").unwrap();
+            }
+            let kept = root.join("kept.rs");
+            std::fs::write(&kept, "source").unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                loop {
+                    let batch = watcher.recv_batch().await.expect("watcher closed");
+                    if batch.changed_paths.contains(&kept) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("source change should still be delivered");
+            let observed = watcher.observed_paths.lock().unwrap().clone();
+            watcher.shutdown().await;
+            // The parent can report the target directory entry itself. Its
+            // descendants must never reach the debounce callback, before policy filtering.
+            assert!(
+                observed.iter().all(|path| path == &target || !path.starts_with(&target)),
+                "native subscription leaked target descendants (pre-existing={target_exists}): {observed:?}"
+            );
+        }
+    }
 
     #[test]
     fn config_defaults() {

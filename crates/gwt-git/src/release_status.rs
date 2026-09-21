@@ -331,6 +331,217 @@ where
     parse_open_release_pr(&output.stdout)
 }
 
+/// Build stamp compiled into the running binary.
+///
+/// The values are produced by the binary crate's build script, so this crate
+/// only ever receives them as data (a build script's `rustc-env` reaches its
+/// own crate and nothing else).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeBuildStamp {
+    /// Commit the running binary was built from, when git was available.
+    pub commit: Option<String>,
+    /// RFC 3339 timestamp of the build, when it could be resolved.
+    pub time: Option<String>,
+}
+
+impl RuntimeBuildStamp {
+    /// True when nothing about the build is known.
+    pub fn is_unknown(&self) -> bool {
+        self.commit.is_none()
+    }
+}
+
+/// Observations the runtime-generation classification is derived from.
+#[derive(Debug, Clone)]
+pub struct RuntimeGenerationInput {
+    /// Branch the running binary is compared against.
+    pub branch: String,
+    /// What the running binary was built from.
+    pub build: RuntimeBuildStamp,
+    /// Head commit of `branch`, when it could be read.
+    pub default_branch_head: Option<String>,
+    /// Commits on `branch` the build does not contain, when countable.
+    pub behind_commits: Option<u64>,
+}
+
+/// How the running binary's generation compares to the branch it came from.
+///
+/// Every field is optional on purpose: this exists because a PM reported a
+/// merged fix as running when it was not, so an unknown comparison must read
+/// as unknown rather than as "up to date" (SPEC #4249 FR-002 / AC-3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeGeneration {
+    /// Branch the running binary was compared against.
+    pub branch: String,
+    /// Commit the running binary was built from.
+    pub build_commit: Option<String>,
+    /// RFC 3339 timestamp of the build.
+    pub build_time: Option<String>,
+    /// Head commit of [`Self::branch`].
+    pub default_branch_head: Option<String>,
+    /// Commits on the branch the running binary does not contain.
+    pub behind_commits: Option<u64>,
+    /// `true` behind, `false` current, `None` when the comparison is unknown.
+    pub stale_runtime: Option<bool>,
+    /// The one step the owner takes, present only when the runtime is stale.
+    pub owner_action: Option<String>,
+}
+
+impl RuntimeGeneration {
+    /// A generation nothing is known about, for callers that cannot read one.
+    pub fn unknown(branch: &str) -> Self {
+        Self {
+            branch: branch.to_string(),
+            build_commit: None,
+            build_time: None,
+            default_branch_head: None,
+            behind_commits: None,
+            stale_runtime: None,
+            owner_action: None,
+        }
+    }
+}
+
+/// Classify the runtime generation from already-collected observations.
+///
+/// The only way to reach `stale_runtime: true` is to know both ends of the
+/// comparison *and* to have counted the gap. Two different commit ids alone do
+/// not prove the binary is behind — a build off a side branch is not stale —
+/// so an uncountable gap stays unknown.
+pub fn classify_runtime_generation(input: RuntimeGenerationInput) -> RuntimeGeneration {
+    let RuntimeGenerationInput {
+        branch,
+        build,
+        default_branch_head,
+        behind_commits,
+    } = input;
+    let current = match (build.commit.as_deref(), default_branch_head.as_deref()) {
+        (Some(built), Some(head)) => Some(built == head),
+        _ => None,
+    };
+    // Identical commits are zero apart even when no count was taken.
+    let behind_commits = if current == Some(true) {
+        Some(0)
+    } else {
+        behind_commits
+    };
+    let stale_runtime = match current {
+        None => None,
+        Some(true) => Some(false),
+        Some(false) => behind_commits.map(|count| count > 0),
+    };
+    let owner_action = (stale_runtime == Some(true))
+        .then(|| stale_runtime_owner_action(&branch, default_branch_head.as_deref()));
+    RuntimeGeneration {
+        branch,
+        build_commit: build.commit,
+        build_time: build.time,
+        default_branch_head,
+        behind_commits,
+        stale_runtime,
+        owner_action,
+    }
+}
+
+/// The single line a stale runtime hands the owner.
+fn stale_runtime_owner_action(branch: &str, head: Option<&str>) -> String {
+    let head = head.unwrap_or(branch);
+    format!(
+        "restart GWT.app on a build that contains {head} — apply the pending update in the GUI, \
+         or reinstall from a fresh {branch} build"
+    )
+}
+
+/// Read how the running binary's generation compares to `branch`.
+///
+/// Never fails: the PM runs `release.status` every cycle, so a GitHub outage
+/// or a commit missing from this clone degrades to unknown instead of turning
+/// the whole operation into an error.
+pub fn fetch_runtime_generation(
+    repo_path: &Path,
+    branch: &str,
+    build: RuntimeBuildStamp,
+) -> RuntimeGeneration {
+    fetch_runtime_generation_with(
+        repo_path,
+        branch,
+        build,
+        run_gh_command,
+        count_commits_behind,
+    )
+}
+
+/// [`fetch_runtime_generation`] with the `gh` and git reads injected.
+fn fetch_runtime_generation_with<G, C>(
+    repo_path: &Path,
+    branch: &str,
+    build: RuntimeBuildStamp,
+    mut run_gh: G,
+    mut count_behind: C,
+) -> RuntimeGeneration
+where
+    G: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+    C: FnMut(&Path, &str, &str) -> Result<u64>,
+{
+    // No build stamp means nothing to compare, so spend no budget at all.
+    if build.is_unknown() {
+        return RuntimeGeneration::unknown(branch);
+    }
+    let default_branch_head = fetch_branch_head(repo_path, branch, &mut run_gh);
+    let behind_commits = match (build.commit.as_deref(), default_branch_head.as_deref()) {
+        (Some(built), Some(head)) if built != head => count_behind(repo_path, built, head).ok(),
+        _ => None,
+    };
+    classify_runtime_generation(RuntimeGenerationInput {
+        branch: branch.to_string(),
+        build,
+        default_branch_head,
+        behind_commits,
+    })
+}
+
+/// Head commit of `branch` as GitHub has it, or `None` when it cannot be read.
+///
+/// `git/ref/heads/...` is the smallest response that carries a branch head, so
+/// the every-cycle read stays cheap.
+fn fetch_branch_head<G>(repo_path: &Path, branch: &str, run_gh: &mut G) -> Option<String>
+where
+    G: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let endpoint = format!("repos/{{owner}}/{{repo}}/git/ref/heads/{branch}");
+    let output = run_gh(
+        repo_path,
+        &["api", endpoint.as_str(), "--jq", ".object.sha"],
+    )
+    .ok()?;
+    if !output.success {
+        return None;
+    }
+    let sha = output.stdout.trim();
+    let is_sha = sha.len() >= 7 && sha.bytes().all(|byte| byte.is_ascii_hexdigit());
+    is_sha.then(|| sha.to_string())
+}
+
+/// Commits reachable from `head` but not from `base`.
+fn count_commits_behind(repo_path: &Path, base: &str, head: &str) -> Result<u64> {
+    let range = format!("{base}..{head}");
+    let output = gwt_core::process::run_git_logged(
+        &["rev-list", "--count", range.as_str()],
+        Some(repo_path),
+    )
+    .map_err(|error| GwtError::Git(format!("rev-list --count {range}: {error}")))?;
+    if !output.status.success() {
+        return Err(GwtError::Git(format!(
+            "rev-list --count {range}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|error| GwtError::Git(format!("rev-list --count {range}: {error}")))
+}
+
 /// Detect a stalled release and open the missing Release PR.
 ///
 /// Idempotent: the classification runs first, and only [`ReleaseCheckState::
@@ -417,11 +628,118 @@ where
 
 /// Body for the recovered Release PR: the CHANGELOG section when it can be
 /// read, otherwise a self-describing placeholder so the PR is never empty.
+///
+/// The body is reference-only (Issue #3545): `main` is the default branch,
+/// so a closing keyword that survives here would close its Issue on merge
+/// regardless of open acceptance criteria.
 fn release_pr_body(changelog: Option<&str>, version: &str) -> String {
     let notes = changelog
         .and_then(|text| changelog_section(text, version))
         .unwrap_or_else(|| format!("## {version}"));
-    format!("{notes}\n\nRecovered by the gwt interrupted-release check (Issue #3516).\n")
+    neutralize_closing_keywords(&format!(
+        "{notes}\n\nRecovered by the gwt interrupted-release check (Issue #3516).\n"
+    ))
+}
+
+/// GitHub closing keywords. One of these followed by an optional colon,
+/// whitespace, and an Issue reference links the PR as closing that Issue.
+const CLOSING_KEYWORDS: [&str; 9] = [
+    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+];
+
+/// Wrap every Issue reference that follows a closing keyword in a code span
+/// so GitHub cannot read the pair as a closing link (Issue #3545). Plain
+/// references stay untouched and the rewrite is idempotent.
+fn neutralize_closing_keywords(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+    while let Some((ref_start, ref_end)) = next_closing_reference(rest) {
+        out.push_str(&rest[..ref_start]);
+        out.push('`');
+        out.push_str(&rest[ref_start..ref_end]);
+        out.push('`');
+        rest = &rest[ref_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte range of the first Issue reference that follows a closing keyword.
+fn next_closing_reference(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    for (index, _) in text.char_indices() {
+        let word_start = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+        if !word_start {
+            continue;
+        }
+        let Some(keyword_end) = closing_keyword_end(text, index) else {
+            continue;
+        };
+        let mut cursor = keyword_end;
+        if bytes.get(cursor) == Some(&b':') {
+            cursor += 1;
+        }
+        let after_sep = text[cursor..].trim_start();
+        let sep_len = text.len() - cursor - after_sep.len();
+        if sep_len == 0 {
+            continue;
+        }
+        let ref_start = cursor + sep_len;
+        let ref_end = ref_start + issue_reference_len(after_sep);
+        if ref_end > ref_start {
+            return Some((ref_start, ref_end));
+        }
+    }
+    None
+}
+
+/// End of the closing keyword that starts at `start`, when one does.
+fn closing_keyword_end(text: &str, start: usize) -> Option<usize> {
+    let rest = &text[start..];
+    CLOSING_KEYWORDS
+        .iter()
+        .filter(|keyword| {
+            // Compare bytes: slicing `rest` at a byte offset would panic when a
+            // multi-byte character follows the keyword (`fix対応`).
+            rest.len() >= keyword.len()
+                && rest.as_bytes()[..keyword.len()].eq_ignore_ascii_case(keyword.as_bytes())
+        })
+        .map(|keyword| start + keyword.len())
+        .find(|&end| {
+            !text
+                .as_bytes()
+                .get(end)
+                .is_some_and(u8::is_ascii_alphanumeric)
+        })
+}
+
+/// Length of the `#N`, `owner/repo#N`, or Issue-URL reference at the start of
+/// `text`, or 0 when there is none.
+fn issue_reference_len(text: &str) -> usize {
+    let token_len = text
+        .find(|c: char| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '#' | '/' | '.' | '-' | '_' | ':'))
+        })
+        .unwrap_or(text.len());
+    let token = &text[..token_len];
+    let is_reference = match token.split_once('#') {
+        Some((prefix, digits))
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            prefix.is_empty() || prefix.matches('/').count() == 1
+        }
+        _ => {
+            token.starts_with("https://github.com/")
+                && token.rsplit_once("/issues/").is_some_and(|(_, digits)| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+        }
+    };
+    if is_reference {
+        token_len
+    } else {
+        0
+    }
 }
 
 /// Pull the PR number out of the URL `gh pr create` prints.
@@ -758,5 +1076,230 @@ mod tests {
         let body = release_pr_body(None, "v9.91.0");
         assert!(body.contains("## v9.91.0"));
         assert!(body.contains("Issue #3516"));
+    }
+
+    #[test]
+    fn recovered_body_neutralizes_closing_keywords_from_the_changelog() {
+        // Issue #3545: a Release PR body must never carry a closing keyword
+        // followed by an Issue reference, whatever a commit subject said.
+        let changelog = "## [9.92.0] - 2026-09-07\n\n### Bug Fixes\n\n\
+            - **launch:** Skip legacy resume, fixes #3527\n\
+            - Closes: #3528 and RESOLVES akiojin/gwt#3529\n\
+            - closed https://github.com/akiojin/gwt/issues/3530\n\
+            - Plain reference #3531 and hotfix #3532 stay\n\
+            - 修正 fixed #3533 対応、fix対応 #3534\n";
+        let body = release_pr_body(Some(changelog), "v9.92.0");
+        assert!(body.contains("fixes `#3527`"), "body was: {body}");
+        assert!(body.contains("Closes: `#3528`"), "body was: {body}");
+        assert!(
+            body.contains("RESOLVES `akiojin/gwt#3529`"),
+            "body was: {body}"
+        );
+        assert!(
+            body.contains("closed `https://github.com/akiojin/gwt/issues/3530`"),
+            "body was: {body}"
+        );
+        assert!(
+            body.contains("reference #3531 and hotfix #3532 stay"),
+            "body was: {body}"
+        );
+        assert!(
+            body.contains("修正 fixed `#3533` 対応、fix対応 #3534"),
+            "body was: {body}"
+        );
+        assert_eq!(
+            neutralize_closing_keywords(&body),
+            body,
+            "rewrite is idempotent"
+        );
+    }
+
+    // --- Runtime generation (SPEC #4249 FR-002 / AC-3) -------------------
+
+    /// AC-3's measured case: the app binary was built on 2026-09-10 from a
+    /// commit that predates the `develop` head, so the trust fix it is
+    /// reported to carry (`5b10bca75`) is not actually running.
+    const MEASURED_BUILD_COMMIT: &str = "5b10bca75c4f2a6d9e8b1c3f0a7d4e2b6c8f1a39";
+    const MEASURED_DEVELOP_HEAD: &str = "85a216ee6b1d4c7f9a2e8b5c0d3f6a1e4b7c9d02";
+
+    fn generation_input(
+        build_commit: Option<&str>,
+        head: Option<&str>,
+        behind: Option<u64>,
+    ) -> RuntimeGenerationInput {
+        RuntimeGenerationInput {
+            branch: DEFAULT_RELEASE_BRANCH.to_string(),
+            build: RuntimeBuildStamp {
+                commit: build_commit.map(str::to_string),
+                time: Some("2026-09-10T01:29:00+00:00".to_string()),
+            },
+            default_branch_head: head.map(str::to_string),
+            behind_commits: behind,
+        }
+    }
+
+    #[test]
+    fn stale_runtime_is_true_when_the_running_build_is_behind_the_branch_head() {
+        let generation = classify_runtime_generation(generation_input(
+            Some(MEASURED_BUILD_COMMIT),
+            Some(MEASURED_DEVELOP_HEAD),
+            Some(37),
+        ));
+        assert_eq!(generation.stale_runtime, Some(true));
+        assert_eq!(generation.behind_commits, Some(37));
+        assert_eq!(
+            generation.build_commit.as_deref(),
+            Some(MEASURED_BUILD_COMMIT)
+        );
+        assert_eq!(
+            generation.build_time.as_deref(),
+            Some("2026-09-10T01:29:00+00:00")
+        );
+        let action = generation
+            .owner_action
+            .expect("a stale runtime asks for an owner action");
+        assert!(action.contains(MEASURED_DEVELOP_HEAD), "{action}");
+        assert!(action.contains("GWT.app"), "{action}");
+    }
+
+    #[test]
+    fn stale_runtime_is_false_when_the_running_build_is_the_branch_head() {
+        let generation = classify_runtime_generation(generation_input(
+            Some(MEASURED_DEVELOP_HEAD),
+            Some(MEASURED_DEVELOP_HEAD),
+            None,
+        ));
+        assert_eq!(generation.stale_runtime, Some(false));
+        // Identical commits are zero apart even when the count was unavailable.
+        assert_eq!(generation.behind_commits, Some(0));
+        assert_eq!(generation.owner_action, None);
+    }
+
+    #[test]
+    fn stale_runtime_is_null_when_either_end_of_the_comparison_is_unknown() {
+        // No build stamp: a binary built outside a git checkout.
+        let no_stamp =
+            classify_runtime_generation(generation_input(None, Some(MEASURED_DEVELOP_HEAD), None));
+        assert_eq!(no_stamp.stale_runtime, None);
+        assert_eq!(no_stamp.owner_action, None);
+
+        // No branch head: the GitHub read failed. Unknown is never false.
+        let no_head =
+            classify_runtime_generation(generation_input(Some(MEASURED_BUILD_COMMIT), None, None));
+        assert_eq!(no_head.stale_runtime, None);
+        assert_eq!(no_head.owner_action, None);
+
+        // Both ends known and different, but the commit count is unavailable
+        // (the build commit is not in this clone): still unknown, not stale.
+        let uncounted = classify_runtime_generation(generation_input(
+            Some(MEASURED_BUILD_COMMIT),
+            Some(MEASURED_DEVELOP_HEAD),
+            None,
+        ));
+        assert_eq!(uncounted.stale_runtime, None);
+        assert_eq!(uncounted.behind_commits, None);
+        assert_eq!(uncounted.owner_action, None);
+    }
+
+    #[test]
+    fn a_build_that_already_contains_the_head_is_not_stale() {
+        let generation = classify_runtime_generation(generation_input(
+            Some(MEASURED_BUILD_COMMIT),
+            Some(MEASURED_DEVELOP_HEAD),
+            Some(0),
+        ));
+        assert_eq!(generation.stale_runtime, Some(false));
+        assert_eq!(generation.owner_action, None);
+    }
+
+    #[test]
+    fn the_runtime_generation_read_resolves_the_branch_head_through_gh() {
+        let mut seen: Vec<String> = Vec::new();
+        let generation = fetch_runtime_generation_with(
+            &PathBuf::from("/repo"),
+            DEFAULT_RELEASE_BRANCH,
+            RuntimeBuildStamp {
+                commit: Some(MEASURED_BUILD_COMMIT.to_string()),
+                time: None,
+            },
+            |_path, args| {
+                seen = args.iter().map(|arg| (*arg).to_string()).collect();
+                ok_gh(&format!("{MEASURED_DEVELOP_HEAD}\n"))
+            },
+            |_path, base, head| {
+                assert_eq!(base, MEASURED_BUILD_COMMIT);
+                assert_eq!(head, MEASURED_DEVELOP_HEAD);
+                Ok(37)
+            },
+        );
+        assert!(
+            seen.iter().any(|arg| arg.contains("git/ref/heads/develop")),
+            "expected a git ref read, got {seen:?}"
+        );
+        assert_eq!(
+            generation.default_branch_head.as_deref(),
+            Some(MEASURED_DEVELOP_HEAD)
+        );
+        assert_eq!(generation.behind_commits, Some(37));
+        assert_eq!(generation.stale_runtime, Some(true));
+    }
+
+    #[test]
+    fn the_runtime_generation_read_degrades_to_nulls_instead_of_failing() {
+        // `release.status` is the PM's every-cycle read: a GitHub outage must
+        // not turn the whole operation into an error.
+        let generation = fetch_runtime_generation_with(
+            &PathBuf::from("/repo"),
+            DEFAULT_RELEASE_BRANCH,
+            RuntimeBuildStamp {
+                commit: Some(MEASURED_BUILD_COMMIT.to_string()),
+                time: None,
+            },
+            |_path, _args| {
+                Ok(GhCliOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "gh: API rate limit exceeded".to_string(),
+                })
+            },
+            |_path, _base, _head| unreachable!("no head means nothing to count"),
+        );
+        assert_eq!(generation.default_branch_head, None);
+        assert_eq!(generation.behind_commits, None);
+        assert_eq!(generation.stale_runtime, None);
+    }
+
+    #[test]
+    fn an_uncountable_range_leaves_the_behind_count_unknown() {
+        let generation = fetch_runtime_generation_with(
+            &PathBuf::from("/repo"),
+            DEFAULT_RELEASE_BRANCH,
+            RuntimeBuildStamp {
+                commit: Some(MEASURED_BUILD_COMMIT.to_string()),
+                time: None,
+            },
+            |_path, _args| ok_gh(MEASURED_DEVELOP_HEAD),
+            |_path, _base, _head| Err(GwtError::Git("bad revision".to_string())),
+        );
+        assert_eq!(
+            generation.default_branch_head.as_deref(),
+            Some(MEASURED_DEVELOP_HEAD)
+        );
+        assert_eq!(generation.behind_commits, None);
+        assert_eq!(generation.stale_runtime, None);
+    }
+
+    #[test]
+    fn an_absent_build_stamp_skips_every_read() {
+        let generation = fetch_runtime_generation_with(
+            &PathBuf::from("/repo"),
+            DEFAULT_RELEASE_BRANCH,
+            RuntimeBuildStamp::default(),
+            |_path, _args| unreachable!("no build stamp means nothing to compare against"),
+            |_path, _base, _head| unreachable!("no build stamp means nothing to count"),
+        );
+        assert_eq!(generation.build_commit, None);
+        assert_eq!(generation.default_branch_head, None);
+        assert_eq!(generation.stale_runtime, None);
     }
 }

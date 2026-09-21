@@ -26,6 +26,7 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",
+  "recovery-center-modal.js",
   "branch-cleanup-modal.js",
   // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
   // self-heal / last-known retention / stale-load guard.
@@ -48,6 +49,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
   "fleet-minimap.js",
   "focus-trap.js",
+  "startup-metrics.js",
   "hotkey.js",
   "index-settings-panel.js",
   // SPEC-3431 FR-026 — PM settings panel.

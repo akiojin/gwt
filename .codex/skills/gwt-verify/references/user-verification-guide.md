@@ -165,20 +165,24 @@ When the user selects `Rejected`:
 
 The handoff is **automatically skipped** (no user prompt) when:
 
-- The launch mode is `autonomous` (`GWT_AUTONOMOUS_EXECUTION` is set by the
-  gwt Issue Monitor). Nobody is watching the session, and calling the question
-  tool would park the owner Issue instead of pausing for an answer. Record
-  `User Verification Result: n/a (autonomous)` and cover any UI surface with
-  the `Agent Visual Check:` line described in SKILL.md. This waiver is a
-  property of the launch, not a judgement, so it is never written as
-  `skipped(<reason>)`.
+- The launch mode is `autonomous` — `execution.status` reports
+  `launch_route: autonomous`; the legacy `GWT_AUTONOMOUS_EXECUTION` marker also
+  counts when present, but its absence proves nothing. Do not request a human
+  check or send a verification URL. Record
+  `User Verification Result: n/a (autonomous)` and cover UI work with the
+  separate `Agent Visual Check:` line and measured headed evidence described
+  in SKILL.md. Passing work proceeds through a Ready PR and the existing
+  CI auto-merge path. Existing autonomous PRs may retain the legacy
+  `deferred (autonomous execution)` body value with fresh passing evidence,
+  without a body rewrite or human confirmation. The agent's own check is never
+  human `confirmed`, and the launch waiver is never `skipped(<reason>)`.
 - `--mode quick` is in effect (TDD mid-iteration).
 - `Changed surfaces: (none)` — nothing to verify.
 - All changed surfaces are `docs-only` per `surface-taxonomy.md`.
 - The caller passed `--skip-user-check` for an explicit non-interactive
   run.
 
-In every skip case, the reason is recorded as
+In every non-autonomous skip case, the reason is recorded as
 `User Verification: skipped(<reason>)` so reviewers can audit why no user
 confirmation was requested.
 

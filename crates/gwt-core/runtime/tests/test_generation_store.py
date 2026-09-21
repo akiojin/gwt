@@ -261,6 +261,58 @@ class GenerationStoreTests(unittest.TestCase):
         self.assertTrue(status["healthy"], status)
         self.assertEqual(status["document_count"], 6, status)
 
+    def test_empty_rebuild_never_replaces_a_populated_generation(self):
+        """Issue #4205 AC-11: a build that stages zero documents must not be
+        published over healthy data.
+
+        Observed three times in one day on the live index: `specs` went
+        500 -> 0, `board` 51 -> 0 and `memory` 386 -> 367. The published
+        `active.json` recorded `document_count: 0` and the same publish also
+        ran the lazy-migration cleanup, so the legacy in-place store was
+        deleted in the very operation that promoted the empty generation.
+        """
+        project = _make_project(self.base, 6)
+        self.assertTrue(self._build(project).get("ok"))
+        db_path = self._db_path()
+        legacy_sqlite = db_path / "chroma.sqlite3"
+        legacy_sqlite.write_bytes(b"legacy store standing in for a pre-generation build")
+
+        # The source disappears under the rebuild: enumeration yields nothing.
+        for path in (project / "src").iterdir():
+            path.unlink()
+        result = self._build(project)
+
+        self.assertFalse(
+            result.get("ok"),
+            f"an empty rebuild must not report success over healthy data: {result}",
+        )
+        self.assertEqual(result.get("error_code"), "EMPTY_CORPUS", result)
+        status = self._status()
+        self.assertTrue(status["healthy"], status)
+        self.assertEqual(
+            status["document_count"],
+            6,
+            f"the populated generation must survive an empty rebuild: {status}",
+        )
+        self.assertTrue(
+            self._search("module feature").get("results"),
+            "search must keep working after a refused empty publish",
+        )
+        self.assertTrue(
+            legacy_sqlite.exists(),
+            "a refused publish must not run the legacy-store cleanup",
+        )
+
+    def test_first_build_of_a_genuinely_empty_scope_still_publishes(self):
+        """The Issue #4205 AC-11 guard must not block a legitimately empty
+        scope: `discussions` sits at documents=0 as a healthy steady state."""
+        project = _make_project(self.base, 0)
+        result = self._build(project)
+
+        self.assertTrue(result.get("ok"), result)
+        status = self._status()
+        self.assertEqual(status["document_count"], 0, status)
+
     def test_corrupt_active_pointer_is_classified_for_repair_not_crash(self):
         project = _make_project(self.base, 4)
         baseline = self._build(project)

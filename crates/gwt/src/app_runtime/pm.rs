@@ -30,16 +30,18 @@ use gwt::persistence::{WindowGeometry, WindowProcessStatus};
 // reporting clause the Stop-gate continuation also uses; see
 // `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
 use gwt::pm_registry::{
-    self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE, PM_GWTD_EXECUTION_CLAUSE,
-    PM_STEERING_WAKE_CLAUSE,
+    self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE,
+    PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_STEERING_WAKE_CLAUSE,
 };
 use gwt::PmAgentOption;
 
 use crate::embedded_server::AgentPmSendResponder;
+use crate::UserEvent;
 
+use super::startup::RestoreOrigin;
 use super::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AppRuntime, BackendEvent, ClientId, OutboundEvent,
-    WindowPreset,
+    WindowPreset, WorkspaceResumeContext,
 };
 
 const PM_DELIVERY_MAX_BODY_BYTES: usize = 16 * 1024;
@@ -108,7 +110,11 @@ const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
 };
 
 /// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
-const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+///
+/// Issue #3965: the restore path rebuilds a launch config from structured
+/// `Session` fields, so it re-applies this from here rather than recovering it
+/// out of the persisted `launch_args`.
+pub(super) const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 
 /// SPEC-3431 T-093 (FR-012): a wake the monitor-event path decided on — which
 /// pane receives the prompt and what it says. The window id is only ever the
@@ -116,8 +122,21 @@ const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
 /// can point the wake anywhere else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PmWakeDecision {
+    project_root: PathBuf,
     pub(crate) window_id: String,
     pub(crate) prompt: String,
+}
+
+impl PmWakeDecision {
+    /// Resolve escalation subjects at the physical delivery boundary, including
+    /// wakes held while the PM composer contains unsent input.
+    pub(crate) fn delivery_prompt(&self) -> String {
+        format!(
+            "{}{}\r",
+            self.prompt.trim_end_matches('\r'),
+            open_escalation_prompt_section(&self.project_root)
+        )
+    }
 }
 
 /// Outcome of attempting to type a wake prompt into the PM pane.
@@ -153,6 +172,51 @@ const ESCALATION_PROMPT_BODY_CHARS: usize = 220;
 /// `issue.monitor.status` rather than a wall of text.
 const ESCALATION_PROMPT_MAX_ROWS: usize = 5;
 
+/// Keep unknown subjects visible; retire only proven terminal or replaced sessions.
+fn current_open_escalations(
+    project_root: &Path,
+) -> Vec<gwt_core::board_escalation::BoardEscalation> {
+    let Ok(store) = gwt_core::coordination::load_escalation_store(project_root) else {
+        return Vec::new();
+    };
+    store
+        .open_escalations()
+        .into_iter()
+        .filter(|escalation| {
+            let Some(session_id) = escalation.origin_session_id.as_deref() else {
+                return true;
+            };
+            let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+            let Ok(session) = gwt_agent::Session::load(&path) else {
+                return true;
+            };
+            if session.id != session_id {
+                return true;
+            }
+            if matches!(
+                session.status,
+                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+            ) {
+                return false;
+            }
+            let Some(owner) = session.linked_issue_number else {
+                return true;
+            };
+            if !escalation.owner_issue_numbers().contains(&owner) {
+                return true;
+            }
+            !gwt::cli::execution_state::load(&session.worktree_path)
+                .ok()
+                .flatten()
+                .is_some_and(|record| {
+                    gwt::cli::execution_state::integrity_ok(&record)
+                        && record.owner_number == owner
+                        && record.primary_session_id != session_id
+                })
+        })
+        .collect()
+}
+
 /// Issue #3655 AC-5 / AC-9: every open unblock request, with its body, as a
 /// suffix for a PM wake prompt.
 ///
@@ -166,14 +230,7 @@ const ESCALATION_PROMPT_MAX_ROWS: usize = 5;
 /// Rendered on one physical line: the prompt is typed into a pane, and an
 /// embedded newline would submit it half-written.
 pub(crate) fn open_escalation_prompt_section(project_root: &Path) -> String {
-    let store = match gwt_core::coordination::load_escalation_store(project_root) {
-        Ok(store) => store,
-        Err(error) => {
-            tracing::warn!(%error, "PM wake could not read the Board escalation index");
-            return String::new();
-        }
-    };
-    let open = store.open_escalations();
+    let open = current_open_escalations(project_root);
     if open.is_empty() {
         return String::new();
     }
@@ -197,9 +254,7 @@ pub(crate) fn open_escalation_prompt_section(project_root: &Path) -> String {
 
 /// Whether any agent currently has a standing unblock request.
 pub(crate) fn has_open_board_escalations(project_root: &Path) -> bool {
-    gwt_core::coordination::load_escalation_store(project_root)
-        .map(|store| store.open().next().is_some())
-        .unwrap_or(false)
+    !current_open_escalations(project_root).is_empty()
 }
 
 /// An actively-looping PM picks new events up in its own next cycle, and a PM
@@ -228,6 +283,12 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
         && instant_is_quiet(state.last_wake_at.as_deref())
 }
 
+/// Issue #4258: how many loop intervals a Running PM pane may hold a wake.
+/// The newest loop clock marks when the current turn began, so a pane still
+/// Running past this bound has most likely missed its Stop hook (#3809) and
+/// would otherwise never be woken again.
+const PM_WAKE_BUSY_DEFER_MAX_INTERVALS: u64 = 3;
+
 /// Who asked for the PM.
 ///
 /// SPEC-3431 FR-002's `auto_start` opt-out scopes to "opening a project starts
@@ -245,6 +306,76 @@ pub(crate) enum PmEnsureTrigger {
     /// cleared. The accepted close still finalizes in the background, but its
     /// generic anti-respawn fence must not suppress this requested successor.
     Restart,
+}
+
+/// Issue #4375: the spawn a PM worktree preparation is holding up.
+///
+/// Preparing the worktree is Git work — `git worktree add` for a first spawn,
+/// `git fetch` plus a detached checkout for every refresh — and its cost scales
+/// with the repository's worktree count. Running it inline held the tao event
+/// loop for seconds during the canvas-ready restore drain, so the preparation
+/// moves to a blocking worker and the spawn it gates is replayed from this
+/// payload when the worker reports back.
+#[derive(Debug, Clone)]
+pub(crate) enum PmWorktreeContinuation {
+    /// A fresh silent spawn into the canonical PM worktree. The dedicated
+    /// detached worktree (research R-10) is created here; its lifecycle is
+    /// bound to the PM registration.
+    FreshSpawn {
+        tab_id: String,
+        project_root: PathBuf,
+    },
+    /// A persisted PM session resuming in the worktree it already owns.
+    ResumeSession {
+        tab_id: String,
+        /// The tab's repository, which keys the in-flight gate. The Git work
+        /// itself targets the session's own worktree.
+        project_root: PathBuf,
+        session: Box<gwt_agent::Session>,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+        origin: RestoreOrigin,
+        /// SPEC-3431 FR-001: whether the resumed pane must be recorded in
+        /// `pending_pm_launches`, so launch completion rewrites `pm.json` to
+        /// name the successor session. Only the ensure path asks for this; the
+        /// startup restore drain deliberately leaves the registration alone.
+        register_pm_launch: bool,
+    },
+}
+
+impl PmWorktreeContinuation {
+    pub(crate) fn tab_id(&self) -> &str {
+        match self {
+            Self::FreshSpawn { tab_id, .. } | Self::ResumeSession { tab_id, .. } => tab_id,
+        }
+    }
+
+    /// The repository this preparation holds, i.e. the in-flight gate's key.
+    pub(crate) fn project_root(&self) -> &Path {
+        match self {
+            Self::FreshSpawn { project_root, .. } | Self::ResumeSession { project_root, .. } => {
+                project_root
+            }
+        }
+    }
+
+    /// Run the Git-backed preparation and report the prepared PM worktree.
+    ///
+    /// Called on a blocking worker, never on the GUI event loop.
+    pub(crate) fn prepare(&self) -> Result<PathBuf, String> {
+        match self {
+            Self::FreshSpawn { project_root, .. } => {
+                pm_registry::refresh_pm_worktree_for_repo_path(project_root)
+                    .map(|outcome| outcome.worktree)
+                    .map_err(|error| error.to_string())
+            }
+            Self::ResumeSession { session, .. } => {
+                pm_registry::refresh_pm_worktree_at_safe_boundary(&session.worktree_path)
+                    .map(|_| session.worktree_path.clone())
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
 }
 
 impl AppRuntime {
@@ -376,16 +507,7 @@ impl AppRuntime {
             .join(format!("{}.toml", registration.session_id));
         if let Ok(session) = gwt_agent::Session::load_and_migrate(&session_path) {
             if session.worktree_path.exists() {
-                let before = self.pm_window_ids(tab_id);
-                let events = self.spawn_restored_agent_session(
-                    tab_id,
-                    session,
-                    None,
-                    PM_WINDOW_GEOMETRY,
-                    crate::app_runtime::startup::RestoreOrigin::Automatic,
-                );
-                self.mark_new_pm_windows(tab_id, &before, &project_root);
-                return events;
+                return self.resume_registered_pm_session(tab_id, &project_root, session);
             }
         }
         self.spawn_pm_agent(tab_id, &project_root)
@@ -639,9 +761,11 @@ impl AppRuntime {
     /// replay a long-lived backlog as if it just happened. After that, a
     /// signal never seen before wakes the PM iff the Monitor is enabled, a
     /// registered PM pane is live, and the resident loop has gone quiet.
-    /// A delta suppressed only by an active loop is retained (not consumed),
-    /// so a loop that dies inside its floor is still revived by the next
-    /// snapshot; every other outcome consumes the delta.
+    /// A delta suppressed only by an active loop or a busy PM pane (Issue
+    /// #4258) is retained (not consumed), so a loop that dies inside its
+    /// floor is still revived by the next snapshot and a turn in progress
+    /// gets the accumulated signals once it is Idle; every other outcome
+    /// consumes the delta.
     pub(crate) fn pm_wake_decision_at(
         &mut self,
         project_root: &Path,
@@ -695,9 +819,12 @@ impl AppRuntime {
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
-        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
-            // Actively looping: its own next cycle reconciles this. Keep the
-            // delta so a floor-stopped loop is revived by the next snapshot.
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
+            || self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now)
+        {
+            // Actively looping or mid-turn: its own next cycle reconciles
+            // this. Keep the delta so a floor-stopped loop is revived by the
+            // next snapshot.
             return None;
         }
         self.pm_wake_seen
@@ -717,15 +844,15 @@ impl AppRuntime {
         let mut reasons = fresh;
         reasons.truncate(5);
         Some(PmWakeDecision {
+            project_root: project_root.to_path_buf(),
             window_id,
             prompt: format!(
                 "[gwt] Monitor activity while the PM was idle ({}). Reconcile now: fresh \
                  `issue.monitor.status`, triage new items, inventory PRs with `pr.list` \
                  (stale/SUPERSEDED/owner-closed rows: digest, never auto-close). \
-                 {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_CLAUSE} \
-                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
+                 {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_WAKE_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}\r",
                 reasons.join(", "),
-                escalations = open_escalation_prompt_section(project_root),
             ),
         })
     }
@@ -739,7 +866,8 @@ impl AppRuntime {
     /// The same quiet gate as the delta wake keeps the two from double-firing:
     /// an actively-looping or freshly-prompted PM is never interrupted, and a
     /// wake re-arms the loop so the next tick inside the interval is quiet-
-    /// gated out.
+    /// gated out. A busy PM pane (Issue #4258) holds the tick without
+    /// stamping the wake clock, so the first tick after it is Idle fires.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn pm_periodic_wake_decision_at(
         &mut self,
@@ -772,7 +900,17 @@ impl AppRuntime {
             && status.needs_human.is_empty()
             && !has_open_board_escalations(project_root)
         {
-            return None;
+            match gwt_core::concern::has_unresolved_concerns(project_root) {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        project_root = %project_root.display(),
+                        "PM periodic wake retained after Concern store read failure"
+                    );
+                }
+            }
         }
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(project_root);
         let prefs = pm_registry::load_pm_prefs(&prefs_path).ok()?;
@@ -781,7 +919,9 @@ impl AppRuntime {
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
-        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now) {
+        if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
+            || self.pm_wake_pane_is_busy(&window_id, &loop_state, interval_secs, now)
+        {
             return None;
         }
         if let Err(error) = pm_registry::save_pm_loop_state(
@@ -794,14 +934,14 @@ impl AppRuntime {
             tracing::warn!(%error, "PM periodic wake could not re-arm the loop budget");
         }
         Some(PmWakeDecision {
+            project_root: project_root.to_path_buf(),
             window_id,
             prompt: format!(
                 "[gwt] Scheduled supervision tick: reconcile now — read a fresh \
                  `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
                  (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never \
-                 auto-close). {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_CLAUSE} \
-                 {PM_CYCLE_REPORTING_CLAUSE}{escalations}\r",
-                escalations = open_escalation_prompt_section(project_root),
+                 auto-close). {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_WAKE_CLAUSE} \
+                 {PM_CYCLE_REPORTING_CLAUSE}\r",
             ),
         })
     }
@@ -1087,6 +1227,14 @@ impl AppRuntime {
                             window.preset,
                             window.status,
                             window.session_id.clone(),
+                            window.is_pm
+                                || pm_registry::pane_is_pm(
+                                    &project_root,
+                                    self.active_agent_sessions
+                                        .get(window_id)
+                                        .map(|session| session.worktree_path.as_path()),
+                                    window.session_id.as_deref(),
+                                ),
                         )
                     },
                 )
@@ -1094,9 +1242,12 @@ impl AppRuntime {
         });
         let target_session_id = target
             .as_ref()
-            .and_then(|(_, _, _, session_id)| session_id.clone());
+            .and_then(|(_, _, _, session_id, _)| session_id.clone());
+        let self_delivery_reason = (target_session_id.as_deref() == Some(principal_session_id.as_str())
+            || target.as_ref().is_some_and(|(_, _, _, _, is_pm)| *is_pm))
+            .then(|| format!("pm.message.send refused self-delivery to PM pane {window_id}; choose an implementation_agent from pane.list"));
         let target_is_live_agent = target.as_ref().is_some_and(
-            |(target_tab_id, target_preset, target_status, target_session_id)| {
+            |(target_tab_id, target_preset, target_status, target_session_id, _)| {
                 matches!(
                     target_status,
                     WindowProcessStatus::Running
@@ -1198,7 +1349,7 @@ impl AppRuntime {
                     "pm.message.send refused: target is not an authorized live agent pane"
                         .to_string()
                 })?;
-                if !target_is_live_agent || expected_pty.is_none() {
+                if self_delivery_reason.is_none() && (!target_is_live_agent || expected_pty.is_none()) {
                     return Err(
                         "pm.message.send refused: target is not an authorized live agent pane"
                             .to_string(),
@@ -1220,6 +1371,18 @@ impl AppRuntime {
             });
             let result = match prepare {
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Prepared) => {
+                    if let Some(reason) = self_delivery_reason.as_deref() {
+                        match pm_registry::finish_pm_delivery_receipt(
+                            &receipt_path, &worker_operation_id,
+                            durable_target_session_id.as_deref().expect("Prepared target Session"),
+                            &body_sha256, pm_registry::PmDeliveryReceiptStatus::Refused, Some(reason),
+                        ) {
+                            Ok(pm_registry::PmDeliveryReceiptStatus::Refused) => send_terminal("refused", Some(reason.to_string())),
+                            Ok(_) => send_terminal("failed", Some("PM self-delivery receipt changed before refusal".to_string())),
+                            Err(error) => send_terminal("failed", Some(format!("PM self-delivery refusal receipt commit failed: {error}"))),
+                        }
+                        return;
+                    }
                     receipt_prepared = true;
                     let delivery_target_session_id = durable_target_session_id
                         .clone()
@@ -1384,8 +1547,11 @@ impl AppRuntime {
                             })
                         }
                         Ok(pm_registry::PmDeliveryReceiptStatus::Refused) => {
-                            receipt_terminalized = true;
-                            Err("PM delivery operation was already refused".to_string())
+                            let reason = pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &worker_operation_id)
+                                .ok().flatten().and_then(|receipt| receipt.reason)
+                                .unwrap_or_else(|| format!("PM delivery operation was already refused for {worker_window_id}"));
+                            send_terminal("refused", Some(reason));
+                            return;
                         }
                         Ok(pm_registry::PmDeliveryReceiptStatus::Prepared) => match pm_registry::finish_pm_delivery_receipt(
                         &receipt_path,
@@ -1425,8 +1591,11 @@ impl AppRuntime {
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
                     pm_registry::PmDeliveryReceiptStatus::Refused,
                 )) => {
-                    receipt_terminalized = true;
-                    Err("PM delivery operation was already refused".to_string())
+                    let reason = pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &worker_operation_id)
+                        .ok().flatten().and_then(|receipt| receipt.reason)
+                        .unwrap_or_else(|| format!("PM delivery operation was already refused for {worker_window_id}"));
+                    send_terminal("refused", Some(reason));
+                    return;
                 }
                 Err(error) => Err(error),
             };
@@ -1542,7 +1711,7 @@ impl AppRuntime {
             return Ok(PmWakeWrite::Deferred);
         }
         self.pending_pm_wakes.remove(&decision.window_id);
-        super::pty_io::write_pane_input_then_submit(&pane, &decision.prompt)?;
+        super::pty_io::write_pane_input_then_submit(&pane, &decision.delivery_prompt())?;
         Ok(PmWakeWrite::Injected)
     }
 
@@ -1604,6 +1773,47 @@ impl AppRuntime {
             })
     }
 
+    /// Issue #4258: whether the live PM pane is mid-turn (Running) or at a
+    /// prompt (Waiting), where an injected wake would splice into the turn or
+    /// be read as the prompt's answer. Both wake paths hold — never drop —
+    /// their wake while this is true. A pane Running past the deferral bound
+    /// is treated as stuck and woken; a Waiting one is only reported.
+    fn pm_wake_pane_is_busy(
+        &self,
+        window_id: &str,
+        loop_state: &pm_registry::PmLoopState,
+        interval_secs: u64,
+        now: &str,
+    ) -> bool {
+        let status = self.window_status(window_id);
+        if !matches!(
+            status,
+            Some(WindowProcessStatus::Running | WindowProcessStatus::Waiting)
+        ) {
+            return false;
+        }
+        let past_bound = pm_wake_loop_is_quiet(
+            loop_state,
+            interval_secs.saturating_mul(PM_WAKE_BUSY_DEFER_MAX_INTERVALS),
+            now,
+        );
+        if !past_bound {
+            return true;
+        }
+        if status == Some(WindowProcessStatus::Waiting) {
+            tracing::warn!(
+                window_id,
+                "PM wake still held: the PM pane has waited on a prompt past the deferral bound"
+            );
+            return true;
+        }
+        tracing::warn!(
+            window_id,
+            "PM pane has been Running past the wake deferral bound; waking it anyway"
+        );
+        false
+    }
+
     /// Issue #3607 AC-1: window id of a live PM registered by *another* project
     /// store of the same repository.
     ///
@@ -1663,7 +1873,18 @@ impl AppRuntime {
                     "PM launch completed while another live PM is registered; keeping existing"
                 );
             }
-            Ok((prefs, _)) => {
+            Ok((prefs, outcome)) => {
+                // Issue #4394 AC-2: succession ends the replaced Session as a
+                // PM even when it died without `pm.stop`, so restore cannot
+                // bring it back as a second, unregistered PM.
+                if let pm_registry::PmRegisterOutcome::ReplacedStale { previous } = outcome {
+                    if previous.session_id != session_id {
+                        super::startup::mark_auto_resume_source_completed(
+                            &self.sessions_dir,
+                            &previous.session_id,
+                        );
+                    }
+                }
                 self.sync_pm_session_cache(project_root, prefs.registration.as_ref());
             }
             Err(error) => {
@@ -1828,27 +2049,153 @@ impl AppRuntime {
         }
     }
 
+    /// Resume the registered PM's own conversation (FR-003), recording the
+    /// successor pane so launch completion rewrites `pm.json`.
+    ///
+    /// Issue #4375: when the Session lives in the canonical PM worktree the
+    /// spawn now waits on an off-loop preparation, so the marking travels with
+    /// the continuation. Marking here would find no pane and the registration
+    /// would keep naming the dead session.
+    fn resume_registered_pm_session(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        session: gwt_agent::Session,
+    ) -> Vec<OutboundEvent> {
+        if pm_registry::is_pm_worktree(&session.worktree_path) {
+            return self.spawn_pm_worktree_preparation(PmWorktreeContinuation::ResumeSession {
+                tab_id: tab_id.to_string(),
+                project_root: project_root.to_path_buf(),
+                session: Box::new(session),
+                workspace_resume_context: None,
+                fallback_geometry: PM_WINDOW_GEOMETRY,
+                origin: RestoreOrigin::Automatic,
+                register_pm_launch: true,
+            });
+        }
+        let before = self.pm_window_ids(tab_id);
+        let events = self.spawn_restored_agent_session(
+            tab_id,
+            session,
+            None,
+            PM_WINDOW_GEOMETRY,
+            RestoreOrigin::Automatic,
+        );
+        self.mark_new_pm_windows(tab_id, &before, project_root);
+        events
+    }
+
     fn spawn_pm_agent(&mut self, tab_id: &str, project_root: &Path) -> Vec<OutboundEvent> {
+        self.spawn_pm_worktree_preparation(PmWorktreeContinuation::FreshSpawn {
+            tab_id: tab_id.to_string(),
+            project_root: project_root.to_path_buf(),
+        })
+    }
+
+    /// Issue #4375 AC-1: run one PM worktree preparation off the GUI event
+    /// loop, then resume the spawn it gates from the completion event.
+    ///
+    /// The in-flight gate preserves the singleton property the synchronous path
+    /// got for free: while a preparation is running, a second ensure for the
+    /// same repository must not start another one and land a second PM pane.
+    pub(super) fn spawn_pm_worktree_preparation(
+        &mut self,
+        continuation: PmWorktreeContinuation,
+    ) -> Vec<OutboundEvent> {
+        let project_root = continuation.project_root().to_path_buf();
+        if !self
+            .pending_pm_worktree_preparations
+            .insert(project_root.clone())
+        {
+            tracing::info!(
+                project_root = %project_root.display(),
+                "PM worktree preparation already in flight; not starting a second one"
+            );
+            return Vec::new();
+        }
+        let proxy = self.proxy.clone();
+        let spawned = self.blocking_tasks.try_spawn(move || {
+            let result = continuation.prepare();
+            proxy.send(UserEvent::PmWorktreePrepared {
+                continuation: Box::new(continuation),
+                result,
+            });
+        });
+        if let Err(error) = spawned {
+            // Nothing will report back, so release the gate here instead of
+            // leaving the repository permanently unpreparable.
+            self.pending_pm_worktree_preparations.remove(&project_root);
+            return self.pm_worktree_preparation_failed_events(&project_root, &error);
+        }
+        Vec::new()
+    }
+
+    /// Issue #4375: resume the spawn that the PM worktree preparation gated.
+    pub(crate) fn handle_pm_worktree_prepared(
+        &mut self,
+        continuation: PmWorktreeContinuation,
+        result: Result<PathBuf, String>,
+    ) -> Vec<OutboundEvent> {
+        self.pending_pm_worktree_preparations
+            .remove(continuation.project_root());
+        let tab_id = continuation.tab_id().to_string();
+        let mut events = match result {
+            Err(error) => {
+                self.pm_worktree_preparation_failed_events(continuation.project_root(), &error)
+            }
+            Ok(worktree) => match continuation {
+                PmWorktreeContinuation::FreshSpawn {
+                    tab_id,
+                    project_root,
+                } => self.spawn_prepared_pm_agent(&tab_id, &project_root, &worktree),
+                PmWorktreeContinuation::ResumeSession {
+                    tab_id,
+                    project_root,
+                    session,
+                    workspace_resume_context,
+                    fallback_geometry,
+                    origin,
+                    register_pm_launch,
+                } => {
+                    let before = register_pm_launch.then(|| self.pm_window_ids(&tab_id));
+                    let spawned = self.spawn_prepared_restored_agent_session(
+                        &tab_id,
+                        *session,
+                        workspace_resume_context,
+                        fallback_geometry,
+                        origin,
+                    );
+                    if let Some(before) = before {
+                        self.mark_new_pm_windows(&tab_id, &before, &project_root);
+                    }
+                    spawned
+                }
+            },
+        };
+        // FR-026: the preparation is where the PM's live state actually
+        // changes now, so it is also where the settings panel learns about it.
+        if self.active_tab_id.as_deref() == Some(tab_id.as_str()) {
+            events.extend(self.pm_status_broadcast_events());
+        }
+        events
+    }
+
+    /// The fresh silent spawn, once its worktree exists.
+    fn spawn_prepared_pm_agent(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        worktree: &Path,
+    ) -> Vec<OutboundEvent> {
         let profile = pm_registry::pm_prefs_path_for_repo_path(project_root);
         let profile = pm_registry::load_pm_prefs(&profile)
             .map(|prefs| prefs.settings.launch_profile_or_default())
             .unwrap_or_else(|_| pm_registry::PmLaunchProfile::default_profile());
-        let worktree = match Self::ensure_pm_worktree(project_root) {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(
-                    project_root = %project_root.display(),
-                    error,
-                    "failed to prepare the PM worktree; PM not started"
-                );
-                return Vec::new();
-            }
-        };
         // T-052: the `$gwt-pm` bootstrap prompt resolves against the guidance
         // skill that managed-asset materialization writes into this worktree.
         // Writing it here instead would be futile — the launch's own asset
         // refresh prunes unbundled `gwt-*` skills right after.
-        let config = Self::pm_launch_config(&worktree, &profile);
+        let config = Self::pm_launch_config(worktree, &profile);
         let before = self.pm_window_ids(tab_id);
         match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None) {
             Ok(events) => {
@@ -1862,9 +2209,36 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #4375 AC-3: a PM worktree preparation that failed stays visible.
+    ///
+    /// The synchronous path only logged, so a PM pane that never appeared — a
+    /// Git error, a full disk — was indistinguishable from one the project had
+    /// deliberately opted out of.
+    fn pm_worktree_preparation_failed_events(
+        &self,
+        project_root: &Path,
+        error: &str,
+    ) -> Vec<OutboundEvent> {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            error,
+            "failed to prepare the PM worktree; PM not started"
+        );
+        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "error".to_string(),
+            message: format!(
+                "PM worktree preparation failed for {}: {error}",
+                project_root.display()
+            ),
+            issue_number: None,
+        })]
+    }
+
     /// SPEC-3431 FR-026: the launch config for a fresh PM spawn.
     ///
     /// Pure so the resolved agent/model can be asserted without spawning.
+    /// The canonical worktree remains the config and Session identity; the
+    /// launch worker selects the separate PM runtime as the provider's cwd.
     /// `suppress_execution_control` is set because the PM is a conversational
     /// role, not an execution-controlled implementation session.
     ///
@@ -1898,19 +2272,11 @@ impl AppRuntime {
         config.suppress_execution_control = true;
         if let Some(scratch) = pm_registry::pm_scratch_dir_for_pm_worktree(worktree) {
             config.env_vars.insert(
-                "GWT_PM_SCRATCH_DIR".to_string(),
+                pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
                 scratch.to_string_lossy().into_owned(),
             );
         }
         config
-    }
-
-    /// Dedicated detached worktree for the PM session (research R-10). Its
-    /// lifecycle is bound to the PM registration; T-016 adds GC.
-    fn ensure_pm_worktree(project_root: &Path) -> Result<PathBuf, String> {
-        pm_registry::refresh_pm_worktree_for_repo_path(project_root)
-            .map(|outcome| outcome.worktree)
-            .map_err(|error| error.to_string())
     }
 }
 

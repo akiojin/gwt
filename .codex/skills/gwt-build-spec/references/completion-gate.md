@@ -55,9 +55,19 @@ The gate **fails** when any of:
 - `User Verification Result` is `pending` (handoff never completed) or
   `rejected(<reason>)` (user declined). The user's reason is preserved
   in the evidence bundle; route the failure for repair per the
-  failure-handling section below. `n/a (autonomous)` is not `pending`: an
-  unattended gwt Issue Monitor launch waives the handoff by design and passes
-  the gate, provided `Agent Visual Check: pass` covers any UI surface.
+  failure-handling section below. Neither `n/a (autonomous)` nor
+  `deferred (autonomous execution)` is `pending`: an unattended gwt Issue
+  Monitor launch records `n/a (autonomous)` and waives the human handoff.
+  UI work requires `Agent Visual Check: pass` and measured passing headed
+  Chromium dark/light results in the same fresh `verify.run` record, selected
+  with `params.headed_e2e_commands`. The legacy deferred value on existing
+  autonomous PRs remains compatible without rewriting the body or obtaining
+  human confirmation. Manual verification stays unchanged.
+
+After verification and all other Ready Gate conditions pass, autonomous work
+continues through a Ready PR and the existing CI auto-merge path until merged.
+Automated test / headed E2E / CI failures and known blockers require repair;
+missing human visual confirmation does not stop autonomous delivery.
 
 ## Standalone mode checks
 

@@ -651,6 +651,7 @@ impl AppRuntime {
             Ok(mut guard) => {
                 let previous = guard.insert(id.to_string(), Arc::clone(&pty));
                 drop(guard);
+                gwt::perf::startup::pty_ready(id);
                 if let Some(previous) = previous.filter(|previous| !Arc::ptr_eq(previous, &pty)) {
                     previous.revoke_input_generation();
                     let window_id = id.to_string();
@@ -681,6 +682,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn deregister_pty_writer(&self, id: &str) {
+        gwt::perf::startup::forget_terminal(id);
         match self.pty_writers.write() {
             Ok(mut guard) => {
                 let previous = guard.remove(id);
@@ -1183,6 +1185,15 @@ impl AppRuntime {
             }
 
             if let Some(runtime) = runtime.as_mut() {
+                // Issue #4014: the reader thread stays in `read` until the PTY
+                // signals EOF. On Windows the ConPTY output pipe only does so
+                // once the pseudoconsole is closed, and the reader itself pins
+                // the pane - and with it the master - alive, so joining first
+                // would never return. The child was killed and reaped above, so
+                // releasing the descriptors here (Issue #4142 already drops the
+                // master and writer together) closes the pseudoconsole and lets
+                // the join below complete.
+                runtime.pty.release_descriptors();
                 if let Some(handle) = runtime.output_thread.take() {
                     finalizer_ok &= handle.join().is_ok();
                 }

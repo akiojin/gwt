@@ -313,19 +313,32 @@ run("CI workflows call direct verification scripts and skip npm publish", () => 
   }
 });
 
-run("Windows CI proves the Rust suites with default parallelism three times", () => {
+run("Nightly CI proves the Rust suites with default parallelism three times", () => {
   const testWorkflow = fs.readFileSync(
     path.join(__dirname, "..", ".github", "workflows", "test.yml"),
     "utf8"
   );
-  assert.match(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
-  assert.match(testWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
-  assert.match(testWorkflow, /1\.\.3 \| ForEach-Object/);
-  assert.match(testWorkflow, /cargo test -p gwt --lib --all-features/);
+  // Issue #4134 AC-1: the loop cost 2806s and was test.yml's critical path,
+  // re-running on Windows a suite Linux had already run. It keeps its purpose
+  // on the nightly schedule instead of on every pull request.
+  assert.doesNotMatch(testWorkflow, /^ {2}test-windows-default-parallel:$/m);
+  const nightlyWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "nightly.yml"),
+    "utf8"
+  );
+  assert.doesNotMatch(nightlyWorkflow, /pull_request/);
+  assert.match(nightlyWorkflow, /^ {2}test-windows-default-parallel:$/m);
+  assert.match(nightlyWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
+  assert.match(nightlyWorkflow, /1\.\.3 \| ForEach-Object/);
+  assert.match(nightlyWorkflow, /cargo test -p gwt --lib --bin gwt --all-features/);
+  // A scheduled run has no pull request to turn red, so the failure has to
+  // reach a named destination or the schedule silently stops meaning anything.
+  assert.match(nightlyWorkflow, /if: failure\(\)/);
+  assert.match(nightlyWorkflow, /gh issue create/);
   // The three runs must share one job so they share one SHA and one runner.
   // Splitting them across jobs would let a green run and a red run coexist.
-  const defaultParallelJob = testWorkflow.slice(
-    testWorkflow.indexOf("  test-windows-default-parallel:")
+  const defaultParallelJob = nightlyWorkflow.slice(
+    nightlyWorkflow.indexOf("  test-windows-default-parallel:")
   );
   assert.match(defaultParallelJob, /1\.\.3 \| ForEach-Object/);
   // The build must sit outside the timed loop, or the first iteration is
@@ -336,9 +349,10 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
       defaultParallelJob.indexOf("1..3 | ForEach-Object"),
     "the --no-run build must precede the timed three-run loop"
   );
-  // `--bin gwt` and `-p gwt-core` are excluded: each fails Windows default
-  // parallelism for its own reason, and including either would fail every PR.
-  // Assert the loop's cargo invocations positively — matching comment prose
+  // `-p gwt-core` is excluded: it fails Windows default parallelism on its
+  // own defects, and including it would fail every PR. `--bin gwt` is back
+  // since #4014 fixed the close-finalizer deadlock that stalled it. Assert
+  // the loop's cargo invocations positively — matching comment prose
   // negatively would pass or fail on how the exclusions happen to be worded.
   const loopBody = defaultParallelJob.slice(
     defaultParallelJob.indexOf("1..3 | ForEach-Object")
@@ -349,16 +363,18 @@ run("Windows CI proves the Rust suites with default parallelism three times", ()
     .filter((line) => line.startsWith("cargo "));
   assert.deepStrictEqual(
     loopCommands,
-    ["cargo test -p gwt --lib --all-features"],
+    ["cargo test -p gwt --lib --bin gwt --all-features"],
     "the timed loop must run exactly the targets proven green under Windows default parallelism"
+  );
+  // The `--bin gwt` tests must be compiled outside the timed loop as well
+  // (#4014), or its first iteration pays for that build.
+  assert.match(
+    defaultParallelJob,
+    /cargo test -p gwt --lib --bin gwt --all-features --no-run/,
+    "the --no-run build must cover the --bin gwt target the loop runs"
   );
   // Keep each exclusion tied to its reason so it cannot quietly become
   // permanent once the underlying defect is fixed.
-  assert.match(
-    defaultParallelJob,
-    /deadlocks[\s\S]*?#4014/,
-    "the --bin gwt exclusion must carry its reason and its follow-up owner"
-  );
   assert.match(
     defaultParallelJob,
     /`-p gwt-core` is absent[\s\S]*?await their own owner/,

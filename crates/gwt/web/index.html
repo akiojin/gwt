@@ -826,6 +826,63 @@
         ></div>
       </div>
 
+      <!-- SPEC-1921 Phase 80: read-only durable delivery Recovery Center. -->
+      <div
+        class="modal-backdrop"
+        id="recovery-center-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell recovery-center-modal__shell"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="recovery-center-title"
+          tabindex="-1"
+        >
+          <header class="modal-header recovery-center-modal__header">
+            <div>
+              <p class="recovery-center-modal__kicker">DURABLE DELIVERY</p>
+              <h2 id="recovery-center-title">Recovery Center</h2>
+            </div>
+            <button
+              type="button"
+              class="wizard-button recovery-center-modal__close"
+              data-recovery-center-close
+              aria-label="Close Recovery Center"
+            >×</button>
+          </header>
+          <div class="modal-body recovery-center-modal__body">
+            <div class="recovery-center-filters" aria-label="Recovery filters">
+              <label>
+                <span>State</span>
+                <select id="recovery-center-state-filter">
+                  <option value="attention">Attention</option>
+                  <option value="all">All states</option>
+                  <option value="pending">Pending</option>
+                  <option value="acknowledged">Acknowledged</option>
+                  <option value="conflicted">Conflicted</option>
+                </select>
+              </label>
+              <label>
+                <span>Worktree</span>
+                <select id="recovery-center-worktree-filter">
+                  <option value="all">All forms</option>
+                  <option value="ephemeral">Ephemeral</option>
+                  <option value="branch-backed">Branch-backed</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+              </label>
+            </div>
+            <div class="recovery-center-status" role="status"></div>
+            <div class="recovery-center-list" role="listbox" aria-label="Recovery deliveries"></div>
+          </div>
+          <footer class="modal-footer recovery-center-modal__footer">
+            <span class="recovery-center-count" aria-live="polite">0 shown · 0 total</span>
+            <button type="button" class="wizard-button" data-recovery-center-close>Close</button>
+          </footer>
+        </div>
+      </div>
+
       <!-- SPEC-2017 US-9: Knowledge Bridge Drawer. Re-uses the
            SPEC-2356 .op-drawer / .op-drawer-backdrop pattern (slide-
            over + backdrop + reduced-motion fallback). Body content

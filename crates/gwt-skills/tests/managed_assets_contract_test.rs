@@ -79,15 +79,28 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let report = distribute_to_worktree(dir.path()).expect("distribute bundle");
 
     assert!(report.files_written > 0, "bundle must write files");
-    for skill_md in [
-        dir.path().join(".claude/skills/gwt-verify/SKILL.md"),
-        dir.path().join(".codex/skills/gwt-verify/SKILL.md"),
+    for skill in [
+        "gwt-execute",
+        "gwt-verify",
+        "gwt-manage-pr",
+        "gwt-build-spec",
+        "gwt-fix-issue",
     ] {
-        assert!(
-            skill_md.is_file(),
-            "expected bundled skill at {}",
-            skill_md.display()
+        let relative = format!("skills/{skill}/SKILL.md");
+        let claude = fs::read_to_string(dir.path().join(".claude").join(&relative))
+            .expect("read materialized Claude skill");
+        let codex = fs::read_to_string(dir.path().join(".codex").join(&relative))
+            .expect("read materialized Codex skill");
+        assert_eq!(
+            claude, codex,
+            "{skill} must have identical delivered contracts"
         );
+        for required in ["n/a (autonomous)", "CI auto-merge", "Agent Visual Check"] {
+            assert!(
+                claude.contains(required),
+                "materialized {skill} must contain {required}"
+            );
+        }
     }
 
     let has_gwt_command = fs::read_dir(dir.path().join(".claude/commands"))
@@ -124,6 +137,38 @@ fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
             "managed gwt-* skill asset must be byte-identical between .claude and .codex: {relative:?}"
         );
     }
+}
+
+#[test]
+fn browser_check_embedded_seed_disables_automatic_agents() {
+    let embedded = gwt_skills::assets::CLAUDE_SKILLS
+        .get_file("browser-check/SKILL.md")
+        .expect("embedded browser-check")
+        .contents_utf8()
+        .expect("UTF-8 skill");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for provider in [".claude", ".codex"] {
+        let source = fs::read_to_string(
+            workspace_root.join(format!("{provider}/skills/browser-check/SKILL.md")),
+        )
+        .expect("skill mirror");
+        assert_eq!(source, embedded, "{provider} must match the embedded skill");
+    }
+    let seed = markdown_block(
+        embedded,
+        "# browser-check-agent-seed-begin",
+        Some("# browser-check-agent-seed-end"),
+    );
+    let prefs: Vec<serde_json::Value> = seed
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line.trim()).expect("valid seed JSON"))
+        .collect();
+    assert_eq!(prefs.len(), 2, "seed both PM and Issue Monitor preferences");
+    assert_eq!(prefs[0]["settings"]["auto_start"], false);
+    assert_eq!(prefs[1]["enabled"], false);
+    assert!(prefs[1]["max_active_agents"].as_u64().unwrap() > 0);
+    assert_eq!(prefs[1]["priority_order"], serde_json::json!([]));
 }
 
 #[cfg(unix)]
@@ -424,6 +469,58 @@ fn browser_check_hook_repair_blocks_url_handoff_when_doctor_reports_issues() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn browser_check_gates_allow_only_fail_open_hook_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$DOCTOR_RESPONSE\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755)).unwrap();
+
+    for state in ["fail-open", "fail-closed", "unresolved"] {
+        let issue = format!(
+            "managed hook failure: PostToolUse/forward/live-forward state={state} recorded_at=2026-09-10T00:00:00Z (errors.list id=test)"
+        );
+        let health = serde_json::json!({
+            "status": if state == "fail-open" { "needs-attention" } else { "degraded" },
+            "issues": [issue],
+        });
+        for gate in ["hook-repair", "hook-audit"] {
+            let evidence = if gate == "hook-repair" {
+                serde_json::json!({"health": health})
+            } else {
+                health.clone()
+            };
+            let response = serde_json::json!({"ok": true, "output": evidence.to_string()});
+            let output = hidden_command("bash")
+                .args(["-c", &browser_check_shell_block(gate)])
+                .current_dir(dir.path())
+                .env("REPO_ROOT", dir.path())
+                .env("CHECK_HOME", dir.path())
+                .env("CHECKOUT_GWTD", &fake_gwtd)
+                .env("CHECK_HOOK_BIN", "gwtd")
+                .env("DOCTOR_RESPONSE", response.to_string())
+                .output()
+                .expect("run browser-check gate");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.success(),
+                state == "fail-open",
+                "{gate} state={state}: {stderr}"
+            );
+            if state != "fail-open" {
+                assert!(stderr.contains(&format!("state={state}")), "{stderr}");
+            }
+        }
+    }
+}
+
 #[test]
 fn user_verification_handoff_is_identifiable_and_actionable() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -512,11 +609,11 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
             }
         }
 
-        // Issue #4001 AC-A1: `n/a (autonomous)` is the recorded value for an
-        // Issue Monitor launch, distinct from the agent judging a skip.
+        // Issue #4326: the autonomous waiver and legacy deferred value remain
+        // distinct from a human confirmation or an agent-judged skip.
         assert_eq!(
             line_starting_with(&skill, "User Verification Result:"),
-            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous)",
+            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous) | deferred (autonomous execution)",
             "{} evidence-bundle enum must include every supported result",
             skill_path.display()
         );
@@ -779,9 +876,38 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
         let content = fs::read_to_string(&skill_md)
             .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
         assert!(content.contains("gwt-coordination"));
+        for required in [
+            "launch_route: autonomous",
+            "Ready PR",
+            "CI auto-merge",
+            "User Verification Result: n/a (autonomous)",
+            "Agent Visual Check",
+            "headed_e2e_commands",
+            "manual",
+        ] {
+            assert!(
+                content.contains(required),
+                "generated guidance must contain {required}"
+            );
+        }
+        assert!(
+            content.contains("Read-only `gh` commands are allowed")
+                && content.contains("Mutations must use gwtd JSON-envelope operations"),
+            "generated guidance must distinguish GitHub reads from mutations"
+        );
         assert!(
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
+        );
+        // Issue #4396: the guidance told agents to disable auto-merge without
+        // naming a way to do it, and the `pr.merge` it named did not exist. An
+        // agent that followed the text stopped and escalated to a PM who had no
+        // such operation either. Name the hold route, not just the requirement.
+        assert!(
+            content.contains("gwtd has no merge operation")
+                && content.contains("An explicit owner-requested hold uses `pr.draft`")
+                && content.contains("Resume with `pr.ready`"),
+            "generated guidance must name `pr.draft` as the route that holds a merge"
         );
         assert!(
             content.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
