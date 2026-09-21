@@ -55,6 +55,19 @@ pub enum AutoGcDecision {
     },
 }
 
+/// Whether a run's counts are measurements (Issue #4566 AC-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildArtifactGcOutcome {
+    /// The worktrees were enumerated and judged, so the counts say what was
+    /// found — including a legitimate "nothing to reclaim".
+    Swept,
+    /// The sweep never got a worktree list. `candidates`,
+    /// `reclaimable_bytes` and `reclaimed_bytes` are placeholders below, not
+    /// measurements: a reader must not take the zeros for an idle host.
+    EnumerationFailed,
+}
+
 /// One automatic run, as written to [`RECORD_FILE_NAME`] (AC-3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildArtifactGcRecord {
@@ -63,6 +76,11 @@ pub struct BuildArtifactGcRecord {
     /// The disk warning that started the run.
     pub trigger: String,
     pub base: String,
+    /// Whether the counts below mean anything. Runs recorded before #4566
+    /// carry no value; [`BuildArtifactGcRecord::outcome`] reads it back from
+    /// `error` for them, so read that rather than this field.
+    #[serde(default, rename = "outcome")]
+    pub recorded_outcome: Option<BuildArtifactGcOutcome>,
     pub candidates: usize,
     pub reclaimable_bytes: u64,
     pub reclaimed_bytes: u64,
@@ -79,6 +97,17 @@ pub struct BuildArtifactGcRecord {
     /// The sweep itself failed (for example `git worktree list`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl BuildArtifactGcRecord {
+    /// What this run actually did, for records old and new alike.
+    pub fn outcome(&self) -> BuildArtifactGcOutcome {
+        self.recorded_outcome.unwrap_or(if self.error.is_some() {
+            BuildArtifactGcOutcome::EnumerationFailed
+        } else {
+            BuildArtifactGcOutcome::Swept
+        })
+    }
 }
 
 /// The `[build_artifact_gc]` settings, or the defaults when the settings
@@ -238,25 +267,12 @@ fn run_exclusive(project_root: &Path, record_path: &Path, trigger: &str) {
     }
     let started_at = now_rfc3339();
     let base = gwt_git::pr_status::SETTLEMENT_BASE_BRANCH;
-    let result = worktree_gc::run_gc(project_root, base, AUTO_GC_OPTIONS, false);
+    let result = worktree_gc::run_gc(project_root, base, AUTO_GC_OPTIONS, false)
+        .map_err(|error| error.to_string());
     let finished_at = now_rfc3339();
-    let record = match result {
-        Ok(report) => record_from_report(report, started_at, finished_at, trigger),
-        Err(error) => BuildArtifactGcRecord {
-            started_at,
-            finished_at,
-            trigger: trigger.to_string(),
-            base: base.to_string(),
-            candidates: 0,
-            reclaimable_bytes: 0,
-            reclaimed_bytes: 0,
-            removed: Vec::new(),
-            failed: Vec::new(),
-            kept_by_reason: BTreeMap::new(),
-            error: Some(error.to_string()),
-        },
-    };
+    let record = record_from_result(result, started_at, finished_at, trigger, base);
     tracing::info!(
+        outcome = ?record.outcome(),
         candidates = record.candidates,
         reclaimed_bytes = record.reclaimed_bytes,
         removed = record.removed.len(),
@@ -273,12 +289,36 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn record_from_report(
-    report: GcReport,
+/// The record for one sweep, whichever way it ended. A failed sweep is
+/// recorded with the same three zeros a clean one would report, so it carries
+/// [`BuildArtifactGcOutcome::EnumerationFailed`] to say those zeros measure
+/// nothing (Issue #4566 AC-2).
+fn record_from_result(
+    result: Result<GcReport, String>,
     started_at: String,
     finished_at: String,
     trigger: &str,
+    base: &str,
 ) -> BuildArtifactGcRecord {
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            return BuildArtifactGcRecord {
+                started_at,
+                finished_at,
+                trigger: trigger.to_string(),
+                base: base.to_string(),
+                recorded_outcome: Some(BuildArtifactGcOutcome::EnumerationFailed),
+                candidates: 0,
+                reclaimable_bytes: 0,
+                reclaimed_bytes: 0,
+                removed: Vec::new(),
+                failed: Vec::new(),
+                kept_by_reason: BTreeMap::new(),
+                error: Some(error),
+            };
+        }
+    };
     let mut kept_by_reason = BTreeMap::new();
     for kept in &report.kept {
         *kept_by_reason
@@ -290,6 +330,7 @@ fn record_from_report(
         finished_at,
         trigger: trigger.to_string(),
         base: report.base,
+        recorded_outcome: Some(BuildArtifactGcOutcome::Swept),
         candidates: report.candidates.len(),
         reclaimable_bytes: report.reclaimable_bytes,
         reclaimed_bytes: report.reclaimed_bytes,
@@ -482,8 +523,15 @@ mod tests {
             disk_space: evaluate(Vec::new()),
         };
 
-        let record = record_from_report(report, "s".into(), "f".into(), "disk space low");
+        let record = record_from_result(
+            Ok(report),
+            "s".into(),
+            "f".into(),
+            "disk space low",
+            "develop",
+        );
 
+        assert_eq!(record.outcome(), BuildArtifactGcOutcome::Swept);
         assert_eq!(record.reclaimed_bytes, 4096);
         assert_eq!(record.removed.len(), 1);
         assert_eq!(record.trigger, "disk space low");
@@ -494,6 +542,73 @@ mod tests {
                 ("not merged into origin/develop".to_string(), 1),
             ])
         );
+    }
+
+    /// Issue #4566 AC-2 / AC-3: a sweep that never got a worktree list
+    /// reports the same three zeros a fully-reclaimed host reports. The
+    /// record names which of the two it was, so nobody reads a broken sweep
+    /// as an idle one.
+    #[test]
+    fn a_failed_enumeration_is_not_recorded_as_a_clean_sweep() {
+        let record = record_from_result(
+            Err("git worktree list failed: fatal: not a git repository".to_string()),
+            "s".into(),
+            "f".into(),
+            "disk space low",
+            "develop",
+        );
+
+        assert_eq!(record.outcome(), BuildArtifactGcOutcome::EnumerationFailed);
+        assert_eq!(record.candidates, 0);
+        assert!(record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not a git repository")));
+        let json: serde_json::Value = serde_json::to_value(&record).expect("serialize");
+        assert_eq!(json["outcome"], "enumeration_failed", "{json}");
+    }
+
+    /// The other half of AC-2: a sweep that did enumerate says so, even when
+    /// it found nothing to reclaim.
+    #[test]
+    fn a_sweep_that_found_nothing_is_still_recorded_as_swept() {
+        let report = GcReport {
+            dry_run: false,
+            base: "develop".to_string(),
+            include_unmerged: false,
+            include_protected_workspaces: false,
+            candidates: Vec::new(),
+            kept: Vec::new(),
+            reclaimable_bytes: 0,
+            removed: Vec::new(),
+            failed: Vec::new(),
+            reclaimed_bytes: 0,
+            disk_space: evaluate(Vec::new()),
+        };
+
+        let record = record_from_result(Ok(report), "s".into(), "f".into(), "trigger", "develop");
+
+        assert_eq!(record.outcome(), BuildArtifactGcOutcome::Swept);
+        assert_eq!(record.error, None);
+    }
+
+    /// Runs recorded before #4566 carry no `outcome` key. Their `error` says
+    /// the same thing, so reading an old history stays honest.
+    #[test]
+    fn a_legacy_record_without_an_outcome_falls_back_to_its_error() {
+        let legacy = |error: &str| {
+            format!(
+                r#"{{"started_at":"s","finished_at":"f","trigger":"t","base":"develop",
+                "candidates":0,"reclaimable_bytes":0,"reclaimed_bytes":0,"error":{error}}}"#
+            )
+        };
+        let failed: BuildArtifactGcRecord =
+            serde_json::from_str(&legacy(r#""git worktree list failed""#)).expect("failed record");
+        let clean: BuildArtifactGcRecord =
+            serde_json::from_str(&legacy("null")).expect("clean record");
+
+        assert_eq!(failed.outcome(), BuildArtifactGcOutcome::EnumerationFailed);
+        assert_eq!(clean.outcome(), BuildArtifactGcOutcome::Swept);
     }
 
     /// AC-3: runs are appended, never overwritten, and the last one is what
@@ -508,6 +623,7 @@ mod tests {
             finished_at: finished_at.to_string(),
             trigger: "disk space low".to_string(),
             base: "develop".to_string(),
+            recorded_outcome: Some(BuildArtifactGcOutcome::Swept),
             candidates: 1,
             reclaimable_bytes: 1,
             reclaimed_bytes: 1,
