@@ -756,7 +756,7 @@ mod tests {
     }
 
     /// Every `run:` script the named job executes, in step order.
-    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+    fn workflow_doc(workflow: &str) -> serde_yaml::Value {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -765,11 +765,39 @@ mod tests {
             .join(workflow);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-        let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("workflow is valid YAML");
+        serde_yaml::from_str(&text).expect("workflow is valid YAML")
+    }
+
+    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+        let doc = workflow_doc(workflow);
         doc["jobs"][job]["steps"]
             .as_sequence()
             .unwrap_or_else(|| panic!("{workflow} job `{job}` has steps"))
             .iter()
+            .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
+            .collect()
+    }
+
+    /// Every `run:` script declared by any job in `workflow` whose runner
+    /// image starts with `os` — the jobs that actually compile that platform's
+    /// `#[cfg(target_os = ...)]` code.
+    fn workflow_runs_on_os(workflow: &str, os: &str) -> Vec<String> {
+        let doc = workflow_doc(workflow);
+        doc["jobs"]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("{workflow} declares jobs"))
+            .values()
+            .filter(|job| {
+                job.get("runs-on")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|runner| runner.starts_with(os))
+            })
+            .flat_map(|job| {
+                job.get("steps")
+                    .and_then(serde_yaml::Value::as_sequence)
+                    .cloned()
+                    .unwrap_or_default()
+            })
             .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
             .collect()
     }
@@ -1081,6 +1109,26 @@ mod tests {
         assert!(
             plan.commands.contains(&CI_CLIPPY_GATE.to_string()),
             "{plan:?}"
+        );
+    }
+
+    // #4522: the gate above is the command every macOS agent has to pass
+    // before it can deliver, but the ubuntu and windows clippy jobs never
+    // compile `#[cfg(target_os = "macos")]` code, so they cannot report a
+    // lint violation hiding behind it. `fsevent-sys` 5.2.0 deprecated its
+    // whole C API, CI stayed green through the bump, and `gwt-core` stopped
+    // compiling under `-D warnings` on every macOS host at once (#4396 and
+    // #3752 each lost hours to it). CI's green has to mean what the local
+    // gate means, on the platform the work is done on.
+    #[test]
+    fn ci_runs_the_clippy_gate_on_macos() {
+        let runs = workflow_runs_on_os("lint.yml", "macos");
+        assert!(
+            runs.iter().any(|run| run.trim() == CI_CLIPPY_GATE),
+            "no macOS job in lint.yml runs `{CI_CLIPPY_GATE}`, so a clippy \
+             violation behind `#[cfg(target_os = \"macos\")]` passes CI and \
+             stops every macOS agent instead (#4522). macOS steps found: \
+             {runs:?}"
         );
     }
 
