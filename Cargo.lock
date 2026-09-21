@@ -1416,6 +1416,7 @@ dependencies = [
  "fs2",
  "fsevent-sys 5.2.0",
  "gwt-config",
+ "gwt-core",
  "hex",
  "ignore",
  "libc",
