@@ -2413,6 +2413,15 @@ fn workspace_revalidation_error(code: AgentWorkspaceUpdateErrorCode) -> AgentWor
 }
 
 fn classify_workspace_transaction_error(error: &GwtError) -> AgentWorkspaceUpdateError {
+    // The refusal below tells the agent to inspect the Host gwt log, and the
+    // bridge withholds the message itself, so this is the only place the cause
+    // can be recovered from. It used to log nothing at all, which left a
+    // permanent `transaction_conflict` with no way to tell a lost race from a
+    // durable state defect (#4443).
+    tracing::warn!(
+        error = %error,
+        "Host workspace transaction failed without committing"
+    );
     if error
         .to_string()
         .to_ascii_lowercase()
