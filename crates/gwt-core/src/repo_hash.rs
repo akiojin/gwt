@@ -19,6 +19,13 @@ const HASH_HEX_LEN: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepoHash(String);
 
+/// Canonical runtime identity for project-scoped operations.
+///
+/// This is deliberately an alias, not a second identifier type: project
+/// navigation and project-store routing must use the exact same identity
+/// resolution contract.
+pub type ProjectKey = RepoHash;
+
 impl RepoHash {
     pub fn as_str(&self) -> &str {
         &self.0

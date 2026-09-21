@@ -65,6 +65,38 @@ pub enum IssueState {
     Closed,
 }
 
+/// Why an Issue is being closed (SPEC #4249 FR-001). Mirrors the GitHub REST
+/// `state_reason` field; `None` leaves the reason to GitHub's default, and the
+/// field is meaningless when reopening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IssueCloseReason {
+    Completed,
+    NotPlanned,
+}
+
+impl IssueCloseReason {
+    /// The literal GitHub REST `state_reason` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+        }
+    }
+
+    /// Parse an operation parameter. Accepts the REST spellings plus the
+    /// hyphenated form agents type by habit.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "completed" => Some(Self::Completed),
+            "not_planned" => Some(Self::NotPlanned),
+            _ => None,
+        }
+    }
+
+    /// Every accepted spelling, for refusal messages.
+    pub const ACCEPTED: [&'static str; 2] = ["completed", "not_planned"];
+}
+
 /// Snapshot of a single Issue including its body and every artifact comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueSnapshot {
@@ -168,6 +200,21 @@ pub type OwnerMutationResult<T> = Result<T, OwnerMutationError>;
 /// The abstract GitHub Issue client. All mutating operations return the
 /// post-write server snapshot so callers can atomically update their local
 /// cache.
+/// Fields of a single-request Issue update (Issue #3865). `None` leaves the
+/// field untouched; `Some(vec![])` for `labels` clears them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueFieldsPatch {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub labels: Option<Vec<String>>,
+}
+
+impl IssueFieldsPatch {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.body.is_none() && self.labels.is_none()
+    }
+}
+
 pub trait IssueClient: Send + Sync {
     fn fetch(
         &self,
@@ -178,6 +225,36 @@ pub trait IssueClient: Send + Sync {
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError>;
 
     fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError>;
+
+    /// Update title / body / labels in one remote request so a partial
+    /// failure cannot leave a half-applied Issue (Issue #3865). Transports
+    /// with a combined update endpoint override this; the default composes
+    /// the single-field patches for test doubles and is not atomic.
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        let mut latest = None;
+        if let Some(title) = &fields.title {
+            latest = Some(self.patch_title(number, title)?);
+        }
+        if let Some(body) = &fields.body {
+            latest = Some(self.patch_body(number, body)?);
+        }
+        if let Some(labels) = &fields.labels {
+            latest = Some(self.set_labels(number, labels)?);
+        }
+        match latest {
+            Some(snapshot) => Ok(snapshot),
+            None => match self.fetch(number, None)? {
+                FetchResult::Updated(snapshot) => Ok(snapshot),
+                FetchResult::NotModified => Err(ApiError::Unexpected(
+                    "unconditional fetch reported not modified".to_string(),
+                )),
+            },
+        }
+    }
 
     fn patch_comment(
         &self,
@@ -225,7 +302,32 @@ pub trait IssueClient: Send + Sync {
     fn set_labels(&self, number: IssueNumber, labels: &[String])
         -> Result<IssueSnapshot, ApiError>;
 
-    fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError>;
+    /// Add labels without replacing unrelated labels. Never automatically retry.
+    fn add_labels_mutation(
+        &self,
+        _number: IssueNumber,
+        _labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "add labels unsupported".into(),
+        )))
+    }
+
+    /// Remove one label without replacing unrelated labels. Never automatically retry.
+    fn remove_label_mutation(&self, _number: IssueNumber, _label: &str) -> OwnerMutationResult<()> {
+        Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "remove label unsupported".into(),
+        )))
+    }
+
+    /// Move an Issue between open and closed. `reason` is the GitHub
+    /// `state_reason` and is only meaningful when closing (SPEC #4249 FR-001).
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: IssueState,
+        reason: Option<IssueCloseReason>,
+    ) -> Result<IssueSnapshot, ApiError>;
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError>;
 }

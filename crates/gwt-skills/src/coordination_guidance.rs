@@ -10,7 +10,10 @@
 //! the only injection mechanisms; `generated guidance` is now backed by
 //! this module.
 
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use crate::settings_local::write_text_atomically;
 
@@ -122,6 +125,53 @@ posting output and every PM-facing surface repeat back to you:
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### Waiting is not a stall: declare it
+
+The Issue Monitor judges a launched agent stuck when it sees no activity
+for `stuck_timeout_secs` (30 minutes by default), and each stuck verdict
+costs an autonomous attempt. Waiting on a host-exclusivity turn, on a PM
+serialization ruling, or on a long verification run you must not touch
+produces no activity either, so before you go quiet for that long,
+declare the wait:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"number":4324,"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` is the Issue this launch owns - replace `4324` with yours. While
+the declaration is in force stuck detection skips your issue and the PM
+reads `reason` / `resume_condition` / `expires_at` from the `waiting`
+field of your row in `issue.monitor.status`. It is capped
+(`max_wait_secs` in the response, 3 hours): re-declaring refreshes the
+text but never the cap, and past it the ordinary rule applies again.
+Clear it the moment you resume:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"number":4324,"clear":true}}
+    JSON
+
+Always pass `number`. Omitting it resolves the owner Issue from
+`GWT_AUTONOMOUS_ISSUE`, which only exists directly inside a session the
+Issue Monitor launched - a bootstrap script, a subshell, a wrapper
+process, or an agent you started yourself does not have it, and there the
+call is refused with `issue_unknown`.
+
+That refusal does not release your verification lease or any other
+exclusivity - it changed nothing at all. Agents put the clear call in a
+`finally`, so a refusal raising out of that block has torn down held
+exclusivity the agent still needed. Handle `issue_unknown` by retrying
+with an explicit `number`, never by releasing what you hold.
+
+Do not fake activity instead (periodic `workspace.update` or Board posts
+to look alive) - a declared wait is the honest signal.
+
+The PM can void your declaration with `issue.monitor.wait.invalidate`
+when its ruling removes the condition (Issue #4286). Your row then reads
+`waiting.in_force:false` with `waiting.invalidated` naming who and why,
+and ordinary stuck detection applies from your last activity, so read
+the Board when you come back: act on the ruling, and declare again only
+if you are genuinely waiting on something else.
+
 ### Proposing new Issues to the PM
 
 Do not call `issue.create`. When you find something that deserves its own
@@ -136,6 +186,17 @@ Board with the registered Issue number, threaded under your proposal via
 Commenting on an existing Issue with `issue.comment` is never restricted
 - add evidence, propose acceptance criteria, and share analysis freely.
 Only creating a new Issue routes through the PM.
+
+### Friction in gwt itself takes the same route
+
+Friction and capability gaps in gwt itself - a hook, launch, skill, index,
+verification, coordination, or Issue/SPEC workflow that contradicts what gwt
+told you to do - is reported the same way: post it to the Board for the PM,
+who registers it with `gwt-register-issue`. Never file an Issue upstream in
+the gwt repository yourself, and never work around it silently. Include the
+contract you were following, what you observed instead, and the primary
+evidence (command, output, file and line). gwt has no automatic capture for
+this; the Board post is the intake.
 
 ## Work (current state)
 
@@ -179,7 +240,7 @@ Board body to convey what the Work is.
 Make the final Work update before terminal operations, then converge in this
 exact order: `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`. After the final Work update or a
 terminal lifecycle transition, do not issue another `workspace.update`; keep
-blocker/recovery coordination on the Board or in a Draft PR comment instead.
+blocker/recovery coordination on the Board or in a PR comment instead.
 Set `params.status:"done"` on that explicit final update; its successful event
 append opens the machine-local delivery obligation used by Stop and final gates.
 
@@ -220,6 +281,91 @@ gwtd binary:
     JSON
 
 There is no standalone `gwt-search` executable.
+
+## Delivery: Ready PRs only, always auto-merge
+
+**Draft PRs are retired in this project (owner ruling, 2026-09-16).** Create
+every PR non-draft and enable `auto-merge` on it. Never open a Draft, and mark
+any Draft you inherit ready with `pr.ready`. "It is still in progress, so keep
+it a Draft" is no longer a valid state.
+
+CI is therefore the only delivery gate. That makes PR scope the thing to get
+right: cut each PR so it is independently shippable, and when work remains,
+say so in the body and file a follow-up Issue rather than holding the PR back.
+Verify locally before opening the PR — there is no longer a Draft to park
+unverified work in.
+
+Read the launch route from `execution.status`. With `launch_route: autonomous`,
+record `User Verification Result: n/a (autonomous)` and continue verified work
+through the PR and the CI auto-merge path until merged. Do not request human
+visual confirmation or send a verification URL merely because nobody performed
+a human check. Manual launches retain their user-verification contract and
+require an explicit request to drive to merge.
+
+Automated test / headed E2E / CI failures, known blockers, and all other Ready
+Gate conditions still require repair. For UI work, use the project's isolated
+headed E2E setup and record `Agent Visual Check: pass` separately from the user
+result (`n/a (no UI surface)` otherwise). Select Playwright commands already in
+`verify.run`'s `params.commands` with `params.headed_e2e_commands`; the same fresh
+record must contain actual passing headed Chromium results for dark and light
+themes. The E2E suite must check console/page errors and the changed behavior.
+The agent's own check is never human `confirmed`.
+
+Existing autonomous PRs may retain the legacy `deferred (autonomous execution)`
+body value. Fresh passing evidence permits Ready without rewriting that body or
+obtaining human confirmation. Do not call terminal `execution.blocked` merely
+because human visual confirmation is absent.
+
+## GitHub reads and mutations
+
+Read-only `gh` commands are allowed and recorded on the shared GitHub budget
+ledger. This includes Issue, PR, and Actions inspection, REST GET requests,
+and GraphQL queries. Prefer gwtd `pr.list` and `issue.view` when cached data
+or workflow lifecycle context is useful.
+
+Mutations must use gwtd JSON-envelope operations, such as `pr.ready`,
+`pr.draft`, and `actions.rerun`; direct `gh` writes and API mutations are
+blocked. Read permission does not bypass PR gates or the long PR/CI polling
+restriction.
+
+gwtd has no merge operation. A PR is merged by the repository's own merge
+automation (GitHub auto-merge, or a workflow that merges non-Draft PRs) or by
+a human. Keep auto-merge enabled across routine pushes; verify code changes
+before pushing. For a BEHIND PR use `pr.update_branch`, or hand synchronization
+to the PM when assigned. An explicit owner-requested hold uses `pr.draft`:
+a Draft PR cannot be merged. Resume with `pr.ready` only after the Ready PR
+Gate passes again; routine pushes do not require a Draft/Ready cycle.
+
+## Canonical verification admission
+
+Only canonical `verify.run` acquires the host-wide lease, in-process for
+its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+`cargo clippy`, `cargo build`, coverage, direct headed browser checks, and
+pre-push checks do not require a verification lease. Run them directly.
+
+Use `verify.plan` followed by `verify.run` for canonical verification
+records. Manual `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` are retired and return an error without acquiring or
+reserving a lease. Use `verify.lease.status` to inspect contention;
+`verify.lease.release` remains available to drain a legacy holder.
+`verify.run` waits up to `params.max_wait_secs` and returns `deferred`
+when admission times out. Inspect the reported holder before retrying;
+there is no manual acquire loop or fixed retry schedule.
+
+### gwtd bootstrap order
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
 
 ## Persisted Work files
 
@@ -367,6 +513,48 @@ blocker が解消したら、必ず明示的に escalation を閉じます（他
     {"schema_version":1,"operation":"board.post","params":{"kind":"decision","owners":["2338"],"resolves":["<blocked-entry-id>"],"body":"現在の状態: fresh launch を手配したので unblock 済みです。"}}
     JSON
 
+### 待機は停滞ではない: 申告する
+
+Issue Monitor は `stuck_timeout_secs`（既定 30 分）活動が無い launched agent
+を stuck と判定し、判定ごとに autonomous attempt を 1 つ消費します。host
+排他の順番待ち、PM の直列化裁定待ち、触ってはいけない長時間 verification
+の完走待ちも活動を生まないため、その長さの沈黙に入る前に待機を申告します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"number":4324,"reason":"host 排他の順番待ち","resume_condition":"Issue 3791 の verify.run が完了する"}}
+    JSON
+
+`number` はこの launch の担当 Issue です。`4324` を自分の担当 Issue に
+置き換えてください。申告が有効な間は stuck 判定が自分の Issue をスキップし、
+PM は `issue.monitor.status` の自分の行の `waiting` フィールドから
+`reason` / `resume_condition` / `expires_at` を読めます。申告には上限が
+あります（応答の `max_wait_secs`、3 時間）。再申告は本文を更新しますが上限は
+延びず、超過後は通常の判定に戻ります。再開したらすぐ解除します:
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"issue.monitor.wait","params":{"number":4324,"clear":true}}
+    JSON
+
+`number` は必ず渡してください。省略した場合は `GWT_AUTONOMOUS_ISSUE` から
+担当 Issue を解決しますが、この env は Issue Monitor が起動したセッションの
+直下にしか存在しません。bootstrap スクリプト、サブシェル、ラッパープロセス、
+自分で起動した agent には届かず、そこでは `issue_unknown` で拒否されます。
+
+この拒否は verification lease もその他の排他も解放しません。何も変更して
+いません。解除処理は `finally` に置かれがちで、そこで拒否が例外として抜けると
+まだ必要な排他まで手放してしまいます（Issue #4324 で実際に発生しました）。
+`issue_unknown` は `number` を明示して再実行して処理し、保持しているものを
+解放して処理しないでください。
+
+生存を装うために定期的な `workspace.update` や Board 投稿で活動を偽装しない
+でください。待機の申告が正直なシグナルです。
+
+PM の裁定で待機条件が消えた場合、PM は `issue.monitor.wait.invalidate` で
+申告を無効化できます（Issue #4286）。自分の行は `waiting.in_force:false` と
+なり `waiting.invalidated` に誰が・なぜが残り、最後の活動時刻から通常の
+stuck 判定に戻ります。戻ってきたら Board を読んで裁定に従い、別のものを
+本当に待つ場合にだけ再申告してください。
+
 ### Issue 化は PM へ提案する
 
 `issue.create` を直接呼ばないでください。Issue 化すべき事象を見つけたら
@@ -381,6 +569,16 @@ agent をブロックしているか）。PM は登録した Issue 番号を返�
 分析の共有は自由に行ってください。制限するのは新規 Issue の登録だけです。
 PM は登録した Issue 番号を、提案投稿の entry id を `params.parent` に
 指定した Board 返信で返します。
+
+### gwt 自体の摩擦・機能ギャップも同じ経路
+
+gwt 自体の摩擦や機能ギャップ（hook、launch、skill、index、verification、
+coordination、Issue/SPEC workflow が gwt の指示と食い違う）も同じ経路で
+扱います。Board に投稿して PM へ報告し、PM が `gwt-register-issue` で
+起票します。gwt リポジトリに自分で Issue を作らないでください。黙って
+回避するのも禁止です。投稿には、従っていた契約、実際に観測した挙動、
+一次証拠（コマンド、出力、ファイルと行）を含めます。自動捕捉の仕組みは
+無く、この Board 投稿が唯一の intake です。
 
 ## Work (current state)
 
@@ -423,7 +621,7 @@ terminal operation の前に final Work update を行い、以後は exact
 `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`
 の順で収束します。final Work update または terminal lifecycle transition
 の後は、別の `workspace.update` を実行しません。blocker / recovery coordination
-は Board または Draft PR comment に残します。
+は Board または PR comment に残します。
 explicit final update では `params.status:"done"` を設定します。event append
 が成功すると、Stop と final gate が使用する machine-local delivery obligation
 が開きます。
@@ -460,6 +658,38 @@ binary の `search` JSON operation で実行します:
     JSON
 
 `gwt-search` という単体の実行ファイルは存在しません。
+
+## Canonical verification admission
+
+host 全体の lease を取得するのは canonical `verify.run` だけです。
+各 run がプロセス内で取得・管理します。初回の
+`cargo build -p gwt --bin gwtd`、通常の `cargo test`、`cargo clippy`、
+`cargo build`、coverage、直接の headed browser 確認、pre-push 確認には
+verification lease は不要です。そのまま実行してください。
+
+canonical な検証記録は `verify.plan` → `verify.run` で生成します。
+手動の `verify.lease.acquire`、`verify.lease.hold`、`verify.lease.extend`
+は廃止され、lease の取得や予約をせずエラーを返します。
+`verify.lease.status` で競合を確認でき、旧 holder の解放には
+`verify.lease.release` を引き続き使えます。
+`verify.run` は `params.max_wait_secs` まで待機し、時間切れなら
+`deferred` を返します。報告された holder を確認してから再試行してください。
+手動 acquire のループや固定の再試行間隔はありません。
+
+### gwtd bootstrap order
+
+gwtd をソースから build する checkout（gwt リポジトリ自身）では、初回の
+`cargo build -p gwt --bin gwtd` は lease 不要の bootstrap step であり、heavy な
+検証コマンドではありません。順序は build → `verify.plan` → `verify.run` です。
+lease を保持・待機せずに checkout binary を build し、その後にはじめて
+canonical 検証をその binary で実行します。
+
+先に checkout binary が必要かを判断します。必要なのは checkout のコードを
+実行する operation だけです: `execution.*`、`workspace.*`、`build.*`、
+`verify.*`、および checkout で追加した operation。読み取りの `issue.*`、
+`pr.*`、`board.*`、`search` は解決済みの installed gwtd（`GWT_BIN_PATH` /
+PATH）で実行します。Issue / PR / Board の状態を知るためだけに build や
+lease を待たないでください。
 
 ## Persisted Work files
 
@@ -562,8 +792,13 @@ pub fn generate_coordination_guidance_for_codex(worktree: &Path) -> io::Result<(
     write_skill_md(&worktree.join(".codex").join("skills"))
 }
 
+/// Path of the generated guidance within a provider's skills root.
+pub fn skill_path(skills_root: &Path) -> PathBuf {
+    skills_root.join(SKILL_NAME).join("SKILL.md")
+}
+
 fn write_skill_md(skills_root: &Path) -> io::Result<()> {
-    let path = skills_root.join(SKILL_NAME).join("SKILL.md");
+    let path = skill_path(skills_root);
     write_text_atomically(&path, &render_skill_md())
 }
 
@@ -646,6 +881,71 @@ mod tests {
                 "generated guidance: {phrase}"
             );
         }
+    }
+
+    /// SPEC #3576 AC-C6: only canonical verification uses host admission.
+    #[test]
+    fn canonical_verification_guidance_is_materialized_without_manual_admission() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        for relative in [
+            ".claude/skills/gwt-coordination/SKILL.md",
+            ".codex/skills/gwt-coordination/SKILL.md",
+        ] {
+            let body = std::fs::read_to_string(tmp.path().join(relative)).unwrap();
+            assert!(body.contains("Only canonical `verify.run` acquires the host-wide lease"));
+            assert!(body.contains("cargo build -p gwt --bin gwtd"));
+            assert!(body.contains("do not require a verification lease"));
+            assert!(!body.contains("\"operation\":\"verify.lease.acquire\""));
+            assert!(!body.contains("even a single focused test"));
+        }
+        assert!(SKILL_BODY_JA.contains("canonical `verify.run` だけ"));
+    }
+
+    /// Issue #4352 AC-1 / AC-3: the gwtd bootstrap order is defined once in
+    /// the canonical source, names which operations need the checkout
+    /// binary, and reaches both generated mirrors byte-identically.
+    #[test]
+    fn bootstrap_build_is_a_lease_free_step_that_precedes_canonical_verification() {
+        for phrase in [
+            "### gwtd bootstrap order",
+            "build \u{2192} `verify.plan` \u{2192} `verify.run`",
+            "`execution.*`",
+            "`workspace.*`",
+            "`build.*`",
+            "`verify.*`",
+            "`issue.*`",
+            "`pr.*`",
+            "`board.*`",
+            "`search`",
+            "`GWT_BIN_PATH`",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+        assert!(SKILL_BODY_EN.contains("lease-free bootstrap step"));
+        assert!(SKILL_BODY_JA.contains("lease \u{4e0d}\u{8981}\u{306e} bootstrap step"));
+
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        let claude =
+            std::fs::read_to_string(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        let codex =
+            std::fs::read_to_string(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        assert_eq!(
+            claude, codex,
+            "both mirrors must carry the same bootstrap contract"
+        );
+        assert!(claude.contains("lease-free bootstrap step"));
     }
 
     #[test]
@@ -1174,6 +1474,119 @@ mod tests {
         assert!(
             !rendered.contains(&legacy_workspace_update),
             "generated guidance must not expose the legacy workspace update CLI example"
+        );
+    }
+
+    /// Every `gwtd` JSON example the guidance ships, as the parsed envelope
+    /// plus the raw line, so a test can assert on what an agent would actually
+    /// execute after copying the example verbatim.
+    fn json_examples(body: &str) -> Vec<(String, serde_json::Value)> {
+        body.lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('{') && line.contains("\"operation\""))
+            .map(|line| {
+                let parsed =
+                    serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|error| {
+                        panic!("guidance example is not valid JSON: {line}\n{error}")
+                    });
+                (line.to_string(), parsed)
+            })
+            .collect()
+    }
+
+    /// Issue #4334 AC-1 / AC-4 / AC-5: every shipped `issue.monitor.wait`
+    /// example must pass `number` explicitly.
+    ///
+    /// Omitting it only resolves inside a session the Issue Monitor launched,
+    /// where `GWT_AUTONOMOUS_ISSUE` names the owner. Anywhere else — a
+    /// bootstrap script, a subshell, a manually started agent — the operation
+    /// refuses with `issue_unknown`, and agents put the clear call in a
+    /// `finally` that then releases the verification lease they hold. The
+    /// example is the canonical source every agent copies, so it must work
+    /// with no launch context at all.
+    #[test]
+    fn guidance_monitor_wait_examples_pass_number_explicitly() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        let claude =
+            std::fs::read_to_string(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        let codex =
+            std::fs::read_to_string(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md"))
+                .unwrap();
+        let sources = [
+            ("English body", SKILL_BODY_EN),
+            ("Japanese body", SKILL_BODY_JA),
+            ("generated .claude SKILL.md", claude.as_str()),
+            ("generated .codex SKILL.md", codex.as_str()),
+        ];
+        for (label, body) in sources {
+            let waits: Vec<_> = json_examples(body)
+                .into_iter()
+                .filter(|(_, value)| value["operation"] == "issue.monitor.wait")
+                .collect();
+            assert!(
+                !waits.is_empty(),
+                "{label}: expected the wait-declaration examples to be present"
+            );
+            for (line, value) in waits {
+                assert!(
+                    value["params"]["number"].as_u64().is_some(),
+                    "{label}: issue.monitor.wait example must carry params.number \
+                     so it does not depend on GWT_AUTONOMOUS_ISSUE: {line}"
+                );
+            }
+        }
+    }
+
+    /// Issue #4334 AC-2: the guidance must say where `number` may be omitted,
+    /// so an agent moving the call into a script knows it has to be explicit.
+    #[test]
+    fn guidance_states_where_the_wait_number_may_be_omitted() {
+        assert!(
+            SKILL_BODY_EN.contains("GWT_AUTONOMOUS_ISSUE"),
+            "English guidance must name the env the fallback depends on"
+        );
+        assert!(
+            SKILL_BODY_EN.contains("bootstrap script"),
+            "English guidance must name the context where the fallback is absent"
+        );
+        assert!(
+            SKILL_BODY_JA.contains("GWT_AUTONOMOUS_ISSUE"),
+            "Japanese guidance must name the env the fallback depends on"
+        );
+        assert!(
+            SKILL_BODY_JA.contains("bootstrap"),
+            "Japanese guidance must name the context where the fallback is absent"
+        );
+        let rendered = render_skill_md();
+        assert!(
+            rendered.contains("GWT_AUTONOMOUS_ISSUE"),
+            "generated guidance must carry the omission rule"
+        );
+    }
+
+    /// Issue #4334 AC-3: the guidance must tell agents that a refused wait
+    /// call never touches the verification lease, so the refusal is not
+    /// handled by tearing down exclusivity.
+    #[test]
+    fn guidance_states_a_refused_wait_does_not_release_the_lease() {
+        for (label, body) in [
+            ("English body", SKILL_BODY_EN),
+            ("Japanese body", SKILL_BODY_JA),
+        ] {
+            assert!(
+                body.contains("lease"),
+                "{label}: the refusal note must name the lease it does not release"
+            );
+        }
+        assert!(
+            SKILL_BODY_EN.contains("does not release"),
+            "English guidance must state the refusal releases nothing"
+        );
+        assert!(
+            SKILL_BODY_JA.contains("解放しません"),
+            "Japanese guidance must state the refusal releases nothing"
         );
     }
 }

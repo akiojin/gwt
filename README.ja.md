@@ -210,6 +210,18 @@ gwtd <<'JSON'
 JSON
 ```
 
+`board.show` は、選択された workspace / session から見える最新20件を時系列順で
+返します。`params.limit` に非負整数（例: `15`、`0` は空）を指定して件数を変更できます。
+`params.all: true` は全宛先を対象にして既定上限を解除しますが、明示した `limit` が
+常に優先します。provider の保持窓は残り、`all` は全履歴の読み込みを意味しません。
+未知のキーは受け付けるキー一覧を示して拒否します。既存の `board` フィールドは維持し、
+`page.total_entries` はCLI制限前の可視snapshot件数、`page.returned_entries` は
+返却件数、`page.truncated` はCLI制限による省略の有無を示します。
+
+返却サイズはおおむね「件数 × シリアライズされた1件のサイズ + metadata」です。
+1件平均2 KiBなら20件で約40 KiBです。固定バイト上限はなく、長文ほど増え、
+`all: true` では数百 KiB以上になる場合があります。
+
 managed hook と runtime 委譲は `gwtd` を使います。macOS と Linux では、
 ユーザーが JSON operation `daemon.start` を実行することでプロジェクトごとの
 runtime daemon（Unix ドメインソケット IPC）が起動します。daemon
@@ -222,12 +234,19 @@ JSON operation `daemon.start` を実行していない場合は multi-instance f
 無効ですが、ローカルのファイルベース state とファイル watcher は
 従来どおり動作します。
 
-Windows では現状 long-running daemon は提供されておらず、
-JSON operation `daemon.start` は "not yet implemented" で終了します。managed
-hook は同期的な `gwt hook ...` dispatch にフォールバックし、複数
-インスタンス間のイベント fan-out は Windows 対応 (named-pipe 経路)
-が完了するまで利用できません。JSON operation `daemon.status` 自体は Windows
-でも実行可能ですが、daemon が動かないため常に `stopped` を表示します。
+Windows でも daemon は同じ形で動きます。GUI の Issue Monitor がユーザー
+セッションの子プロセスとして起動・監視し、JSON operation `daemon.start` で
+手動起動もできます。通信は named pipe（`\\.\pipe\gwtd-<scope>-<hash>`、
+ローカルクライアントのみ。auth token は `~/.gwt` 配下の endpoint file が
+持つ）です。`daemon.status` / `daemon.subscribe` / Issue Monitor control /
+複数インスタンス間の fan-out は macOS / Linux と同じように動作します。
+手動起動した daemon は Ctrl-C、Ctrl-Break、コンソールを閉じることで停止し、
+ログオフとシャットダウンでも同じ cleanup が走ります。GUI が終了させた
+daemon は次回起動時の liveness 判定で回収されます。gwt は Windows Service を
+インストールしません。daemon が行うのは scan と claim までで、エージェント
+pane の生成は GUI 側が担うため、Service 化してもヘッドレス自律実行には
+ならず、ユーザー単位の `~/.gwt` state とも噛み合わないためです。ヘッドレス
+自律実行は daemon の目標には含めていません。
 
 ## Agent Workflow
 
@@ -256,7 +275,11 @@ hook は同期的な `gwt hook ...` dispatch にフォールバックし、複�
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
-  Work Item view を開きます
+  Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
+  開かず、Issue ウィンドウの右ペインに読み取り専用でミラー表示されます。入力
+  したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
+  の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
+  `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
 - `Profile` — environment/profile 管理
 - `File Tree` — 実リポジトリの read-only tree
@@ -299,10 +322,40 @@ Agent や自動化からは、`gwtd` JSON operation の `issue.monitor.status`�
 `issue.monitor.priority.move`、`issue.monitor.priority.set` を使ってプロジェクトの
 キューを確認・並べ替えできます。`issue.monitor.config.set` は処理停止、Autonomous
 モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
-`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。各 operation
+`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
+`review_verdict_published` / `execution_settled` / `binding_dead` /
+`stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
+前 3 種は解放して pane を閉じます。解放された Issue は通常 queue に戻りませんが、
+エージェントが実行を settle する前に窓が失われた場合（アプリ再起動が pane ごと落とした
+場合など）は requeue され、次の scan が既存ブランチのまま再 launch します。実行レコードが Active の
+まま idle な `stuck_unknown` だけは人の判断に残り、stuck タイムアウトの 2 倍を超えると
+判断を求める通知を出します。`issue.monitor.release_idle` は同じ解放を Issue 単位
+または全 idle 行に対して手動実行し、`dry_run: true` は対象の報告だけを行います。
+`issue.monitor.profiles` は起動候補プールを返し、`issue.monitor.profiles.set` は
+プールを置き換えます。候補が 2 件以上あると、Monitor は各 Issue を最初の適格な候補
+で起動する（rate limit の hold・使用率しきい値・`prefer_for` routing が適格性を決め、
+詳細な規則は SPEC [#3914](https://github.com/akiojin/gwt/issues/3914) に定義）
+ため、1 つの provider が rate limit に入ってもキューは止まりません。GUI の Agent
+settings で別 provider を保存すると同じプールに追加されます。各 operation
 は省略可能な `project_root` を受け取り、省略時は現在の worktree を対象にします。
 Priority の変更と daemon 不在時の設定変更は、実行中 instance の next scan/rebase で
 反映されます。
+
+ホストの空き容量も同じ snapshot に含まれます。`issue.monitor.status` の
+`disk_space` は worktree と verification coordinator が置かれた volume を列挙し、
+空きが 20 GiB または 5% を下回ると `warning` を載せるため、`verify.run` が
+`No space left on device` で落ちる前にディスク枯渇が見えます。空き容量の回収は
+`worktree.gc_build_artifacts` operation が行います。HEAD が `origin/<base>`
+（`base` の既定は `develop`）にマージ済みで、稼働中プロセスも live な gwt launch も
+無い worktree の `target/` ビルドキャッシュを削除します。引数無しの呼び出しは dry run
+で、候補とそのサイズ、および除外した worktree とその理由（`active process …` /
+`tracked launch …` / `not merged …`）を報告します。削除するには `dry_run: false`
+を、未マージの idle worktree も対象にするには `include_unmerged: true` を渡します。
+共有の base ブランチ workspace（`develop` / `main`）は、リビルド代償を次に触る人が
+負うことになるため既定で除外され、`include_protected_workspaces: true` を明示した
+場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
+実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
 ### Autonomous モード（opt-in）
 
@@ -323,6 +376,18 @@ opt-in** が必要です:
 エスカレーションし、`Autonomous` トグルは monitor が arm した auto-merge を
 能動的に解除する kill switch として機能します。ゲート設計と脅威モデルの全体は
 SPEC [#3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。
+
+work ブランチが `develop` に merge されると、monitor は delivered な Issue を
+自分で決着させます（`Closes #N` は default branch でしか発火しません）。
+受け入れ基準がすべてチェック済みか、PR 本文 / Issue コメントに残りの基準を
+別 Issue に委譲した記録（`残 AC は別 Issue に委譲`）があれば、PR 番号と merge
+SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
+`merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
+全 Phase の tasks が完了したときだけ close します。auto-close は既定で
+`Autonomous` トグルに連動し、`issue.monitor.config.set` の
+`auto_close_merged_issues=true|false` で上書きできます（off のときは
+`merge 済み・close 待ち` コメントの記録のみ）。人間が reopen した Issue を同じ
+merge で再度 close することはありません。
 
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
@@ -408,6 +473,36 @@ Board reminders、discussion/plan/build Stop checks、coordination-event summari
   （worktree ローカルの `.codex/hooks.json` と repo root 側の workspace-home
   コピー）所有します。hook health の報告と self-heal は常に同じファイル集合を
   対象にします。
+
+### Codex 推奨設定
+
+gwt は GUI 起動のたびに、ホストの Codex 設定（`$CODEX_HOME/config.toml`、
+既定は `~/.codex/config.toml`）に gwt 推奨の
+`features.context_management.experimental_mode = true` が入っていることを
+保証します。この設定は、コンテキストを単一の要約へ繰り返し圧縮する代わりに、
+メモと検索可能な履歴として蓄積された詳細を保持します。gwt が書き込むのは
+キーが未設定の場合だけで、ファイル内の他の table はすべて保持され、既に
+キーを持つ config は書き換えられません。無効化したい場合は `config.toml` に
+明示的に記述してください:
+
+```toml
+[features.context_management]
+experimental_mode = false
+```
+
+gwt は明示された値（`true` / `false` を問わず）を尊重し、変更しません。
+config.toml が parse 不能または書き込み不可でも起動は止まらず、path と原因が
+error ledger（`errors.list`）に記録されます。
+
+0.153.0 より前の Codex CLI は `[features]` 配下の table を読めません。
+`[features.context_management]` が 1 つあるだけで config 全体が読めなくなり
+（`invalid type: map, expected a boolean`）、`codex login` も起動しなくなります。
+gwt が起動する codex と `PATH` 上の `codex` は別の version であり得るため、
+gwt は起動時に `PATH` 上の codex（`codex --version`）を確認します。それが
+0.153.0 より古い、または version を読み取れない場合、gwt はキーを書き込まず、
+既存の `[features.context_management]` table を削除してその codex が動き続ける
+ようにします。`PATH` 上の codex を 0.153.0 以降に更新すると、次回の gwt 起動時に
+キーが再び書き込まれます。
 
 gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
 は local hook-forward bridge も有効にします。この bridge は、その session に
@@ -619,6 +714,21 @@ Teams でチャンネル → **チャンネルへのリンクを取得**し、�
 対象 team/channel に**参加している**必要があります（未参加だと Graph が `403` を返し、
 gwt が対処メッセージを表示）。
 
+## PM のプロジェクト設定
+
+常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
+hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には
+読み込まれません。実装 agent は従来どおり project 設定を使います。既存の PM 会話は
+自動移行せず、次回の PM セッション起動時から分離されたディレクトリを使います。
+
+project 固有の規約を明示的に渡すには、
+`~/.gwt/projects/<project-hash>/project-state/pm.json` の他のフィールドを保持したまま、
+`settings.project_policy_files` を設定してください。
+例: `"project_policy_files": ["docs/pm-policy.md"]`。パスは PM の project checkout からの
+相対パスで、既定は空リストです。選択した内容は managed asset の再生成時に既存の
+`gwt-pm` skill へコピーされ、runtime に project への symlink は作りません。
+指定を外した内容は次回の再生成で除去されます。
+
 ## キャンバス操作
 
 - 画面上の zoom ボタンでキャンバスを拡大・縮小
@@ -626,8 +736,10 @@ gwt が対処メッセージを表示）。
 - `Tile` で表示中のウィンドウをグリッド整列
 - `Stack` でタイトルバーを残したまま重ねて表示
 - `Align` でウィンドウサイズを変えずにグリッド整列
-- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` でフォーカス切替
-  - フォーカスされたウィンドウは中央へ寄ります
+- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で Canvas 上の Agent を
+  状態順（running/starting → waiting/idle → その他）に切り替え
+  - Agent 以外はスキップし、非表示の Agent タブは選択時に表示して、対象の
+    Agent を中央へ寄せます
 
 ## Operator デザイン言語 (SPEC-2356)
 
@@ -725,6 +837,27 @@ gwtd <<'JSON'
 JSON
 ```
 
+- レビューへ渡す前に SPEC artifact を lint する: FR / AS / T 番号、Traceability
+  表との整合、supersede のインライン注記、section マーカー / roundtrip の健全性を
+  検査し、結果を Intake Inspection Snapshot に記録し、Finding Disposition Ledger
+  を seed して reviewer checklist を出力します。critical finding があると非ゼロ
+  終了します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.lint","params":{"number":1784}}
+JSON
+```
+
+- 完了を宣言してよいかを判定する: 各 section が snapshot と一致する GitHub 実体
+  readback を持ち、critical finding がすべて disposition 済みであることを確認します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.inspection.complete","params":{"number":1784}}
+JSON
+```
+
 ## ログ
 
 - アプリログ:
@@ -734,6 +867,42 @@ JSON
 - プロジェクト単位のワークスペース状態:
   `~/.gwt/projects/<repo-hash>/workspace.json`
 
+### macOS のファイルシステム負荷と Spotlight
+
+worktree の index watcher は、自身の macOS FSEvents stream から直下の
+`target/` の子孫を除外します。監視開始後に `target/` が作られる場合にも適用されます。
+親から `target` ディレクトリエントリ自体の変更通知が届く場合は、index path policy
+で除外します。保証範囲はこの gwt stream であり、OS 全体の FSEvents や他アプリの
+購読は停止しません。現在、この index watcher を production で起動する呼出元は
+存在しないため、この除外だけで `fseventsd` 高負荷の原因を特定したとは扱いません。
+
+既存 worktree は、**システム設定 → Spotlight → 検索のプライバシー**を開いて
+その `target` ディレクトリを追加してください。新規 worktree は、最初のビルドで
+`target` が作られた後に追加してください。macOS のバージョンごとの操作は
+[Apple の Spotlight プライバシー設定ガイド](https://support.apple.com/en-gb/guide/mac-help/mchl1bb43b84/mac)
+を参照してください。gwt が Spotlight 設定を自動変更することはありません。
+
+gwt の診断と併せてホストの CPU 状況を確認できます。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"diagnostics.cpu","params":{}}
+JSON
+```
+
+`host_cpu` には最新の `fseventsd` プロセス標本と、標本数・採取間隔を表示します。
+macOS では1秒間隔で3回採取し、同じプロセスが全標本で CPU 100% を超えた場合に
+警告します。プロセスや標本を取得できなかった場合は低負荷と断定しません。
+警告は観測結果であり、特定 worktree が原因である証明ではありません。
+稼働中のファイル監視利用者と Spotlight のプライバシー設定を確認してください。
+
+Spotlight のインデックス処理そのものは Issue Monitor の snapshot から読めます。
+`issue.monitor.status` の `spotlight` は `mds_stores` プロセスとその CPU 率を
+列挙し、100% を超えたプロセスがある場合に `warning` を載せます。worktree が
+数百規模のホストでは、この daemon がエージェント本体を上回る CPU 消費者になり、
+そうでなければ「ホストが重い」としか観測できません。Spotlight の無い
+プラットフォームでは、プロセスも警告も無い状態でこのブロックを返します。
+
 ## 開発
 
 ### ビルド
@@ -741,6 +910,9 @@ JSON
 ```bash
 cargo build -p gwt --bin gwt --bin gwtd
 ```
+
+`browser-check` スキル（この checkout の隔離 GUI 検証）は `hook.doctor` の証跡を
+読むために `jq` が `PATH` 上に必要です。gwt 自体の実行には不要です。
 
 ### 実行
 
@@ -763,23 +935,10 @@ cargo test -p gwt-core -p gwt --all-features
 
 ### 重量級検証の直列化
 
-重量級検証（`cargo test --all-features` / `cargo llvm-cov` / headed
-Playwright / `verify.run`）はホストの CPU を奪い合います。同じマシンで 2 つ
-同時に走らせると wall-clock に依存する fixture が理由なく失敗し、カバレッジ
-計測も汚れるため、gwt はホスト単位の lease で直列化します。保持者はマシン
-あたり 1 つで、リポジトリや worktree をまたいで共有されます。
-
-重量級コマンドの前に lease を取得し、終わったら解放します。
-
-```bash
-gwtd <<'JSON'
-{"schema_version":1,"operation":"verify.lease.acquire","params":{"ttl_minutes":45}}
-JSON
-```
-
-応答は即時です。`verification lease: granted` の場合は解放に使う `lease_id`
-が返り、`verification lease: unavailable` の場合は現在の保持者と残り TTL が
-返るため、他プロセスを監視する必要はありません。
+ホスト全体の verification lease を取得するのは canonical `verify.run`
+だけです。`verify.plan` で検証行列を登録し、`verify.run` で実行します。
+各 run が取得と解放を管理します。`deferred` は取得待機が時間切れになり、
+検証記録が生成されなかったことを示します。再試行前に保持者を確認してください。
 
 ```bash
 gwtd <<'JSON'
@@ -787,16 +946,73 @@ gwtd <<'JSON'
 JSON
 ```
 
+初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
+lint、coverage、直接の headed browser 確認、pre-push 確認は verification
+lease なしでそのまま実行します。完了判定には引き続き canonical な検証証跡が
+必要です。
+
+`pre-push` hook は、ワークスペースをコンパイルしない検査だけを実行します
+（`cargo fmt --all -- --check`、Markdownlint、SKILL.md frontmatter の検証）。
+Git hook は `gwtd` ではなく `git push` の配下で動くため verification lease を
+取得できず、そこで重量級の Cargo ジョブを起動すると、別の worktree が lease を
+保持している間にホストを飽和させてしまいます。Clippy・テスト・カバレッジ 90%
+閾値は、代わりに Lint / Test / Coverage workflow が pull request ごとに強制
+します。
+
+**移行方法:** `verify.lease.acquire`、`verify.lease.hold`、
+`verify.lease.extend` は holder や予約を作らずエラーを返すようになりました。
+canonical 検証を囲む手動取得は `verify.run` に置き換え、通常の Cargo 操作を
+囲む手動取得は削除してください。既存の旧 holder はプロセスを kill せず、
+明示的に解放できます。
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.release","params":{"lease_id":"<lease-id>"}}
 JSON
 ```
 
-TTL より実行が長引く場合は、同じ `lease_id` で `verify.lease.extend` を
-使います。既定 TTL は 45 分で、満了した lease は自動的に解放され、保持者が
-kill された場合も即座に解放されます。lease の遷移は
-`~/.gwt/runtime/index-coordinator/lease-events.jsonl` に記録されます。
+lease の遷移は
+`~/.gwt/runtime/verification-coordinator/lease-events.jsonl` に記録されます。
+検証は専用の coordinator レーンを持ちます。semantic search と index build は
+従来どおり `~/.gwt/runtime/index-coordinator` 上で相互排他（model を load する
+runner は同時に 1 本）し、検証とは互いに待ち合いません。
+
+### GitHub API 予算
+
+gwt が発行する `gh` 呼び出しは、全マシン・全 worktree・全エージェントで
+1 つの GitHub アカウント予算を共有します。`pr.list` の inventory は
+cache-first で、`~/.gwt/projects/<hash>/pr-inventory-cache.json` の
+スナップショットが 5 分間は GitHub に触れずに応答します。一括クエリは軽量で、
+`statusCheckRollup` / `body` は変更のあった PR だけ個別に取得します。判断に
+ライブ状態が必要なときだけ `params.refresh:true` を渡し、重いフィールドは
+`params.include`（`["checks","body"]`、既定は `["checks"]`）で選びます。応答には
+`source` / `cache_age_secs` / `throttled` / `github_calls` に加え、
+`hydrated`（個別取得に成功したPR数）と `skipped_unchanged`（ライブ読み取りで変更なしと判定したPR数、キャッシュ応答では0）が含まれ、予算が
+予備域を下回ると最後のスナップショットが返り `throttled` に理由が入ります。
+
+変更のない Draft / CI 未起動 PR の空チェック結果は、スナップショットの期限後も再利用します。
+`updatedAt` または head commit が変わると再取得し、実行中のチェックは既定で10分ごとに再取得します。
+個別取得は同時最大5件、1回の読み取りで最大30件です。`~/.gwt/config.toml` で
+それぞれの間隔を独立して設定できます（0を指定するとその待ち時間を無効にします）。
+
+```toml
+[pr_inventory]
+cache_ttl_secs = 300
+checks_refresh_secs = 600
+```
+
+予算の観測は無料エンドポイントで行います:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"github.budget","params":{}}
+JSON
+```
+
+応答には GitHub が報告する primary window（`graphql` / `core`）、分あたりの
+secondary limit のローカル推定（GitHub は公開しないため、このマシンの
+`~/.gwt/github-budget/` の spawn ledger から近似）、最新の rate-limit 拒否、
+そして定期読み取りが今受ける間引き判定が含まれます。
 
 ### リリース手順
 
@@ -805,9 +1021,18 @@ kill された場合も即座に解放されます。lease の遷移は
 バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
 を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
 リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
+`auto` がメジャーになることはありません。コミットの breaking marker は
+Release PR 本文に列挙されるだけで、メジャー昇格は `major` を明示した場合のみです。
 生成された Release PR をレビューしてマージすると、`main` 側でリリース
 パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
 ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+
+Release PR の本文は参照専用です。配信した Issue は裸の `#N` 参照で列挙し、
+closing keyword は書きません。`main` は default branch なので、そこに
+`Closes #N` があると受け入れ基準が未消化の Issue まで閉じてしまうためです。
+Issue の決着は work ブランチが `develop` に merge された時点で行われます
+（前述）。merge 後は `release.yml` が `scripts/release_close_guard.py` を実行し、
+Release PR の merge 自体が閉じた Issue を reopen してマーカー付きコメントを残します。
 
 ### Release Asset Contract
 

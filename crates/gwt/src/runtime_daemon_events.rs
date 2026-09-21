@@ -676,6 +676,12 @@ mod tests {
 
     #[test]
     fn project_store_identity_from_project_root_matches_resolved_operation_store() {
+        // Issue #4060: pin the gwt home per thread so the two `gwt_home()`
+        // reads (direct `gwt_project_dir` and the one inside
+        // `from_project_root`) observe the same root even when a parallel
+        // test swaps the process-wide `HOME` in between.
+        let home = tempfile::tempdir().expect("gwt home tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project tempdir");
         let canonical_root = dunce::canonicalize(project.path()).expect("canonical project root");
         let scope = gwt_core::paths::resolve_project_scope(&canonical_root);
