@@ -61,7 +61,9 @@ fn with_managed_asset_lock<T>(
 /// (read by Codex before 0.131.0-alpha.21) and the workspace-home copy (read by
 /// newer Codex). Deduplicated when both resolve to the same file.
 pub fn managed_codex_hook_paths(worktree: &Path) -> Vec<PathBuf> {
-    gwt_skills::codex_hooks_paths_for_codex_discovery(worktree, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree);
+    let root = runtime.as_deref().unwrap_or(worktree);
+    gwt_skills::codex_hooks_paths_for_codex_discovery(root, MANAGED_CODEX_HOOK_DISCOVERY_MODE)
 }
 
 /// Resolve the only Host Codex config whose project trust lifecycle gwt can
@@ -233,6 +235,9 @@ pub fn managed_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
 }
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        return refresh_managed_gwt_assets_for_pm_worktree(worktree);
+    }
     with_managed_asset_lock(worktree, || {
         crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
         crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
@@ -251,8 +256,8 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
 
 /// Refresh the resident PM's own managed assets without mutating the linked
 /// main checkout's workspace-home Codex hooks. Launch materialization owns
-/// provider-specific workspace-home discovery; safe-boundary refreshes are
-/// confined to the canonical PM checkout.
+/// provider-specific workspace-home discovery; safe-boundary refreshes write
+/// provider assets in the PM runtime and Git hooks in its canonical checkout.
 pub fn refresh_managed_gwt_assets_for_pm_worktree(worktree: &Path) -> io::Result<()> {
     with_managed_asset_lock(worktree, || {
         refresh_managed_gwt_assets_for_pm_worktree_locked(worktree)
@@ -261,30 +266,39 @@ pub fn refresh_managed_gwt_assets_for_pm_worktree(worktree: &Path) -> io::Result
 
 /// Caller holds the managed-assets lock through repoint and regeneration.
 pub(crate) fn refresh_managed_gwt_assets_for_pm_worktree_locked(worktree: &Path) -> io::Result<()> {
-    if !crate::pm_registry::is_pm_worktree(worktree) {
+    if !crate::pm_registry::is_canonical_pm_worktree(worktree) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("not a canonical PM worktree: {}", worktree.display()),
         ));
     }
-    let snapshot = PmManagedAssetSnapshot::capture(worktree)?;
+    refresh_pm_runtime_assets(worktree, &ManagedAssetTarget::ALL)?;
+    crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
+    crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
+    Ok(())
+}
+
+fn refresh_pm_runtime_assets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<ManagedAssetMaterialization> {
+    let runtime = crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(worktree)?;
+    let snapshot = PmManagedAssetSnapshot::capture(&runtime)?;
     let refresh = (|| {
-        materialize_managed_gwt_assets_for_targets(
-            worktree,
-            &ManagedAssetTarget::ALL,
+        let hook_bin = materialize_managed_gwt_assets_for_targets(
+            &runtime,
+            targets,
             CodexHookDiscoveryMode::WorktreeLocal,
             false,
         )?;
-        update_git_exclude(worktree).map_err(|error| {
-            io::Error::other(format!("failed to update PM managed excludes: {error}"))
-        })
+        materialize_pm_project_policy(worktree, &runtime, targets)?;
+        gwt_skills::materialize_managed_git_hooks(worktree)?;
+        Ok(ManagedAssetMaterialization { hook_bin })
     })();
     match refresh {
-        Ok(()) => {
+        Ok(result) => {
             snapshot.discard();
-            crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
-            crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
-            Ok(())
+            Ok(result)
         }
         Err(error) => match snapshot.restore() {
             Ok(()) => Err(error),
@@ -293,6 +307,59 @@ pub(crate) fn refresh_managed_gwt_assets_for_pm_worktree_locked(worktree: &Path)
             ))),
         },
     }
+}
+
+/// Opt-in content rides the existing generated gwt-pm leaf and its snapshot.
+fn materialize_pm_project_policy(
+    worktree: &Path,
+    runtime: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<()> {
+    let prefs_path = worktree
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("PM worktree has no project store"))?
+        .join("project-state/pm.json");
+    let prefs = crate::pm_registry::load_pm_prefs(&prefs_path)?;
+    let mut policy = String::new();
+    for relative in prefs.settings.project_policy_files {
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "PM project_policy_files requires a project-relative file: {}",
+                    relative.display()
+                ),
+            ));
+        }
+        let source = worktree.join(&relative);
+        let content = fs::read_to_string(&source).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("read opted-in PM policy {}: {error}", source.display()),
+            )
+        })?;
+        policy.push_str(&format!("\n### {}\n\n{}\n", relative.display(), content));
+    }
+    if policy.is_empty() {
+        return Ok(());
+    }
+    for (target, root) in [
+        (ManagedAssetTarget::ClaudeCode, ".claude/skills"),
+        (ManagedAssetTarget::Codex, ".codex/skills"),
+    ] {
+        if targets.contains(&target) {
+            gwt_skills::pm_guidance::generate_pm_guidance_with_policy(
+                &runtime.join(root),
+                &policy,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Preserve only untracked gwt-owned collisions before the non-force Git
@@ -761,18 +828,197 @@ fn pm_repoint_sync_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-const PM_MANAGED_ASSET_TRANSACTION_ROOTS: &[&str] = &[
-    ".claude",
-    ".codex",
-    ".gwt/opencode",
-    ".gwt/openclaw",
-    ".gwt/hermes",
-];
+/// Generated leaves are supplied by the same path definitions the writers use.
+fn pm_generated_asset_paths(worktree: &Path) -> Vec<PathBuf> {
+    let mut paths = gwt_skills::provider_hooks::managed_provider_hook_paths(worktree);
+    paths.extend([
+        worktree.join(gwt_skills::settings_local::CLAUDE_SETTINGS_PATH),
+        worktree.join(gwt_skills::settings_local::CODEX_HOOKS_PATH),
+    ]);
+    for root in [".claude/skills", ".codex/skills"] {
+        let root = worktree.join(root);
+        paths.push(gwt_skills::coordination_guidance::skill_path(&root));
+        paths.push(gwt_skills::pm_guidance::skill_path(&root));
+    }
+    paths
+}
+
+fn pm_managed_asset_targets(worktree: &Path) -> io::Result<Vec<PathBuf>> {
+    let plan = gwt_skills::distribute::plan_distribution_to_worktree_for_targets(
+        worktree,
+        &ManagedAssetTarget::ALL,
+        gwt_skills::TrackedAssetWritePolicy::PreserveTracked,
+    )?;
+    let mut targets = pm_generated_asset_paths(worktree);
+    targets.extend(plan.mutation_paths().map(Path::to_path_buf));
+    targets.extend(
+        gwt_skills::provider_hooks::HERMES_CREDENTIAL_FILES
+            .iter()
+            .map(|name| worktree.join(".gwt/hermes").join(name)),
+    );
+    // Runtime owns provider assets; the same Git hook plan still owns leaves
+    // in the separate canonical checkout, including their rollback snapshot.
+    let canonical = crate::pm_registry::pm_worktree_for_runtime_dir(worktree);
+    let git_worktree = canonical.as_deref().unwrap_or(worktree);
+    if let Some(plan) = gwt_skills::plan_managed_git_hooks(git_worktree) {
+        let self_ignore = plan.hooks_dir.join(".gitignore");
+        if !self_ignore.exists() {
+            targets.push(self_ignore);
+        }
+        targets.extend(plan.hooks.into_iter().filter_map(|hook| {
+            (!hook.target.exists() || gwt_skills::git_hooks::is_managed_hook(&hook.target))
+                .then_some(hook.target)
+        }));
+    }
+    if crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_none() {
+        targets.push(resolve_git_exclude_path(worktree)?);
+    }
+    targets.sort();
+    // A pruned managed subtree already includes its regenerated leaves.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for target in targets {
+        if !roots.iter().any(|root| target.starts_with(root)) {
+            roots.push(target);
+        }
+    }
+    Ok(roots)
+}
+
+/// Guard managed namespaces before the distribution planner can traverse them.
+/// Project links outside these namespaces are never inspected or snapshotted;
+/// the Hermes credential bridge owns its link leaves without following them.
+fn preflight_pm_managed_asset_refresh(worktree: &Path) -> io::Result<()> {
+    for path in pm_generated_asset_paths(worktree) {
+        preflight_pm_managed_asset_path(worktree, &path, "write")?;
+    }
+    // The Hermes credential bridge replaces links without following them.
+    // Its parent is checked above; .env/auth.json remain valid link leaves.
+    for relative in [
+        ".claude/skills",
+        ".codex/skills",
+        ".gwt/hermes/skills",
+        ".claude/commands",
+        ".claude/hooks/scripts",
+        ".codex/hooks/scripts",
+    ] {
+        let root = worktree.join(relative);
+        preflight_pm_managed_asset_path(worktree, &root, "write/prune")?;
+        if !root.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with("gwt-") {
+                preflight_pm_managed_asset_tree(&entry.path())?;
+            }
+        }
+    }
+    // Use the writer's canonical names too: on case-insensitive filesystems
+    // an existing GWT-execute directory is also the gwt-execute write target.
+    for relative in [".claude/skills", ".codex/skills", ".gwt/hermes/skills"] {
+        for entry in gwt_skills::assets::CLAUDE_SKILLS.dirs() {
+            let name = entry.path().file_name().unwrap_or_default();
+            if name.to_string_lossy().starts_with("gwt-") {
+                preflight_pm_managed_asset_tree(&worktree.join(relative).join(name))?;
+            }
+        }
+    }
+    for relative in [".claude/skills", ".codex/skills"] {
+        for name in ["gwt-pm", "gwt-coordination"] {
+            preflight_pm_managed_asset_tree(&worktree.join(relative).join(name))?;
+        }
+    }
+    // Commands also contain non-gwt names (currently release.md). Their
+    // existing tracked files are preserved by distribution; the command root
+    // and its ancestors have already been checked above.
+    let tracked_paths = gwt_skills::distribute::tracked_gwt_asset_paths(worktree);
+    for entry in gwt_skills::assets::CLAUDE_COMMANDS.entries() {
+        let path = worktree.join(".claude/commands").join(entry.path());
+        if entry.as_file().is_some()
+            && path.exists()
+            && gwt_skills::distribute::should_skip_tracked_path(worktree, &path, &tracked_paths)
+        {
+            continue;
+        }
+        preflight_pm_managed_asset_path(worktree, &path, "write/prune")?;
+        preflight_pm_managed_asset_tree(&path)?;
+    }
+    // Runtime owns provider assets; the same Git hook plan still owns leaves
+    // in the separate canonical checkout, including their rollback snapshot.
+    let canonical = crate::pm_registry::pm_worktree_for_runtime_dir(worktree);
+    let git_worktree = canonical.as_deref().unwrap_or(worktree);
+    if let Some(plan) = gwt_skills::plan_managed_git_hooks(git_worktree) {
+        let self_ignore = plan.hooks_dir.join(".gitignore");
+        if !self_ignore.exists() {
+            preflight_pm_managed_asset_path(worktree, &self_ignore, "write")?;
+        }
+        for hook in plan.hooks {
+            if !hook.target.exists() || gwt_skills::git_hooks::is_managed_hook(&hook.target) {
+                preflight_pm_managed_asset_path(worktree, &hook.target, "write")?;
+            }
+        }
+    }
+    if crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_none() {
+        preflight_pm_managed_asset_path(worktree, &resolve_git_exclude_path(worktree)?, "write")?;
+    }
+    Ok(())
+}
+
+fn preflight_pm_managed_asset_path(
+    worktree: &Path,
+    path: &Path,
+    operation: &str,
+) -> io::Result<()> {
+    // Git's exclude may live in the linked main checkout. Stop at the shared
+    // ancestor so OS aliases above the checkouts (e.g. /var) remain valid.
+    let shared = worktree
+        .ancestors()
+        .find(|ancestor| path.starts_with(ancestor));
+    let ancestors = path
+        .ancestors()
+        .take_while(|ancestor| Some(*ancestor) != shared)
+        .collect::<Vec<_>>();
+    for node in ancestors.into_iter().rev() {
+        match fs::symlink_metadata(node) {
+            Ok(metadata) => {
+                reject_pm_managed_asset_indirection(node, &metadata).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("PM managed asset {operation} preflight: {error}"),
+                    )
+                })?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn preflight_pm_managed_asset_tree(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    reject_pm_managed_asset_indirection(path, &metadata).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("PM managed asset write/prune preflight: {error}"),
+        )
+    })?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            preflight_pm_managed_asset_tree(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
 
 struct PmManagedAssetSnapshot {
     entries: Vec<PmManagedAssetSnapshotEntry>,
-    gwt_parent: PathBuf,
-    gwt_parent_existed: bool,
+    worktree: PathBuf,
+    missing_directories: Vec<PathBuf>,
     backup_root: PathBuf,
 }
 
@@ -784,38 +1030,36 @@ struct PmManagedAssetSnapshotEntry {
 
 impl PmManagedAssetSnapshot {
     fn capture(worktree: &Path) -> io::Result<Self> {
+        preflight_pm_managed_asset_refresh(worktree)?;
         let project_state = worktree
             .parent()
             .and_then(Path::parent)
             .ok_or_else(|| io::Error::other("canonical PM worktree has no project-state root"))?
             .join("project-state");
         ensure_real_pm_managed_asset_directory(&project_state)?;
-        let gwt_parent = worktree.join(".gwt");
-        let gwt_parent_existed = pm_managed_asset_node_exists(&gwt_parent)?;
-        if gwt_parent_existed {
-            let metadata = fs::symlink_metadata(&gwt_parent)?;
-            reject_pm_managed_asset_indirection(&gwt_parent, &metadata)?;
-            if !metadata.file_type().is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "PM managed provider-home parent is not a directory: {}",
-                        gwt_parent.display()
-                    ),
-                ));
+        let targets = pm_managed_asset_targets(worktree)?;
+        let exclude = if crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_some() {
+            None
+        } else {
+            Some(resolve_git_exclude_path(worktree)?)
+        };
+        let mut missing_directories = BTreeSet::new();
+        let canonical = crate::pm_registry::pm_worktree_for_runtime_dir(worktree);
+        for target in &targets {
+            let root = canonical
+                .as_deref()
+                .filter(|root| target.starts_with(root))
+                .unwrap_or(worktree);
+            for parent in target
+                .ancestors()
+                .skip(1)
+                .take_while(|parent| parent.starts_with(root) && *parent != root)
+            {
+                if !pm_managed_asset_node_exists(parent)? {
+                    missing_directories.insert(parent.to_path_buf());
+                }
             }
         }
-        let mut targets = PM_MANAGED_ASSET_TRANSACTION_ROOTS
-            .iter()
-            .map(|relative| worktree.join(relative))
-            .collect::<Vec<_>>();
-        targets.push(resolve_git_exclude_path(worktree)?);
-        let exclude_backup = unique_pm_managed_asset_sibling(
-            targets
-                .last()
-                .expect("Git exclude is always appended to the transaction targets"),
-            "backup",
-        )?;
         let target_presence = targets
             .iter()
             .map(|target| pm_managed_asset_node_exists(target))
@@ -827,10 +1071,10 @@ impl PmManagedAssetSnapshot {
         fs::create_dir(&backup_root)?;
         let mut entries: Vec<PmManagedAssetSnapshotEntry> = Vec::with_capacity(targets.len());
         for (index, (target, existed)) in targets.into_iter().zip(target_presence).enumerate() {
-            let backup = if index < PM_MANAGED_ASSET_TRANSACTION_ROOTS.len() {
-                backup_root.join(index.to_string())
+            let backup = if Some(&target) == exclude.as_ref() {
+                unique_pm_managed_asset_sibling(&target, "backup")?
             } else {
-                exclude_backup.clone()
+                backup_root.join(index.to_string())
             };
             if existed {
                 if let Err(error) = copy_pm_managed_asset_node(&target, &backup) {
@@ -867,8 +1111,8 @@ impl PmManagedAssetSnapshot {
         }
         Ok(Self {
             entries,
-            gwt_parent,
-            gwt_parent_existed,
+            worktree: worktree.to_path_buf(),
+            missing_directories: missing_directories.into_iter().collect(),
             backup_root,
         })
     }
@@ -876,6 +1120,23 @@ impl PmManagedAssetSnapshot {
     fn restore(self) -> io::Result<()> {
         let mut failures = Vec::new();
         for entry in &self.entries {
+            let parent = entry.target.parent().expect("managed target parent");
+            if let Err(error) = preflight_pm_managed_asset_path(&self.worktree, parent, "restore")
+                .and_then(|()| {
+                    if entry.existed {
+                        fs::create_dir_all(parent)
+                    } else {
+                        Ok(())
+                    }
+                })
+            {
+                failures.push(format!(
+                    "restore parent for {}: {error}",
+                    entry.target.display()
+                ));
+                continue;
+            }
+
             let quarantine = match unique_pm_managed_asset_sibling(&entry.target, "failed") {
                 Ok(path) => path,
                 Err(error) => {
@@ -933,8 +1194,8 @@ impl PmManagedAssetSnapshot {
                 }
             }
         }
-        if !self.gwt_parent_existed {
-            match fs::remove_dir(&self.gwt_parent) {
+        for directory in self.missing_directories.iter().rev() {
+            match fs::remove_dir(directory) {
                 Ok(()) => {}
                 Err(error)
                     if matches!(
@@ -942,8 +1203,8 @@ impl PmManagedAssetSnapshot {
                         io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
                     ) => {}
                 Err(error) => failures.push(format!(
-                    "remove newly-created empty PM provider-home parent {}: {error}",
-                    self.gwt_parent.display()
+                    "remove newly-created empty PM managed asset directory {}: {error}",
+                    directory.display()
                 )),
             }
         }
@@ -1063,6 +1324,11 @@ fn remove_pm_managed_asset_node(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    // A captured credential link is an owned leaf. Unlink it without ever
+    // traversing its destination, just as remove_dir_all did inside a backup.
+    if metadata.file_type().is_symlink() {
+        return fs::remove_file(path);
+    }
     reject_pm_managed_asset_indirection(path, &metadata)?;
     if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)
@@ -1072,19 +1338,8 @@ fn remove_pm_managed_asset_node(path: &Path) -> io::Result<()> {
 }
 
 fn copy_pm_managed_asset_node(source: &Path, destination: &Path) -> io::Result<()> {
-    copy_pm_managed_asset_node_at(source, destination, source)
-}
-
-fn copy_pm_managed_asset_node_at(
-    source: &Path,
-    destination: &Path,
-    transaction_root: &Path,
-) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
-        if !pm_managed_asset_symlink_is_allowed(transaction_root, source) {
-            reject_pm_managed_asset_indirection(source, &metadata)?;
-        }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1098,11 +1353,7 @@ fn copy_pm_managed_asset_node_at(
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            copy_pm_managed_asset_node_at(
-                &entry.path(),
-                &destination.join(entry.file_name()),
-                transaction_root,
-            )?;
+            copy_pm_managed_asset_node(&entry.path(), &destination.join(entry.file_name()))?;
         }
         fs::set_permissions(destination, metadata.permissions())?;
         return Ok(());
@@ -1119,20 +1370,6 @@ fn copy_pm_managed_asset_node_at(
             source.display()
         ),
     ))
-}
-
-fn pm_managed_asset_symlink_is_allowed(transaction_root: &Path, source: &Path) -> bool {
-    transaction_root.file_name().and_then(|name| name.to_str()) == Some("hermes")
-        && transaction_root
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some(".gwt")
-        && source.parent() == Some(transaction_root)
-        && matches!(
-            source.file_name().and_then(|name| name.to_str()),
-            Some(".env" | "auth.json")
-        )
 }
 
 #[cfg(unix)]
@@ -1246,6 +1483,13 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     is_ephemeral: bool,
 ) -> io::Result<ManagedAssetMaterialization> {
     with_managed_asset_lock(worktree, || {
+        if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+            let runtime = crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(worktree)?;
+            return refresh_pm_runtime_assets(
+                worktree,
+                &refresh_targets_for_agent(&runtime, agent_id),
+            );
+        }
         let targets = refresh_targets_for_agent(worktree, agent_id);
         let hook_bin = materialize_managed_gwt_assets_for_targets(
             worktree,
@@ -1262,6 +1506,9 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
 }
 
 pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        return refresh_managed_gwt_assets_for_pm_worktree(worktree);
+    }
     with_managed_asset_lock(worktree, || {
         let targets = detect_existing_managed_asset_targets(worktree);
         materialize_managed_gwt_assets_for_targets(
@@ -1312,6 +1559,15 @@ fn materialize_managed_gwt_assets_for_targets(
             ),
         ));
     }
+    // #4339: `core.hooksPath` is inherited through git config, but the
+    // directory it names is generated and never arrives with a clone or a
+    // `git worktree add`. Materializing it here — before any provider-specific
+    // work, and regardless of which targets are selected — is what keeps
+    // commitlint and the commit/push gates from silently doing nothing in a
+    // fresh worktree.
+    gwt_skills::materialize_managed_git_hooks(worktree).map_err(|error| {
+        io::Error::other(format!("failed to materialize managed git hooks: {error}"))
+    })?;
     // #3374: an ephemeral worktree refreshes tracked gwt-* assets from the
     // embedded bundle — its tracked copies are a stale base-ref snapshot, not
     // user content. Persistent worktrees keep the preserve-tracked default.
@@ -1332,7 +1588,8 @@ fn materialize_managed_gwt_assets_for_targets(
     // makes the `$gwt-pm` bootstrap prompt resolvable at all. The predicate is
     // structural (canonical PM worktree path), so no other worktree can be
     // handed the PM contract by an ambient value.
-    let is_pm = crate::pm_registry::is_pm_worktree(worktree);
+    let is_pm = crate::pm_registry::is_canonical_pm_worktree(worktree)
+        || crate::pm_registry::pm_worktree_for_runtime_dir(worktree).is_some();
     let hook_bin =
         regenerate_managed_hook_configs_for_targets(worktree, targets, codex_hook_discovery_mode)?;
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
@@ -1363,7 +1620,16 @@ fn materialize_managed_gwt_assets_for_targets(
 }
 
 pub fn regenerate_existing_managed_hook_configs(worktree: &Path) -> io::Result<()> {
+    if crate::pm_registry::is_canonical_pm_worktree(worktree) {
+        return refresh_managed_gwt_assets_for_pm_worktree(worktree);
+    }
     with_managed_asset_lock(worktree, || {
+        // #4339: a worktree created before gwt owned `core.hooksPath` still has
+        // an empty hook directory. Self-heal is the route that reaches those
+        // worktrees without waiting for a relaunch.
+        gwt_skills::materialize_managed_git_hooks(worktree).map_err(|error| {
+            io::Error::other(format!("failed to materialize managed git hooks: {error}"))
+        })?;
         let targets = detect_existing_managed_asset_targets(worktree);
         regenerate_managed_hook_configs_for_targets(
             worktree,
@@ -1745,6 +2011,248 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
+    #[test]
+    fn pm_runtime_isolates_project_configuration_and_keeps_project_data_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let worktree = gwt_core::paths::gwt_projects_dir().join("test/pm/worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        repoint_git(&worktree, &["init", "--quiet"]);
+        for relative in [
+            "src/main.rs",
+            "README.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".claude/skills/project/SKILL.md",
+            ".claude/agents/project.md",
+            ".claude/commands/project.md",
+            ".codex/skills/project/SKILL.md",
+            ".grok/skills/project/SKILL.md",
+            ".claude/settings.json",
+        ] {
+            let path = worktree.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "PROJECT-ONLY-SENTINEL").unwrap();
+        }
+        super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).unwrap();
+        let runtime = worktree.parent().unwrap().join("runtime");
+        assert!(
+            runtime.join(".claude/skills/gwt-pm/SKILL.md").is_file(),
+            "PM configuration must be materialized outside the project checkout"
+        );
+        assert!(!runtime.join("AGENTS.md").exists());
+        assert!(!runtime.join(".claude/skills/project").exists());
+        assert!(!runtime.join(".claude/settings.json").exists());
+        for relative in ["src/main.rs", "README.md", "AGENTS.md"] {
+            assert_eq!(
+                std::fs::read_to_string(worktree.join(relative)).unwrap(),
+                "PROJECT-ONLY-SENTINEL",
+                "AC-5a: project data stays readable"
+            );
+        }
+        let skill = runtime.join(".claude/skills/gwt-pm/SKILL.md");
+        assert!(!std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("PROJECT-ONLY-SENTINEL"));
+
+        // Explicit project-store opt-in uses the same owned generated leaf.
+        let prefs = worktree
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("project-state/pm.json");
+        std::fs::write(
+            &prefs,
+            r#"{"settings":{"project_policy_files":["AGENTS.md"]}}"#,
+        )
+        .unwrap();
+        let canonical_worktree = dunce::canonicalize(&worktree).unwrap();
+        super::refresh_managed_gwt_assets_for_pm_worktree_locked(&canonical_worktree).unwrap();
+        assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("PROJECT-ONLY-SENTINEL"));
+        assert!(!std::fs::symlink_metadata(&skill)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::write(&prefs, r#"{"settings":{}}"#).unwrap();
+        super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).unwrap();
+        assert!(!std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("PROJECT-ONLY-SENTINEL"));
+        let before = std::fs::read(&skill).unwrap();
+        std::fs::write(
+            &prefs,
+            r#"{"settings":{"project_policy_files":["missing.md"]}}"#,
+        )
+        .unwrap();
+        assert!(super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree).is_err());
+        assert_eq!(
+            std::fs::read(&skill).unwrap(),
+            before,
+            "failed opt-in refresh rolls back the owned runtime leaf"
+        );
+        repoint_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+        seed_repoint_collision(&worktree, ".husky/commit-msg", "#!/bin/sh\nexit 0\n");
+        let hook = worktree.join(".husky/_/commit-msg");
+        let prior_hook = "# gwt-managed-git-hook\n# previous version\n";
+        seed_repoint_collision(&worktree, ".husky/_/commit-msg", prior_hook);
+        let snapshot = super::PmManagedAssetSnapshot::capture(&runtime).unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        assert_ne!(std::fs::read_to_string(&hook).unwrap(), prior_hook);
+        snapshot.restore().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&hook).unwrap(),
+            prior_hook,
+            "runtime rollback must include the canonical Git hook owned leaves"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_snapshot_does_not_capture_project_owned_nodes() {
+        let (_temp, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
+        let project_path = worktree.join(".claude/agents/project.md");
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(&project_path, "project before").unwrap();
+        let socket_path = project_path.with_extension("sock");
+        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let managed_path = worktree.join(".claude/settings.local.json");
+        std::fs::write(&managed_path, "managed before").unwrap();
+        repoint_git(&worktree, &["config", "core.hooksPath", ".git-hooks/_"]);
+        seed_repoint_collision(&worktree, ".git-hooks/pre-commit", "echo project hook");
+        let hook_path = worktree.join(".git-hooks/_/pre-commit");
+        let hook_before = "# gwt-managed-git-hook\n# previous generated hook\n";
+        seed_repoint_collision(&worktree, ".git-hooks/_/pre-commit", hook_before);
+        seed_repoint_collision(&worktree, ".claude/hooks/scripts/gwt-old.sh", "old script");
+        let snapshot = super::PmManagedAssetSnapshot::capture(&worktree).unwrap();
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| !project_path.starts_with(&entry.target)),
+            "project-owned nodes must not be captured through a shared parent"
+        );
+        assert!(snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.target == hook_path));
+        gwt_skills::distribute_to_worktree(&worktree).unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        std::fs::write(&project_path, "project after").unwrap();
+        std::fs::write(&managed_path, "managed after").unwrap();
+        snapshot.restore().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project_path).unwrap(),
+            "project after"
+        );
+        assert_eq!(
+            std::fs::read_to_string(managed_path).unwrap(),
+            "managed before"
+        );
+        assert_eq!(std::fs::read_to_string(hook_path).unwrap(), hook_before);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(".claude/hooks/scripts/gwt-old.sh")).unwrap(),
+            "old script"
+        );
+        assert!(socket_path.exists());
+        assert!(!worktree.join(".codex").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_snapshot_preserves_project_and_hermes_symlinks_verbatim() {
+        let (_temp, worktree, _) = repoint_fixture(&[("fixture.txt", "incoming")]);
+        let sentinel = worktree.join("shared/agent.md");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, "project agent content").unwrap();
+        let links = [
+            (".claude/agents/planner", "../../shared/agent.md"),
+            (".codex/skills/unity-tools", "../missing-skills"),
+            (".gwt/hermes/.env", "/outside/hermes/.env"),
+            (".gwt/hermes/auth.json", "../../credentials/auth.json"),
+        ];
+        for (relative, target) in links {
+            let path = worktree.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+        }
+        repoint_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+        std::fs::create_dir_all(worktree.join(".husky/_")).unwrap();
+        std::fs::write(worktree.join(".husky/pre-commit"), "echo tracked hook").unwrap();
+        for name in ["pre-commit", ".gitignore"] {
+            std::os::unix::fs::symlink(&sentinel, worktree.join(".husky/_").join(name)).unwrap();
+        }
+        let snapshot = super::PmManagedAssetSnapshot::capture(&worktree).unwrap();
+        // Rollback preserves project links and recovers credential links verbatim.
+        std::fs::remove_file(worktree.join(links[2].0)).unwrap();
+        snapshot.restore().unwrap();
+        gwt_skills::materialize_managed_git_hooks(&worktree).unwrap();
+        for name in ["pre-commit", ".gitignore"] {
+            assert_eq!(
+                std::fs::read_link(worktree.join(".husky/_").join(name)).unwrap(),
+                sentinel
+            );
+        }
+        for (relative, target) in links {
+            assert_eq!(
+                std::fs::read_link(worktree.join(relative)).unwrap(),
+                Path::new(target)
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(sentinel).unwrap(),
+            "project agent content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pm_refresh_rejects_managed_write_and_prune_symlinks_before_mutation() {
+        let mut paths = vec![
+            ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/commands/release.md",
+            ".claude/hooks/scripts/gwt-retired.sh",
+            ".gwt/opencode/plugins",
+        ];
+        let probe = tempfile::tempdir().unwrap();
+        std::fs::create_dir(probe.path().join("GWT-case")).unwrap();
+        if probe.path().join("gwt-case").exists() {
+            paths.push(".codex/skills/GWT-execute");
+        }
+        for relative in paths {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+            let worktree = gwt_core::paths::gwt_projects_dir().join("test/pm/worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            repoint_git(&worktree, &["init", "--quiet"]);
+            let outside = temp.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            let sentinel = outside.join("sentinel");
+            std::fs::write(&sentinel, "user content").unwrap();
+            let runtime =
+                crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+            let path = runtime.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            let error = super::refresh_managed_gwt_assets_for_pm_worktree_locked(&worktree)
+                .expect_err("managed indirection must fail before refresh")
+                .to_string();
+            assert!(!runtime.join(".claude/settings.local.json").exists());
+            assert!(
+                error.contains("write") || error.contains("prune"),
+                "{error}"
+            );
+            assert!(
+                error.to_lowercase().contains(&relative.to_lowercase()),
+                "{error}"
+            );
+            assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "user content");
+            assert_eq!(std::fs::read_link(path).unwrap(), outside);
+        }
+    }
+
     fn repoint_fixture(incoming: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, String) {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("pm/worktree");
@@ -1935,31 +2443,59 @@ mod tests {
     #[test]
     fn pm_repoint_transaction_holds_materializer_lock_through_callback() {
         let asset = ".claude/commands/gwt-execute.md";
-        let (_temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let (temp, worktree, target) = repoint_fixture(&[(asset, "incoming")]);
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt"));
         seed_repoint_collision(&worktree, asset, "original");
-        let (entered, receiver) = std::sync::mpsc::channel();
-        let mut worker = None;
-        super::with_pm_repoint_transaction(&worktree, &target, || {
-            let other = worktree.clone();
-            worker = Some(std::thread::spawn(move || {
-                super::with_managed_asset_lock(&other, || {
-                    entered.send(()).unwrap();
-                    Ok(())
-                })
-                .unwrap();
-            }));
-            assert!(matches!(
-                receiver.recv_timeout(std::time::Duration::from_millis(100)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ));
+        let identity_root = gwt_git::worktree::main_worktree_root(&worktree).unwrap();
+        let identity = gwt_core::repo_hash::compute_path_hash(&identity_root);
+        let lock_path = gwt_core::paths::gwt_home()
+            .join("locks/managed-assets")
+            .join(format!("{identity}.lock"));
+        let contender = super::with_pm_repoint_transaction(&worktree, &target, || {
+            // Probe the actual lock, not a worker's scheduling delay. Keeping
+            // both handles on this thread also preserves the isolated HOME.
+            let contender = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)?;
+            let error = fs2::FileExt::try_lock_exclusive(&contender)
+                .expect_err("the transaction must hold the materializer lock during its callback");
+            assert!(
+                gwt_core::operation_deadline::is_lock_contended(&error),
+                "{error}"
+            );
             assert!(!worktree.join(asset).exists());
-            Ok(())
+            Ok(contender)
         })
         .unwrap();
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap();
-        worker.unwrap().join().unwrap();
+        fs2::FileExt::try_lock_exclusive(&contender)
+            .expect("the transaction must release the materializer lock after its callback");
+        fs2::FileExt::unlock(&contender).unwrap();
+    }
+
+    #[test]
+    #[ignore = "load worker controlled by scripts/test-managed-assets-lock-stress.py"]
+    fn pm_repoint_transaction_lock_stress_worker() {
+        let ready = PathBuf::from(
+            std::env::var_os("GWT_MANAGED_ASSETS_STRESS_READY").expect("stress runner ready path"),
+        );
+        let stop = PathBuf::from(
+            std::env::var_os("GWT_MANAGED_ASSETS_STRESS_STOP").expect("stress runner stop path"),
+        );
+        let mut iterations = 0;
+        loop {
+            pm_repoint_transaction_holds_materializer_lock_through_callback();
+            iterations += 1;
+            if iterations == 1 {
+                std::fs::write(&ready, b"ready").unwrap();
+            }
+            // The runner controls lifetime so scheduler delays cannot let a
+            // finite background suite finish before the foreground checks.
+            if stop.exists() {
+                break;
+            }
+        }
+        println!("load worker completed {iterations} lock checks");
     }
 
     #[test]

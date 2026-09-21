@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CommitComparisonStatus, CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    IssueCloseReason, IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
     OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
     RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
     RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
@@ -723,6 +723,35 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             return Err(classify_graphql_errors(errors, operation));
         }
         Ok(value)
+    }
+
+    fn label_rest_mutation(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: Value,
+        operation: &str,
+    ) -> OwnerMutationResult<()> {
+        self.admit(&REST_BUDGET_ARGS)
+            .map_err(OwnerMutationError::PreSubmit)?;
+        let result = self.owner_rest_mutation(
+            method,
+            path,
+            body,
+            &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+            operation,
+        );
+        match result {
+            Ok(_) => self
+                .settle(&REST_BUDGET_ARGS, Ok(()))
+                .map_err(OwnerMutationError::PreSubmit),
+            Err(OwnerMutationError::PreSubmit(error)) => self
+                .settle(&REST_BUDGET_ARGS, Err(error))
+                .map_err(OwnerMutationError::PreSubmit),
+            Err(OwnerMutationError::RemoteOutcomeUnknown(error)) => self
+                .settle(&REST_BUDGET_ARGS, Err(error))
+                .map_err(OwnerMutationError::RemoteOutcomeUnknown),
+        }
     }
 
     fn owner_rest_mutation(
@@ -1996,6 +2025,37 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         parse_rest_issue(&value)
     }
 
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        self.label_rest_mutation(
+            HttpMethod::Post,
+            &format!(
+                "/repos/{}/{}/issues/{}/labels",
+                self.owner, self.repo, number.0
+            ),
+            json!({ "labels": labels }),
+            "add issue labels",
+        )
+    }
+
+    fn remove_label_mutation(&self, number: IssueNumber, label: &str) -> OwnerMutationResult<()> {
+        self.label_rest_mutation(
+            HttpMethod::Delete,
+            &format!(
+                "/repos/{}/{}/issues/{}/labels/{}",
+                self.owner,
+                self.repo,
+                number.0,
+                encode_path_segment(label)
+            ),
+            Value::Null,
+            "remove issue label",
+        )
+    }
+
     fn set_labels(
         &self,
         number: IssueNumber,
@@ -2008,13 +2068,26 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         parse_rest_issue(&value)
     }
 
-    fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError> {
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: IssueState,
+        reason: Option<IssueCloseReason>,
+    ) -> Result<IssueSnapshot, ApiError> {
         let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
         let state_str = match state {
             IssueState::Open => "open",
             IssueState::Closed => "closed",
         };
-        let resp = self.rest_patch(&path, json!({ "state": state_str }))?;
+        let mut payload = json!({ "state": state_str });
+        // GitHub only honours `state_reason` on a close; reopening resets it
+        // server-side, so sending one there would be noise.
+        if state == IssueState::Closed {
+            if let Some(reason) = reason {
+                payload["state_reason"] = json!(reason.as_str());
+            }
+        }
+        let resp = self.rest_patch(&path, payload)?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("set_state json: {e}")))?;
         parse_rest_issue(&value)

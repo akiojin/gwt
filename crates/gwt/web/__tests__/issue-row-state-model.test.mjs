@@ -226,7 +226,7 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
     "queue position and the SPEC attribute win over the remaining labels",
   );
   assert.deepEqual(queued.actions, ["launch-now", "configure-issue"]);
-  assert.deepEqual(queued.overflow, ["move-up", "move-down"]);
+  assert.deepEqual(queued.overflow, ["queue-remove", "move-up", "move-down"]);
 
   const liveInline = issueRowStateModel({
     entry: knowledgeEntry(3671, { monitor_state: "launched", labels: ["auto-merge"] }),
@@ -362,7 +362,9 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
   const bareOpen = issueRowStateModel({ entry: knowledgeEntry(49) });
   assert.deepEqual(bareOpen.primary, { key: "issue:open", label: "Open", tone: "idle" });
   assert.deepEqual(bareOpen.secondary, []);
-  assert.deepEqual(bareOpen.actions, ["launch-agent"]);
+  // SPEC #3165 TQ-9: a Backlog Issue is exactly the row the user queues from,
+  // so the push sits beside the direct launch.
+  assert.deepEqual(bareOpen.actions, ["queue-push", "launch-agent"]);
   assert.deepEqual(bareOpen.overflow, []);
 
   const bareClosed = issueRowStateModel({ entry: knowledgeEntry(51, { state: "closed" }) });
@@ -554,7 +556,7 @@ test("every rendered Issue row has one primary badge, at most two secondary item
     { kind: "chip", text: "Spec" },
   ]);
   assert.deepEqual(visibleActions(row42), ["launch-now", "configure-issue"]);
-  assert.deepEqual(overflowActions(row42), ["move-up", "move-down"]);
+  assert.deepEqual(overflowActions(row42), ["queue-remove", "move-up", "move-down"]);
   assert.equal(row42.querySelector('[data-action="move-up"]').disabled, true);
   assert.equal(row42.querySelector('[data-action="move-down"]').disabled, false);
 
@@ -599,7 +601,7 @@ test("every rendered Issue row has one primary badge, at most two secondary item
   const row49 = fixture.body.querySelector('[data-issue-number="49"]');
   assert.equal(row49.querySelector(".knowledge-row-badge").textContent, "Open");
   assert.deepEqual(secondaryItems(row49), []);
-  assert.deepEqual(visibleActions(row49), ["launch-agent"]);
+  assert.deepEqual(visibleActions(row49), ["queue-push", "launch-agent"]);
 
   const row51 = fixture.body.querySelector('[data-issue-number="51"]');
   assert.equal(row51.querySelector(".knowledge-row-badge").textContent, "Closed");
@@ -643,6 +645,15 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
     issue_number: 42,
     linked_issue_kind: "spec",
   });
+  const remove42 = row42.querySelector('[data-action="queue-remove"]');
+  assert.equal(remove42.textContent, "Remove from queue");
+  assert.equal(remove42.getAttribute("aria-label"), "Remove from queue Issue #42");
+  const beforeRemove = fixture.sent.length;
+  remove42.click();
+  assert.deepEqual(fixture.sent.slice(beforeRemove), [{
+    kind: "issue_monitor_queue_remove",
+    issue_numbers: [42],
+  }]);
   assert.equal(
     fixture.sent.filter((message) => message.kind === "select_knowledge_bridge_entry").length,
     0,
@@ -684,6 +695,14 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
   assert.equal(fixture.calls.cleaned.length, 1);
   assert.equal(fixture.calls.cleaned[0].candidate.branch, "work/issue-3671");
   assert.equal(fixture.calls.cleaned[0].windowId, "win-1");
+
+  // SPEC #3165 TQ-9: the queue push is the requested feature's main direction.
+  // Clicking it must reach the backend, not fall through to the default arm.
+  fixture.body.querySelector('[data-issue-number="49"] [data-action="queue-push"]').click();
+  assert.deepEqual(
+    fixture.sent.filter((message) => message.kind === "issue_monitor_queue_push"),
+    [{ kind: "issue_monitor_queue_push", issue_numbers: [49] }],
+  );
 
   fixture.body.querySelector('[data-issue-number="49"] [data-action="launch-agent"]').click();
   assert.deepEqual(fixture.calls.launchWizard, [{ windowId: "win-1", number: 49 }]);

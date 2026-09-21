@@ -136,6 +136,12 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
         FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::LoadRecoveryCenter { .. } => {
+            FrontendUserActionLog::new("load_recovery_center", "recovery")
+        }
+        FrontendEvent::OpenRecoveryCenterBoardEntry { .. } => {
+            FrontendUserActionLog::new("open_recovery_center_board_entry", "recovery")
+        }
         FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
             FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
                 .mode(if *enabled { "on" } else { "off" })
@@ -224,6 +230,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CloseWindow { id, .. } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }
+        FrontendEvent::RecoverRestoredWindow { id, .. } => {
+            FrontendUserActionLog::new("recover_restored_window", "window").window(id)
+        }
         FrontendEvent::StopWindow { id } => {
             FrontendUserActionLog::new("stop_window", "window").window(id)
         }
@@ -269,6 +278,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             branches,
             delete_remote,
             force_filesystem_delete,
+            ..
         } => FrontendUserActionLog::new("run_branch_cleanup", "branches")
             .window(id)
             .target(summarize_ui_action_values(
@@ -285,6 +295,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             branch,
             delete_remote,
             force_filesystem_delete,
+            ..
         } => FrontendUserActionLog::new("run_workspace_cleanup", "workspace")
             .target(branch)
             .count(1)
@@ -294,6 +305,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 "local_only"
             })
             .force(*force_filesystem_delete),
+        FrontendEvent::SyncBranchCleanup { id, .. } => {
+            FrontendUserActionLog::new("sync_branch_cleanup", "branches").window(id)
+        }
+        FrontendEvent::ClearBranchCleanupStatus { id, .. } => {
+            FrontendUserActionLog::new("clear_branch_cleanup_status", "branches").window(id)
+        }
         FrontendEvent::LoadBoard { id, all } => FrontendUserActionLog::new("load_board", "board")
             .window(id)
             .mode(if *all { "all" } else { "workspace" }),
@@ -674,6 +691,14 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("reorder_issue_monitor_issues", "issue_monitor")
                 .target(issue_numbers.len().to_string())
         }
+        FrontendEvent::IssueMonitorQueuePush { issue_numbers } => {
+            FrontendUserActionLog::new("issue_monitor_queue_push", "issue_monitor")
+                .target(issue_numbers.len().to_string())
+        }
+        FrontendEvent::IssueMonitorQueueRemove { issue_numbers } => {
+            FrontendUserActionLog::new("issue_monitor_queue_remove", "issue_monitor")
+                .target(issue_numbers.len().to_string())
+        }
         FrontendEvent::ListIssueMonitor => {
             FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
         }
@@ -684,6 +709,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::IssueMonitorLaunchNow { issue_number, .. } => {
             FrontendUserActionLog::new("issue_monitor_launch_now", "issue_monitor")
+                .target(issue_number.to_string())
+        }
+        // Issue #3628 (AC-3): an operator recovery that changes launch
+        // eligibility is exactly the kind of deliberate action worth a record.
+        FrontendEvent::IssueMonitorRequeue { issue_number } => {
+            FrontendUserActionLog::new("issue_monitor_requeue", "issue_monitor")
                 .target(issue_number.to_string())
         }
         FrontendEvent::IssueMonitorConfigureIssue { issue_number, .. } => {
@@ -718,6 +749,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
+        | FrontendEvent::StartupFirstFrame { .. }
+        | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }

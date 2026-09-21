@@ -52,6 +52,17 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
         }
     ));
 
+    // Issue #3628 AC-3: the GUI recovery for a row whose launch is already
+    // gone. It deliberately names no launch identity — an `agent_failed` row
+    // has none left, which is the whole defect this Issue reports.
+    let event: FrontendEvent =
+        serde_json::from_str(r#"{"kind":"issue_monitor_requeue","issue_number":3628}"#)
+            .expect("requeue event");
+    assert!(matches!(
+        event,
+        FrontendEvent::IssueMonitorRequeue { issue_number: 3628 }
+    ));
+
     let event: FrontendEvent = serde_json::from_str(
         r#"{"kind":"issue_monitor_configure_issue","issue_number":3165,"linked_issue_kind":"spec"}"#,
     )
@@ -76,6 +87,16 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
     assert!(matches!(
         event,
         FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } if issue_numbers == vec![44, 42, 43]
+    ));
+
+    // SPEC #3165 TQ-9: the row's "Remove from queue" action must reach the
+    // backend instead of being rejected as an unknown variant.
+    let event: FrontendEvent =
+        serde_json::from_str(r#"{"kind":"issue_monitor_queue_remove","issue_numbers":[42]}"#)
+            .expect("queue remove event");
+    assert!(matches!(
+        event,
+        FrontendEvent::IssueMonitorQueueRemove { issue_numbers } if issue_numbers == vec![42]
     ));
 
     let event: FrontendEvent = serde_json::from_str(
@@ -152,6 +173,9 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
+            terminal_queue_len: 0,
+            unqueued_open_count: 0,
+            other_terminal_queue_count: 0,
             active_count: 1,
             max_active_agents: 3,
             total_candidates: 8,
@@ -164,7 +188,9 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             quota_hold: None,
             update_drain: None,
             autonomous_issues: Vec::new(),
+            agent_blackout: None,
             launch_profile_candidates: Vec::new(),
+            effective_launch_profile: None,
             provider_quota_holds: Vec::new(),
             usage_threshold_percent: 80,
         }),

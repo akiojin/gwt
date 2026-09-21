@@ -26,6 +26,49 @@ use super::{
     WindowPreset, WindowProcessStatus,
 };
 
+/// One uniform view over the window-keyed containers listed in
+/// [`window_scoped_state`], so the release path and the residue probe can be
+/// generated from the same list regardless of map or set.
+trait WindowScopedEntries {
+    fn forget(&mut self, id: &str);
+    #[cfg(test)]
+    fn holds(&self, id: &str) -> bool;
+    #[cfg(test)]
+    fn entry_count(&self) -> usize;
+}
+
+impl<V> WindowScopedEntries for std::collections::HashMap<String, V> {
+    fn forget(&mut self, id: &str) {
+        self.remove(id);
+    }
+
+    #[cfg(test)]
+    fn holds(&self, id: &str) -> bool {
+        self.contains_key(id)
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.len()
+    }
+}
+
+impl WindowScopedEntries for std::collections::HashSet<String> {
+    fn forget(&mut self, id: &str) {
+        self.remove(id);
+    }
+
+    #[cfg(test)]
+    fn holds(&self, id: &str) -> bool {
+        self.contains(id)
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.len()
+    }
+}
+
 fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
     matches!(preset, WindowPreset::Work | WindowPreset::Branches)
 }
@@ -36,6 +79,52 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
 pub(crate) struct CloseWindowOutcome {
     pub(crate) closed: bool,
     pub(crate) events: Vec<OutboundEvent>,
+}
+
+/// Issue #4234 AC-3: every `AppRuntime` map that is keyed by a combined window
+/// id, named once so the release path and the residue probe below can never
+/// drift apart.
+///
+/// Adding a window-keyed map means adding one arm here. Both
+/// [`AppRuntime::forget_window_scoped_state`] and
+/// [`AppRuntime::window_scoped_state_residue`] are generated from this list, so
+/// a map that is registered is both released on close and measured by the
+/// regression test.
+macro_rules! window_scoped_state {
+    ($runtime:ident, $id:ident, $visit:ident) => {
+        // Removed by the close path itself; listed so the probe proves it.
+        $visit!($runtime, $id, runtimes);
+        $visit!($runtime, $id, active_agent_sessions);
+        $visit!($runtime, $id, agent_capability_tokens);
+        $visit!($runtime, $id, window_details);
+        $visit!($runtime, $id, window_lookup);
+        $visit!($runtime, $id, profile_selections);
+        $visit!($runtime, $id, restore_launch_windows);
+        $visit!($runtime, $id, issue_monitor_review_dispatch_windows);
+        // Released only on specific relaunch / exit routes before Issue #4234,
+        // so an ordinary close left one entry per window behind for the life of
+        // the process.
+        $visit!($runtime, $id, launch_error_terminal_details);
+        $visit!($runtime, $id, board_all_view_windows);
+        $visit!($runtime, $id, pending_launch_wizard_materializations);
+        $visit!($runtime, $id, pending_workspace_resume_contexts);
+        $visit!($runtime, $id, pending_launch_feedback_contexts);
+        $visit!($runtime, $id, pending_continue_work);
+        $visit!($runtime, $id, pending_fresh_execution_launches);
+        $visit!($runtime, $id, pending_auto_resume_sources);
+        $visit!($runtime, $id, pending_tool_runtime_migrations);
+        $visit!($runtime, $id, pending_pm_wakes);
+        $visit!($runtime, $id, terminal_close_candidates);
+        $visit!($runtime, $id, window_pty_statuses);
+        $visit!($runtime, $id, window_output_bytes);
+        $visit!($runtime, $id, window_hook_states);
+        $visit!($runtime, $id, window_approval_waiting);
+        $visit!($runtime, $id, recoverable_agent_error_windows);
+        $visit!($runtime, $id, provider_quota_holds);
+        $visit!($runtime, $id, provider_quota_candidates);
+        $visit!($runtime, $id, released_provider_quota_notices);
+        $visit!($runtime, $id, last_agent_activity);
+    };
 }
 
 impl AppRuntime {
@@ -456,6 +545,54 @@ impl AppRuntime {
         self.close_window_outcome_with_monitor_notification(id, true, None)
     }
 
+    /// Issue #4234 AC-3: drop every window-keyed entry the closing window owns.
+    ///
+    /// Window ids are reassigned lowest-free, so a surviving entry is not only
+    /// retained memory — it is state a future window with the same id would
+    /// read as its own.
+    fn forget_window_scoped_state(&mut self, id: &str) {
+        macro_rules! forget {
+            ($runtime:ident, $id:ident, $field:ident) => {
+                WindowScopedEntries::forget(&mut $runtime.$field, $id);
+            };
+        }
+        window_scoped_state!(self, id, forget);
+    }
+
+    /// Issue #4234 AC-3 / AC-4: names of the window-keyed maps that still hold
+    /// `id`. Empty after a close; the regression test reads it directly instead
+    /// of inferring release from a heap measurement.
+    #[cfg(test)]
+    pub(crate) fn window_scoped_state_residue(&self, id: &str) -> Vec<&'static str> {
+        let mut residue = Vec::new();
+        macro_rules! probe {
+            ($runtime:ident, $id:ident, $field:ident) => {
+                if WindowScopedEntries::holds(&$runtime.$field, $id) {
+                    residue.push(stringify!($field));
+                }
+            };
+        }
+        window_scoped_state!(self, id, probe);
+        residue
+    }
+
+    /// Issue #4234 AC-4: total entries held across every window-keyed map. The
+    /// open/close regression fixes this number rather than a heap reading, so
+    /// it measures retention instead of allocator behaviour.
+    #[cfg(test)]
+    pub(crate) fn window_scoped_state_entry_count(&self) -> usize {
+        let mut total = 0usize;
+        macro_rules! count {
+            ($runtime:ident, $id:ident, $field:ident) => {
+                let _ = $id;
+                total += WindowScopedEntries::entry_count(&$runtime.$field);
+            };
+        }
+        let id = "";
+        window_scoped_state!(self, id, count);
+        total
+    }
+
     /// Close a window whose Issue Monitor lifecycle transition was already
     /// committed by the daemon or the fail-closed local fallback. Re-entering
     /// the normal window-closed hook here would publish a second control for
@@ -503,6 +640,7 @@ impl AppRuntime {
         self.issue_monitor_review_dispatch_windows.remove(id);
         // Issue #4143 (AC-3): window ids are reassigned lowest-free, so an
         // in-flight restore marker must not outlive its window.
+        self.record_restore_window_outcome(id, Err(super::startup::RestoreRefusal::WindowClosed));
         self.restore_launch_windows.remove(id);
         // Issue #3783: the accepted close is the in-memory removal above.
         // Everything that may wait on PTY, execution, Session, or Work locks
@@ -513,6 +651,11 @@ impl AppRuntime {
             notify_issue_monitor,
             self_close_ticket,
         );
+        // Issue #4234 AC-3: the finalizer above takes the runtime, the session
+        // and the capability token because it needs their values. Everything
+        // else keyed by this window id is released here, after the finalizer
+        // has captured what it owns.
+        self.forget_window_scoped_state(id);
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
         if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {

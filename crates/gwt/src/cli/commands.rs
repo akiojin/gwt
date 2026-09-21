@@ -4,6 +4,12 @@ pub enum IssueMonitorPriorityPosition {
     Index(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueLabelAction {
+    Add,
+    Remove,
+}
+
 /// SPEC-1942 command model for `issue.*` and `issue.spec.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCommand {
@@ -109,6 +115,28 @@ pub enum IssueCommand {
         body: Option<String>,
         labels: Option<Vec<String>>,
     },
+    /// SPEC #4249 FR-001: move a plain or `gwt-spec` Issue to closed. `reason`
+    /// is the GitHub `state_reason`; `comment` is posted before the close so the
+    /// rationale is already on the Issue when it drops out of the Monitor inbox.
+    Close {
+        number: u64,
+        reason: Option<gwt_github::client::IssueCloseReason>,
+        comment: Option<String>,
+    },
+    /// SPEC #4249 FR-001: reopen a closed Issue so it returns to readiness
+    /// evaluation and can be requeued.
+    Reopen {
+        number: u64,
+        comment: Option<String>,
+    },
+    Label {
+        number: u64,
+        action: IssueLabelAction,
+        labels: Vec<String>,
+        confirm_queue: bool,
+        confirm_design_gate: bool,
+        confirm_auto_merge: bool,
+    },
     Comment {
         number: u64,
         file: String,
@@ -136,6 +164,25 @@ pub enum IssueCommand {
     MonitorPrioritySet {
         project_root: Option<std::path::PathBuf>,
         issue_numbers: Vec<u64>,
+    },
+    MonitorQueueList {
+        project_root: Option<std::path::PathBuf>,
+        terminal: Option<String>,
+    },
+    MonitorQueuePush {
+        project_root: Option<std::path::PathBuf>,
+        issue_numbers: Vec<u64>,
+        position: Option<usize>,
+        force: bool,
+    },
+    MonitorQueueRemove {
+        project_root: Option<std::path::PathBuf>,
+        issue_numbers: Vec<u64>,
+    },
+    MonitorQueueMove {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        position: usize,
     },
     MonitorConfigSet {
         project_root: Option<std::path::PathBuf>,
@@ -248,6 +295,14 @@ pub enum IssueCommand {
         reason: Option<String>,
         resume_condition: Option<String>,
         clear: bool,
+    },
+    /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration whose
+    /// condition no longer holds. `by` defaults to the calling session.
+    MonitorWaitInvalidate {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        reason: String,
+        by: Option<String>,
     },
     /// Issue #3478 (AC-9): list the questions autonomous executions are parked
     /// on, so a human can see what is blocking the queue.
