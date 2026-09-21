@@ -4938,9 +4938,7 @@ mod tests {
         );
         if !cfg!(target_os = "macos") {
             assert!(
-                spotlight["processes"]
-                    .as_array()
-                    .is_some_and(Vec::is_empty),
+                spotlight["processes"].as_array().is_some_and(Vec::is_empty),
                 "hosts without Spotlight report no processes: {out}"
             );
             assert!(
