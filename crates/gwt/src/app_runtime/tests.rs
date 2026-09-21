@@ -4907,6 +4907,132 @@ fn close_project_tab_queues_all_window_finalizers_before_pty_teardown() {
     );
 }
 
+/// Seed the window-keyed maps that an ordinary close used to leave behind.
+/// Only containers whose value type is trivially constructible are seeded; the
+/// release path itself is generated from one shared list, so these stand in for
+/// every entry on it.
+fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
+    runtime
+        .launch_error_terminal_details
+        .insert(window_id.to_string(), "x".repeat(64 * 1024));
+    runtime.board_all_view_windows.insert(window_id.to_string());
+    runtime
+        .pending_auto_resume_sources
+        .insert(window_id.to_string(), "session-resume-source".to_string());
+    runtime
+        .window_pty_statuses
+        .insert(window_id.to_string(), WindowProcessStatus::Running);
+    runtime
+        .window_hook_states
+        .insert(window_id.to_string(), WindowProcessStatus::Running);
+    runtime
+        .window_output_bytes
+        .insert(window_id.to_string(), 42);
+    runtime
+        .recoverable_agent_error_windows
+        .insert(window_id.to_string());
+    runtime
+        .last_agent_activity
+        .insert(window_id.to_string(), chrono::Utc::now());
+}
+
+/// Issue #4234 AC-3: closing a pane must release every buffer keyed by that
+/// pane. Before this, an ordinary close dropped the runtime and the session but
+/// left ~20 window-keyed maps holding an entry per window for the life of the
+/// process — and because window ids are reassigned lowest-free, a later window
+/// with the same id would read that residue as its own state.
+#[test]
+fn closing_a_window_releases_every_window_scoped_buffer() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    init_repo(&project);
+    let tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-1",
+        project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let window_id = "tab-project::agent-1".to_string();
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let (spawner, _finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    seed_window_scoped_state(&mut runtime, &window_id);
+    assert!(
+        !runtime.window_scoped_state_residue(&window_id).is_empty(),
+        "the fixture must actually populate window-scoped state"
+    );
+
+    assert!(runtime.close_window_outcome(&window_id).closed);
+
+    let residue = runtime.window_scoped_state_residue(&window_id);
+    assert!(
+        residue.is_empty(),
+        "closing {window_id} left window-scoped state behind: {residue:?}"
+    );
+}
+
+/// Issue #4234 AC-4: opening and closing panes N times returns the window-keyed
+/// state to its starting level instead of growing once per window.
+#[test]
+fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    init_repo(&project);
+    let tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-1",
+        project,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let window_id = "tab-project::agent-1".to_string();
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let (spawner, _finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    // The fixture tab already carries `agent-1`; close it so the loop below
+    // starts from an empty canvas and every round opens its own window.
+    assert!(runtime.close_window_outcome(&window_id).closed);
+
+    let baseline = runtime.window_scoped_state_entry_count();
+    let mut opened = Vec::new();
+    for _ in 0..8 {
+        let raw_id = runtime
+            .tab_mut("tab-project")
+            .expect("tab")
+            .workspace
+            .add_window(WindowPreset::Agent, canvas_bounds())
+            .id;
+        let id = combined_window_id("tab-project", &raw_id);
+        runtime.register_window("tab-project", &raw_id);
+        insert_test_pane_runtime(&mut runtime, &id);
+        seed_window_scoped_state(&mut runtime, &id);
+        assert!(runtime.close_window_outcome(&id).closed);
+        opened.push(id);
+    }
+
+    let residue = opened
+        .iter()
+        .flat_map(|id| {
+            runtime
+                .window_scoped_state_residue(id)
+                .into_iter()
+                .map(move |field| format!("{id}:{field}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        runtime.window_scoped_state_entry_count(),
+        baseline,
+        "window-scoped state grew across 8 open/close rounds; residue: {residue:?}"
+    );
+}
+
 /// Issue #3783 generation fence: a queued predecessor close may finish after
 /// the canvas has reused the same public window id for a successor. The old
 /// finalizer owns only its captured PTY and must not deregister or revoke the
