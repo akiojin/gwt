@@ -67,7 +67,8 @@ fn expected_existing_hook_output(
                     "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.merge`, `pr.review_threads.reply_and_resolve`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
+- Merges: gwtd has no merge operation. The repository's merge automation or a human merges; hold a pending merge with `pr.draft`\n\
 - Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
@@ -815,7 +816,6 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
         "JSON-envelope operations",
         "issue.edit",
         "pr.edit",
-        "pr.merge",
         "pr.ready",
         "pr.draft",
         "actions.rerun",
@@ -829,14 +829,18 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
 }
 
 #[test]
-fn github_workflow_cli_blocks_gh_pr_merge_in_favor_of_json_operation() {
+fn github_workflow_cli_blocks_gh_pr_merge_and_names_the_draft_hold() {
     let decision = block_bash_policy::evaluate_bash_command("gh pr merge 1949", &root())
         .expect("gh pr merge must block");
     let visible = decision.permission_decision_reason();
+    // Issue #4396: the message used to name `pr.merge`, which no operation
+    // implements. It now says so and names the lever that does exist.
     assert!(
-        visible.contains("pr.merge"),
-        "block message must name the canonical merge operation: {visible}"
+        visible.contains("gwtd has no merge operation")
+            && visible.contains("hold a pending merge with `pr.draft`"),
+        "block message must name the real merge path: {visible}"
     );
+    assert!(!visible.contains("`pr.merge`"), "{visible}");
     assert!(
         visible.contains("Blocked command: gh pr merge 1949"),
         "{visible}"

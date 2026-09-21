@@ -365,6 +365,10 @@ impl AppRuntime {
         // Issue #4143 (AC-3): read the automatic-restore guard before anything
         // below can publish an Error status for this window. The launch is over
         // either way, so the marker is consumed here.
+        self.record_restore_window_outcome(
+            &window_id,
+            Err(super::startup::RestoreRefusal::LaunchNotStarted),
+        );
         let restored_launch = self.restore_launch_windows.remove(&window_id);
         let user_detail = Self::user_facing_launch_error_detail(&detail);
         let issue_monitor_issue_number = launch_feedback_context

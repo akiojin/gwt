@@ -193,7 +193,11 @@ impl DerivedPlan {
 }
 
 fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
-    hidden_command("git")
+    checked_git_lines(worktree, args).unwrap_or_default()
+}
+
+fn checked_git_lines(worktree: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let output = hidden_command("git")
         .arg("-C")
         .arg(worktree)
         // Non-ASCII paths must come back verbatim, not quote-escaped —
@@ -201,17 +205,22 @@ fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+        .map_err(|error| format!("git {} failed: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("git {} returned unreadable paths: {error}", args.join(" ")))?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Resolve the integration base the committed span is diffed against.
@@ -244,13 +253,23 @@ fn changed_paths(worktree: &Path) -> Result<Vec<String>, TrivialReason> {
         return Err(TrivialReason::IntegrationBranch);
     }
     let base = integration_merge_base(worktree).ok_or(TrivialReason::MergeBaseUnavailable)?;
+    changed_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
+}
+
+fn changed_paths_since(worktree: &Path, base: &str) -> Result<Vec<String>, String> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
-    paths.extend(git_lines(worktree, &["diff", "--name-only", &base, "HEAD"]));
-    paths.extend(git_lines(worktree, &["diff", "--name-only", "HEAD"]));
-    paths.extend(git_lines(
+    paths.extend(checked_git_lines(
+        worktree,
+        &["diff", "--no-renames", "--name-only", base, "HEAD"],
+    )?);
+    paths.extend(checked_git_lines(
+        worktree,
+        &["diff", "--no-renames", "--name-only", "HEAD"],
+    )?);
+    paths.extend(checked_git_lines(
         worktree,
         &["ls-files", "--others", "--exclude-standard"],
-    ));
+    )?);
     Ok(paths
         .into_iter()
         .filter(|path| !path.starts_with(".gwt/") && !path.starts_with("tasks/"))
@@ -276,6 +295,37 @@ fn is_frontend_path(path: &str) -> bool {
         || [".js", ".mjs", ".ts", ".css", ".html"]
             .iter()
             .any(|ext| path.ends_with(ext))
+}
+
+/// A frontend path that exercises the UI rather than rendering it.
+///
+/// Issue #4510: these still belong to the frontend *matrix* — changing a
+/// Playwright spec is exactly the reason to run the Playwright suite — but
+/// they are not a UI *surface*, because there is no rendered change for a
+/// human to look at. Conflating the two made a PR whose entire diff was one
+/// `*.spec.ts` demand a visual confirmation nobody could give (PR #4374).
+fn is_frontend_test_path(path: &str) -> bool {
+    path.starts_with("crates/gwt/playwright/tests/")
+        || path.contains("/__tests__/")
+        || [".spec.ts", ".spec.js", ".test.ts", ".test.js"]
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+}
+
+/// Whether a changed path renders UI a human could be asked to look at.
+fn is_ui_surface_path(path: &str) -> bool {
+    is_frontend_path(path) && !is_frontend_test_path(path)
+}
+
+/// Inspect frontend changes even when plan derivation is trivial on an
+/// integration branch. An unknown base or unreadable diff cannot prove that
+/// a Ready handoff has no UI surface.
+pub fn has_frontend_changes(worktree: &Path) -> Result<bool, String> {
+    let base = integration_merge_base(worktree)
+        .ok_or_else(|| "frontend classification requires a readable git merge-base".to_string())?;
+    Ok(changed_paths_since(worktree, &base)?
+        .iter()
+        .any(|path| is_ui_surface_path(path)))
 }
 
 fn is_docs_path(path: &str) -> bool {
@@ -308,6 +358,7 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
     let mut workspace_rust = false;
     let mut skills = false;
     let mut frontend = false;
+    let mut ui_surface = false;
     let mut docs_files: Vec<String> = Vec::new();
     let mut other = false;
 
@@ -318,6 +369,7 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
             docs_files.push(path.clone());
         } else if is_frontend_path(path) {
             frontend = true;
+            ui_surface |= is_ui_surface_path(path);
         } else if is_rust_path(path) {
             match crate_of(path) {
                 Some(name) => {
@@ -366,7 +418,15 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
         test_packages.insert("gwt-skills");
     }
     if frontend {
-        surfaces.push("frontend".to_string());
+        // Issue #4510: the matrix is the same either way, but the label is the
+        // only thing the Ready handoff reads to decide whether a human has
+        // anything to look at. A test-only frontend change declares itself as
+        // such so the visual gate is not raised over a `*.spec.ts`.
+        surfaces.push(if ui_surface {
+            "frontend".to_string()
+        } else {
+            "frontend-tests".to_string()
+        });
         test_packages.insert("gwt");
     }
     if other {
@@ -538,6 +598,130 @@ mod tests {
         let plan = derive(dir.path()).unwrap();
         assert!(plan.commands.is_empty());
         assert_eq!(plan.trivial_reason, Some(TrivialReason::IntegrationBranch));
+    }
+
+    #[test]
+    fn frontend_detection_inspects_integration_branch_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        git(dir.path(), &["checkout", "-q", "-B", "develop"]);
+        write(dir.path(), "README.md", "# readme");
+        assert!(!has_frontend_changes(dir.path()).unwrap());
+
+        write(dir.path(), "crates/gwt/web/styles/test.css", "body {}\n");
+        assert!(has_frontend_changes(dir.path()).unwrap());
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "feat: frontend fixture"]);
+        assert!(has_frontend_changes(dir.path()).unwrap());
+        assert_eq!(
+            derive(dir.path()).unwrap().trivial_reason,
+            Some(TrivialReason::IntegrationBranch)
+        );
+
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        git(dir.path(), &["config", "diff.renames", "true"]);
+        git(
+            dir.path(),
+            &["mv", "crates/gwt/web/styles/test.css", "archived-style.txt"],
+        );
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a staged rename must retain the removed frontend surface"
+        );
+        git(
+            dir.path(),
+            &["commit", "-qm", "chore: archive frontend fixture"],
+        );
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a committed rename must retain the removed frontend surface"
+        );
+    }
+
+    /// Issue #4510 AC-2: a frontend *test* file exercises the UI, it never
+    /// renders one. Counting `*.spec.ts` as a UI surface made a PR whose whole
+    /// diff was one Playwright spec demand a human visual check that had
+    /// nothing to look at (PR #4374). The verification matrix still treats the
+    /// same path as frontend — the Playwright suite must run — so only the
+    /// Ready-handoff question changes here.
+    #[test]
+    fn frontend_test_only_changes_are_not_a_ui_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+
+        write(
+            dir.path(),
+            "crates/gwt/playwright/tests/pane-close-latency-live.spec.ts",
+            "test('pane close', async () => {});\n",
+        );
+        assert!(
+            !has_frontend_changes(dir.path()).unwrap(),
+            "a Playwright spec renders no UI of its own"
+        );
+        write(
+            dir.path(),
+            "crates/gwt/web/__tests__/kanban.test.js",
+            "test('kanban', () => {});\n",
+        );
+        assert!(
+            !has_frontend_changes(dir.path()).unwrap(),
+            "a web unit test renders no UI of its own"
+        );
+        // The matrix is unchanged — the suite that covers these paths still
+        // runs — but the surface declares itself as test-only so the Ready
+        // handoff does not raise a visual gate over it.
+        let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
+        assert!(
+            plan.commands
+                .contains(&package_test_command_for("gwt", VerificationHost::Other)),
+            "test-only frontend changes still run the gwt package gate: {:?}",
+            plan.commands
+        );
+        assert!(
+            plan.surfaces.contains(&"frontend-tests".to_string())
+                && !plan.surfaces.contains(&"frontend".to_string()),
+            "{:?}",
+            plan.surfaces
+        );
+
+        write(dir.path(), "crates/gwt/web/app.js", "export const x = 1;\n");
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a real UI module is still a UI surface"
+        );
+
+        let committed = tempfile::tempdir().unwrap();
+        fixture(committed.path());
+        write(
+            committed.path(),
+            "crates/gwt/playwright/tests/live.spec.ts",
+            "test('live', async () => {});\n",
+        );
+        write(
+            committed.path(),
+            "crates/gwt/web/styles/tokens.css",
+            ":root {}\n",
+        );
+        git(committed.path(), &["add", "."]);
+        git(committed.path(), &["commit", "-qm", "feat: ui and spec"]);
+        assert!(
+            has_frontend_changes(committed.path()).unwrap(),
+            "a spec alongside a stylesheet keeps the stylesheet's UI surface"
+        );
+    }
+
+    #[test]
+    fn frontend_detection_refuses_unknown_git_or_base() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(has_frontend_changes(dir.path()).is_err());
+
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        write(dir.path(), "crates/gwt/web/styles/test.css", "body {}\n");
+        let error = has_frontend_changes(dir.path()).unwrap_err();
+        assert!(error.contains("merge-base"), "{error}");
     }
 
     // Deletions-only change sets produce an explicit no-target plan rather

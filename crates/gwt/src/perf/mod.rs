@@ -4,6 +4,7 @@ mod record;
 pub mod route;
 pub mod self_budget;
 pub mod smoothing;
+pub mod startup;
 mod store;
 pub mod summary;
 
@@ -81,6 +82,13 @@ impl PerfSink {
     pub fn append(&mut self, record: &PerfRecord) -> io::Result<()> {
         match self.store.as_mut() {
             Some(store) => store.append(record),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn append_budgeted(&mut self, record: &PerfRecord, budget: f64) -> io::Result<()> {
+        match self.store.as_mut() {
+            Some(store) => store.append_budgeted(record, budget),
             None => Ok(()),
         }
     }

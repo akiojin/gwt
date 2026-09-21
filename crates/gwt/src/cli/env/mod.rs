@@ -199,8 +199,23 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
         &self,
         number: IssueNumber,
         state: gwt_github::client::IssueState,
+        reason: Option<gwt_github::client::IssueCloseReason>,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
-        self.inner.set_state(number, state)
+        self.inner.set_state(number, state, reason)
+    }
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.inner.add_labels_mutation(number, labels)
+    }
+    fn remove_label_mutation(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> gwt_github::client::OwnerMutationResult<()> {
+        self.inner.remove_label_mutation(number, label)
     }
     fn list_spec_issues(
         &self,

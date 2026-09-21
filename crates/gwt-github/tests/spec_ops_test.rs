@@ -54,6 +54,42 @@ fn seed_spec(
     snapshot
 }
 
+// Issue #4392: a body whose gwt-spec header carries an unparseable sections
+// index is surfaced by the cache with an empty SpecBody. Writing a section
+// from that empty map would rewrite the index and orphan comment-resident
+// content, so write_section must refuse before any remote mutation.
+#[test]
+fn write_section_refuses_body_with_unparseable_sections_index() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(4388),
+        title: "SPEC with a broken index".to_string(),
+        body: "<!-- gwt-spec id=4388 version=1 -->\n<!-- sections: {} -->\n\nbody\n".to_string(),
+        labels: vec!["gwt-spec".to_string()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("seed-4388"),
+        comments: Vec::new(),
+    };
+    client.seed(snapshot.clone());
+    cache.write_snapshot(&snapshot).unwrap();
+
+    let ops = SpecOps::new(client, cache);
+    let error = ops
+        .write_section(IssueNumber(4388), &n("spec"), "new spec")
+        .expect_err("a malformed sections index must refuse section writes");
+
+    assert!(matches!(error, SpecOpsError::Validation(_)), "{error:?}");
+    assert!(error.to_string().contains("issue.edit"), "{error}");
+    let log = ops.client().call_log();
+    assert!(
+        !log.iter()
+            .any(|entry| entry.starts_with("patch_body:") || entry.starts_with("create_comment:")),
+        "no remote mutation may happen: {log:?}"
+    );
+}
+
 // RED-60: read_section with fresh cache -> NotModified -> reads from cache
 #[test]
 fn red_60_read_section_uses_cache_on_not_modified() {
