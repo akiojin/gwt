@@ -43,6 +43,49 @@ pub struct ServerConfig {
     pub embedded_port: Option<NonZeroU16>,
 }
 
+/// Optional overrides for the built-in performance budgets.
+///
+/// `None` keeps the normative default owned by the performance domain. This
+/// keeps configuration backward compatible while avoiding a second copy of
+/// the default budget values in the settings crate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerfBudgetOverrides {
+    /// Maximum UI interaction response time in milliseconds.
+    pub ui_response_ms: Option<f64>,
+    /// Maximum rendered-frame duration in milliseconds.
+    pub frame_ms: Option<f64>,
+    /// Maximum p95 duration for read-only gwtd operations in milliseconds.
+    pub gwtd_read_p95_ms: Option<f64>,
+    /// Maximum p95 duration for mutating gwtd operations in milliseconds.
+    pub gwtd_mutation_p95_ms: Option<f64>,
+}
+
+/// Always-on performance collection settings persisted under `[perf]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerfConfig {
+    /// Global kill switch for performance collection.
+    pub enabled: bool,
+    /// Number of UTC daily log files retained. Zero disables cleanup.
+    pub retention_days: u32,
+    /// Maximum CPU percentage attributable to collection before sampling is reduced.
+    pub self_budget_cpu_percent: f64,
+    /// Optional overrides for the built-in normative budgets.
+    pub budgets: PerfBudgetOverrides,
+}
+
+impl Default for PerfConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: 30,
+            self_budget_cpu_percent: 1.0,
+            budgets: PerfBudgetOverrides::default(),
+        }
+    }
+}
+
 fn resolve_config_home_dir(
     home: Option<OsString>,
     userprofile: Option<OsString>,
@@ -75,6 +118,23 @@ fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Refresh intervals for the shared PR inventory snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrInventoryConfig {
+    pub cache_ttl_secs: u64,
+    pub checks_refresh_secs: u64,
+}
+
+impl Default for PrInventoryConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: 300,
+            checks_refresh_secs: 600,
+        }
+    }
+}
+
 /// Top-level application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -89,6 +149,8 @@ pub struct Settings {
     pub debug: bool,
     /// Enable performance profiling.
     pub profiling: bool,
+    /// Always-on performance collection and budget settings.
+    pub perf: PerfConfig,
     /// Profile management.
     pub profiles: ProfilesConfig,
     /// Voice input configuration.
@@ -106,6 +168,12 @@ pub struct Settings {
     pub usage: UsageConfig,
     /// Embedded browser server configuration (SPEC-3287).
     pub server: ServerConfig,
+    /// GitHub API budget throttle knobs (SPEC #4093 FR-007).
+    pub github_budget: crate::GitHubBudgetConfig,
+    /// Snapshot and running-check refresh intervals for `pr.list`.
+    pub pr_inventory: PrInventoryConfig,
+    /// Automatic build-artifact reclaim on low disk (Issue #4391).
+    pub build_artifact_gc: crate::BuildArtifactGcConfig,
 }
 
 impl Default for Settings {
@@ -120,6 +188,7 @@ impl Default for Settings {
             worktree_root: None,
             debug: false,
             profiling: false,
+            perf: PerfConfig::default(),
             profiles: ProfilesConfig::default(),
             voice: VoiceConfig::default(),
             agent: AgentConfig::default(),
@@ -127,6 +196,9 @@ impl Default for Settings {
             board: BoardConfig::default(),
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
+            github_budget: crate::GitHubBudgetConfig::default(),
+            pr_inventory: PrInventoryConfig::default(),
+            build_artifact_gc: crate::BuildArtifactGcConfig::default(),
         }
     }
 }
@@ -273,6 +345,48 @@ mod tests {
         assert!(s.protected_branches.contains(&"main".to_string()));
         assert!(!s.debug);
         assert!(!s.profiling);
+        assert!(s.perf.enabled);
+        assert_eq!(s.perf.retention_days, 30);
+        assert_eq!(s.perf.self_budget_cpu_percent, 1.0);
+        assert_eq!(s.perf.budgets, PerfBudgetOverrides::default());
+    }
+
+    #[test]
+    fn legacy_config_without_perf_section_defaults() {
+        let settings: Settings =
+            toml::from_str("default_base_branch = \"develop\"\ndebug = true\n").unwrap();
+
+        assert!(settings.perf.enabled);
+        assert_eq!(settings.perf.retention_days, 30);
+        assert_eq!(settings.perf.self_budget_cpu_percent, 1.0);
+        assert_eq!(settings.perf.budgets, PerfBudgetOverrides::default());
+    }
+
+    #[test]
+    fn perf_config_can_override_collection_and_budgets() {
+        let settings: Settings = toml::from_str(
+            r#"
+[perf]
+enabled = false
+retention_days = 14
+self_budget_cpu_percent = 0.5
+
+[perf.budgets]
+ui_response_ms = 80.0
+frame_ms = 12.0
+gwtd_read_p95_ms = 75.0
+gwtd_mutation_p95_ms = 350.0
+"#,
+        )
+        .unwrap();
+
+        assert!(!settings.perf.enabled);
+        assert_eq!(settings.perf.retention_days, 14);
+        assert_eq!(settings.perf.self_budget_cpu_percent, 0.5);
+        assert_eq!(settings.perf.budgets.ui_response_ms, Some(80.0));
+        assert_eq!(settings.perf.budgets.frame_ms, Some(12.0));
+        assert_eq!(settings.perf.budgets.gwtd_read_p95_ms, Some(75.0));
+        assert_eq!(settings.perf.budgets.gwtd_mutation_p95_ms, Some(350.0));
     }
 
     #[test]
@@ -457,6 +571,19 @@ debug = true
         assert!(loaded.debug);
         assert_eq!(loaded.default_base_branch, "main");
         assert!(loaded.protected_branches.contains(&"main".to_string()));
+    }
+
+    #[test]
+    fn pr_inventory_intervals_have_defaults_and_roundtrip_overrides() {
+        let defaults = Settings::default().pr_inventory;
+        assert_eq!(defaults.cache_ttl_secs, 300);
+        assert_eq!(defaults.checks_refresh_secs, 600);
+        let settings: Settings =
+            toml::from_str("[pr_inventory]\ncache_ttl_secs = 1200\nchecks_refresh_secs = 1800\n")
+                .unwrap();
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.pr_inventory.cache_ttl_secs, 1200);
+        assert_eq!(restored.pr_inventory.checks_refresh_secs, 1800);
     }
 
     #[test]

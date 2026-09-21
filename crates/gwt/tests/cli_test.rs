@@ -2,9 +2,9 @@
 
 use gwt::cli::{
     dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli,
-    ActionsCommand, CliCommand, CliParseError, HookCommand, IssueCommand, LinkedPrSummary,
-    PrCheckItem, PrChecksSummary, PrCommand, PrCreateCall, PrEditCall, PrReview, PrReviewThread,
-    PrReviewThreadComment, TestEnv,
+    ActionsCommand, ActionsRerunTarget, CliCommand, CliParseError, HookCommand, IssueCommand,
+    LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCommand, PrCreateCall, PrEditCall, PrReview,
+    PrReviewThread, PrReviewThreadComment, TestEnv,
 };
 use gwt_git::PrStatus;
 use gwt_github::{
@@ -428,6 +428,21 @@ fn red_104_parse_pr_view() {
 }
 
 #[test]
+fn parse_pr_list() {
+    let cmd = parse_pr_args(&[s("list")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Pr(PrCommand::List {
+            stale_after_hours: None,
+            escalate_after_cycles: None,
+            refresh: false,
+            include: None,
+            force_reason: None,
+        })
+    );
+}
+
+#[test]
 fn red_104a_parse_pr_create() {
     let cmd = parse_pr_args(&[
         s("create"),
@@ -581,6 +596,26 @@ fn red_107_parse_actions_job_logs() {
     assert_eq!(
         cmd,
         CliCommand::Actions(ActionsCommand::JobLogs { job_id: 202 })
+    );
+}
+
+/// Issue #3515: `actions.rerun` is reachable from the argv transport too.
+#[test]
+fn parse_actions_rerun_targets() {
+    assert_eq!(
+        parse_actions_args(&[s("rerun"), s("--run"), s("303"), s("--failed")]).unwrap(),
+        CliCommand::Actions(ActionsCommand::Rerun {
+            target: ActionsRerunTarget::Run {
+                run_id: 303,
+                failed_only: true
+            }
+        })
+    );
+    assert_eq!(
+        parse_actions_args(&[s("rerun"), s("--job"), s("404")]).unwrap(),
+        CliCommand::Actions(ActionsCommand::Rerun {
+            target: ActionsRerunTarget::Job { job_id: 404 }
+        })
     );
 }
 
@@ -1042,7 +1077,8 @@ fn red_97_dispatch_issue_view_prefers_warm_cache() {
     cache.write_snapshot(&snapshot).unwrap();
     assert!(cache
         .renew_validation_receipt_if_current(&snapshot)
-        .unwrap());
+        .unwrap()
+        .renewed());
     env.client.seed(IssueSnapshot {
         title: "Fetched title".to_string(),
         updated_at: UpdatedAt::new("fetched"),
@@ -1127,7 +1163,8 @@ fn red_99_dispatch_issue_comments_prefers_cache() {
     cache.write_snapshot(&snapshot).unwrap();
     assert!(cache
         .renew_validation_receipt_if_current(&snapshot)
-        .unwrap());
+        .unwrap()
+        .renewed());
 
     let code = dispatch(&mut env, &argv(&["gwt", "issue", "comments", "42"]));
     assert_eq!(code, 0);
@@ -1267,6 +1304,8 @@ fn red_108_dispatch_pr_current_is_live_first() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.seed_current_pr(Some(PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 77,
         title: "Current PR".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -1297,6 +1336,8 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
         "## Summary\n\nBody".to_string(),
     );
     env.seed_created_pr(PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 88,
         title: "Created PR".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -1356,6 +1397,8 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
     env.seed_pr(
         42,
         PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 42,
             title: "Updated PR".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -1406,6 +1449,8 @@ fn red_109_dispatch_pr_view_reads_live_data() {
     env.seed_pr(
         42,
         PrStatus {
+            head_ref_name: String::new(),
+            check_counts: None,
             number: 42,
             title: "Viewed PR".to_string(),
             state: gwt_git::pr_status::PrState::Merged,
@@ -1433,6 +1478,8 @@ fn red_109_dispatch_pr_current_surfaces_branch_behind_as_effective_merge_state()
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.seed_current_pr(Some(PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 91,
         title: "Update branch required".to_string(),
         state: gwt_git::pr_status::PrState::Open,

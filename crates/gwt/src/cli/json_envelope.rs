@@ -1,15 +1,14 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::str::FromStr;
 
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
-    memory::MemoryAddCommand, workflow::WorkflowBypassMode, ActionsCommand, CliCommand, CliEnv,
-    CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, ImprovementCommand,
-    IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
-    SkillStateAction, WorkflowCommand, WorkspaceCommand,
+    memory::MemoryAddCommand, perf::PerfCommand, workflow::WorkflowBypassMode, ActionsCommand,
+    CliCommand, CliEnv, CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand,
+    IndexCommand, IndexScope, IssueCommand, IssueLabelAction, MemoryCommand, PaneCommand,
+    PrCommand, SearchCommand, SkillStateAction, WorkflowCommand, WorkspaceCommand,
 };
 use super::{verification_lease::VerificationLeaseCommand, BoardCommand, BoardPostCommand};
 
@@ -59,7 +58,15 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     };
     let operation = parsed.operation.clone();
     let declared_block = parsed.declared_block;
-    match super::run_collect(env, parsed.command) {
+    // SPEC #3700 FR-002 / Issue #4145 AC-1: every JSON-envelope operation
+    // funnels through here, so one timer covers the whole `op` stream. The
+    // collector is fail-open and is only installed by the `gwtd` binary, so
+    // this is a no-op in tests and in the argv path.
+    let read_only = super::hook::workflow_policy::is_read_only_json_envelope_operation(&operation);
+    let operation_started = std::time::Instant::now();
+    let outcome = super::run_collect(env, parsed.command);
+    crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
+    match outcome {
         Ok((code, output)) => {
             let mut payload = serde_json::json!({
                 "ok": code == 0,
@@ -68,7 +75,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "output": output,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{}", payload);
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
                 (0, None) => {}
@@ -92,7 +101,9 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "error": message,
             });
             attach_project_store(&mut payload);
-            let _ = writeln!(env.stdout(), "{payload}");
+            if let Err(err) = write_response(env.stdout(), &payload) {
+                return report_undelivered_response(env, prog, &operation, &err);
+            }
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
             // Issue #3655 AC-2: a governance refusal reaches the PM without
             // depending on the agent noticing it is stuck. Answering the caller
@@ -103,6 +114,32 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+/// Exit code for an operation whose response never reached the caller.
+///
+/// Issue #4435 AC-1: swallowing the write turns a delivery failure into a
+/// zero-byte, exit-0 answer that reads exactly like silent success. Distinct
+/// from the ordinary failure code so a caller can tell the two apart.
+const RESPONSE_NOT_DELIVERED_EXIT: i32 = 3;
+
+/// Write the response envelope. The envelope is the operation's only answer,
+/// so a failed write is reported, never dropped.
+fn write_response(stdout: &mut dyn std::io::Write, payload: &Value) -> Result<(), String> {
+    writeln!(stdout, "{payload}").map_err(|err| err.to_string())
+}
+
+fn report_undelivered_response<E: CliEnv>(
+    env: &mut E,
+    prog: &str,
+    operation: &str,
+    error: &str,
+) -> i32 {
+    let _ = writeln!(
+        env.stderr(),
+        "{prog} {operation}: response envelope was not delivered: {error}"
+    );
+    RESPONSE_NOT_DELIVERED_EXIT
 }
 
 /// Issue #3606: name the project store the operation acted on.
@@ -163,10 +200,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         ));
     }
     let params = params_object(&envelope.params)?;
-    if envelope.operation.starts_with("improvement.") {
-        reject_improvement_force(params)?;
-    }
     let command = match envelope.operation.as_str() {
+        "concern.create" | "concern.update" | "concern.list" | "concern.measure"
+        | "concern.resolve" => CliCommand::Concern(Box::new(super::concern::parse(
+            &envelope.operation,
+            params,
+        )?)),
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
@@ -185,8 +224,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "workspace.work_prune" | "workspace.work-prune" => {
+            // Issue #4465 AC-4'': this operation closes, discards and detaches
+            // durable Work state across every Work in the project, so a scope
+            // parameter it does not implement is a refusal. `params.work` was
+            // silently dropped and the call then applied machine-wide.
+            reject_unknown_params(
+                params,
+                &["project_root", "dry_run", "ids"],
+                "workspace.work_prune",
+            )?;
             CliCommand::Workspace(WorkspaceCommand::WorkPrune {
-                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+                // Issue #4465 AC-8: an unqualified call reports candidates
+                // only; applying requires an explicit opt-out.
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
                 ids: optional_string_vec(params, "ids")?,
                 project_root: optional_string(params, "project_root")?,
             })
@@ -214,20 +264,50 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "board.config.show" | "board.config-show" => {
             CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
         }
-        "improvement.capture" => improvement_capture(params)?,
-        "improvement.list" => improvement_list(params)?,
+        "branch.prune_merged" | "branch.prune-merged" => {
+            reject_unknown_params(
+                params,
+                &["dry_run", "base", "branches"],
+                "branch.prune_merged",
+            )?;
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                // Deleting remote branches is not reversible from here, so an
+                // unqualified call only reports candidates (Issue #3970 AC-3).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                branches: optional_string_vec(params, "branches")?,
+            })
+        }
+        "worktree.gc_build_artifacts" | "worktree.gc-build-artifacts" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "dry_run",
+                    "base",
+                    "include_unmerged",
+                    "include_protected_workspaces",
+                ],
+                "worktree.gc_build_artifacts",
+            )?;
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                // Removing a build cache is recoverable but slow to undo, so
+                // an unqualified call only reports (Issue #4009 AC-1).
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+                base: optional_string(params, "base")?,
+                include_unmerged: optional_bool(params, "include_unmerged")?.unwrap_or(false),
+                include_protected_workspaces: optional_bool(
+                    params,
+                    "include_protected_workspaces",
+                )?
+                .unwrap_or(false),
+            })
+        }
         "intake.outcome.record" | "intake.outcome-record" => {
             CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
                 kind: required_string(params, "kind")?,
                 number: optional_u64(params, "number")?,
                 reason: optional_string(params, "reason")?,
             })
-        }
-        "improvement.dismiss" => improvement_dismiss(params)?,
-        "improvement.resolve" => improvement_resolve(params)?,
-        "improvement.link_issue" | "improvement.link-issue" => improvement_link_issue(params)?,
-        "improvement.promote_issue" | "improvement.promote-issue" => {
-            improvement_promote_issue(params)?
         }
         "issue.view" => CliCommand::Issue(IssueCommand::View {
             number: required_u64(params, "number")?,
@@ -252,6 +332,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             phase: optional_string(params, "phase")?,
             state: optional_string(params, "state")?,
         }),
+        "issue.spec.audit" => CliCommand::Issue(IssueCommand::SpecAudit {
+            state: optional_string(params, "state")?,
+        }),
         "issue.spec.pull" => CliCommand::Issue(IssueCommand::SpecPull {
             all: optional_bool(params, "all")?.unwrap_or(false),
             numbers: optional_u64_vec(params, "numbers")?,
@@ -259,6 +342,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
         }),
+        "issue.spec.lint" => CliCommand::Issue(IssueCommand::SpecLint {
+            number: required_u64(params, "number")?,
+            sections: optional_string_vec(params, "sections")?,
+            snapshot: optional_bool(params, "snapshot")?.unwrap_or(true),
+            directive_epoch: optional_string(params, "directive_epoch")?,
+            phase_slice: optional_string(params, "phase_slice")?,
+        }),
+        "issue.spec.inspection.complete" | "issue.spec.inspection-complete" => {
+            CliCommand::Issue(IssueCommand::SpecInspectionComplete {
+                number: required_u64(params, "number")?,
+            })
+        }
         "issue.spec.rename" => CliCommand::Issue(IssueCommand::SpecRename {
             number: required_u64(params, "number")?,
             title: required_string(params, "title")?,
@@ -269,6 +364,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             title: required_string(params, "title")?,
             body: required_string(params, "body")?,
             labels: optional_string_vec(params, "labels")?,
+        }),
+        "issue.edit" => CliCommand::Issue(IssueCommand::Edit {
+            number: required_u64(params, "number")?,
+            title: optional_string(params, "title")?,
+            body: optional_string(params, "body")?,
+            // Absent or `null` means "leave labels alone"; only an explicit
+            // empty array clears them.
+            labels: params
+                .get("labels")
+                .filter(|value| !value.is_null())
+                .map(|_| optional_string_vec(params, "labels"))
+                .transpose()?,
+        }),
+        "issue.label" => issue_label(params)?,
+        "issue.close" => CliCommand::Issue(IssueCommand::Close {
+            number: required_u64(params, "number")?,
+            reason: issue_close_reason(params)?,
+            comment: optional_string(params, "comment")?,
+        }),
+        "issue.reopen" => CliCommand::Issue(IssueCommand::Reopen {
+            number: required_u64(params, "number")?,
+            comment: optional_string(params, "comment")?,
         }),
         "issue.comment" => CliCommand::Issue(IssueCommand::CommentBody {
             number: required_u64(params, "number")?,
@@ -332,39 +449,111 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
         }),
+        "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
+                project_root: optional_path(params, "project_root")?,
+            })
+        }
+        "issue.monitor.release_idle" | "issue.monitor.release-idle" => {
+            CliCommand::Issue(IssueCommand::MonitorReleaseIdle {
+                project_root: optional_path(params, "project_root")?,
+                // Issue #4084 AC-5: no `number` means every idle row.
+                number: optional_u64(params, "number")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(false),
+            })
+        }
+        "issue.monitor.reconcile" => CliCommand::Issue(IssueCommand::MonitorReconcile {
+            project_root: optional_path(params, "project_root")?,
+        }),
+        "issue.monitor.quota_hold.clear" | "issue.monitor.quota-hold.clear" => {
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: optional_path(params, "project_root")?,
+                provider: required_string(params, "provider")?,
+                // An unexplained release of a provider hold is not auditable.
+                reason: required_string(params, "reason")?,
+            })
+        }
+        "issue.monitor.wait" => {
+            let clear = optional_bool(params, "clear")?.unwrap_or(false);
+            let (reason, resume_condition) = if clear {
+                (
+                    optional_string(params, "reason")?,
+                    optional_string(params, "resume_condition")?,
+                )
+            } else {
+                // An unexplained wait is exactly the state the PM cannot act on.
+                (
+                    Some(required_string(params, "reason")?),
+                    Some(required_string(params, "resume_condition")?),
+                )
+            };
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: optional_path(params, "project_root")?,
+                number: optional_u64(params, "number")?,
+                reason,
+                resume_condition,
+                clear,
+            })
+        }
+        "issue.monitor.wait.invalidate" | "issue.monitor.wait-invalidate" => {
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                // An unexplained invalidation is exactly the record AC-2 needs.
+                reason: required_string(params, "reason")?,
+                by: optional_string(params, "by")?,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
         }
+        "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
+            project_root: optional_path(params, "project_root")?,
+            terminal: optional_string(params, "terminal")?,
+        }),
+        "issue.monitor.queue.push" => CliCommand::Issue(IssueCommand::MonitorQueuePush {
+            project_root: optional_path(params, "project_root")?,
+            issue_numbers: required_u64_vec(params, "numbers")?,
+            position: optional_usize(params, "position")?,
+            force: optional_bool(params, "force")?.unwrap_or(false),
+        }),
+        "issue.monitor.queue.remove" => CliCommand::Issue(IssueCommand::MonitorQueueRemove {
+            project_root: optional_path(params, "project_root")?,
+            issue_numbers: required_u64_vec(params, "numbers")?,
+        }),
+        "issue.monitor.queue.move" => CliCommand::Issue(IssueCommand::MonitorQueueMove {
+            project_root: optional_path(params, "project_root")?,
+            number: required_u64(params, "number")?,
+            position: required_usize(params, "position")?,
+        }),
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
             let enabled = optional_bool(params, "enabled")?;
             let autonomous_mode = optional_bool(params, "autonomous_mode")?;
             let max_active = optional_usize(params, "max_active")?;
-            if enabled.is_none() && autonomous_mode.is_none() && max_active.is_none() {
+            let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
+            let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            let launch_agent = optional_string(params, "launch_agent")?;
+            // Issue #4037 AC-5: the non-destructive update drain.
+            let update_drain = optional_update_drain_control(params)?;
+            if enabled.is_none()
+                && autonomous_mode.is_none()
+                && max_active.is_none()
+                && auto_close_merged_issues.is_none()
+                && auto_apply_updates.is_none()
+                && launch_agent.is_none()
+                && update_drain.is_none()
+            {
                 return Err(CliParseError::MissingFlag(
-                    "enabled|autonomous_mode|max_active",
+                    "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
                 ));
             }
-            // SPEC-3431 FR-008/FR-009: Issue #3357's asymmetric boundary keeps
-            // applying to every agent session — raising a switch stays a GUI
-            // action — except for the project's registered PM, which the SPEC
-            // grants full authority. Merges are unaffected either way: SPEC
-            // #3200's fail-closed merge gate still decides every merge.
-            let pm_privileged = params_caller_is_registered_pm(params);
-            if !pm_privileged {
-                if enabled == Some(true) {
-                    return Err(CliParseError::InvalidJson(
-                        "enabled=true requires an explicit GUI action".to_string(),
-                    ));
-                }
-                if autonomous_mode == Some(true) {
-                    return Err(CliParseError::InvalidJson(
-                        "autonomous_mode=true requires an explicit GUI action".to_string(),
-                    ));
-                }
-            }
+            // The handler owns the GUI-only ON policy so dispatch can return
+            // the normal structured `ok:false` operation envelope. This layer
+            // only rejects malformed config values.
             if max_active == Some(0) {
                 return Err(CliParseError::InvalidJson(
                     "max_active must be greater than zero".to_string(),
@@ -375,9 +564,82 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 enabled,
                 autonomous_mode,
                 max_active,
+                auto_close_merged_issues,
+                auto_apply_updates,
+                launch_agent,
+                update_drain,
+            })
+        }
+        "issue.monitor.profiles" => CliCommand::Issue(IssueCommand::MonitorProfiles {
+            project_root: optional_path(params, "project_root")?,
+        }),
+        "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
+            let Some(profiles) = params.get("profiles") else {
+                return Err(CliParseError::MissingFlag("profiles"));
+            };
+            // Issue #4079 AC-3: keep the caller's element shape. Parsing
+            // straight into a full profile cannot tell an omitted field from
+            // one explicitly cleared, so a reorder reset the pool's settings.
+            let profiles = serde_json::from_value::<Vec<crate::IssueMonitorLaunchProfilePatch>>(
+                profiles.clone(),
+            )
+            .map_err(|error| {
+                CliParseError::InvalidJson(format!(
+                    "profiles must be an array of launch profiles with agent_id: {error}"
+                ))
+            })?;
+            let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
+                .map(|value| {
+                    u8::try_from(value).map_err(|_| {
+                        CliParseError::InvalidJson(
+                            "usage_threshold_percent must be between 1 and 100".to_string(),
+                        )
+                    })
+                })
+                .transpose()?;
+            CliCommand::Issue(IssueCommand::MonitorProfilesSet {
+                project_root: optional_path(params, "project_root")?,
+                profiles,
+                usage_threshold_percent,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
+        "pr.list" => CliCommand::Pr(PrCommand::List {
+            stale_after_hours: optional_u64(params, "stale_after_hours")?
+                .map(|hours| i64::try_from(hours).unwrap_or(i64::MAX)),
+            escalate_after_cycles: optional_u64(params, "escalate_after_cycles")?
+                .map(|cycles| u32::try_from(cycles).unwrap_or(u32::MAX)),
+            refresh: optional_bool(params, "refresh")?.unwrap_or(false),
+            include: params
+                .contains_key("include")
+                .then(|| parse_pr_inventory_include(&optional_string_vec(params, "include")?))
+                .transpose()?,
+            force_reason: optional_string(params, "force_reason")?,
+        }),
+        // Issue #3891 AC-3: GitHub API budget observation.
+        "github.budget" => CliCommand::GithubBudget(super::github_budget::GithubBudgetCommand {
+            refresh: optional_bool(params, "refresh")?.unwrap_or(false),
+        }),
+        // Issue #3516: interrupted-release standing check. Read-only unless the
+        // caller explicitly opts into opening the missing Release PR.
+        "release.status" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "release_branch",
+                    "base_branch",
+                    "scan_commits",
+                    "ensure_release_pr",
+                ],
+                "release.status",
+            )?;
+            CliCommand::Release(super::release::ReleaseCommand::Status {
+                release_branch: optional_string(params, "release_branch")?,
+                base_branch: optional_string(params, "base_branch")?,
+                scan_commits: optional_u64(params, "scan_commits")?,
+                ensure_release_pr: optional_bool(params, "ensure_release_pr")?.unwrap_or(false),
+            })
+        }
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
             head: optional_string(params, "head")?,
@@ -413,6 +675,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
         }),
+        // SPEC #3835 AC-15 / AC-17: the operation behind the `update-branch`
+        // default action, which `pr.list` recommended for a year without one.
+        "pr.update_branch" | "pr.update-branch" => CliCommand::Pr(PrCommand::UpdateBranch {
+            number: required_u64(params, "number")?,
+        }),
         "pr.comment" => CliCommand::Pr(PrCommand::CommentBody {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
@@ -438,7 +705,30 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "actions.job_logs" | "actions.job-logs" => CliCommand::Actions(ActionsCommand::JobLogs {
             job_id: required_u64(params, "job_id")?,
         }),
+        "actions.rerun" => CliCommand::Actions(ActionsCommand::Rerun {
+            target: actions_rerun_target(params)?,
+        }),
         "index.status" => CliCommand::Index(IndexCommand::Status),
+        "index.cancel" | "index.repair" => {
+            if optional_string(params, "scope")?.is_some_and(|scope| scope != "issues") {
+                return Err(CliParseError::InvalidJson(
+                    "index recovery supports only the issues scope".to_string(),
+                ));
+            }
+            let wait = optional_bool(params, "wait")?.unwrap_or(false);
+            if envelope.operation == "index.cancel" && wait {
+                return Err(CliParseError::InvalidJson(
+                    "index.cancel does not take wait".to_string(),
+                ));
+            }
+            CliCommand::Index(if envelope.operation == "index.cancel" {
+                IndexCommand::Cancel
+            } else {
+                // Issue #4435: `index.repair` submits and answers; `wait`
+                // blocks until the coordinated job settles.
+                IndexCommand::Repair { wait }
+            })
+        }
         "index.rebuild" => CliCommand::Index(IndexCommand::Rebuild {
             scope: optional_string(params, "scope")?
                 .map(|scope| index_scope(&scope))
@@ -452,6 +742,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
             hook_register_codex_trust(params)?
         }
+        "hook.register_codex_managed_project_trust"
+        | "hook.register-codex-managed-project-trust" => hook_register_codex_project_trust(params)?,
         "hook.health" => hook_health(params)?,
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
@@ -476,16 +768,52 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.run" => {
             let commands = optional_string_vec(params, "commands")?;
-            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
+            let headed_e2e_commands = optional_string_vec(params, "headed_e2e_commands")?;
+            if headed_e2e_commands
+                .iter()
+                .any(|command| !commands.contains(command))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "headed_e2e_commands must name exact entries in commands".to_string(),
+                ));
+            }
+            // Issue #3913: bound on the host admission wait.
+            let max_wait_secs = optional_u64(params, "max_wait_secs")?;
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                commands,
+                max_wait_secs,
+                user_verification_result: optional_string(params, "user_verification_result")?,
+                headed_e2e_commands,
+            })
+        }
+        "verify.adjudicate" => {
+            reject_unknown_params(
+                params,
+                &["record_id", "command", "board_entry_id"],
+                "verify.adjudicate",
+            )?;
+            let command = required_string(params, "command")?;
+            if command == "*" {
+                return Err(CliParseError::InvalidValue {
+                    flag: "command",
+                    reason: "must identify one exact command, not the whole record",
+                });
+            }
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Adjudicate {
+                record_id: required_string(params, "record_id")?,
+                command,
+                board_entry_id: required_string(params, "board_entry_id")?,
+            })
         }
         "verify.plan" => {
             let commands = optional_string_vec(params, "commands")?;
             let derive = optional_bool(params, "derive")?.unwrap_or(false);
             let generated_outputs = optional_string_vec(params, "generated_outputs")?;
+            let quarantines = verification_quarantine_requests(params)?;
             if commands.is_empty() && !derive {
                 return Err(CliParseError::MissingFlag("commands"));
             }
-            if generated_outputs.is_empty() {
+            if generated_outputs.is_empty() && quarantines.is_empty() {
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
                     commands,
                     derive,
@@ -496,6 +824,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                         commands,
                         derive,
                         generated_outputs,
+                        quarantines,
                     },
                 )
             }
@@ -530,12 +859,48 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             reason: optional_string(params, "reason")?,
         }),
         "execution.status" => {
-            if !params.is_empty() {
+            // Issue #3934: with no params this stays the caller's own
+            // diagnosis; `issue` or `spec` asks about any owner in this
+            // repository, which is how an operator finds out who holds a
+            // generation that keeps refusing the queue.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
                 return Err(CliParseError::InvalidJson(
-                    "execution.status accepts no params".to_string(),
+                    "execution.status accepts only issue or spec".to_string(),
                 ));
             }
-            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+            match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.status owner number must be greater than zero".to_string(),
+                    ))
+                }
+                (Some(number), None) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                            number,
+                        },
+                    },
+                ),
+                (None, Some(number)) => CliCommand::Execution(
+                    crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                        owner: crate::cli::execution_state::ExecutionOwnerKey {
+                            kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                            number,
+                        },
+                    },
+                ),
+                (None, None) => {
+                    CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+                }
+            }
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
@@ -572,6 +937,54 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.release_prepared" => {
+            // Issue #4161: owner-addressed like `execution.status`, because the
+            // Session that left the Prepared fence behind is gone and the
+            // operator clearing it is somewhere else in the same repository.
+            let issue = optional_u64(params, "issue")?;
+            let spec = optional_u64(params, "spec")?;
+            let reason = required_string(params, "reason")?;
+            let operation_id = optional_string(params, "operation_id")?;
+            reject_unknown_params(
+                params,
+                &["issue", "spec", "reason", "operation_id"],
+                "execution.release_prepared",
+            )?;
+            let owner = match (issue, spec) {
+                (Some(_), Some(_)) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared accepts issue or spec, not both".to_string(),
+                    ))
+                }
+                (None, None) => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared requires params.issue or params.spec"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) | (None, Some(number)) if number == 0 => {
+                    return Err(CliParseError::InvalidJson(
+                        "execution.release_prepared owner number must be greater than zero"
+                            .to_string(),
+                    ))
+                }
+                (Some(number), None) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                },
+                (None, Some(number)) => crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number,
+                },
+            };
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id,
+                    reason,
+                },
+            )
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -602,6 +1015,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.close" | "pane.stop" => CliCommand::Pane(PaneCommand::Close {
             id: required_string(params, "id")?,
         }),
+        "pane.recover" => {
+            reject_unknown_params(
+                params,
+                &["started_after", "started_before", "apply"],
+                "pane.recover",
+            )?;
+            let started_after = required_string(params, "started_after")?;
+            let started_before = required_string(params, "started_before")?;
+            super::pane::parse_recovery_bounds(&started_after, &started_before)
+                .map_err(CliParseError::InvalidJson)?;
+            CliCommand::Pane(PaneCommand::Recover {
+                started_after,
+                started_before,
+                apply: optional_bool(params, "apply")?.unwrap_or(false),
+            })
+        }
         "pane.send" => CliCommand::Pane(PaneCommand::Send {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
@@ -628,6 +1057,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }),
         "search" => search(params)?,
         "errors.list" => errors_list(params)?,
+        "perf.summary" => perf_read(params, "perf.summary")?,
+        "perf.startup" => {
+            reject_unknown_params(params, &[], "perf.startup")?;
+            CliCommand::Perf(PerfCommand::Startup)
+        }
+        "perf.violations" => perf_read(params, "perf.violations")?,
         other => {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
@@ -649,6 +1084,49 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         command,
         declared_block,
     })
+}
+
+fn issue_label(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(
+        params,
+        &[
+            "number",
+            "action",
+            "labels",
+            "confirm_queue",
+            "confirm_design_gate",
+            "confirm_auto_merge",
+        ],
+        "issue.label",
+    )?;
+    let action = match required_string(params, "action")?.as_str() {
+        "add" => IssueLabelAction::Add,
+        "remove" => IssueLabelAction::Remove,
+        _ => {
+            return Err(CliParseError::InvalidValue {
+                flag: "action",
+                reason: "expected add or remove",
+            })
+        }
+    };
+    let labels = optional_string_vec(params, "labels")?;
+    if labels.is_empty() {
+        return Err(CliParseError::MissingFlag("labels"));
+    }
+    if matches!(action, IssueLabelAction::Remove) && labels.len() != 1 {
+        return Err(CliParseError::InvalidValue {
+            flag: "labels",
+            reason: "remove accepts exactly one label",
+        });
+    }
+    Ok(CliCommand::Issue(IssueCommand::Label {
+        number: required_u64(params, "number")?,
+        action,
+        labels,
+        confirm_queue: optional_bool(params, "confirm_queue")?.unwrap_or(false),
+        confirm_design_gate: optional_bool(params, "confirm_design_gate")?.unwrap_or(false),
+        confirm_auto_merge: optional_bool(params, "confirm_auto_merge")?.unwrap_or(false),
+    }))
 }
 
 fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -730,10 +1208,12 @@ fn workspace_ensure(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
 }
 
 fn board_show(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["workspace", "all", "limit"], "board.show")?;
     Ok(CliCommand::Board(BoardCommand::Show {
         json: true,
         workspace: optional_string(params, "workspace")?,
         all: optional_bool(params, "all")?.unwrap_or(false),
+        limit: optional_usize(params, "limit")?,
     }))
 }
 
@@ -744,209 +1224,42 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
         "title_summary",
         "board.post must not update agent title_summary",
     )?;
-    Ok(CliCommand::Board(BoardCommand::Post(Box::new(
-        BoardPostCommand {
-            kind: required_string(params, "kind")?,
-            body: Some(required_string(params, "body")?),
-            file: None,
-            title: optional_string(params, "title")?,
-            title_summary: None,
-            parent: optional_string(params, "parent")?,
-            topics: optional_string_vec(params, "topics")?,
-            owners: optional_string_vec(params, "owners")?,
-            targets: optional_string_vec(params, "targets")?,
-            mentions: optional_string_vec(params, "mentions")?,
-            // Issue #3655: accepts a single id or a list, because the common
-            // case is closing exactly one escalation and quoting it as an
-            // array is the kind of ceremony agents get wrong.
-            resolves: optional_string_or_string_vec(params, "resolves")?,
-            broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
-        },
-    ))))
-}
-
-fn improvement_capture(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     for key in [
-        "producer_id",
-        "source_event_id",
         "session_id",
-        "routing_basis_revision",
-        "budget_profile",
-        "fingerprint",
-        "occurrence_key",
+        "project_id",
+        "provider",
+        "worktree_form",
+        "recovery_id",
+        "entry_id",
+        "payload_digest",
+        "provider_receipt",
+        "operation_id",
     ] {
         reject_key(
             params,
             key,
-            "untrusted identity field is not accepted by public improvement.capture",
+            "untrusted recovery identity field is not accepted by public board.post",
         )?;
     }
-    let typed_evidence = improvement_typed_evidence(params)?;
-    Ok(CliCommand::Improvement(ImprovementCommand::Capture(
-        Box::new(super::improvement::ImprovementCaptureCommand {
-            source: required_string(params, "source")?,
-            target_artifact: required_string(params, "target_artifact")?,
-            classification: required_string(params, "classification")?,
-            confidence: required_string(params, "confidence")?,
-            summary: optional_string(params, "summary")?.unwrap_or_default(),
-            details: optional_string(params, "details")?,
-            evidence_digest: optional_string(params, "evidence_digest")?,
-            dedupe_key: optional_string(params, "dedupe_key")?,
-            local_evidence: optional_json_array(params, "local_evidence")?,
-            typed_evidence,
-        }),
-    )))
-}
-
-fn improvement_typed_evidence(
-    params: &Map<String, Value>,
-) -> Result<Option<super::improvement::ImprovementTypedEvidenceCommand>, CliParseError> {
-    let typed_keys = [
-        "subsystem",
-        "contract_id",
-        "contract_schema_revision",
-        "failure_code",
-        "evidence",
-    ];
-    if !typed_keys.iter().any(|key| params.contains_key(*key)) {
-        return Ok(None);
-    }
-
-    let evidence = params
-        .get("evidence")
-        .and_then(Value::as_object)
-        .ok_or_else(|| CliParseError::InvalidJson("evidence must be an object".to_string()))?;
-    for key in evidence.keys() {
-        if !matches!(key.as_str(), "expected_outcome" | "observed_outcome") {
-            return Err(CliParseError::InvalidJson(format!(
-                "evidence contains unknown field: {key}"
-            )));
-        }
-    }
-
-    Ok(Some(super::improvement::ImprovementTypedEvidenceCommand {
-        subsystem: required_string(params, "subsystem")?,
-        contract_id: required_string(params, "contract_id")?,
-        contract_schema_revision: required_u64(params, "contract_schema_revision")?,
-        failure_code: required_string(params, "failure_code")?,
-        expected_outcome: required_string(evidence, "expected_outcome")?,
-        observed_outcome: required_string(evidence, "observed_outcome")?,
+    let intent_id = optional_string(params, "intent_id")?;
+    let command = Box::new(BoardPostCommand {
+        kind: required_string(params, "kind")?,
+        body: Some(required_string(params, "body")?),
+        file: None,
+        title: optional_string(params, "title")?,
+        title_summary: None,
+        parent: optional_string(params, "parent")?,
+        topics: optional_string_vec(params, "topics")?,
+        owners: optional_string_vec(params, "owners")?,
+        targets: optional_string_vec(params, "targets")?,
+        mentions: optional_string_vec(params, "mentions")?,
+        resolves: optional_string_or_string_vec(params, "resolves")?,
+        broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
+    });
+    Ok(CliCommand::Board(match intent_id {
+        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        None => BoardCommand::Post(command),
     }))
-}
-
-fn improvement_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    let state = optional_string(params, "state")?
-        .map(|value| {
-            super::improvement::CandidateState::from_str(&value)
-                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
-        })
-        .transpose()?;
-    let blocked_reason = optional_string(params, "blocked_reason")?
-        .map(|value| {
-            super::improvement::BlockedReason::from_str(&value)
-                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
-        })
-        .transpose()?;
-    let failure_subcode = optional_string(params, "failure_subcode")?
-        .map(|value| {
-            super::improvement::FailureSubcode::from_str(&value)
-                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
-        })
-        .transpose()?;
-    let classification = optional_string(params, "classification")?;
-    if classification.as_deref().is_some_and(|value| {
-        !["gwt-caused", "ambiguous", "target-project", "external"].contains(&value)
-    }) {
-        return Err(CliParseError::InvalidJson(
-            "invalid classification".to_string(),
-        ));
-    }
-    let confidence = optional_string(params, "confidence")?;
-    if confidence
-        .as_deref()
-        .is_some_and(|value| !["low", "medium", "high"].contains(&value))
-    {
-        return Err(CliParseError::InvalidJson("invalid confidence".to_string()));
-    }
-    let owner_number = optional_u64(params, "owner_number")?;
-    if owner_number == Some(0) {
-        return Err(CliParseError::InvalidJson(
-            "owner_number must be greater than zero".to_string(),
-        ));
-    }
-    let limit = optional_usize(params, "limit")?;
-    if limit == Some(0) {
-        return Err(CliParseError::InvalidJson(
-            "limit must be greater than zero".to_string(),
-        ));
-    }
-    Ok(CliCommand::Improvement(ImprovementCommand::List(
-        super::improvement::ImprovementListCommand {
-            state,
-            blocked_reason,
-            failure_subcode,
-            classification,
-            confidence,
-            owner_number,
-            limit,
-        },
-    )))
-}
-
-fn improvement_dismiss(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    Ok(CliCommand::Improvement(ImprovementCommand::Dismiss(
-        super::improvement::ImprovementDismissCommand {
-            id: required_string(params, "id")?,
-            reason: required_string(params, "reason")?,
-        },
-    )))
-}
-
-fn improvement_link_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    if ["number", "url", "repository"]
-        .iter()
-        .any(|key| params.contains_key(*key))
-    {
-        return Err(CliParseError::InvalidJson(
-            "MIGRATION_REQUIRED: improvement.link_issue v2 accepts id, owner_number, and resolver_revision only"
-                .to_string(),
-        ));
-    }
-    Ok(CliCommand::Improvement(ImprovementCommand::LinkIssue(
-        super::improvement::ImprovementLinkIssueCommand {
-            id: required_string(params, "id")?,
-            owner_number: required_u64(params, "owner_number")?,
-            resolver_revision: required_string(params, "resolver_revision")?,
-        },
-    )))
-}
-
-fn improvement_resolve(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    Ok(CliCommand::Improvement(ImprovementCommand::Resolve(
-        super::improvement::ImprovementResolveCommand {
-            id: required_string(params, "id")?,
-            expected_resolver_revision: optional_string(params, "expected_resolver_revision")?,
-        },
-    )))
-}
-
-fn improvement_promote_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
-    Ok(CliCommand::Improvement(ImprovementCommand::PromoteIssue(
-        super::improvement::ImprovementPromoteIssueCommand {
-            id: required_string(params, "id")?,
-            force: optional_bool(params, "force")?.unwrap_or(false),
-            labels: optional_string_vec(params, "labels")?,
-        },
-    )))
-}
-
-fn reject_improvement_force(params: &Map<String, Value>) -> Result<(), CliParseError> {
-    if optional_bool(params, "force")? == Some(true) {
-        return Err(CliParseError::InvalidJson(
-            "UNSAFE_FORCE_REMOVED".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn issue_spec_edit(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -1042,6 +1355,24 @@ fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, 
     }
     Ok(CliCommand::Hook(HookCommand::Run {
         name: "register-codex-managed-hook-trust".to_string(),
+        rest,
+    }))
+}
+
+fn hook_register_codex_project_trust(
+    params: &Map<String, Value>,
+) -> Result<CliCommand, CliParseError> {
+    let mut rest = Vec::new();
+    if let Some(project_root) = optional_string(params, "project_root")? {
+        rest.push("--project-root".to_string());
+        rest.push(project_root);
+    }
+    if let Some(codex_config) = optional_string(params, "codex_config")? {
+        rest.push("--codex-config".to_string());
+        rest.push(codex_config);
+    }
+    Ok(CliCommand::Hook(HookCommand::Run {
+        name: "register-codex-managed-project-trust".to_string(),
         rest,
     }))
 }
@@ -1158,6 +1489,34 @@ fn errors_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
     }))
 }
 
+/// SPEC #3700 FR-007: `perf.summary` and `perf.violations` share one filter
+/// shape, so they share one parser keyed by the operation name.
+fn perf_read(params: &Map<String, Value>, operation: &str) -> Result<CliCommand, CliParseError> {
+    reject_unknown_params(params, &["since", "stream", "target"], operation)?;
+    let since = optional_string(params, "since")?;
+    if let Some(raw) = since.as_deref() {
+        super::perf::parse_since(raw)?;
+    }
+    let stream = optional_string(params, "stream")?
+        .map(|raw| super::perf::parse_stream(&raw))
+        .transpose()?;
+    let target = optional_string(params, "target")?;
+
+    Ok(CliCommand::Perf(if operation == "perf.violations" {
+        PerfCommand::Violations {
+            since,
+            stream,
+            target,
+        }
+    } else {
+        PerfCommand::Summary {
+            since,
+            stream,
+            target,
+        }
+    }))
+}
+
 fn search(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     let scopes = optional_string_vec(params, "scopes")?
         .into_iter()
@@ -1204,6 +1563,7 @@ fn index_scope(value: &str) -> Result<IndexScope, CliParseError> {
         "memory" => Ok(IndexScope::Memory),
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
+        "works" => Ok(IndexScope::Works),
         "files" => Ok(IndexScope::Files),
         "files_docs" | "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::InvalidJson(format!(
@@ -1327,6 +1687,35 @@ fn reject_unknown_params(
     Ok(())
 }
 
+/// Issue #3515: `actions.rerun` takes `run_id` **or** `job_id`, never both.
+/// `failed_only` narrows a run rerun to its failed jobs and is meaningless for
+/// a job target, so passing it there is rejected instead of silently ignored.
+fn actions_rerun_target(
+    params: &Map<String, Value>,
+) -> Result<crate::cli::ActionsRerunTarget, CliParseError> {
+    let job_id = optional_u64(params, "job_id")?;
+    let run_id = optional_u64(params, "run_id")?;
+    match (run_id, job_id) {
+        (Some(_), Some(_)) => Err(CliParseError::InvalidValue {
+            flag: "job_id",
+            reason: "run_id and job_id are mutually exclusive",
+        }),
+        (None, Some(job_id)) => {
+            if optional_bool(params, "failed_only")?.is_some() {
+                return Err(CliParseError::InvalidValue {
+                    flag: "failed_only",
+                    reason: "only applies to a run_id target",
+                });
+            }
+            Ok(crate::cli::ActionsRerunTarget::Job { job_id })
+        }
+        (run_id, None) => Ok(crate::cli::ActionsRerunTarget::Run {
+            run_id: run_id.ok_or(CliParseError::MissingFlag("run_id"))?,
+            failed_only: optional_bool(params, "failed_only")?.unwrap_or(false),
+        }),
+    }
+}
+
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
     optional_u64(params, key)?.ok_or(CliParseError::MissingFlag(key))
 }
@@ -1359,6 +1748,10 @@ fn optional_usize(
     optional_u64(params, key)?
         .map(|value| Ok(value as usize))
         .transpose()
+}
+
+fn required_usize(params: &Map<String, Value>, key: &'static str) -> Result<usize, CliParseError> {
+    optional_usize(params, key)?.ok_or(CliParseError::MissingFlag(key))
 }
 
 fn optional_u64_vec(
@@ -1405,34 +1798,6 @@ fn required_u64_vec(
     optional_u64_vec(params, key)
 }
 
-/// SPEC-3431 FR-009: is this caller the project's registered PM?
-///
-/// The identity comes from the ambient `GWT_SESSION_ID` only — params may
-/// name the project, never the subject — so no caller can claim PM authority
-/// it does not hold. The project is the explicit `project_root` when given,
-/// otherwise the current directory, matching how the handler resolves it.
-/// Anything unresolvable is not privileged (fail-closed).
-fn params_caller_is_registered_pm(params: &Map<String, Value>) -> bool {
-    let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) else {
-        return false;
-    };
-    let session_id = session_id.trim().to_string();
-    if session_id.is_empty() {
-        return false;
-    }
-    let project_root = match params.get("project_root").and_then(Value::as_str) {
-        Some(path) => std::path::PathBuf::from(path),
-        None => match std::env::current_dir() {
-            Ok(cwd) => cwd,
-            Err(_) => return false,
-        },
-    };
-    crate::pm_registry::session_is_registered_pm(
-        &crate::pm_registry::pm_prefs_path_for_repo_path(&project_root),
-        &session_id,
-    )
-}
-
 fn issue_monitor_priority_position(
     params: &Map<String, Value>,
 ) -> Result<super::IssueMonitorPriorityPosition, CliParseError> {
@@ -1456,6 +1821,41 @@ fn issue_monitor_priority_position(
     }
 }
 
+/// SPEC #4249 FR-001: `reason` is the optional GitHub `state_reason` of a
+/// close. An unrecognised spelling is refused rather than silently dropped,
+/// because a dropped reason closes the Issue with the wrong rationale.
+fn issue_close_reason(
+    params: &Map<String, Value>,
+) -> Result<Option<gwt_github::client::IssueCloseReason>, CliParseError> {
+    let Some(raw) = optional_string(params, "reason")? else {
+        return Ok(None);
+    };
+    gwt_github::client::IssueCloseReason::parse(&raw)
+        .map(Some)
+        .ok_or_else(|| {
+            CliParseError::InvalidJson(format!(
+                "reason must be one of {:?}",
+                gwt_github::client::IssueCloseReason::ACCEPTED
+            ))
+        })
+}
+
+/// Issue #4037 AC-5 / #3906 AC-3: `update_drain` is the operator bool or the
+/// auto-drain object `{reason, version}`.
+fn optional_update_drain_control(
+    params: &Map<String, Value>,
+) -> Result<Option<crate::IssueMonitorUpdateDrainControl>, CliParseError> {
+    match params.get("update_drain") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone()).map(Some).map_err(|_| {
+            CliParseError::InvalidJson(
+                "update_drain must be a bool or {\"reason\":\"auto\"|\"manual\",\"version\":\"x.y.z\"}"
+                    .to_string(),
+            )
+        }),
+    }
+}
+
 fn optional_bool(
     params: &Map<String, Value>,
     key: &'static str,
@@ -1468,6 +1868,30 @@ fn optional_bool(
         Value::Null => Ok(None),
         _ => Err(CliParseError::InvalidJson(format!("{key} must be a bool"))),
     }
+}
+
+/// Issue #3891 AC-2: `params.include` names the heavy `pr.list` fields to
+/// hydrate. An empty list is the bare light inventory.
+fn parse_pr_inventory_include(
+    names: &[String],
+) -> Result<gwt_git::PrInventoryInclude, CliParseError> {
+    let mut include = gwt_git::PrInventoryInclude {
+        checks: false,
+        body: false,
+    };
+    for name in names {
+        match name.as_str() {
+            "checks" => include.checks = true,
+            "body" => include.body = true,
+            _ => {
+                return Err(CliParseError::InvalidValue {
+                    flag: "include",
+                    reason: "expected \"checks\" and/or \"body\"",
+                })
+            }
+        }
+    }
+    Ok(include)
 }
 
 fn optional_string_vec(
@@ -1528,16 +1952,49 @@ fn optional_json_array(
     }
 }
 
+fn verification_quarantine_requests(
+    params: &Map<String, Value>,
+) -> Result<Vec<crate::cli::verification_record::VerificationQuarantineRequest>, CliParseError> {
+    let requests = optional_json_array(params, "quarantines")?
+        .into_iter()
+        .map(|value| {
+            serde_json::from_value::<
+                crate::cli::verification_record::VerificationQuarantineRequest,
+            >(value)
+            .map_err(|error| {
+                CliParseError::InvalidJson(format!(
+                    "quarantines must contain typed quarantine requests: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut identities = std::collections::HashSet::new();
+    for request in &requests {
+        request.validate().map_err(CliParseError::InvalidJson)?;
+        if !identities.insert((
+            request.failed_command.as_str(),
+            request.test_identity.as_str(),
+        )) {
+            return Err(CliParseError::InvalidJson(
+                "quarantines must not contain duplicate failed_command/test_identity pairs"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(requests)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand,
-        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PrCommand,
-        SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
+        parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
+        CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
+        IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
+        WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
-    use crate::cli::IssueMonitorPriorityPosition;
     use crate::cli::TestEnv;
+    use crate::cli::{BoardCommand, IssueMonitorPriorityPosition};
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
 
@@ -1565,6 +2022,731 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    fn concern_call(env: &mut TestEnv, operation: &str, params: Value) -> Value {
+        env.stdout.clear();
+        env.stderr.clear();
+        env.stdin = envelope(operation, params);
+        let code = super::dispatch(env, "gwtd");
+        assert_eq!(
+            code,
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&env.stdout),
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+        serde_json::from_str(response["output"].as_str().unwrap()).unwrap()
+    }
+
+    fn concern_create_params() -> Value {
+        json!({
+            "summary": "Unnecessary windows are restored",
+            "symptom_measurement": {"kind": "shell_command", "command": "printf '{\"count\":3}'"},
+            "baseline": {"count": 3},
+            "verification_predicate": {"pointer": "/count", "op": "eq", "expected": 0},
+            "owner_issues": [4059]
+        })
+    }
+
+    #[test]
+    fn concern_list_is_read_only_but_measurements_and_resolutions_are_mutations() {
+        use crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation;
+        assert!(is_read_only_json_envelope_operation("concern.list"));
+        for operation in [
+            "concern.create",
+            "concern.update",
+            "concern.measure",
+            "concern.resolve",
+        ] {
+            assert!(!is_read_only_json_envelope_operation(operation));
+        }
+    }
+
+    fn concern_owner_progress(state: &str) -> Value {
+        json!([{"number":4059,"state":state,"queue_position":3,"status":"queued","pull_requests":[]}])
+    }
+
+    #[test]
+    fn concern_roundtrip_requires_measurement_evidence_despite_closed_owners() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        assert_eq!(created["concern"]["state"], "open");
+        assert!(created["concern"]["raised_at"].is_string());
+        assert!(gwt_core::paths::gwt_project_dir_for_repo_path(&repo)
+            .join("project-state/concerns.json")
+            .is_file());
+
+        // A new environment reads the record from disk, not process-local state.
+        let mut env = TestEnv::new(repo);
+        let listed = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(listed["concerns"][0]["id"], id);
+        assert_eq!(listed["summary"]["open_count"], 1);
+        assert_eq!(
+            listed["summary"]["oldest_raised_at"],
+            created["concern"]["raised_at"]
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({"id":id,"summary":"Restoration regression"}),
+        );
+        assert_eq!(updated["concern"]["summary"], "Restoration regression");
+
+        let measured = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":2},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(measured["concern"]["state"], "fix_landed");
+        assert_eq!(
+            measured["concern"]["previous_measurement"],
+            json!({"count":3})
+        );
+        assert_eq!(measured["concern"]["last_measurement"], json!({"count":2}));
+        assert_eq!(measured["concern"]["measurement_changed"], true);
+        let unresolved = concern_call(&mut env, "concern.list", json!({}));
+        assert_eq!(unresolved["summary"]["unresolved_count"], 1);
+
+        let failed = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(failed["predicate_passed"], false);
+        assert_eq!(failed["concern"]["state"], "open");
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-2","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        let verified = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        assert_eq!(verified["predicate_passed"], true);
+        assert_eq!(verified["concern"]["state"], "verified");
+        let recurrence = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-3","measurement":{"count":1},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        assert_eq!(recurrence["concern"]["state"], "open");
+        let withdrawn = concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"withdrawn"}),
+        );
+        assert_eq!(withdrawn["concern"]["state"], "withdrawn");
+    }
+
+    #[test]
+    fn concern_duplicate_report_returns_remeasurement_and_preserves_baseline() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let mut report = concern_create_params();
+        report["baseline"] = json!({"count":1});
+        let repeated = concern_call(&mut env, "concern.create", report.clone());
+        assert_eq!(repeated["reused"], true);
+        assert_eq!(repeated["concern"]["id"], created["concern"]["id"]);
+        assert_eq!(repeated["concern"]["baseline"], json!({"count":3}));
+        assert_eq!(repeated["concern"]["last_measurement"], json!({"count":1}));
+        let listed = concern_call(
+            &mut env,
+            "concern.list",
+            json!({"symptom_measurement":report["symptom_measurement"]}),
+        );
+        assert_eq!(listed["concerns"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concern_escalates_after_ten_cycles_without_owner_progress() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        for cycle in 1..=10 {
+            let result = concern_call(
+                &mut env,
+                "concern.measure",
+                json!({
+                    "id":id,"cycle_id":format!("cycle-{cycle}"),"measurement":{"count":cycle},
+                    "owner_progress":concern_owner_progress("open")
+                }),
+            );
+            assert_eq!(result["concern"]["stagnant_cycles"], cycle);
+            assert_eq!(result["concern"]["escalation_due"], cycle == 10);
+        }
+        let repeated = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-10","measurement":{"count":10},
+                "owner_progress":concern_owner_progress("open")
+            }),
+        );
+        assert_eq!(repeated["concern"]["stagnant_cycles"], 10);
+        assert_eq!(
+            repeated["concern"]["previous_measurement"],
+            json!({"count":9})
+        );
+        assert_eq!(repeated["concern"]["measurement_changed"], true);
+        let mut progress = concern_owner_progress("open");
+        progress[0]["status"] = json!("active");
+        let advanced = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(advanced["concern"]["stagnant_cycles"], 0);
+        assert_eq!(advanced["concern"]["escalation_due"], false);
+        assert_eq!(advanced["concern"]["owner_progress_changed"], true);
+        let retried = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-11","measurement":{"count":10},"owner_progress":progress
+            }),
+        );
+        assert_eq!(retried, advanced);
+    }
+
+    #[test]
+    fn concern_definition_update_cannot_reuse_previous_verification() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = TestEnv::new(home.path().join("repo"));
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+        concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"cycle-1","measurement":{"count":0},
+                "owner_progress":concern_owner_progress("closed")
+            }),
+        );
+        concern_call(
+            &mut env,
+            "concern.resolve",
+            json!({"id":id,"state":"verified"}),
+        );
+        let updated = concern_call(
+            &mut env,
+            "concern.update",
+            json!({
+                "id":id,"symptom_measurement":{"kind":"gwtd_operation","operation":"workspace.projection_list","params":{}}
+            }),
+        );
+        assert_eq!(updated["concern"]["state"], "open");
+        env.stdout.clear();
+        env.stdin = envelope("concern.resolve", json!({"id":id,"state":"verified"}));
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(String::from_utf8_lossy(&env.stdout).contains("measurement"));
+        assert!(matches!(
+            err("concern.update", json!({"id":id,"state":"verified"})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    /// SPEC #3835 AC-15: the operation behind the `update-branch` default
+    /// action, so a `BEHIND` PR has a surface that can move it.
+    #[test]
+    fn pr_update_branch_parses_under_both_spellings() {
+        use crate::cli::PrCommand;
+        for operation in ["pr.update_branch", "pr.update-branch"] {
+            assert_eq!(
+                ok(operation, json!({"number": 4139})),
+                CliCommand::Pr(PrCommand::UpdateBranch { number: 4139 })
+            );
+        }
+        assert!(matches!(
+            err("pr.update_branch", json!({})),
+            CliParseError::MissingFlag("number")
+        ));
+    }
+
+    /// SPEC #3835 AC-17: every default action that names an operation names a
+    /// real one. `pr.list` reported `default_action: "update-branch"` with
+    /// `default_action_executable: true` on 21 of 25 open PRs while no such
+    /// operation existed, so its only recommended action was unrunnable.
+    ///
+    /// This test is the structural guard: `gwt-git` cannot see the operation
+    /// table, so the invariant has to be fixed from this side.
+    #[test]
+    fn every_named_pr_default_action_operation_is_callable() {
+        use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
+
+        let now = chrono::Utc::now();
+        let mut seen_update_branch = false;
+        for (mergeable, merge_state_status, ci_status, is_draft) in [
+            ("MERGEABLE", "BEHIND", "SUCCESS", true),
+            ("MERGEABLE", "BEHIND", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "SUCCESS", true),
+            ("MERGEABLE", "CLEAN", "SUCCESS", false),
+            ("CONFLICTING", "DIRTY", "SUCCESS", false),
+            ("MERGEABLE", "CLEAN", "FAILURE", false),
+            ("MERGEABLE", "CLEAN", "PENDING", false),
+            ("UNKNOWN", "UNKNOWN", "UNKNOWN", false),
+        ] {
+            let fields = PrInventoryFields {
+                base_ref_name: "develop".to_string(),
+                check_counts: None,
+                conflict: None,
+                unresolved_review_threads: None,
+                coderabbit_review_complete: None,
+                number: 4139,
+                title: "a PR".to_string(),
+                url: "https://example.com/pr/4139".to_string(),
+                is_draft,
+                head_ref_name: "work/issue-4131".to_string(),
+                updated_at: Some(now),
+                mergeable: mergeable.to_string(),
+                merge_state_status: merge_state_status.to_string(),
+                ci_status: ci_status.to_string(),
+                review_status: "APPROVED".to_string(),
+                body: String::new(),
+                closing_issues: Vec::new(),
+                fallback_owner_closed: false,
+            };
+            let decision = classify_pr_lifecycle(&fields, now);
+            let Some(operation) = decision.default_action_operation else {
+                continue;
+            };
+            seen_update_branch |= operation == "pr.update_branch";
+            if let Err(error) = parse(&envelope(operation, json!({"number": 4139}))) {
+                panic!(
+                    "`{}` recommends `{operation}`, which no operation implements: {error}",
+                    decision.default_action
+                );
+            }
+        }
+        assert!(
+            seen_update_branch,
+            "a BEHIND PR must name the operation that resolves it"
+        );
+    }
+
+    /// Issue #4396: guidance, managed skills, and refusal messages name only
+    /// operations this dispatcher accepts. gwt told agents to run `pr.merge`
+    /// and `workspace.prune` while neither existed, so an agent that followed
+    /// the text hit `unknown subcommand` and stopped.
+    mod guidance_operation_names {
+        use super::{envelope, parse};
+        use crate::cli::CliParseError;
+        use serde_json::json;
+        use std::collections::BTreeSet;
+        use std::path::{Path, PathBuf};
+
+        /// Suffixes that share the `<family>.<segment>` shape without being
+        /// operations: file names and hosts.
+        const NOT_OPERATIONS: &[&str] = &[
+            "md", "json", "jsonl", "rs", "toml", "yml", "yaml", "lock", "log", "txt", "exe", "com",
+            "gradle", "kts",
+        ];
+
+        /// The operation names of the dispatcher's match arms, read from this
+        /// file so a new operation family is covered without a second list.
+        fn dispatched_operations() -> BTreeSet<String> {
+            let source = include_str!("json_envelope.rs");
+            let body = source
+                .split("fn parse(input")
+                .nth(1)
+                .and_then(|rest| rest.split("#[cfg(test)]").next())
+                .expect("parse() precedes the test module");
+            body.lines()
+                .filter_map(|line| line.split_once("=>").map(|(arm, _)| arm.trim()))
+                .filter(|arm| arm.starts_with('"') || arm.starts_with('|'))
+                .flat_map(|arm| arm.split('|'))
+                .filter_map(|alt| alt.trim().strip_prefix('"')?.strip_suffix('"'))
+                .filter(|name| name.contains('.'))
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn is_dispatched(name: &str) -> bool {
+            !matches!(
+                parse(&envelope(name, json!({}))),
+                Err(CliParseError::UnknownSubcommand(_))
+            )
+        }
+
+        /// The `<family>.<op>` names in `text` that no operation implements.
+        /// A namespace such as `verify.lease` or `issue.spec.*` is not a claim
+        /// that one operation exists, so it is skipped.
+        fn unresolved_operation_names(
+            text: &str,
+            operations: &BTreeSet<String>,
+        ) -> BTreeSet<String> {
+            let families: BTreeSet<&str> = operations
+                .iter()
+                .filter_map(|op| op.split('.').next())
+                .collect();
+            text.replace("\\n", " ")
+                .split(|c: char| {
+                    !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*' | '/' | '-'))
+                })
+                .map(|token| token.trim_end_matches('.'))
+                .filter(|token| {
+                    let mut segments = token.split('.');
+                    families.contains(segments.next().unwrap_or_default())
+                        && token.contains('.')
+                        && token.split('.').all(|segment| {
+                            !segment.is_empty()
+                                && segment.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                        })
+                        && !NOT_OPERATIONS.contains(&token.rsplit('.').next().unwrap_or_default())
+                        && !operations
+                            .iter()
+                            .any(|op| op.starts_with(&format!("{token}.")))
+                        && !is_dispatched(token)
+                })
+                .map(str::to_string)
+                .collect()
+        }
+
+        /// The contents of the string literals in Rust `source`. Comments and
+        /// char literals are skipped so code never reads as prose.
+        fn string_literals(source: &str) -> Vec<&str> {
+            let bytes = source.as_bytes();
+            let mut literals = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                        while i < bytes.len() && bytes[i] != b'\n' {
+                            i += 1;
+                        }
+                    }
+                    b'\'' if bytes.get(i + 1) == Some(&b'\\') => {
+                        i = source[i + 2..]
+                            .find('\'')
+                            .map_or(bytes.len(), |p| i + 3 + p);
+                    }
+                    b'\'' if bytes.get(i + 2) == Some(&b'\'') => i += 3,
+                    b'r' if (i == 0
+                        || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+                        && matches!(bytes.get(i + 1), Some(b'"' | b'#')) =>
+                    {
+                        let hashes = bytes[i + 1..].iter().take_while(|&&b| b == b'#').count();
+                        let open = i + 1 + hashes;
+                        if bytes.get(open) != Some(&b'"') {
+                            i += 1;
+                            continue;
+                        }
+                        let close = format!("\"{}", "#".repeat(hashes));
+                        let end = source[open + 1..]
+                            .find(&close)
+                            .map_or(bytes.len(), |p| open + 1 + p);
+                        literals.push(&source[open + 1..end]);
+                        i = end + close.len();
+                    }
+                    b'"' => {
+                        let mut end = i + 1;
+                        while end < bytes.len() && bytes[end] != b'"' {
+                            end += if bytes[end] == b'\\' { 2 } else { 1 };
+                        }
+                        let end = end.min(bytes.len());
+                        literals.push(&source[i + 1..end]);
+                        i = end + 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            literals
+        }
+
+        fn collect_files(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
+            let entries =
+                std::fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    collect_files(&path, extension, out);
+                } else if path.extension().is_some_and(|ext| ext == extension) {
+                    out.push(path);
+                }
+            }
+        }
+
+        #[test]
+        fn guidance_operation_names_flag_an_operation_that_does_not_exist() {
+            let operations = dispatched_operations();
+            assert!(operations.contains("pr.draft"), "{operations:?}");
+            let text = "Disable auto-merge through `pr.merge`, or run workspace.prune. \
+                Keep `pr.draft`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
+                holder, and github.com.";
+            assert_eq!(
+                unresolved_operation_names(text, &operations),
+                BTreeSet::from(["pr.merge".to_string(), "workspace.prune".to_string()])
+            );
+            assert_eq!(
+                string_literals("let q = '\"'; // \"pr.merge\"\nlet s = \"run `pr.merge`\";"),
+                vec!["run `pr.merge`"]
+            );
+        }
+
+        /// The success criterion of Issue #4396: every operation name that
+        /// managed skills, generated guidance, or a production message names
+        /// is one an agent can run.
+        #[test]
+        fn guidance_operation_names_are_all_dispatched() {
+            let operations = dispatched_operations();
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let mut unresolved = Vec::new();
+
+            let mut markdown = Vec::new();
+            collect_files(&root.join(".claude/skills"), "md", &mut markdown);
+            collect_files(&root.join(".claude/commands"), "md", &mut markdown);
+            collect_files(&root.join(".codex/skills"), "md", &mut markdown);
+            for path in markdown {
+                // Materialized from coordination_guidance.rs, which is scanned
+                // below; a stale local copy must not decide this test.
+                if path
+                    .components()
+                    .any(|c| c.as_os_str() == "gwt-coordination")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read skill");
+                for name in unresolved_operation_names(&text, &operations) {
+                    unresolved.push(format!("{}: {name}", path.display()));
+                }
+            }
+
+            let mut sources = Vec::new();
+            collect_files(&root.join("crates/gwt/src"), "rs", &mut sources);
+            collect_files(&root.join("crates/gwt-skills/src"), "rs", &mut sources);
+            for path in sources {
+                let is_test_file = path.components().any(|c| c.as_os_str() == "tests")
+                    || path
+                        .file_stem()
+                        .is_some_and(|stem| stem.to_string_lossy().ends_with("tests"));
+                if is_test_file {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read source");
+                let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+                for literal in string_literals(production) {
+                    if !literal.contains(' ') {
+                        continue;
+                    }
+                    for name in unresolved_operation_names(literal, &operations) {
+                        unresolved.push(format!("{}: {name}", path.display()));
+                    }
+                }
+            }
+
+            assert!(
+                unresolved.is_empty(),
+                "guidance names operations that no gwtd operation implements:\n{}",
+                unresolved.join("\n")
+            );
+        }
+    }
+
+    /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
+    #[test]
+    fn verify_run_parses_max_wait_secs() {
+        use crate::cli::verification_record::VerifyCommand;
+        assert_eq!(
+            ok(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": 2})
+            ),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: Some(2),
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            })
+        );
+        assert_eq!(
+            ok("verify.run", json!({"commands": ["git --version"]})),
+            CliCommand::Verify(VerifyCommand::Run {
+                commands: vec!["git --version".to_string()],
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            })
+        );
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({"commands": ["git --version"], "max_wait_secs": "soon"})
+            ),
+            CliParseError::InvalidNumber(_)
+        ));
+    }
+
+    #[test]
+    fn verify_run_rejects_unlisted_headed_command() {
+        assert!(matches!(
+            err(
+                "verify.run",
+                json!({
+                    "commands": ["cargo test"],
+                    "headed_e2e_commands": ["npx playwright test"]
+                })
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    #[test]
+    fn verify_run_persists_deferred_user_verification() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::ScopedEnvVar;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _session =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4217-verification");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let deferred = "deferred (autonomous execution)";
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": deferred
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
+        let record = verification_record::load(&repo).unwrap().unwrap();
+        let mut serialized = serde_json::to_value(&record).unwrap();
+        assert_eq!(serialized["user_verification_result"], deferred);
+        assert!(String::from_utf8_lossy(&env.stdout).contains(deferred));
+        serialized["user_verification_result"] = json!("confirmed");
+        let tampered = serde_json::from_value(serialized).unwrap();
+        assert!(!verification_record::integrity_ok(&tampered));
+    }
+
+    #[test]
+    fn verify_run_rejects_autonomous_confirmation_and_allows_correction() {
+        use crate::cli::verification_record;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-4237");
+        let _legacy = ScopedEnvVar::unset("GWT_AUTONOMOUS_EXECUTION");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut session = gwt_agent::Session::new(&repo, "test", gwt_agent::AgentId::Codex);
+        session.id = "session-4237".to_string();
+        session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git --version"], "user_verification_result": "n/a"}),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        let original = verification_record::load(&repo).unwrap().unwrap();
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git init must-not-run"],
+                "user_verification_result": "**Confirmed** (launch instructions)"
+            }),
+        );
+        let code = super::dispatch(&mut env, "gwtd");
+        let output = String::from_utf8_lossy(&env.stdout);
+        assert_ne!(code, 0, "{output}");
+        assert!(output.contains("autonomous"), "{output}");
+        assert!(output.contains("n/a (autonomous)"), "{output}");
+        assert!(output.contains("verify.run"), "{output}");
+        assert!(!repo.join("must-not-run").exists());
+        assert_eq!(
+            verification_record::load(&repo).unwrap().unwrap().record_id,
+            original.record_id,
+            "a rejected result must preserve the preceding record"
+        );
+
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({
+                "commands": ["git --version"],
+                "user_verification_result": "n/a (autonomous)"
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+        assert_eq!(
+            verification_record::load(&repo)
+                .unwrap()
+                .unwrap()
+                .user_verification_result
+                .as_deref(),
+            Some("n/a (autonomous)")
+        );
+
+        let _legacy = ScopedEnvVar::set("GWT_AUTONOMOUS_EXECUTION", "1");
+        let _unknown = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "legacy-4237");
+        env.stdout.clear();
+        env.stdin = envelope(
+            "verify.run",
+            json!({"commands": ["git init legacy-must-not-run"], "user_verification_result": "confirmed"}),
+        );
+        assert_ne!(super::dispatch(&mut env, "gwtd"), 0);
+        assert!(!repo.join("legacy-must-not-run").exists());
     }
 
     /// Issue #3510: a failed operation used to leave stdout empty and report
@@ -1606,6 +2788,86 @@ mod tests {
             }),
             "operation refusal must land in the error ledger: {listed:?}"
         );
+    }
+
+    /// Issue #3814 AC-2/AC-3: the JSON surface must return a structured
+    /// refusal for a registered PM and reject a mixed request atomically.
+    #[test]
+    fn issue_monitor_pm_on_refusal_answers_ok_false_and_preserves_prefs() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("gwt-home"));
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: false,
+                autonomous_mode: false,
+                max_active_agents: 3,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("save prefs");
+        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+
+        let pm_prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
+        crate::pm_registry::try_register_pm(
+            &pm_prefs_path,
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "claude".to_string(),
+                worktree_path: project_root.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+        assert!(crate::pm_registry::session_is_registered_pm(
+            &pm_prefs_path,
+            "pm-session"
+        ));
+        let _pm =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+
+        for params in [
+            json!({
+                "project_root": project_root.to_string_lossy(),
+                "enabled": true,
+                "max_active": 7,
+            }),
+            json!({
+                "project_root": project_root.to_string_lossy(),
+                "autonomous_mode": true,
+                "max_active": 9,
+            }),
+        ] {
+            let mut env = TestEnv::new(project_root.clone());
+            env.stdin = envelope("issue.monitor.config.set", params);
+
+            let code = super::dispatch(&mut env, "gwtd");
+
+            assert_eq!(code, 1);
+            let stdout = String::from_utf8(env.stdout).expect("stdout utf8");
+            let payload: Value = serde_json::from_str(stdout.trim()).expect("error envelope JSON");
+            assert_eq!(payload["ok"], json!(false));
+            assert_eq!(payload["operation"], json!("issue.monitor.config.set"));
+            assert_eq!(payload["exit_code"], json!(1));
+            assert!(payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("requires an explicit GUI action")));
+            assert_eq!(
+                std::fs::read(&prefs_path).expect("prefs after refusal"),
+                before,
+                "a mixed ON request must not partially apply allowed fields"
+            );
+        }
     }
 
     #[test]
@@ -1682,6 +2944,104 @@ mod tests {
             CliParseError::UnknownSubcommand(name) => assert_eq!(name, "does.not.exist"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// Issue #3970 AC-3: an unqualified `branch.prune_merged` only reports.
+    #[test]
+    fn branch_prune_merged_defaults_to_a_dry_run() {
+        match ok("branch.prune_merged", json!({})) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(branches.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_accepts_apply_base_and_branch_filter() {
+        match ok(
+            "branch.prune-merged",
+            json!({
+                "dry_run": false,
+                "base": "develop",
+                "branches": ["work/issue-1", "work/issue-2"],
+            }),
+        ) {
+            CliCommand::Branch(crate::cli::branch::BranchCommand::PruneMerged {
+                dry_run,
+                base,
+                branches,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("develop"));
+                assert_eq!(branches, vec!["work/issue-1", "work/issue-2"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_prune_merged_rejects_an_unknown_param() {
+        let error = err("branch.prune_merged", json!({ "dryrun": false }));
+        assert!(format!("{error}").contains("dryrun"), "{error}");
+    }
+
+    /// Issue #4009 AC-1 / AC-3: an unqualified `worktree.gc_build_artifacts`
+    /// is a dry run that keeps unmerged worktrees.
+    #[test]
+    fn worktree_gc_build_artifacts_defaults_to_a_dry_run_that_keeps_unmerged() {
+        match ok("worktree.gc_build_artifacts", json!({})) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+                include_protected_workspaces,
+            }) => {
+                assert!(dry_run);
+                assert!(base.is_none());
+                assert!(!include_unmerged);
+                assert!(!include_protected_workspaces);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_accepts_apply_base_and_both_opt_ins() {
+        match ok(
+            "worktree.gc-build-artifacts",
+            json!({
+                "dry_run": false,
+                "base": "main",
+                "include_unmerged": true,
+                "include_protected_workspaces": true,
+            }),
+        ) {
+            CliCommand::Worktree(crate::cli::worktree_gc::WorktreeCommand::GcBuildArtifacts {
+                dry_run,
+                base,
+                include_unmerged,
+                include_protected_workspaces,
+            }) => {
+                assert!(!dry_run);
+                assert_eq!(base.as_deref(), Some("main"));
+                assert!(include_unmerged);
+                assert!(include_protected_workspaces);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_gc_build_artifacts_rejects_an_unknown_param() {
+        let error = err("worktree.gc_build_artifacts", json!({ "force": true }));
+        assert!(format!("{error}").contains("force"), "{error}");
     }
 
     #[test]
@@ -2018,6 +3378,40 @@ mod tests {
         ));
     }
 
+    /// Issue #4465 AC-8: `workspace.work_prune` mutates durable Work state, so
+    /// an unqualified call only reports candidates. The first call used to be
+    /// an immediate `APPLIED` across every Work on the machine (1100 rows,
+    /// other projects included).
+    #[test]
+    fn workspace_work_prune_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok("workspace.work-prune", json!({"dry_run": false})),
+            CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    /// Issue #4465 AC-4'': a scope parameter this operation does not implement
+    /// must be refused, never dropped. `params.work` was silently ignored and
+    /// the call then applied to the whole machine — the first specimen of the
+    /// #4444 dropped-params family that changes state.
+    #[test]
+    fn workspace_work_prune_rejects_an_unknown_scope_param() {
+        match err(
+            "workspace.work_prune",
+            json!({"work": "work-work-issue-4029-124040a6"}),
+        ) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("work"), "{message}");
+                assert!(message.contains("ids"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
     #[test]
     fn workspace_join_requires_workspace_id() {
         match err("workspace.join", json!({"agent_session": "s"})) {
@@ -2056,80 +3450,208 @@ mod tests {
         ));
     }
 
-    // SPEC-3431 T-030 (FR-008/FR-009): the #3357 asymmetric boundary keeps
-    // applying to every agent session; only the project's registered PM may
-    // raise the switches. The privileged subject comes from the ambient
-    // session id, never from params, so a caller cannot claim it.
+    // SPEC #3914 FR-011 / AC-8: the pool operations accept the shorthand
+    // `{"agent_id": ...}` profile; semantic validation (empty / duplicate /
+    // unknown agent / tag format / threshold range) lives in the handler.
     #[test]
-    fn issue_monitor_config_set_on_direction_is_pm_only() {
-        let _guard = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project_root = temp.path().join("repo");
-        std::fs::create_dir_all(&project_root).expect("repo dir");
-        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
-
-        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&project_root);
-        crate::pm_registry::try_register_pm(
-            &prefs_path,
-            crate::pm_registry::PmRegistration {
-                session_id: "pm-session".to_string(),
-                agent_id: "claude".to_string(),
-                worktree_path: project_root.to_string_lossy().into_owned(),
-                created_at: None,
-                consecutive_crashes: 0,
-                next_not_before: None,
-            },
-            |_| false,
-        )
-        .expect("register PM");
-
-        let params = json!({
-            "project_root": project_root.to_string_lossy(),
-            "autonomous_mode": true,
-        });
-
-        // positive: a non-PM session is still refused, with the GUI guidance.
-        let _other = gwt_core::test_support::ScopedEnvVar::set(
-            gwt_agent::GWT_SESSION_ID_ENV,
-            "other-session",
+    fn issue_monitor_profiles_operations_parse_shorthand_profiles() {
+        assert_eq!(
+            ok("issue.monitor.profiles", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorProfiles { project_root: None })
         );
-        assert!(matches!(
-            err("issue.monitor.config.set", params.clone()),
-            CliParseError::InvalidJson(message) if message.contains("requires an explicit GUI action")
-        ));
-        drop(_other);
+        let parsed = ok(
+            "issue.monitor.profiles.set",
+            json!({
+                "profiles": [
+                    {"agent_id": "codex"},
+                    {"agent_id": "claude", "model": "opus", "prefer_for": ["kind:spec"]},
+                ],
+                "usage_threshold_percent": 70,
+            }),
+        );
+        let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
+            project_root,
+            profiles,
+            usage_threshold_percent,
+        }) = parsed
+        else {
+            panic!("expected MonitorProfilesSet, got {parsed:?}");
+        };
+        assert_eq!(project_root, None);
+        assert_eq!(usage_threshold_percent, Some(70));
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].profile.agent_id, "codex");
+        assert_eq!(profiles[0].profile.model, None);
+        assert!(profiles[0].profile.prefer_for.is_empty());
+        assert_eq!(profiles[1].profile.agent_id, "claude");
+        assert_eq!(profiles[1].profile.model.as_deref(), Some("opus"));
+        assert_eq!(
+            profiles[1].profile.prefer_for,
+            vec!["kind:spec".to_string()]
+        );
+        // Issue #4079 AC-3: the parse keeps which keys the caller wrote, so an
+        // omitted field can inherit instead of resetting to Default.
+        assert_eq!(
+            profiles[0].provided,
+            std::collections::BTreeSet::from(["agent_id".to_string()])
+        );
+        assert_eq!(
+            profiles[1].provided,
+            std::collections::BTreeSet::from([
+                "agent_id".to_string(),
+                "model".to_string(),
+                "prefer_for".to_string(),
+            ])
+        );
 
-        // ...and so is a session with no ambient identity at all.
-        let _unset = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
         assert!(matches!(
-            err("issue.monitor.config.set", params.clone()),
+            err("issue.monitor.profiles.set", json!({})),
+            CliParseError::MissingFlag(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.profiles.set",
+                json!({"profiles": [{"model": "opus"}]})
+            ),
             CliParseError::InvalidJson(_)
         ));
-        drop(_unset);
+        assert!(matches!(
+            err(
+                "issue.monitor.profiles.set",
+                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": "lots"})
+            ),
+            CliParseError::InvalidJson(_) | CliParseError::InvalidNumber(_)
+        ));
+    }
 
-        // false-positive negative: the registered PM is allowed through.
-        let _pm =
-            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+    // Issue #3814 AC-2: semantic policy belongs to the handler so dispatch can
+    // report a structured operation refusal instead of a parse-only stderr.
+    #[test]
+    fn issue_monitor_config_set_on_direction_reaches_handler_validation() {
         assert_eq!(
-            ok("issue.monitor.config.set", params),
+            ok(
+                "issue.monitor.config.set",
+                json!({"enabled": true, "max_active": 7})
+            ),
             CliCommand::Issue(IssueCommand::MonitorConfigSet {
-                project_root: Some(project_root.clone()),
+                project_root: None,
+                enabled: Some(true),
+                autonomous_mode: None,
+                max_active: Some(7),
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
+            })
+        );
+        assert_eq!(
+            ok("issue.monitor.config.set", json!({"autonomous_mode": true})),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
                 enabled: None,
                 autonomous_mode: Some(true),
                 max_active: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
             })
         );
-
-        // OFF direction stays open to everyone, PM or not.
-        assert!(matches!(
+        assert_eq!(
             ok(
                 "issue.monitor.config.set",
-                json!({"project_root": project_root.to_string_lossy(), "autonomous_mode": false})
+                json!({"auto_close_merged_issues": false})
             ),
-            CliCommand::Issue(IssueCommand::MonitorConfigSet { .. })
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: Some(false),
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
+            }),
+            "Issue #3917 AC-5: the auto-close override is settable on its own"
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"auto_apply_updates": true})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: Some(true),
+                launch_agent: None,
+                update_drain: None,
+            }),
+            "Issue #3906 AC-1: the auto-apply override is settable on its own"
+        );
+    }
+
+    /// Issue #3923 AC-5: `launch_agent` alone is a complete config.set.
+    /// Issue #4037 AC-5: the drain is settable on its own, as a plain bool.
+    #[test]
+    fn issue_monitor_config_set_accepts_update_drain_alone() {
+        assert_eq!(
+            ok("issue.monitor.config.set", json!({"update_drain": true})),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
+                auto_apply_updates: None,
+            })
+        );
+        assert_eq!(
+            ok("issue.monitor.config.set", json!({"update_drain": false})),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                launch_agent: None,
+                update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
+                auto_apply_updates: None,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", json!({"update_drain": "yes"})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    #[test]
+    fn issue_monitor_config_set_accepts_launch_agent_alone() {
+        assert_eq!(
+            ok(
+                "issue.monitor.config.set",
+                json!({"launch_agent": "claude"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorConfigSet {
+                project_root: None,
+                enabled: None,
+                autonomous_mode: None,
+                max_active: None,
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: Some("claude".to_string()),
+                update_drain: None,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.config.set", json!({})),
+            CliParseError::MissingFlag(
+                "enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
+            )
         ));
     }
 
@@ -2262,6 +3784,148 @@ mod tests {
     /// row it recovers has no launch left to name — that is precisely why the
     /// stop and failover operations cannot reach it. A reason stays mandatory:
     /// releasing a hold that something recorded for a cause is auditable work.
+    /// Issue #3844: an agent declares (or clears) a wait for its own launch.
+    /// `number` is optional because the launch context already names the
+    /// owner Issue; `reason` and `resume_condition` are mandatory unless the
+    /// declaration is being cleared, because an unexplained wait is exactly
+    /// the state the PM cannot act on.
+    #[test]
+    fn issue_monitor_wait_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait",
+                json!({
+                    "reason": "host 排他の順番待ち",
+                    "resume_condition": "#3791 の verify が完了する",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: None,
+                number: None,
+                reason: Some("host 排他の順番待ち".to_string()),
+                resume_condition: Some("#3791 の verify が完了する".to_string()),
+                clear: false,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait",
+                json!({ "project_root": "/tmp/project", "number": 42, "clear": true })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWait {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: Some(42),
+                reason: None,
+                resume_condition: None,
+                clear: true,
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait", json!({"resume_condition": "x"})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait", json!({"reason": "x"})),
+            CliParseError::MissingFlag("resume_condition")
+        ));
+    }
+
+    /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
+    /// target and the reason are mandatory because an unexplained
+    /// invalidation is exactly the record AC-2 says must exist.
+    #[test]
+    fn issue_monitor_wait_invalidate_parses() {
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({ "number": 42, "reason": "bootstrap build needs no lease" })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: None,
+                number: 42,
+                reason: "bootstrap build needs no lease".to_string(),
+                by: None,
+            })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.wait.invalidate",
+                json!({
+                    "project_root": "/tmp/project",
+                    "number": 42,
+                    "reason": "ruled out",
+                    "by": "session:pm",
+                })
+            ),
+            CliCommand::Issue(IssueCommand::MonitorWaitInvalidate {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                number: 42,
+                reason: "ruled out".to_string(),
+                by: Some("session:pm".to_string()),
+            })
+        );
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"reason": "x"})),
+            CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            err("issue.monitor.wait.invalidate", json!({"number": 42})),
+            CliParseError::MissingFlag("reason")
+        ));
+    }
+
+    /// Issue #3883 AC-6: the PM's recovery for launches that are still running
+    /// but no longer tracked. It takes no target and no reason because it
+    /// revokes nothing — it only re-adopts what the canvas already shows.
+    #[test]
+    fn issue_monitor_reconcile_parses_with_an_optional_project_scope() {
+        assert_eq!(
+            ok("issue.monitor.reconcile", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorReconcile { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.reconcile",
+                json!({"project_root": "/tmp/gwt-project"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorReconcile {
+                project_root: Some(std::path::PathBuf::from("/tmp/gwt-project")),
+            })
+        );
+    }
+
+    /// Issue #3923 AC-1: provider quota holds are listed and cleared through
+    /// JSON operations, and a clear must name its provider and reason.
+    #[test]
+    fn issue_monitor_quota_hold_operations_parse() {
+        assert_eq!(
+            ok("issue.monitor.quota_hold.list", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldList { project_root: None })
+        );
+        assert_eq!(
+            ok(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex", "reason": "Codex is not rate limited"})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorQuotaHoldClear {
+                project_root: None,
+                provider: "codex".to_string(),
+                reason: "Codex is not rate limited".to_string(),
+            })
+        );
+        assert!(matches!(
+            err(
+                "issue.monitor.quota_hold.clear",
+                json!({"provider": "codex"})
+            ),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err("issue.monitor.quota_hold.clear", json!({"reason": "x"})),
+            CliParseError::MissingFlag("provider")
+        ));
+    }
+
     #[test]
     fn issue_monitor_requeue_parses() {
         assert_eq!(
@@ -2425,26 +4089,22 @@ mod tests {
                 enabled: Some(false),
                 autonomous_mode: Some(false),
                 max_active: Some(3),
+                auto_close_merged_issues: None,
+                auto_apply_updates: None,
+                launch_agent: None,
+                update_drain: None,
             })
         );
     }
 
     #[test]
     fn issue_monitor_queue_operations_reject_unsafe_or_incomplete_params() {
-        for params in [
-            json!({}),
-            json!({"enabled": true}),
-            json!({"max_active": 0}),
-        ] {
+        for params in [json!({}), json!({"max_active": 0})] {
             assert!(matches!(
                 err("issue.monitor.config.set", params),
                 CliParseError::InvalidJson(_) | CliParseError::MissingFlag(_)
             ));
         }
-        assert!(matches!(
-            err("issue.monitor.config.set", json!({"autonomous_mode": true})),
-            CliParseError::InvalidJson(_)
-        ));
         assert!(matches!(
             err(
                 "issue.monitor.priority.move",
@@ -2456,6 +4116,72 @@ mod tests {
             err("issue.monitor.priority.set", json!({})),
             CliParseError::MissingFlag("issue_numbers")
         ));
+    }
+
+    #[test]
+    fn board_show_rejects_unknown_params() {
+        let error = err("board.show", json!({"limti": 15})).to_string();
+        assert!(error.contains("limti"), "{error}");
+        assert!(error.contains("workspace, all, limit"), "{error}");
+    }
+
+    fn board_show_page(params: Value) -> Value {
+        use gwt_core::{
+            coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind},
+            test_support::{ScopedEnvVar, ScopedGwtHome},
+        };
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        for index in 0..25 {
+            post_entry(
+                temp.path(),
+                BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Codex",
+                    BoardEntryKind::Status,
+                    format!("entry-{index}"),
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(&mut env, ok("board.show", params)).unwrap();
+        assert_eq!(code, 0);
+        serde_json::from_str(&output).unwrap()
+    }
+
+    #[test]
+    fn board_show_explicit_limit_returns_latest_fifteen_even_with_all() {
+        let page = board_show_page(json!({"limit": 15, "all": true}));
+        let entries = page["board"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 15);
+        assert_eq!(entries[0]["body"], "entry-10");
+        assert_eq!(entries[14]["body"], "entry-24");
+        assert_eq!(page["board"]["oldest_entry_id"], entries[0]["id"]);
+        assert_eq!(page["board"]["newest_entry_id"], entries[14]["id"]);
+        assert_eq!(page["board"]["has_more_before"], true);
+        assert_eq!(page["page"]["total_entries"], 25);
+        assert_eq!(page["page"]["returned_entries"], 15);
+        assert_eq!(page["page"]["truncated"], true);
+    }
+
+    #[test]
+    fn board_show_default_cap_and_all_override() {
+        let page = board_show_page(json!({}));
+        assert_eq!(page["board"]["entries"].as_array().unwrap().len(), 20);
+        assert_eq!(page["board"]["entries"][0]["body"], "entry-5");
+        assert_eq!(page["page"]["returned_entries"], 20);
+        let all = board_show_page(json!({"all": true}));
+        assert_eq!(all["board"]["entries"].as_array().unwrap().len(), 25);
+        assert_eq!(all["page"]["truncated"], false);
     }
 
     #[test]
@@ -2501,6 +4227,167 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn issue_label_accepts_directional_params_and_rejects_invalid_shapes() {
+        for action in ["add", "remove"] {
+            assert!(matches!(
+                ok(
+                    "issue.label",
+                    json!({"number":7,"action":action,"labels":["bug"]})
+                ),
+                CliCommand::Issue(_)
+            ));
+        }
+        for params in [
+            json!({"number":7,"action":"remove","labels":["bug","hold"]}),
+            json!({"number":7,"action":"add","labels":[]}),
+            json!({"number":7,"action":"replace","labels":["bug"]}),
+            json!({"number":7,"action":"add","labels":["bug"],"confirm_auto_merge":"true"}),
+        ] {
+            let _ = err("issue.label", params);
+        }
+    }
+
+    /// SPEC #4249 FR-001: `issue.close` / `issue.reopen` need only `number`;
+    /// `reason` accepts the GitHub spellings and is refused — never silently
+    /// dropped — when it is not one of them, because a dropped reason closes the
+    /// Issue with the wrong rationale.
+    #[test]
+    fn issue_close_and_reopen_parse_their_optional_params() {
+        assert!(matches!(
+            ok("issue.close", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: None,
+                comment: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.close",
+                json!({"number": 7, "reason": "not-planned", "comment": "why"})
+            ),
+            CliCommand::Issue(IssueCommand::Close {
+                number: 7,
+                reason: Some(gwt_github::client::IssueCloseReason::NotPlanned),
+                ..
+            })
+        ));
+        for reason in ["completed", "not_planned"] {
+            assert!(
+                matches!(
+                    ok("issue.close", json!({"number": 7, "reason": reason})),
+                    CliCommand::Issue(IssueCommand::Close {
+                        reason: Some(_),
+                        ..
+                    })
+                ),
+                "{reason}"
+            );
+        }
+        // Duplicate closure needs a canonical issue ID; tracked in #4489.
+        assert!(matches!(
+            err("issue.close", json!({"number": 7, "reason": "duplicate"})),
+            CliParseError::InvalidJson(_)
+        ));
+        match err("issue.close", json!({"number": 7, "reason": "wontfix"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("not_planned"), "{message}")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("issue.close", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert!(matches!(
+            ok("issue.reopen", json!({"number": 7})),
+            CliCommand::Issue(IssueCommand::Reopen {
+                number: 7,
+                comment: None,
+            })
+        ));
+        match err("issue.reopen", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Issue #3865 / review: `labels` absent or `null` leaves labels alone,
+    /// while an explicit empty array clears them.
+    #[test]
+    fn issue_edit_labels_null_means_omitted_and_empty_array_clears() {
+        let absent = ok("issue.edit", json!({"number": 7, "body": "b"}));
+        let null = ok(
+            "issue.edit",
+            json!({"number": 7, "body": "b", "labels": null}),
+        );
+        let cleared = ok("issue.edit", json!({"number": 7, "labels": []}));
+        for command in [absent, null] {
+            assert!(matches!(
+                command,
+                CliCommand::Issue(IssueCommand::Edit { labels: None, .. })
+            ));
+        }
+        assert!(matches!(
+            cleared,
+            CliCommand::Issue(IssueCommand::Edit { labels: Some(ref labels), .. }) if labels.is_empty()
+        ));
+    }
+
+    #[test]
+    fn board_post_intent_id_selects_recovery_and_normal_shape_stays_normal() {
+        let normal = ok("board.post", json!({"kind": "status", "body": "normal"}));
+        assert!(matches!(normal, CliCommand::Board(BoardCommand::Post(_))));
+
+        let recovery = ok(
+            "board.post",
+            json!({
+                "kind": "status",
+                "body": "recover",
+                "intent_id": "stable-intent-1"
+            }),
+        );
+        assert!(matches!(
+            recovery,
+            CliCommand::Board(BoardCommand::RecoveryPost {
+                ref intent_id,
+                ..
+            }) if intent_id == "stable-intent-1"
+        ));
+    }
+
+    #[test]
+    fn board_post_rejects_untrusted_recovery_identity_fields() {
+        for intent_id in [None, Some("stable-intent-1")] {
+            for key in [
+                "session_id",
+                "project_id",
+                "provider",
+                "worktree_form",
+                "recovery_id",
+                "entry_id",
+                "payload_digest",
+                "provider_receipt",
+                "operation_id",
+            ] {
+                let mut params = serde_json::Map::from_iter([
+                    ("kind".to_string(), json!("status")),
+                    ("body".to_string(), json!("recover")),
+                ]);
+                if let Some(intent_id) = intent_id {
+                    params.insert("intent_id".to_string(), json!(intent_id));
+                }
+                params.insert(key.to_string(), json!("untrusted"));
+                assert!(matches!(
+                    err("board.post", Value::Object(params)),
+                    CliParseError::InvalidValue { .. }
+                ));
+            }
+        }
     }
 
     #[test]
@@ -2575,6 +4462,89 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn index_issue_recovery_operations_are_reachable() {
+        for operation in ["index.cancel", "index.repair"] {
+            assert!(matches!(
+                ok(operation, json!({"scope": "issues"})),
+                CliCommand::Index(_)
+            ));
+            assert!(matches!(
+                err(operation, json!({"scope": "files"})),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+    }
+
+    /// Issue #4435: `index.repair` submits by default; `wait` is the blocking
+    /// form the detached worker runs. `index.cancel` never blocks.
+    #[test]
+    fn index_repair_wait_selects_the_blocking_form() {
+        assert!(matches!(
+            ok("index.repair", json!({})),
+            CliCommand::Index(IndexCommand::Repair { wait: false })
+        ));
+        assert!(matches!(
+            ok("index.repair", json!({"scope": "issues", "wait": true})),
+            CliCommand::Index(IndexCommand::Repair { wait: true })
+        ));
+        match err("index.cancel", json!({"wait": true})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(
+                    message.contains("index.cancel does not take wait"),
+                    "{message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("index.repair", json!({"wait": "yes"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("wait must be a bool"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Issue #4435 AC-1: the envelope is the operation's only answer, so a
+    /// failed write must surface instead of leaving the caller with zero
+    /// bytes on both streams and an exit code that reads as success.
+    #[test]
+    fn an_undelivered_response_is_reported_rather_than_dropped() {
+        struct ClosedPipe;
+        impl std::io::Write for ClosedPipe {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the pipe has been ended",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let payload = json!({"ok": true, "operation": "index.repair"});
+
+        let mut delivered = Vec::new();
+        write_response(&mut delivered, &payload).expect("a writable stdout accepts the envelope");
+        assert!(!delivered.is_empty());
+        assert!(delivered.ends_with(b"\n"));
+
+        let error = write_response(&mut ClosedPipe, &payload)
+            .expect_err("a broken stdout must not be reported as delivered");
+        assert!(error.contains("pipe"), "{error}");
+
+        let mut env = crate::cli::env::TestEnv::new(std::path::PathBuf::from("cache"));
+        let code = report_undelivered_response(&mut env, "gwtd", "index.repair", &error);
+        assert_eq!(code, RESPONSE_NOT_DELIVERED_EXIT);
+        assert_ne!(code, 0, "an undelivered answer must not exit as success");
+        let reported = String::from_utf8(env.stderr.clone()).expect("stderr is utf-8");
+        assert!(
+            reported.contains("index.repair: response envelope was not delivered"),
+            "{reported}"
+        );
     }
 
     #[test]
@@ -2656,7 +4626,37 @@ mod tests {
         assert!(matches!(
             err("execution.status", json!({"unexpected": true})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts no params")
+                if message.contains("accepts only issue or spec")
+        ));
+        // Issue #3934: an operator must be able to ask who holds any owner's
+        // generation, not only the one their own session is bound to.
+        assert!(matches!(
+            ok("execution.status", json!({"issue": 3934})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 3934,
+                }
+        ));
+        assert!(matches!(
+            ok("execution.status", json!({"spec": 3885})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
+                owner,
+            }) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Spec,
+                    number: 3885,
+                }
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 3934, "spec": 3885})),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"issue": 0})),
+            CliParseError::InvalidJson(message) if message.contains("greater than zero")
         ));
         assert!(matches!(
             ok("execution.complete", json!({})),
@@ -2713,6 +4713,61 @@ mod tests {
             CliParseError::InvalidJson(message)
                 if message.contains("only accepts params.operation_id")
         ));
+        // Issue #4161: the release is owner-addressed, so the owner is
+        // required rather than inferred from the caller's own record.
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "the launch that prepared it is gone"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    owner,
+                    operation_id: None,
+                    ..
+                }
+            ) if owner
+                == crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number: 4161,
+                }
+        ));
+        assert!(matches!(
+            ok(
+                "execution.release_prepared",
+                json!({"spec": 4161, "reason": "stale fence", "operation_id": "fresh-launch-7"})
+            ),
+            CliCommand::Execution(
+                crate::cli::execution_state::ExecutionCommand::ReleasePrepared {
+                    operation_id: Some(operation_id),
+                    ..
+                }
+            ) if operation_id == "fresh-launch-7"
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"reason": "stale fence"})),
+            CliParseError::InvalidJson(message)
+                if message.contains("requires params.issue or params.spec")
+        ));
+        assert!(matches!(
+            err("execution.release_prepared", json!({"issue": 4161})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "spec": 4161, "reason": "stale fence"})
+            ),
+            CliParseError::InvalidJson(message) if message.contains("not both")
+        ));
+        assert!(matches!(
+            err(
+                "execution.release_prepared",
+                json!({"issue": 4161, "reason": "stale fence", "unexpected": true})
+            ),
+            CliParseError::InvalidJson(message)
+                if message.contains("does not accept the parameter unexpected")
+        ));
     }
 
     #[test]
@@ -2732,6 +4787,37 @@ mod tests {
                 }
             ) if generated_outputs == vec!["artifacts/report.json"]
         ));
+    }
+
+    // Issue #3841 / SPEC #3248 AS-48: quarantine is plan-bound typed input,
+    // not prose that verify.run may invent after observing a failure.
+    #[test]
+    fn verification_plan_preserves_typed_quarantine_request() {
+        let command = ok(
+            "verify.plan",
+            json!({
+                "derive": true,
+                "quarantines": [{
+                    "failed_command": "cargo test -p gwt --all-features --lib",
+                    "test_identity": "app_runtime::tests::bounded_sync",
+                    "baseline_command": "cargo test -p gwt --all-features --lib app_runtime::tests::bounded_sync -- --exact",
+                    "owner_issue": 3755,
+                    "pr_number": 3854
+                }]
+            }),
+        );
+
+        let typed = format!("{command:?}");
+        for expected in [
+            "app_runtime::tests::bounded_sync",
+            "owner_issue: 3755",
+            "pr_number: 3854",
+        ] {
+            assert!(
+                typed.contains(expected),
+                "typed quarantine field was discarded: {typed}"
+            );
+        }
     }
 
     // SPEC #3576 T-007: verification lease operation parsing.
@@ -2799,11 +4885,119 @@ mod tests {
         ));
     }
 
+    /// Issue #3516: the standing check is read-only until the caller opts in.
+    #[test]
+    fn release_status_defaults_to_a_read_only_check() {
+        assert!(matches!(
+            ok("release.status", json!({})),
+            CliCommand::Release(crate::cli::release::ReleaseCommand::Status {
+                release_branch: None,
+                base_branch: None,
+                scan_commits: None,
+                ensure_release_pr: false,
+            })
+        ));
+    }
+
+    #[test]
+    fn release_status_accepts_the_reconcile_and_topology_params() {
+        let parsed = ok(
+            "release.status",
+            json!({
+                "release_branch": "develop",
+                "base_branch": "main",
+                "scan_commits": 50,
+                "ensure_release_pr": true,
+            }),
+        );
+        assert!(matches!(
+            parsed,
+            CliCommand::Release(crate::cli::release::ReleaseCommand::Status {
+                scan_commits: Some(50),
+                ensure_release_pr: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            err("release.status", json!({"ensure": true})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
     #[test]
     fn pr_operations_parse() {
         assert!(matches!(
             ok("pr.current", json!({})),
             CliCommand::Pr(PrCommand::Current)
+        ));
+        assert!(matches!(
+            ok("pr.list", json!({})),
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: None,
+                escalate_after_cycles: None,
+                refresh: false,
+                include: None,
+                force_reason: None,
+            })
+        ));
+        assert!(matches!(
+            ok(
+                "pr.list",
+                json!({"stale_after_hours": 24, "escalate_after_cycles": 2})
+            ),
+            CliCommand::Pr(PrCommand::List {
+                stale_after_hours: Some(24),
+                escalate_after_cycles: Some(2),
+                refresh: false,
+                include: None,
+                force_reason: None,
+            })
+        ));
+        // Issue #3891: refresh bypasses the TTL cache / throttle; include
+        // names the heavy fields to hydrate.
+        assert!(matches!(
+            ok(
+                "pr.list",
+                json!({"refresh": true, "include": ["checks", "body"]})
+            ),
+            CliCommand::Pr(PrCommand::List {
+                refresh: true,
+                include: Some(gwt_git::PrInventoryInclude {
+                    checks: true,
+                    body: true
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            ok("pr.list", json!({"include": []})),
+            CliCommand::Pr(PrCommand::List {
+                include: Some(gwt_git::PrInventoryInclude {
+                    checks: false,
+                    body: false
+                }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            err("pr.list", json!({"include": ["reviews"]})),
+            CliParseError::InvalidValue {
+                flag: "include",
+                ..
+            }
+        ));
+        // Issue #3891 AC-3: budget observation.
+        assert!(matches!(
+            ok("github.budget", json!({})),
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: false
+            })
+        ));
+        assert!(matches!(
+            ok("github.budget", json!({"refresh": true})),
+            CliCommand::GithubBudget(crate::cli::github_budget::GithubBudgetCommand {
+                refresh: true
+            })
         ));
         assert!(matches!(
             ok(
@@ -2876,6 +5070,45 @@ mod tests {
         assert!(matches!(
             ok("actions.job-logs", json!({"job_id": 5})),
             CliCommand::Actions(ActionsCommand::JobLogs { .. })
+        ));
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: false
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"run_id": 5, "failed_only": true})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Run {
+                    run_id: 5,
+                    failed_only: true
+                }
+            })
+        );
+        assert_eq!(
+            ok("actions.rerun", json!({"job_id": 7})),
+            CliCommand::Actions(ActionsCommand::Rerun {
+                target: crate::cli::ActionsRerunTarget::Job { job_id: 7 }
+            })
+        );
+        assert!(matches!(
+            err("actions.rerun", json!({})),
+            CliParseError::MissingFlag("run_id")
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"run_id": 5, "job_id": 7})),
+            CliParseError::InvalidValue { flag: "job_id", .. }
+        ));
+        assert!(matches!(
+            err("actions.rerun", json!({"job_id": 7, "failed_only": true})),
+            CliParseError::InvalidValue {
+                flag: "failed_only",
+                ..
+            }
         ));
         assert!(matches!(
             ok("index.status", json!({})),
@@ -3046,6 +5279,7 @@ mod tests {
             "memory",
             "discussions",
             "board",
+            "works",
             "files",
             "files-docs",
         ] {
@@ -3073,6 +5307,24 @@ mod tests {
             ),
             CliCommand::Hook(_)
         ));
+        assert_eq!(
+            ok(
+                "hook.register_codex_managed_project_trust",
+                json!({
+                    "project_root": "/repo",
+                    "codex_config": "/cfg",
+                })
+            ),
+            CliCommand::Hook(HookCommand::Run {
+                name: "register-codex-managed-project-trust".to_string(),
+                rest: vec![
+                    "--project-root".to_string(),
+                    "/repo".to_string(),
+                    "--codex-config".to_string(),
+                    "/cfg".to_string(),
+                ],
+            })
+        );
     }
 
     #[test]
@@ -3110,6 +5362,50 @@ mod tests {
             ),
             CliCommand::Discussion(_)
         ));
+    }
+
+    #[test]
+    fn verification_adjudication_requires_exact_board_decision_reference() {
+        assert!(parse(&envelope(
+            "verify.adjudicate",
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+        ))
+        .is_ok());
+
+        for params in [
+            json!({
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "*",
+                "board_entry_id": "board-decision-1",
+            }),
+            json!({
+                "record_id": "vrr-failing",
+                "command": "cargo test -p gwt --all-features",
+                "board_entry_id": "board-decision-1",
+                "waive_record": true,
+            }),
+        ] {
+            assert!(
+                parse(&envelope("verify.adjudicate", params)).is_err(),
+                "invalid adjudication input must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -3182,6 +5478,20 @@ mod tests {
         assert!(matches!(
             ok("build.start", json!({"spec": 1})),
             CliCommand::Build(SkillStateAction::Start { spec: 1 })
+        ));
+    }
+
+    #[test]
+    fn pane_recover_accepts_a_bounded_restore_burst() {
+        assert!(matches!(
+            ok(
+                "pane.recover",
+                json!({
+                    "started_after": "2026-09-14T05:00:00Z",
+                    "started_before": "2026-09-14T05:05:00Z"
+                })
+            ),
+            CliCommand::Pane(_)
         ));
     }
 
@@ -3323,6 +5633,53 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` share one filter.
+    #[test]
+    fn perf_operations_parse_their_shared_filter() {
+        assert!(matches!(
+            ok("perf.summary", json!({})),
+            CliCommand::Perf(PerfCommand::Summary {
+                since: None,
+                stream: None,
+                target: None
+            })
+        ));
+        match ok(
+            "perf.violations",
+            json!({"since": "2026-09-08T00:00:00Z", "stream": "op", "target": "issue."}),
+        ) {
+            CliCommand::Perf(PerfCommand::Violations {
+                since,
+                stream,
+                target,
+            }) => {
+                assert_eq!(since.as_deref(), Some("2026-09-08T00:00:00Z"));
+                assert_eq!(stream.as_deref(), Some("op"));
+                assert_eq!(target.as_deref(), Some("issue."));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn perf_operations_reject_malformed_filters() {
+        match err("perf.summary", json!({"since": "yesterday"})) {
+            CliParseError::InvalidValue { flag, reason } => {
+                assert_eq!(flag, "since");
+                assert!(reason.contains("RFC3339"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        match err("perf.summary", json!({"stream": "frontend"})) {
+            CliParseError::InvalidValue { flag, .. } => assert_eq!(flag, "stream"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(matches!(
+            err("perf.violations", json!({"limit": 5})),
+            CliParseError::InvalidJson(_)
+        ));
     }
 
     #[test]

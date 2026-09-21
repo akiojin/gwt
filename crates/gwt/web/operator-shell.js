@@ -211,6 +211,23 @@ export function applyTelemetryCounts(doc, counts = {}) {
   // per-layer counters are removed; telemetry now lives solely in the Status
   // Strip cells below.
   setText("op-strip-running", counts.running ?? 0);
+  // Issue #3884 AC-3: break out the running agents that live as inline
+  // terminals in the Issue window (SPEC-3671 `issue_preview` placement), so
+  // "RUNNING 6" next to an empty canvas explains itself. Hidden when every
+  // running agent is on the canvas, and for callers that omit the breakdown.
+  const runningInline = Number(counts.running_inline ?? 0);
+  const inlineSlot = doc.getElementById("op-strip-running-inline");
+  if (inlineSlot) {
+    inlineSlot.textContent = `${runningInline} inline`;
+    inlineSlot.hidden = !(runningInline > 0);
+  }
+  const runningCell = doc.querySelector(".op-status-strip__cell--running");
+  if (runningCell) {
+    runningCell.title =
+      runningInline > 0
+        ? `${runningInline} of ${Number(counts.running ?? 0)} running agents are inline terminals in the Issue window`
+        : "";
+  }
   setText("op-strip-idle", counts.idle ?? 0);
   // FR-039 (anshin): WAITING cell counts agents waiting on the operator.
   setText("op-strip-waiting", counts.waiting ?? 0);
@@ -1292,11 +1309,11 @@ function createActionRegistry(doc) {
     { id: "open-board", label: "Focus Board surface", hint: "⌘B", group: "Navigate", handler: dispatch("open-board") },
     { id: "open-git", label: "Focus Work", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
     { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
+    { id: "open-recovery-center", label: "Open Recovery Center", hint: "Durable delivery", group: "Navigate", handler: dispatch("open-recovery-center") },
     { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
     // SPEC-3431 FR-026: the rail gear only appears on hover, so the palette is
     // the keyboard-reachable entry to PM settings.
     { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
-    { id: "intake-session", label: "Intake", hint: "Curate · new work", group: "Workflow", handler: dispatch("intake-session") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
     { id: "open-branches", label: "Open Workspace", hint: "Execute · existing branch", group: "Spawn", handler: dispatch("open-branches") },
     { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },

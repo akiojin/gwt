@@ -39,6 +39,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 dunce.workspace = true
+dirs.workspace = true
 ignore.workspace = true
 chrono.workspace = true
 semver.workspace = true
@@ -65,7 +66,7 @@ pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
 sysinfo.workspace = true
-tray-icon = "0.24"
+tray-icon = "0.25"
 auto-launch = "0.6"
 whoami = "2.1"
 # SPEC #2920 Phase 4: the tray-icon crate needs RGBA bytes, so decode the
@@ -92,8 +93,8 @@ objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2
 winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-registry = "0.6"
-windows-result = "0.4"
+windows-registry = "0.100"
+windows-result = "0.100"
 
 [features]
 # Issue #3675 AC-2: arms the unsandboxed-gh spawn guard at process start (see
@@ -111,6 +112,9 @@ tracing-subscriber.workspace = true
 gwt-core = { workspace = true, features = ["test-support"] }
 gwt = { path = ".", features = ["test-gh-guard"] }
 ctor = "1.0.13"
+# Issue #4095: client-side vt100 model for the pane snapshot / stream
+# ordering fixture (patched to vendor/vt100 like gwt-terminal).
+vt100 = "0.16"
 
 [package.metadata.bundle]
 name = "GWT"

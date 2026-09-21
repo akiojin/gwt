@@ -16,6 +16,12 @@ delegates to `gwt-verify --mode full`; `gwt-manage-pr` requires `gwt-verify --mo
 before opening or updating a PR; users may also invoke it directly through
 `/gwt:gwt-verify`.
 
+Read-only `gh` commands are allowed during verification, and allowed calls
+are recorded on the shared GitHub budget ledger. Prefer gwtd JSON operations
+such as `pr.list` and `issue.view` when cached data or workflow lifecycle
+context is needed. GitHub mutations must use JSON-envelope operations;
+direct `gh` writes do not satisfy verification, audit, or Ready PR gates.
+
 ## Contract overview
 
 `gwt-verify` is **project-agnostic**. It does not own a fixed cargo / pnpm /
@@ -72,6 +78,112 @@ Additional flag:
   Default is **off**; `--mode full` and `--mode pre-pr` require user
   verification unless this flag is set. The reason is recorded in the
   evidence bundle as `User Verification: skipped(--skip-user-check)`.
+
+## Launch mode (autonomous vs interactive)
+
+Verification behavior depends on **who launched the work**, not on how hard
+the check looks. Read it from the launch record — never from the agent's
+judgement, and never from ambient environment variables:
+
+```
+gwtd <<'JSON'
+{"schema_version":1,"operation":"execution.status","params":{}}
+JSON
+```
+
+The `launch_route` field is the answer. It is stamped by the launcher onto the
+durable Session at launch, which is the only party that knows.
+
+| Launch mode | Detection | User Verification Handoff |
+|---|---|---|
+| `autonomous` | `execution.status` reports `launch_route: autonomous` — an unattended gwt Issue Monitor launch | **Waived.** Nobody is watching the session. |
+| `interactive` | `launch_route: manual`, or absent | Unchanged: the handoff below runs as written. |
+
+`GWT_AUTONOMOUS_EXECUTION` is a **legacy** signal. Treat it as autonomous when
+it is set, but its absence proves nothing: it is written only when the project
+opted into unattended autonomous mode, so a monitor-launched window with that
+preference off used to read as human-driven and then stall waiting for a human
+who was never there (#3777, #3697, #4217). `launch_route` wins over the
+environment in every case.
+
+Record the detected mode on the evidence bundle's `Launch mode:` line.
+
+In `autonomous` mode:
+
+- **Skip the User Verification Handoff phase entirely.** Do not prepare a
+  user handoff instance, share a verification URL, or call the question tool.
+  Prepare an isolated instance for the agent's own headed E2E when UI is in
+  scope; for gwt use `browser-check` and the current checkout with a fresh HOME.
+- Record `User Verification Result: n/a (autonomous)` for new work, with or
+  without a UI surface. This is a launch-mode fact, never `skipped(<reason>)`
+  or `confirmed`. The agent's own check does not confirm a human check.
+- Require `Agent Visual Check: pass` for UI work and `n/a (no UI surface)`
+  otherwise. Automated test, headed E2E, or CI failures and known blockers must
+  be repaired; absent human visual confirmation is not a blocker.
+- After fresh passing verification and the other Ready PR Gate conditions,
+  create a Ready PR or call `pr.ready`, then follow the existing CI auto-merge
+  path until merged. Do not stop at a Draft PR or call `execution.blocked`
+  merely because no human performed a visual check.
+
+### Legacy deferred results
+
+The legacy `deferred (autonomous execution)` value remains readable on
+existing autonomous PRs. Fresh passing verification permits Ready and the
+existing CI auto-merge path without rewriting that PR body or requiring human
+confirmation. This compatibility does not waive automated evidence or any
+other Ready Gate condition. Manual launch verification is unchanged.
+
+`pr.list` with `include: ["body"]` still exposes
+`deferred_user_verification`: both `n/a (autonomous)` and the legacy autonomous
+deferred value yield `false`; manual or generic deferred results yield `true`.
+An absent field means bodies were not hydrated, so the value is unknown.
+
+Record the same result in the tool-generated execution evidence: pass
+`params.user_verification_result` to `verify.run` with the exact
+`User Verification Result` value used in the report and new PR body. An existing
+legacy deferred body may remain unchanged while new autonomous evidence records
+`n/a (autonomous)`. The result is persisted in the integrity-protected
+Verification Run Record and printed in the run output. For manual launches, an omitted value remains
+unknown; it never means `confirmed` or `n/a`. Autonomous launches normalize the
+result to `n/a (autonomous)`. Automated command success does not
+confirm a human check.
+
+For an autonomous run with a UI surface, for example:
+
+```json
+{"schema_version":1,"operation":"verify.run","params":{"commands":["<planned Playwright command>"],"headed_e2e_commands":["<planned Playwright command>"],"user_verification_result":"n/a (autonomous)"}}
+```
+
+## Agent Visual Check (the agent's own browser-check)
+
+The agent's own headed run is evidence the **agent** produced. It is recorded
+on its own line and is **never a User Verification Result** — a self-reported
+"looks right" must not be readable as a human having confirmed anything.
+
+Run it whenever a UI surface is in scope (by diff or by acceptance-aware
+escalation) and the project ships a headed runner, in every launch mode:
+
+- a real browser / WebView instance, not headless-only, not a DOM shim
+- both `dark` and `light` themes
+- zero console errors and zero page errors
+- the concrete changed behavior actually exercised, not just page load
+
+Record the result as `Agent Visual Check: pass | fail(<reason>) | n/a (no UI
+surface)`, and list the executed headed command under `Executed` so the claim
+is backed by a `PASS` entry. In `autonomous` mode this is the GUI quality bar
+that replaces the human's eyes, so `Agent Visual Check: fail(<reason>)` — or a
+UI surface in scope with no Agent Visual Check at all — makes `Overall: FAIL`.
+
+For an autonomous UI Ready handoff, a prose `Agent Visual Check: pass` alone
+is insufficient. Pass `params.headed_e2e_commands` to `verify.run`, selecting
+exact strings already present in `params.commands`. Use Playwright commands
+or project scripts that forward extra Playwright arguments. gwtd adds
+`--headed`, `--trace=on`, and its embedded reporter, then reads the actual
+browser launch and context settings from Playwright traces to count passing
+Chromium tests for dark and light themes. Both themes must have passing
+executed tests in the same fresh verification record; skipped tests, metadata
+claims, or a headless run cannot satisfy this evidence requirement. The E2E
+suite remains responsible for console/page-error checks and behavior assertions.
 
 ## Invocation Sequence
 
@@ -141,6 +253,7 @@ Output to stdout in the following shape (Markdown):
 ## Verification Report
 
 Mode: <quick|full|pre-pr>
+Launch mode: autonomous | interactive
 Baseline: merge-base HEAD..origin/develop (<N> commits, <M> files)
 Changed surfaces: <abstract surface list>
 Acceptance Surface: <user-facing surface the change is escalated to, or `non-user-facing(<justification>)`>
@@ -163,7 +276,7 @@ Skipped (no matching surface or not applicable):
 (inventory unavailable: <reason>)  # when extraction failed for a runner
 
 ### User Verification
-Status: required | recommended | skipped(<reason>)
+Status: required | recommended | skipped(<reason>) | waived(autonomous launch)
 Surfaces requiring user check: <list>
 
 #### Verification Target Card
@@ -193,7 +306,8 @@ URL or launch target: <verified URL, GUI/editor target, or exact CLI/TUI invocat
 
 Expected: <one-line summary of the intended behavior>
 Observed: <user response slot>
-User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a
+User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous) | deferred (autonomous execution)
+Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)
 
 Headed verification: <yes|no>
 Tooling installed during run: <list, or "none">
@@ -204,8 +318,16 @@ Overall: PASS|FAIL
 Rules:
 
 - `Overall: PASS` requires **both** every entry in `Executed` reporting `PASS`
-  **and** `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`.
-  `pending` must never resolve to `PASS`.
+  **and** `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
+  deferred (autonomous execution), skipped(<reason>)}`. `pending` must never
+  resolve to `PASS`. The legacy deferred value is accepted for autonomous
+  launches under the same fresh evidence and Ready PR Gate requirements.
+- When a UI surface is in scope, `Overall: PASS` additionally requires
+  `Agent Visual Check: pass`. In `autonomous` mode that line carries the GUI
+  quality bar on its own, so a missing or failing Agent Visual Check is
+  `Overall: FAIL` even when the launch waives the human handoff. An autonomous
+  UI Ready handoff also requires measured passing headed Chromium results for
+  dark and light themes in the same fresh `verify.run` record.
 - Every acceptance boundary in scope must map to either a reachable manual
   checkbox or an Automated-only Evidence item that names the exact command and
   test. An Automated-only Evidence item must match a `PASS` entry under
@@ -231,11 +353,22 @@ project-specific specialization, see `references/surface-taxonomy.md`.
 | Skill asset / agent config | **Recommended** | Describe the trigger phrase or scenario that should activate the modified skill / agent, plus the expected effect. |
 | Docs / config-only (markdownlint clean) | **Skipped(docs-only)** | Automated checks are sufficient. |
 
+The `User Check` column applies to `interactive` launches. In `autonomous`
+mode every row collapses to `waived(autonomous launch)`; a **Required** row
+means the Agent Visual Check is mandatory instead, not that a human is
+summoned.
+
 ## User Verification Handoff (post-Executed)
 
+This phase runs in `interactive` launch mode only. In `autonomous` mode, skip
+straight to recording `User Verification Result: n/a (autonomous)` plus the
+`Agent Visual Check:` line, then finalize `Overall`. Do
+not execute any step below, and in particular do not call the question tool in
+step 5.
+
 When `Overall` would otherwise be `PASS` (every `Executed` entry passed) and
-`--mode full` or `--mode pre-pr` is active and `--skip-user-check` was not
-supplied:
+the launch mode is `interactive` and `--mode full` or `--mode pre-pr` is
+active and `--skip-user-check` was not supplied:
 
 1. Compute the `User Verification` block:
    - `Status: required` if any changed surface is marked Required above.
@@ -312,7 +445,72 @@ supplied:
      skipped(<reason>)`.
 
 If no selection UI exists in the current runtime, fall back to plain-text
-prompting but keep the same three-option discipline.
+prompting but keep the same three-option discipline. An autonomous session is
+not a runtime without a selection UI — it is a runtime where asking parks the
+Issue, so it never reaches this step at all.
+
+## Heavy verification serialization (SPEC #3576)
+
+Only canonical `verify.run` acquires the host-wide lease, in-process for
+its own run. Initial `cargo build -p gwt --bin gwtd`, ordinary `cargo test`,
+`cargo clippy`, `cargo build`, coverage, direct headed Playwright, and
+pre-push checks do not require a verification lease. Run them directly;
+they do not replace the canonical evidence required for completion.
+
+Register the matrix with `verify.plan`, then execute it through
+`verify.run`. Manual `verify.lease.acquire`, `verify.lease.hold`, and
+`verify.lease.extend` are retired and return an error without acquiring or
+reserving a lease. Do not wrap Cargo commands or `verify.run` in a manual
+lease acquisition loop.
+
+`verify.run` owns its admission and bounded wait through
+`params.max_wait_secs` (default 300, hard cap 1500). While waiting,
+`verify.lease.status` lists the run under `pending`. A `deferred` response
+means admission timed out without a verification record. Inspect the
+reported holder and wait reason, then retry when contention is resolved;
+there is no fixed retry schedule. A deferral is not a spent attempt and
+there is no attempt cap: the refusal keeps your turn reserved
+(`next_turn_reserved: yes`, `queue_position`), so keep rerunning
+`verify.run` (a resident wait) while the holder makes progress. The lease
+is released after every run and a holder's next run queues behind you. A
+running `verify.run` publishes its progress, so the refusal and
+`verify.lease.status` show `remaining_batches` (commands left in the
+holder's run) and `estimated_remaining_ms`. If a holder persists without a live
+verification workload, report its run / PID and timing evidence to the
+PM. `verify.lease.release` remains available to drain a legacy holder
+without killing its process.
+
+### gwtd bootstrap order
+
+In a checkout that builds gwtd from source (the gwt repository itself), the
+first `cargo build -p gwt --bin gwtd` is a lease-free bootstrap step, never a
+heavy verification command. The order is build → `verify.plan` → `verify.run`:
+build the checkout binary without holding or waiting for any lease, and only
+then run canonical verification through it.
+
+Decide first whether the checkout binary is needed. Only operations that
+execute checkout code need it: `execution.*`, `workspace.*`, `build.*`,
+`verify.*`, and any operation added in the checkout. Read-only `issue.*`,
+`pr.*`, `board.*`, and `search` operations run through the resolved installed
+gwtd (`GWT_BIN_PATH` / PATH). Never wait for the build or a lease just to read
+Issue, PR, or Board state.
+
+`verify.run` reads `params.commands` before it decides whether to admit at
+all (Issue #4196). A matrix is heavy when any command widens past a single
+target — `--workspace`, `--all`, `--all-features`, `--all-targets`,
+`--exclude`, multiple packages or targets, or glob selectors — and only a
+heavy matrix claims the host lease. Unknown commands and value-taking Cargo
+global options are conservatively heavy; `cargo fmt` and `cargo metadata`
+are light. A matrix
+narrowed to one named target (`--test <name>`, `--bin <name>`,
+`--example <name>`), or to `--lib` of an explicit `-p <crate>`, is light: it
+starts immediately and several worktrees may run one at the same time. Bare
+`--lib` is not narrow — this is a virtual workspace, so with no package it
+builds every default member's lib. The run reports which it acted on as
+`verify: scope — light|heavy`, naming the command that forced a heavy
+classification, so you can tell before starting whether the matrix will
+queue. Splitting a heavy matrix into narrower runs is therefore a real way to
+make progress while another worktree holds the lease.
 
 ## Stop Conditions
 
@@ -375,7 +573,9 @@ exists, stop with `gwtd not found`.
 On `Overall: PASS`, the caller proceeds:
 
 - `gwt-build-spec` Phase 3 → Phase 4 (PR Flow via `gwt-manage-pr`), provided
-  `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`.
+  `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
+  deferred (autonomous execution), skipped(<reason>)}`. The legacy deferred
+  value follows the autonomous compatibility rule above.
 - `gwt-manage-pr` → PR create / update, provided the same User Verification
   Result gate is satisfied.
 - Manual invocation → return the evidence bundle to the user.

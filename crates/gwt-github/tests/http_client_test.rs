@@ -362,14 +362,32 @@ fn red_58_set_state_closed_sends_state_field() {
     ));
     let client = client_with(transport);
     let snap = client
-        .set_state(IssueNumber(5), IssueState::Closed)
+        .set_state(
+            IssueNumber(5),
+            IssueState::Closed,
+            Some(gwt_github::IssueCloseReason::NotPlanned),
+        )
         .unwrap();
 
     let reqs = client.transport().recorded();
     let payload: serde_json::Value =
         serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(payload["state"], "closed");
+    assert_eq!(payload["state_reason"], "not_planned");
     assert_eq!(snap.state, IssueState::Closed);
+
+    client.transport().enqueue(ok_body(
+        r#"{"number":5,"title":"T","body":"B","state":"open","updated_at":"t","labels":[]}"#,
+    ));
+    let reopened = client
+        .set_state(IssueNumber(5), IssueState::Open, None)
+        .unwrap();
+    let requests = client.transport().recorded();
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["state"], "open");
+    assert!(payload.get("state_reason").is_none());
+    assert_eq!(reopened.state, IssueState::Open);
 }
 
 // -----------------------------------------------------------------------
@@ -1686,4 +1704,106 @@ fn owner_environment_override_rejects_an_expired_deadline_before_client_construc
         };
 
     assert!(matches!(error, ApiError::Timeout { .. }));
+}
+
+#[test]
+fn issue_labels_use_directional_single_requests() {
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "[]".into(),
+    });
+    transport.enqueue(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "[]".into(),
+    });
+    let client = client_with(transport);
+    client
+        .add_labels_mutation(IssueNumber(42), &["new".into()])
+        .unwrap();
+    client
+        .remove_label_mutation(IssueNumber(42), "phase/review #1")
+        .unwrap();
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, HttpMethod::Post);
+    assert!(requests[0].url.ends_with("/issues/42/labels"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[0].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"labels": ["new"]})
+    );
+    assert_eq!(requests[1].method, HttpMethod::Delete);
+    assert!(requests[1]
+        .url
+        .ends_with("/issues/42/labels/phase%2Freview%20%231"));
+}
+
+#[test]
+fn issue_label_failure_certainty_does_not_retry() {
+    for (status, unknown) in [(422, false), (503, true)] {
+        for remove in [false, true] {
+            let transport = FakeTransport::new();
+            transport.enqueue(HttpResponse {
+                status,
+                headers: vec![],
+                body: "{}".into(),
+            });
+            let client = client_with(transport);
+            let error = if remove {
+                client.remove_label_mutation(IssueNumber(42), "x")
+            } else {
+                client.add_labels_mutation(IssueNumber(42), &["x".into()])
+            }
+            .unwrap_err();
+            assert_eq!(
+                matches!(error, OwnerMutationError::RemoteOutcomeUnknown(_)),
+                unknown
+            );
+            assert_eq!(client.transport().recorded().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn issue_labels_honor_and_settle_rest_budget() {
+    for remove in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let transport = FakeTransport::new();
+        transport.enqueue(HttpResponse {
+            status: 429,
+            headers: vec![],
+            body: String::new(),
+        });
+        let client = client_with(transport).with_budget(ledger.clone(), gate);
+        let mutate = || {
+            if remove {
+                client.remove_label_mutation(IssueNumber(42), "x")
+            } else {
+                client.add_labels_mutation(IssueNumber(42), &["x".into()])
+            }
+        };
+        assert!(matches!(
+            mutate(),
+            Err(OwnerMutationError::PreSubmit(ApiError::RateLimited { .. }))
+        ));
+        assert!(ledger
+            .active_block(
+                gwt_core::github_quota::GitHubQuota::Rest,
+                chrono::Utc::now()
+            )
+            .is_some());
+        assert!(matches!(
+            mutate(),
+            Err(OwnerMutationError::PreSubmit(ApiError::RateLimited { .. }))
+        ));
+        assert_eq!(client.transport().recorded().len(), 1);
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+            1
+        );
+    }
 }

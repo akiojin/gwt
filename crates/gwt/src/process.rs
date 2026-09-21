@@ -24,6 +24,28 @@ fn resolve_username(whoami_value: Option<&str>, env_value: Option<&str>) -> Stri
         .to_string()
 }
 
+fn normalize_hostname(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .map(|value| value.trim_end_matches(".local").to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown-host".to_string())
+}
+
+/// Stable owner identity for remote Issue claims. The host component prevents
+/// same-user/PID collisions across machines; old persisted claims remain
+/// readable because parsing still treats owner as an opaque string.
+pub fn current_claim_owner() -> String {
+    let hostname = current_hostname();
+    format!("{}:{}:{}", hostname, current_username(), std::process::id())
+}
+
+pub fn current_hostname() -> String {
+    normalize_hostname(whoami::hostname().ok().as_deref())
+}
+
 /// Return the current username, falling back to the platform environment.
 pub fn current_username() -> String {
     let whoami_value = whoami::username().ok();
@@ -63,18 +85,18 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Windows named-pipe support for the daemon is a follow-up.
-        // When that lands, this branch should switch to a real
-        // liveness probe (e.g. `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
-        // ...)`).
-        false
+        // Issue #3526: the Windows daemon (named-pipe transport) persists
+        // real endpoint / authority-fence PIDs, so bootstrap resolution
+        // needs a truthful liveness answer here. A permanent `false` would
+        // make every consumer delete a live daemon's endpoint file on each
+        // bootstrap call and let the GUI tick double-drive the scan.
+        is_host_process_alive(pid)
     }
 }
 
-/// Return whether a GUI materializer process is alive on every supported host.
-/// This is intentionally separate from [`is_process_alive`]: the latter keeps
-/// Windows daemon-bootstrap compatibility semantics while launch-delivery
-/// leases need a real cross-platform owner probe.
+/// Return whether a process is alive on every supported host using the
+/// `sysinfo` process table. [`is_process_alive`] delegates here on Windows;
+/// Unix keeps the cheaper `kill(pid, 0)` probe.
 pub fn is_host_process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -96,6 +118,34 @@ pub fn is_host_process_alive(pid: u32) -> bool {
         );
         system.process(pid).is_some()
     }
+}
+
+/// Issue #3906 AC-8: whether `pid` runs somewhere under `ancestor` in the
+/// process tree (an agent pane's `gwtd verify.run`, for example). Walks the
+/// parent chain through `sysinfo`; a missing process or a chain longer than
+/// 64 hops counts as "not ours" so the drain never blocks on a stranger.
+pub fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+    if pid == 0 || ancestor == 0 || pid == ancestor {
+        return false;
+    }
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let mut current = sysinfo::Pid::from_u32(pid);
+    for _ in 0..64 {
+        let Some(parent) = system.process(current).and_then(sysinfo::Process::parent) else {
+            return false;
+        };
+        if parent.as_u32() == ancestor {
+            return true;
+        }
+        if parent.as_u32() <= 1 {
+            return false;
+        }
+        current = parent;
+    }
+    false
 }
 
 /// Return the OS-reported start time for one host process.
@@ -176,6 +226,20 @@ mod tests {
     }
 
     #[test]
+    fn hostname_normalization_is_case_insensitive_and_removes_local_suffix() {
+        assert_eq!(normalize_hostname(Some(" MacBook.LOCAL ")), "macbook");
+        assert_eq!(normalize_hostname(Some("  ")), "unknown-host");
+        assert_eq!(normalize_hostname(None), "unknown-host");
+    }
+
+    #[test]
+    fn claim_owner_contains_host_username_and_pid() {
+        let owner = current_claim_owner();
+        assert_eq!(owner.split(':').count(), 3);
+        assert!(owner.ends_with(&format!(":{}", std::process::id())));
+    }
+
+    #[test]
     fn pid_zero_is_never_alive() {
         assert!(!is_process_alive(0));
         assert!(!is_host_process_alive(0));
@@ -203,7 +267,6 @@ mod tests {
         assert_eq!(host_process_start_time(i32::MAX as u32), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn current_process_is_alive() {
         assert!(is_process_alive(std::process::id()));

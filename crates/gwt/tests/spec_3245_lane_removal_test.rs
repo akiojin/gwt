@@ -1,14 +1,38 @@
-//! SPEC #3245 AC-4 — the lane mechanism is removed from non-test code.
+//! SPEC #3245 AC-4 / AC-13 / AC-14 / AC-15 — retired lane and Intake-only
+//! product routes are removed from non-test code.
 //!
 //! After Stage C no production source may reference the `GWT_SESSION_KIND`
 //! environment variable or the `.gwt/session-kind.json` lane file. Test code
-//! (files under `tests/`, and in-file `#[cfg(test)]` modules, which sit at the
-//! end of their file by repository convention) is exempt while it pins the
-//! removal behavior itself.
+//! (files under `tests/`, test-only module files, and in-file `#[cfg(test)]`
+//! modules, which sit at the end of their file by repository convention) is
+//! exempt while it pins the removal behavior itself.
 
 use std::path::{Path, PathBuf};
 
-const FORBIDDEN: &[&str] = &["GWT_SESSION_KIND", "session-kind.json", "session-kind"];
+const FORBIDDEN: &[&str] = &[
+    "GWT_SESSION_KIND",
+    "session-kind.json",
+    "session-kind",
+    "OpenIntakeSession",
+    "open_intake_session",
+    "LaunchWizardMode::Intake",
+    "mark_as_ephemeral_intake",
+];
+
+// Keep the scan deliberately exact. Generic ephemeral launch machinery and
+// compatibility/bookkeeping terms (`is_ephemeral`, `AgentLaunchBuilder`, the
+// `.intake` prefix, `resolve_ephemeral_launch_worktree`, `intake.outcome.*`,
+// Work-event intake, and the legacy `lane_kind` adapter) remain supported.
+fn is_test_module_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == "tests.rs"
+                || name
+                    .strip_suffix(".rs")
+                    .is_some_and(|stem| stem.ends_with("_tests"))
+        })
+}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -26,7 +50,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             collect_rs_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+        } else if path.extension().is_some_and(|ext| ext == "rs") && !is_test_module_file(&path) {
             out.push(path);
         }
     }
@@ -54,7 +78,7 @@ fn non_test_source(contents: &str) -> &str {
 }
 
 #[test]
-fn non_test_code_has_no_lane_mechanism_references() {
+fn non_test_code_has_no_retired_lane_or_intake_product_route_references() {
     let crates_root = workspace_root().join("crates");
     let mut files = Vec::new();
     for entry in std::fs::read_dir(&crates_root)
@@ -85,7 +109,7 @@ fn non_test_code_has_no_lane_mechanism_references() {
     }
     assert!(
         offenders.is_empty(),
-        "lane mechanism references must be gone from non-test code (SPEC #3245 AC-4):\n{}",
+        "retired lane and Intake-only product route references must be gone from non-test code (SPEC #3245 AC-4/13/14/15):\n{}",
         offenders.join("\n")
     );
 }

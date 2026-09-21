@@ -84,6 +84,46 @@ fn normalized_embedded_path_text(value: &str) -> String {
 }
 
 #[test]
+fn managed_hook_health_without_expected_binary_does_not_probe_git_tracking() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(worktree.path());
+    for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+        let path = worktree.path().join(artifact);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "{}").unwrap();
+    }
+    let trace_path = worktree.path().join("git-trace.jsonl");
+    let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+    let git = gwt_core::process::hidden_command("git")
+        .arg("--version")
+        .output()
+        .expect("Git is required for the tracking regression test");
+    assert!(git.status.success());
+    assert!(!fs::read_to_string(&trace_path)
+        .expect("Git Trace2 works")
+        .is_empty());
+    fs::write(&trace_path, "").unwrap();
+    let mut input = ManagedHookHealthInput::new(worktree.path());
+    input.expected_hook_bin = None;
+    input.runtime_state_path = None;
+
+    let health = read_managed_hook_health(&input);
+
+    assert!(health
+        .issues
+        .iter()
+        .any(|issue| issue.contains("SessionStart")));
+    let trace = fs::read_to_string(trace_path).expect("read Git trace");
+    assert!(
+        !trace.contains("\"ls-files\""),
+        "without a binary to compare, config tracking cannot affect health: {trace}"
+    );
+}
+
+#[test]
 fn managed_hook_health_is_ready_when_assets_and_runtime_state_are_current() {
     let _env_lock = env_test_lock()
         .lock()
@@ -272,6 +312,56 @@ fn managed_hook_health_detects_missing_managed_configs_and_repair_recreates_them
 
     assert!(outcome.repaired);
     assert!(worktree.path().join(".codex/hooks.json").exists());
+}
+
+/// Issue #4339 AC-2 / AC-4: a `core.hooksPath` whose directory holds no hook
+/// makes Git skip commitlint and the commit/push gates in silence. Health has
+/// to say so, and repair has to materialize them.
+#[test]
+fn managed_hook_health_detects_empty_git_hooks_path_and_repair_materializes_it() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let root = worktree.path();
+    init_git_repo(root);
+    run_git(root, &["config", "core.hooksPath", ".husky/_"]);
+    fs::create_dir_all(root.join(".husky")).expect("husky dir");
+    fs::write(
+        root.join(".husky/commit-msg"),
+        "#!/usr/bin/env sh\nexit 0\n",
+    )
+    .expect("write commit-msg source");
+    // A gwt surface makes this a managed worktree; the Git hooks themselves
+    // belong to the repository, not to any agent provider.
+    fs::create_dir_all(root.join(".claude")).expect("claude dir");
+
+    let health = read_managed_hook_health(&ManagedHookHealthInput::new(root));
+
+    assert_eq!(health.status, ManagedHookHealthStatus::NeedsAttention);
+    assert!(
+        health
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed git hook missing")
+                && issue.contains("commit-msg")),
+        "an empty core.hooksPath directory must be reported: {:?}",
+        health.issues
+    );
+
+    let outcome = repair_managed_hook_configs(root).expect("repair");
+
+    assert!(outcome.repaired);
+    assert!(root.join(".husky/_/commit-msg").is_file());
+    let repaired = read_managed_hook_health(&ManagedHookHealthInput::new(root));
+    assert!(
+        !repaired
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed git hook missing")),
+        "repair must clear the missing-hook issue: {:?}",
+        repaired.issues
+    );
 }
 
 #[test]
@@ -1067,6 +1157,16 @@ fn committed_codex_hooks_stay_guarded_and_portable() {
                 command.contains("command -v"),
                 "{event} still uses the unguarded legacy template: {command}"
             );
+            // #4044 (AC-3): the committed fallback must be the canonical bare
+            // `gwtd`. Any absolute path — a worktree build output OR an
+            // installed `/Applications/GWT.app/...` (PR #4005) — exists on one
+            // machine only, and the generator rewrites a tracked config to the
+            // canonical form, so a committed absolute path leaves every other
+            // checkout permanently dirty after its first materialization.
+            assert!(
+                command.contains("gwt_bin='gwtd'"),
+                "{event} must commit the canonical `gwtd` fallback, not an absolute path: {command}"
+            );
         }
     }
     assert_eq!(managed, 5, "every managed event must be committed");
@@ -1074,4 +1174,769 @@ fn committed_codex_hooks_stay_guarded_and_portable() {
         !rendered.contains("/target/debug/") && !rendered.contains("\\\\target\\\\debug\\\\"),
         "a machine-local build output must never be committed: {rendered}"
     );
+    assert!(
+        !rendered.contains("/Applications/") && !rendered.contains("gwt_bin='/"),
+        "an absolute install path must never be committed: {rendered}"
+    );
+}
+
+fn git_porcelain(dir: &Path) -> String {
+    let output = gwt_core::process::hidden_command("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git status");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Commit the canonical (bare-`gwtd`) managed hook config into a fresh repo so
+/// the test starts from the same shape this repository has on `develop`.
+fn repo_with_committed_canonical_codex_hooks() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().expect("repo");
+    init_git_repo(repo.path());
+    {
+        let _bare = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
+        gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
+    }
+    run_git(repo.path(), &["add", "-A"]);
+    run_git(repo.path(), &["commit", "-qm", "hooks"]);
+    assert!(
+        git_porcelain(repo.path()).trim().is_empty(),
+        "fixture must start clean"
+    );
+    repo
+}
+
+/// #3567 AC-2 / AC-4: a git-TRACKED `.codex/hooks.json` must never receive the
+/// materializing machine's absolute binary path. The generated bytes have to
+/// converge on the canonical `GWT_BIN_PATH` → `gwtd` fallback so the tracked
+/// file stays clean in `git status`; otherwise every worktree is permanently
+/// dirty and a `git add -A` commits a path that exists on exactly one machine.
+#[test]
+fn tracked_codex_hooks_keep_canonical_binary_fallback() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = repo_with_committed_canonical_codex_hooks();
+    let installed = stable_hook_bin_guard();
+
+    gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
+
+    let rendered =
+        fs::read_to_string(repo.path().join(".codex/hooks.json")).expect("read codex hooks");
+    let installed_text = normalized_embedded_path_text(&installed.path().display().to_string());
+    assert!(
+        !normalized_embedded_path_text(&rendered).contains(&installed_text),
+        "a tracked hook config must not embed the materializing machine's path: {rendered}"
+    );
+    assert!(
+        rendered.contains("gwt_bin='gwtd'") || rendered.contains("else { 'gwtd' }"),
+        "a tracked hook config must keep the canonical bare fallback: {rendered}"
+    );
+    assert!(
+        git_porcelain(repo.path()).trim().is_empty(),
+        "materialization must leave a tracked hook config clean, got:\n{}",
+        git_porcelain(repo.path())
+    );
+}
+
+/// #3567 AC-3: an already-contaminated tracked hook config converges back to
+/// the canonical form on the next materialization — that regeneration IS the
+/// repair path, so no worktree stays pinned to a foreign binary forever.
+#[test]
+fn contaminated_tracked_codex_hooks_converge_back_to_canonical() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = repo_with_committed_canonical_codex_hooks();
+    let hooks_path = repo.path().join(".codex/hooks.json");
+    let committed = fs::read_to_string(&hooks_path).expect("read committed hooks");
+    let contaminated = committed.replace(
+        "gwt_bin='gwtd'",
+        "gwt_bin='/Users/someone/Workbench/gwt/work/issue-3547/target/debug/gwtd'",
+    );
+    assert_ne!(committed, contaminated, "fixture must actually contaminate");
+    fs::write(&hooks_path, &contaminated).expect("write contaminated hooks");
+    assert!(!git_porcelain(repo.path()).trim().is_empty());
+
+    let _installed = stable_hook_bin_guard();
+    gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
+
+    assert!(
+        git_porcelain(repo.path()).trim().is_empty(),
+        "regeneration must restore the canonical tracked bytes, got:\n{}",
+        git_porcelain(repo.path())
+    );
+}
+
+/// #4044 AC-3: `develop` already committed an absolute *install* path
+/// (`/Applications/GWT.app/Contents/MacOS/gwtd`, PR #4005) into the tracked
+/// `.codex/hooks.json`. Repair on any machine must normalize that committed
+/// shape back to the canonical bare `gwtd`, and once the canonical bytes are
+/// committed, materializing on a machine with a different install path must
+/// leave the tracked file clean.
+#[test]
+fn committed_install_path_in_tracked_codex_hooks_is_normalized_on_repair() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = repo_with_committed_canonical_codex_hooks();
+    let hooks_path = repo.path().join(".codex/hooks.json");
+    let canonical = fs::read_to_string(&hooks_path).expect("read canonical hooks");
+    let committed_install_path = canonical.replace(
+        "gwt_bin='gwtd'",
+        "gwt_bin='/Applications/GWT.app/Contents/MacOS/gwtd'",
+    );
+    assert_ne!(
+        canonical, committed_install_path,
+        "fixture must embed an install path"
+    );
+    fs::write(&hooks_path, &committed_install_path).expect("write install-path hooks");
+    run_git(repo.path(), &["add", "-A"]);
+    run_git(
+        repo.path(),
+        &[
+            "commit",
+            "-qm",
+            "commit an absolute install path (#4005 shape)",
+        ],
+    );
+    assert!(git_porcelain(repo.path()).trim().is_empty());
+
+    // Machine A: a different install than the committed one repairs the file.
+    {
+        let installed = stable_hook_bin_guard();
+        gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
+        let rendered = fs::read_to_string(&hooks_path).expect("read repaired hooks");
+        let installed_text = normalized_embedded_path_text(&installed.path().display().to_string());
+        assert!(
+            !rendered.contains("/Applications/GWT.app"),
+            "repair must drop the committed install path: {rendered}"
+        );
+        assert!(
+            !normalized_embedded_path_text(&rendered).contains(&installed_text),
+            "repair must not swap in this machine's install path: {rendered}"
+        );
+        assert_eq!(
+            rendered, canonical,
+            "repair must converge on the canonical machine-neutral bytes"
+        );
+    }
+
+    // Commit the normalized bytes, then materialize on "machine B" with yet
+    // another install path: the tracked file must stay clean.
+    run_git(repo.path(), &["add", "-A"]);
+    run_git(
+        repo.path(),
+        &["commit", "-qm", "normalize hooks to canonical gwtd"],
+    );
+    assert!(git_porcelain(repo.path()).trim().is_empty());
+    {
+        let _other_machine = stable_hook_bin_guard();
+        gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
+    }
+    assert!(
+        git_porcelain(repo.path()).trim().is_empty(),
+        "a canonical tracked hook config must stay clean on every machine, got:\n{}",
+        git_porcelain(repo.path())
+    );
+}
+
+/// #3567 AC-1 (revised): repo-wide repair may keep running, but it must never
+/// propagate the repairing worktree's own build output as another worktree's
+/// fallback. Repairing a second worktree while `GWT_HOOK_BIN` points at a
+/// worktree-local `target/debug/gwtd` leaves that worktree canonical.
+#[test]
+fn repairing_another_worktree_never_writes_a_worktree_local_build_path() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = repo_with_committed_canonical_codex_hooks();
+    let other = tempfile::tempdir().expect("linked worktree root");
+    let linked = other.path().join("issue-b");
+    run_git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/issue-b",
+            linked.to_str().expect("linked path"),
+        ],
+    );
+    assert!(git_porcelain(&linked).trim().is_empty());
+
+    let repairing_build_output = repo
+        .path()
+        .join("work/issue-3547/target/debug")
+        .join(if cfg!(windows) { "gwtd.exe" } else { "gwtd" });
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &repairing_build_output);
+
+    gwt_skills::generate_codex_hooks_for_mode(
+        &linked,
+        gwt_skills::CodexHookDiscoveryMode::WorktreeLocal,
+    )
+    .expect("codex hooks");
+
+    let rendered = fs::read_to_string(linked.join(".codex/hooks.json")).expect("read codex hooks");
+    assert!(
+        !normalized_embedded_path_text(&rendered).contains("/target/debug/"),
+        "another worktree's build output must never be written: {rendered}"
+    );
+    assert!(
+        git_porcelain(&linked).trim().is_empty(),
+        "repairing worktree B must leave its tracked hook config clean, got:\n{}",
+        git_porcelain(&linked)
+    );
+}
+
+/// #3567 AC-1 (revised), untracked half: `.claude/settings.local.json` is
+/// machine-local, so it keeps an absolute pin — but never one owned by a
+/// DIFFERENT checkout. A `cargo clean` or a worktree removal over there would
+/// silently turn every hook in this worktree into a no-op.
+#[test]
+fn another_checkouts_build_output_is_never_pinned_into_this_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().expect("root");
+    let other_checkout = root.path().join("work/issue-3547");
+    let worktree = root.path().join("work/issue-3567");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let foreign_build_output =
+        other_checkout
+            .join("target/debug")
+            .join(if cfg!(windows) { "gwtd.exe" } else { "gwtd" });
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &foreign_build_output);
+
+    gwt_skills::generate_settings_local(&worktree).expect("claude settings");
+
+    let rendered =
+        fs::read_to_string(worktree.join(".claude/settings.local.json")).expect("read settings");
+    assert!(
+        !normalized_embedded_path_text(&rendered).contains("issue-3547"),
+        "another checkout's build output must never be pinned here: {rendered}"
+    );
+}
+
+/// #3567: a developer running their OWN `target/debug/gwtd` still gets it
+/// pinned inside their own checkout — the sanitization is about foreign
+/// checkouts, not about banning development builds.
+#[test]
+fn own_build_output_is_still_pinned_inside_its_own_checkout() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let checkout = tempfile::tempdir().expect("checkout");
+    let own_build_output =
+        checkout
+            .path()
+            .join("target/debug")
+            .join(if cfg!(windows) { "gwtd.exe" } else { "gwtd" });
+    let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &own_build_output);
+
+    gwt_skills::generate_settings_local(checkout.path()).expect("claude settings");
+
+    let rendered = fs::read_to_string(checkout.path().join(".claude/settings.local.json"))
+        .expect("read settings");
+    assert!(
+        normalized_embedded_path_text(&rendered).contains(&normalized_embedded_path_text(
+            &own_build_output.display().to_string()
+        )),
+        "a checkout's own build output stays pinned for its own hooks: {rendered}"
+    );
+}
+
+/// #3567: the health auditor derives the same per-path expectation as the
+/// generator. Without this the canonical tracked file is reported as "binary
+/// skew" against the running binary's absolute path, and startup self-heal
+/// rewrites it on every boot — the loop that keeps every worktree dirty.
+#[test]
+fn tracked_canonical_hook_config_is_not_reported_as_binary_skew() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = repo_with_committed_canonical_codex_hooks();
+    let installed = stable_hook_bin_guard();
+
+    let health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(repo.path())
+            .with_expected_hook_bin(installed.path().display().to_string()),
+    );
+
+    assert!(
+        !health
+            .issues
+            .iter()
+            .any(|issue| issue.contains("binary skew")),
+        "a canonical tracked hook config is the expected shape: {:?}",
+        health.issues
+    );
+}
+
+#[test]
+fn managed_hook_health_snapshot_is_reused_and_refreshes_on_next_projection() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+    use gwt_core::error_ledger::{record, ErrorKind, ErrorRecord, ErrorTarget};
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = home.path().join("repo");
+    fs::create_dir(&worktree).unwrap();
+    let mut input = ManagedHookHealthInput::new(&worktree);
+    input.runtime_state_path = None;
+    input.expected_hook_bin = None;
+    let snapshot = ManagedHookFailureSnapshot::read();
+    let before = snapshot.read_health(&input);
+    let failure = record(ErrorRecord::new(
+        ErrorKind::HookFailure,
+        "test failure",
+        ErrorTarget {
+            project_root: Some(worktree.display().to_string()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        snapshot.read_health(&input),
+        before,
+        "one projection must not reread the ledger"
+    );
+    let refreshed = ManagedHookFailureSnapshot::read();
+    let health = refreshed.read_health(&input);
+    assert_eq!(health, read_managed_hook_health(&input));
+    assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+    assert!(health
+        .issues
+        .iter()
+        .any(|issue| issue.contains(&failure.id)));
+    input.worktree_root = home.path().join("other");
+    fs::create_dir(&input.worktree_root).unwrap();
+    assert!(
+        !refreshed
+            .read_health(&input)
+            .issues
+            .iter()
+            .any(|issue| issue.contains(&failure.id)),
+        "shared snapshot must preserve worktree filtering"
+    );
+}
+
+/// Issue #3541 AC-2 / AC-5: a handler failure must surface in `hook.health`,
+/// and a later successful event must turn it into "recovered" evidence
+/// instead of erasing it back to an empty `issues` list.
+#[test]
+fn managed_hook_health_retains_failure_evidence_after_a_later_success() {
+    use gwt::cli::{dispatch, TestEnv};
+    use gwt_agent::{runtime_state_path, AgentId, Session};
+
+    fn argv(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("isolated home");
+    let gwt_home = home.path().join(".gwt");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(&gwt_home);
+    let worktree = home.path().join("repo");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let sessions_dir = gwt_home.join("sessions");
+    let mut session = Session::new(&worktree, "work/issue-3541", AgentId::Codex);
+    session.linked_issue_number = Some(3541);
+    session.save(&sessions_dir).expect("session metadata");
+    let runtime_path = runtime_state_path(&sessions_dir, &session.id);
+    fs::create_dir_all(&runtime_path).expect("invalid runtime-state destination");
+
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    let _gwt_session_id = ScopedEnvVar::set("GWT_SESSION_ID", &session.id);
+    let _runtime_path = ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &runtime_path);
+    let _profile_path = ScopedEnvVar::remove("GWT_HOOK_PROFILE_PATH");
+    let _forward_url = ScopedEnvVar::remove("GWT_HOOK_FORWARD_URL");
+    let _forward_token = ScopedEnvVar::remove("GWT_HOOK_FORWARD_TOKEN");
+    let _codex_thread_id = ScopedEnvVar::remove("CODEX_THREAD_ID");
+    let _hook_bin = stable_hook_bin_guard();
+    gwt_skills::generate_settings_local(&worktree).expect("claude hooks");
+    gwt_skills::generate_codex_hooks(&worktree).expect("codex hooks");
+
+    let payload = json!({
+        "session_id": "provider-session",
+        "cwd": worktree.display().to_string(),
+        "tool_name": "Bash",
+        "tool_input": { "command": "pwd" }
+    })
+    .to_string();
+
+    let mut failure_env = TestEnv::new(worktree.clone());
+    failure_env.stdin = payload.clone();
+    let failure_code = dispatch(
+        &mut failure_env,
+        &argv(&["gwtd", "hook", "event", "PreToolUse"]),
+    );
+    assert_eq!(failure_code, 1, "runtime-state failure must exit 1");
+
+    let failed_health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(&worktree).with_runtime_state_path(&runtime_path),
+    );
+    assert_eq!(
+        failed_health.status,
+        ManagedHookHealthStatus::Degraded,
+        "{failed_health:?}"
+    );
+    let failed_issues = failed_health.issues.join("\n");
+    for expected in ["PreToolUse/runtime-state", "unresolved", "errors.list"] {
+        assert!(
+            failed_issues.contains(expected),
+            "unresolved failure health must retain {expected:?}: {failed_issues}"
+        );
+    }
+
+    fs::remove_dir_all(&runtime_path).expect("remove invalid runtime-state destination");
+    let mut success_env = TestEnv::new(worktree.clone());
+    success_env.stdin = payload;
+    let success_code = dispatch(
+        &mut success_env,
+        &argv(&["gwtd", "hook", "event", "PostToolUse"]),
+    );
+    assert_eq!(
+        success_code,
+        0,
+        "later event must succeed in the same session: {}",
+        String::from_utf8_lossy(&success_env.stderr)
+    );
+    gwt::cli::hook::health::record_managed_hook_self_healed(&worktree).expect("self-healed marker");
+
+    let health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(&worktree).with_runtime_state_path(&runtime_path),
+    );
+
+    assert_eq!(health.last_event.as_deref(), Some("PostToolUse"));
+    assert_eq!(
+        health.status,
+        ManagedHookHealthStatus::NeedsAttention,
+        "recovered but unacknowledged failure must not become Ready/SelfHealed: {health:?}"
+    );
+    let issues = health.issues.join("\n");
+    for expected in ["PreToolUse/runtime-state", "recovered", "errors.list"] {
+        assert!(
+            issues.contains(expected),
+            "hook.health issues must retain {expected:?}: {issues}"
+        );
+    }
+    assert!(
+        !issues.contains("unresolved"),
+        "a later success must be reported as recovery, not as an open failure: {issues}"
+    );
+}
+
+// Issue #4370: the Active Work projection reads hook health once per Work row
+// and used to re-audit every worktree's managed hook surface on every build.
+// The surface audit is now reused across snapshots until the surface changes.
+mod surface_audit_cache {
+    use std::{fs, path::Path, time::Instant};
+
+    use gwt::cli::hook::health::{
+        ManagedHookFailureSnapshot, ManagedHookHealthInput, ManagedHookHealthStatus,
+    };
+
+    fn write_surface(worktree: &Path, hooks_json: &str) {
+        for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+            let path = worktree.join(artifact);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, hooks_json).unwrap();
+        }
+    }
+
+    fn projection_input(worktree: &Path) -> ManagedHookHealthInput {
+        let mut input = ManagedHookHealthInput::new(worktree);
+        input.expected_hook_bin = None;
+        input.runtime_state_path = None;
+        input
+    }
+
+    #[test]
+    fn unchanged_surface_is_reused_across_snapshots_without_a_fresh_audit() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let input = projection_input(worktree.path());
+
+        let first = ManagedHookFailureSnapshot::read();
+        let first_health = first.read_health(&input);
+        assert_eq!(first.surface_audit_stats().refreshed, 1);
+        assert_eq!(first.surface_audit_stats().reused, 0);
+
+        let second = ManagedHookFailureSnapshot::read();
+        let second_health = second.read_health(&input);
+        assert_eq!(
+            second.surface_audit_stats().refreshed,
+            0,
+            "unchanged surface re-audited"
+        );
+        assert_eq!(second.surface_audit_stats().reused, 1);
+        assert_eq!(second_health, first_health);
+        assert!(second_health
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed hook event missing: SessionStart")));
+    }
+
+    #[test]
+    fn removed_and_rewritten_hook_surfaces_refresh_on_the_next_snapshot() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let input = projection_input(worktree.path());
+        let warm = ManagedHookFailureSnapshot::read();
+        let warm_health = warm.read_health(&input);
+        assert_eq!(warm_health.status, ManagedHookHealthStatus::NeedsAttention);
+
+        // Hook removal: the Codex config disappears.
+        let codex_hooks = worktree.path().join(".codex/hooks.json");
+        fs::remove_file(&codex_hooks).unwrap();
+        let after_removal = ManagedHookFailureSnapshot::read();
+        let health = after_removal.read_health(&input);
+        assert_eq!(after_removal.surface_audit_stats().refreshed, 1);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("managed hook config missing")),
+            "{:?}",
+            health.issues
+        );
+
+        // Generated file update: the config comes back with different content.
+        fs::write(&codex_hooks, "{\"hooks\": 1").unwrap();
+        let after_rewrite = ManagedHookFailureSnapshot::read();
+        let health = after_rewrite.read_health(&input);
+        assert_eq!(after_rewrite.surface_audit_stats().refreshed, 1);
+        assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("managed hook config is not valid JSON")),
+            "{:?}",
+            health.issues
+        );
+
+        // Surface removal: no gwt surface at all reports Inactive again.
+        fs::remove_dir_all(worktree.path().join(".claude")).unwrap();
+        fs::remove_dir_all(worktree.path().join(".codex")).unwrap();
+        let after_teardown = ManagedHookFailureSnapshot::read();
+        let health = after_teardown.read_health(&input);
+        assert_eq!(after_teardown.surface_audit_stats().refreshed, 1);
+        assert_eq!(health.status, ManagedHookHealthStatus::Inactive);
+        assert!(health.issues.is_empty(), "{:?}", health.issues);
+    }
+
+    #[test]
+    fn expected_binary_change_invalidates_the_cached_audit() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let mut input = projection_input(worktree.path());
+        ManagedHookFailureSnapshot::read().read_health(&input);
+
+        input.expected_hook_bin = Some("/opt/gwt/other-gwtd".to_string());
+        let snapshot = ManagedHookFailureSnapshot::read();
+        snapshot.read_health(&input);
+        assert_eq!(snapshot.surface_audit_stats().refreshed, 1);
+    }
+
+    /// AC-2: with 592 Work rows the cached build must finish inside 5 seconds
+    /// and must not re-audit a single unchanged row.
+    #[test]
+    fn five_hundred_ninety_two_rows_reuse_every_unchanged_surface_within_budget() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = tempfile::tempdir().expect("worktrees");
+        let rows = 592;
+        let worktrees = (0..rows)
+            .map(|index| {
+                let worktree = root.path().join(format!("work-{index}"));
+                write_surface(&worktree, "{}");
+                worktree
+            })
+            .collect::<Vec<_>>();
+        let inputs = worktrees
+            .iter()
+            .map(|worktree| projection_input(worktree))
+            .collect::<Vec<_>>();
+
+        let cold = ManagedHookFailureSnapshot::read();
+        let cold_started = Instant::now();
+        for input in &inputs {
+            cold.read_health(input);
+        }
+        let cold_elapsed = cold_started.elapsed();
+        assert_eq!(cold.surface_audit_stats().refreshed, rows);
+
+        let warm = ManagedHookFailureSnapshot::read();
+        let warm_started = Instant::now();
+        for input in &inputs {
+            warm.read_health(input);
+        }
+        let warm_elapsed = warm_started.elapsed();
+        eprintln!(
+            "hook health surface audit: rows={rows} cold={}ms warm={}ms",
+            cold_elapsed.as_millis(),
+            warm_elapsed.as_millis()
+        );
+        assert_eq!(warm.surface_audit_stats().refreshed, 0);
+        assert_eq!(warm.surface_audit_stats().reused, rows);
+        assert!(
+            warm_elapsed.as_secs() < 5,
+            "warm build took {}ms",
+            warm_elapsed.as_millis()
+        );
+    }
+}
+
+/// Issue #4257: a bare fallback such as `gwtd` is resolved by walking the whole
+/// PATH (~11ms per lookup on a 59-entry Windows PATH), and the answer depends
+/// only on process-wide state. One projection shares one snapshot across every
+/// Work row, so it must resolve each distinct binary once per projection, not
+/// once per command per event per row.
+#[test]
+fn shared_snapshot_resolves_each_bare_hook_binary_once() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _no_hook_bin = ScopedEnvVar::remove("GWT_HOOK_BIN");
+    let command = |event: &str| {
+        format!(
+            "gwt_bin=\"${{GWT_BIN_PATH:-}}\"; if [ -z \"$gwt_bin\" ]; then gwt_bin='gwtd'; fi; \
+             if command -v \"$gwt_bin\" >/dev/null 2>&1; then \"$gwt_bin\" hook event {event}; \
+             else true; fi"
+        )
+    };
+    let mut hooks = serde_json::Map::new();
+    for event in [
+        "PreToolUse",
+        "PostToolUse",
+        "SessionStart",
+        "Stop",
+        "UserPromptSubmit",
+    ] {
+        hooks.insert(
+            event.to_string(),
+            json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": command(event) }] }]),
+        );
+    }
+    let bare_fallback_hooks = serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap();
+    let worktrees = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    for worktree in &worktrees {
+        fs::create_dir_all(worktree.path().join(".codex")).unwrap();
+        fs::write(
+            worktree.path().join(".codex/hooks.json"),
+            &bare_fallback_hooks,
+        )
+        .unwrap();
+    }
+
+    let snapshot = ManagedHookFailureSnapshot::default();
+    for worktree in &worktrees {
+        let mut input = ManagedHookHealthInput::new(worktree.path());
+        input.runtime_state_path = None;
+        let shared = snapshot.read_health(&input);
+        let fresh = ManagedHookFailureSnapshot::default().read_health(&input);
+        assert_eq!(shared, fresh);
+    }
+
+    assert_eq!(
+        snapshot.resolved_hook_binaries(),
+        1,
+        "10 bare `gwtd` commands across two worktrees must resolve once"
+    );
+}
+
+#[test]
+fn pm_runtime_hook_health_and_repair_follow_runtime_assets() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let _bin = stable_hook_bin_guard();
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&home.path().join("repo"));
+    fs::create_dir_all(worktree.join(".claude/skills/project")).unwrap();
+    gwt::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(&worktree).unwrap();
+    let runtime = gwt::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+    assert_eq!(
+        gwt::managed_assets::managed_codex_hook_paths(&worktree),
+        vec![runtime.join(".codex/hooks.json")],
+        "the Codex health reader must follow the PM materialization root"
+    );
+    let mut input = ManagedHookHealthInput::new(&worktree);
+    input.runtime_state_path = None;
+    let healthy = read_managed_hook_health(&input);
+    let false_missing = healthy
+        .issues
+        .iter()
+        .any(|issue| issue.contains("managed hook config missing"));
+    // Mutate only a runtime artifact: changing the project directory here
+    // would accidentally invalidate a cache that watches the wrong root.
+    let runtime_hooks = runtime.join(".claude/settings.local.json");
+    fs::write(&runtime_hooks, "{invalid-json").unwrap();
+    let damaged = read_managed_hook_health(&input);
+    let outcome = repair_managed_hook_configs(&worktree).unwrap();
+    let repaired_json =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(runtime_hooks).unwrap())
+            .is_ok();
+    assert_eq!(
+        (
+            false_missing,
+            damaged.issues.is_empty(),
+            outcome.repaired,
+            repaired_json
+        ),
+        (false, false, true, true),
+        "healthy={:?}; damaged={:?}",
+        healthy.issues,
+        damaged.issues
+    );
+    assert!(
+        !read_managed_hook_health(&input)
+            .issues
+            .iter()
+            .any(|issue| issue.contains("not valid JSON")),
+        "repair must also invalidate the cached runtime audit"
+    );
+    init_git_repo(&worktree);
+    run_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+    fs::create_dir_all(worktree.join(".husky")).unwrap();
+    fs::write(worktree.join(".husky/commit-msg"), "#!/bin/sh\nexit 0\n").unwrap();
+    gwt::managed_assets::regenerate_existing_managed_hook_configs(&worktree).unwrap();
+    assert!(
+        worktree.join(".husky/_/commit-msg").is_file(),
+        "startup self-heal must restore Git hooks in the canonical checkout"
+    );
+    assert!(!runtime.join(".husky").exists());
 }

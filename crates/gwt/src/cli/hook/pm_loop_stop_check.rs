@@ -19,10 +19,9 @@ use std::{io, path::Path};
 use super::HookOutput;
 use crate::pm_registry::{self, PmLoopState};
 
-// The floor between continuations and the subscribe timeout both come from
-// `PmSettings::loop_interval_secs` (FR-035, default 60s): one knob, because a
-// floor shorter than the wait would never fire and a longer one would skip
-// cycles.
+// The floor between continuations comes from `PmSettings::loop_interval_secs`
+// (FR-035, default 60s). Per-operation budgets are deliberately independent:
+// a scheduling cadence must never become foreground waiting time (FR-156).
 
 /// Consecutive continuations without user contact before the PM parks.
 /// At the default 60s `loop_interval_secs` this is ~12 minutes of unattended
@@ -169,7 +168,11 @@ fn handle_at(
     // escalations wait, or failures sit undigested, the park counter holds —
     // matching the Stop text's "repeated empty cycles" instead of retiring a
     // PM that plainly has supervision work.
-    let has_unconsumed_observations = monitor_prefs
+    // SPEC #4093 FR-008 (Issue #3879): those observations only hold the park
+    // while they change. A snapshot identical to the previous cycle's carries
+    // no new information, so the cycle is empty even with launches running,
+    // and the PM is told not to spend live GitHub reads on it.
+    let (has_unconsumed_observations, snapshot_fingerprint) = monitor_prefs
         .as_ref()
         .map(|prefs| {
             let monitor = crate::IssueMonitorState::with_prefs(
@@ -177,12 +180,16 @@ fn handle_at(
                 prefs.clone(),
             );
             let status = monitor.agent_status();
-            !status.active_launches.is_empty()
+            let unconsumed = !status.active_launches.is_empty()
                 || !status.needs_human.is_empty()
-                || status.inbox.iter().any(|row| row.error_message.is_some())
+                || status.inbox.iter().any(|row| row.error_message.is_some());
+            (unconsumed, Some(pm_cycle_snapshot_fingerprint(&status)))
         })
-        .unwrap_or(false);
+        .unwrap_or((false, None));
     let mut state = pm_registry::load_pm_loop_state(&state_path).unwrap_or_default();
+    let snapshot_unchanged =
+        snapshot_fingerprint.is_some() && snapshot_fingerprint == state.last_snapshot_fingerprint;
+    let has_unconsumed_observations = has_unconsumed_observations && !snapshot_unchanged;
     // A `stop_hook_active` chain the loop did not start belongs to another
     // Stop gate — riding it would stack this loop's directive on top of that
     // gate's forced continuation. The loop's own chain carries the marker set
@@ -229,7 +236,7 @@ fn handle_at(
     }
     let interval_secs = pm_registry::load_pm_prefs(&pm_prefs_path)
         .map(|prefs| prefs.settings.loop_interval_secs_clamped())
-        .unwrap_or(60);
+        .unwrap_or(pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS);
     if !has_unconsumed_observations && state.consecutive_continuations >= PM_LOOP_MAX_CONSECUTIVE {
         end_own_chain(&mut state);
         return HookOutput::Silent;
@@ -239,7 +246,7 @@ fn handle_at(
             chrono::DateTime::parse_from_rfc3339(now),
             chrono::DateTime::parse_from_rfc3339(last),
         ) {
-            if (now_t - last_t).num_seconds() < interval_secs as i64 {
+            if (now_t - last_t).num_seconds() < i64::try_from(interval_secs).unwrap_or(i64::MAX) {
                 end_own_chain(&mut state);
                 return HookOutput::Silent;
             }
@@ -263,22 +270,77 @@ fn handle_at(
     }
     state.last_continued_at = Some(now.to_string());
     state.pending_own_block = true;
+    state.last_snapshot_fingerprint = snapshot_fingerprint;
     let _ = pm_registry::save_pm_loop_state(&state_path, &state);
     let refresh_context = refresh_context
         .map(|context| format!(" Worktree status: {context}."))
         .unwrap_or_default();
+    let unchanged_clause = if snapshot_unchanged {
+        " The monitor snapshot is unchanged since the previous cycle: do not spend live GitHub \
+         reads on it (no `pr.list refresh:true`, no `issue.view refresh:true`); reuse the cached \
+         inventory, finish the Concern duties above, and end the cycle unless the stalled-item \
+         inventory names an action."
+    } else {
+        ""
+    };
     HookOutput::stop_block(format!(
-        "Resident PM loop: run one cycle before stopping. Try JSON operation `daemon.subscribe` \
-         on the `issue_monitor` channel with `params.timeout_seconds:{interval_secs}`; if the \
-         subscribe fails (e.g. no daemon endpoint), continue the same cycle in degraded polling \
-         mode instead of treating it as a failure (FR-109). Either way, reconcile a fresh \
-         `issue.monitor.status` snapshot: triage new issues, re-evaluate order, and check the \
-         running agents' `last_activity_at`. {clause} \
+        "Resident PM loop: run one cycle before stopping. {execution_clause} \
+         If a background task is unavailable or the subscribe fails (e.g. no daemon endpoint), \
+         skip it and continue the same cycle in degraded polling mode instead of treating it as a \
+         failure (FR-109). Either way, use the `issue.monitor.status` snapshot: triage new issues, \
+         re-evaluate order, and check the \
+         running agents' `last_activity_at`. Inventory open PRs with `pr.list` and act on each \
+         row's `lifecycle` and `default_action`; a row with `default_action_executable` false \
+         follows its `fallback` (triage → rerun a flake → fresh-launch a regression → escalate); \
+         stale (no update for `stale_after_hours`), SUPERSEDED, owner-Issue-closed, and \
+         `escalation_due` rows are digest escalations — never auto-close them. \
+         A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is \
+         never a no-change cycle: advance one or escalate with the reason. A READY_TO_PROMOTE \
+         row is advanced by running `pr.ready` on it, with no user confirmation. \
+         Run `concern.list`, execute the stored measurement for every `open` and `fix_landed` \
+         Concern, and submit its structured result and owner progress with `concern.measure`. \
+         Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, \
+         red or escalation-due PRs, and quiet agents; advance at least one item with a concrete \
+         action or user handoff. \
+         Treat that required advance or handoff as a reportable milestone or escalation under \
+         the shared conditional-reporting clause below. \
+         Re-report every unresolved wait in every cycle using the window title and required user \
+         action; if the window title is unavailable, identify the owning Issue and say `title \
+         unavailable`; do not promote a pane or window ID to the primary identity. For a decision \
+         include the question, your recommendation and rationale, and a copy-paste answer \
+         example. Only an empty stalled-item inventory may end silently. \
+         {steering_clause} {clause} \
          If the snapshot shows nothing actionable, stop again — the loop parks on its own \
-         after repeated empty cycles (cycles with running launches, escalations, or undigested \
-         failures do not count as empty).{refresh_context}",
+         after repeated empty cycles (a cycle whose monitor snapshot changed — new launches, \
+         escalations, or undigested failures — does not count as empty; an unchanged snapshot \
+         counts as empty even while launches run).{unchanged_clause}{refresh_context}",
+        steering_clause = pm_registry::PM_STEERING_CLAUSE,
+        execution_clause = pm_registry::PM_GWTD_EXECUTION_CLAUSE,
         clause = pm_registry::PM_CYCLE_REPORTING_CLAUSE,
     ))
+}
+
+/// SPEC #4093 FR-008 (Issue #3879): what a PM cycle can act on, reduced to a
+/// fingerprint. Two cycles with the same fingerprint saw the same launches,
+/// escalations, holds, queue, and inbox states, so the second learned nothing.
+fn pm_cycle_snapshot_fingerprint(status: &crate::IssueMonitorAgentStatus) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!("queue={}", status.queue.len()));
+    lines.push(format!("active={:?}", status.active_launches));
+    lines.push(format!("needs_human={:?}", status.needs_human));
+    for hold in &status.provider_quota_holds {
+        lines.push(format!("hold={}@{}", hold.provider, hold.reset_at));
+    }
+    for row in &status.inbox {
+        lines.push(format!(
+            "inbox={}:{:?}:{}:{}",
+            row.issue_number,
+            row.state,
+            row.error_message.is_some(),
+            row.launched_window_id.as_deref().unwrap_or("")
+        ));
+    }
+    pm_registry::pm_delivery_prompt_sha256(&lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -366,6 +428,8 @@ mod tests {
         run_git(&repo, &["add", "tracked.txt"]);
         run_git(&repo, &["commit", "-m", "A"]);
         run_git(&repo, &["push", "-u", "origin", "develop"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "--auto"]);
 
         let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(&repo);
         std::fs::create_dir_all(worktree.parent().expect("PM parent")).expect("PM parent");
@@ -551,6 +615,31 @@ mod tests {
         };
         assert!(reason.contains("daemon.subscribe"));
         assert!(reason.contains("issue.monitor.status"));
+        assert_eq!(
+            reason.matches("`daemon.subscribe`").count(),
+            1,
+            "the shared clause must be the single subscribe command authority; got: {reason}"
+        );
+        let subscribe_timeout_secs = reason
+            .split_once("`params.timeout_seconds:")
+            .and_then(|(_, tail)| tail.split_once('`').map(|(value, _)| value))
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("the shared subscribe command must carry a numeric timeout");
+        assert!(
+            subscribe_timeout_secs <= 5,
+            "one resident subscribe may block for at most five seconds; got: {reason}"
+        );
+        assert!(
+            reason.contains("`params.timeout_seconds:5`"),
+            "the default 60-second loop cadence must not become the subscribe budget; got: {reason}"
+        );
+        assert!(
+            !reason.contains("`params.timeout_seconds:60`"),
+            "the loop cadence leaked into the per-operation timeout; got: {reason}"
+        );
+        assert!(reason.contains("background task"));
+        assert!(reason.contains("do not wait for it"));
+        assert!(reason.contains("immediately reconcile a fresh `issue.monitor.status` snapshot"));
     }
 
     /// Issue #3632 AC-1/AC-6: the forced continuation is the highest-frequency
@@ -586,6 +675,73 @@ mod tests {
             reason.contains("issue.monitor.status"),
             "FR-3: the cycle itself is still driven in full; got: {reason}"
         );
+        assert!(
+            reason.contains(pm_registry::PM_GWTD_EXECUTION_CLAUSE),
+            "the forced continuation must carry the canonical gwtd execution-isolation clause verbatim; got: {reason}"
+        );
+        assert!(
+            reason.contains("`pr.list`"),
+            "Issue #3781: the continuation must inventory open PRs; got: {reason}"
+        );
+        assert!(
+            reason.contains("never auto-close"),
+            "Issue #3781: close proposals stay in the digest; got: {reason}"
+        );
+    }
+
+    /// Issue #3791 / SPEC-3431 FR-151/154: a forced cycle is a driver,
+    /// not a passive snapshot. The compact reminder keeps the full policy in
+    /// gwt-pm while making recurring waits and one concrete advance impossible
+    /// to omit from the highest-frequency injected prompt.
+    #[test]
+    fn forced_continuation_inventories_and_advances_stalled_work() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+
+        let output = handle_at(
+            &worktree,
+            "2026-09-01T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected the loop to continue, got {output:?}");
+        };
+        for phrase in [
+            "Build a stalled-item inventory covering `needs_human`, decision waits, ownerless PRs, red or escalation-due PRs, and quiet agents",
+            "advance at least one item",
+            // Issue #3868 AC-2 / AC-3: the fallback order and the red-PR
+            // exception to the silent cycle are in the Stop hook itself.
+            "a row with `default_action_executable` false follows its `fallback`",
+            "A cycle with any CI-RED, CONFLICTED, READY_TO_PROMOTE, or `escalation_due` open PR is",
+            "Treat that required advance or handoff as a reportable milestone or escalation",
+            "Re-report every unresolved wait in every cycle using the window title and required user action",
+            "identify the owning Issue and say `title unavailable`",
+            "do not promote a pane or window ID to the primary identity",
+            "the question, your recommendation and rationale, and a copy-paste answer example",
+            "Only an empty stalled-item inventory may end silently",
+            // Issue #3767 AC-2 / AC-3: the running launches are steered
+            // through the ruling channels before the no-change judgment.
+            "Steer every running launch before you judge the cycle unchanged",
+            "more than twice the monitor scan interval",
+            "drifting outside its owner Issue's scope",
+            "waiting for its next action",
+            "`board.post` with a mention or `pm.message.send`",
+            "never inject launch or bootstrap instructions past the Issue Monitor",
+            "A launch left idle without a directive is never a no-change cycle",
+        ] {
+            assert!(
+                reason.contains(phrase),
+                "forced continuation is missing `{phrase}`; got: {reason}"
+            );
+        }
+        assert!(reason.contains(pm_registry::PM_CYCLE_REPORTING_CLAUSE));
+        assert!(reason.contains(pm_registry::PM_GWTD_EXECUTION_CLAUSE));
+        assert!(
+            reason.contains(pm_registry::PM_STEERING_CLAUSE),
+            "Issue #3767: the continuation must carry the shared steering clause verbatim; got: {reason}"
+        );
     }
 
     #[test]
@@ -602,15 +758,17 @@ mod tests {
         );
         assert_ne!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
 
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
         handle_user_prompt_submit(&worktree).expect("pre-turn refresh");
 
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
         assert!(
-            worktree.join(".codex/skills/gwt-pm/SKILL.md").exists(),
+            runtime.join(".codex/skills/gwt-pm/SKILL.md").exists(),
             "pre-turn refresh must materialize Codex PM guidance before the model runs"
         );
         assert!(
-            worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
+            runtime.join(".claude/skills/gwt-pm/SKILL.md").exists(),
             "pre-turn refresh must materialize Claude PM guidance before the model runs"
         );
     }
@@ -627,8 +785,10 @@ mod tests {
         )
         .expect("make origin unavailable without changing project identity");
         let old_head = run_git(&worktree, &["rev-parse", "HEAD"]);
-        let codex_guidance = worktree.join(".codex/skills/gwt-pm/SKILL.md");
-        let claude_guidance = worktree.join(".claude/skills/gwt-pm/SKILL.md");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        let codex_guidance = runtime.join(".codex/skills/gwt-pm/SKILL.md");
+        let claude_guidance = runtime.join(".claude/skills/gwt-pm/SKILL.md");
         let _ = std::fs::remove_file(&codex_guidance);
         let _ = std::fs::remove_file(&claude_guidance);
 
@@ -651,7 +811,9 @@ mod tests {
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
         let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
-        let codex_root = worktree.join(".codex");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        let codex_root = runtime.join(".codex");
         std::fs::create_dir_all(&codex_root).expect("create Codex root");
         std::fs::write(codex_root.join("skills"), b"blocking non-directory node\n")
             .expect("create deterministic managed-asset collision");
@@ -665,6 +827,7 @@ mod tests {
         .expect("write legacy memory");
         let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
         let prior_tree = snapshot_worktree(&worktree);
+        let prior_runtime = snapshot_worktree(&runtime);
 
         handle_user_prompt_submit(&worktree)
             .expect_err("a pre-turn phase must fail closed when assets are incomplete");
@@ -678,6 +841,12 @@ mod tests {
             snapshot_worktree(&worktree),
             prior_tree,
             "managed-asset failure must restore every worktree node, not leave partial materialization"
+        );
+
+        assert_eq!(
+            snapshot_worktree(&runtime),
+            prior_runtime,
+            "failed generation must restore the runtime"
         );
 
         let project_state = worktree
@@ -713,9 +882,11 @@ mod tests {
         let (_env_lock, _fixture_home, repo, worktree, _target) = pm_refresh_fixture();
         handle_user_prompt_submit(&worktree)
             .expect("initial refresh materializes generated hook configs");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
         for generated in [".claude/settings.local.json", ".codex/hooks.json"] {
             assert!(
-                worktree.join(generated).is_file(),
+                runtime.join(generated).is_file(),
                 "fixture requires prior generated config {generated}"
             );
         }
@@ -732,8 +903,18 @@ mod tests {
                 worktree.join(path)
             }
         };
-        std::fs::write(&exclude, b"# gwt-managed-begin\n")
-            .expect("seed malformed managed exclude block");
+        // Opt-in policy is read after runtime assets have been regenerated.
+        // A missing source therefore exercises the late rollback boundary.
+        crate::pm_registry::mutate_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            |prefs| prefs.settings.project_policy_files = vec!["missing-policy.md".into()],
+        )
+        .expect("opt into a missing policy file");
+        std::fs::write(
+            runtime.join(".codex/skills/gwt-pm/SKILL.md"),
+            b"prior runtime guidance\n",
+        )
+        .expect("seed distinguishable prior runtime guidance");
         let legacy_memory = worktree.join("tasks/memory.md");
         std::fs::create_dir_all(legacy_memory.parent().expect("legacy memory parent"))
             .expect("create legacy memory parent");
@@ -741,13 +922,23 @@ mod tests {
             .expect("write legacy memory");
         let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
         let prior_tree = snapshot_worktree(&worktree);
-        let prior_exclude = std::fs::read(&exclude).expect("snapshot malformed exclude");
+        let prior_exclude = std::fs::read(&exclude).expect("snapshot Git exclude");
+        let prior_runtime = snapshot_worktree(&runtime);
 
-        handle_user_prompt_submit(&worktree)
-            .expect_err("late Git-exclude failure must fail the pre-turn refresh");
+        let error = handle_user_prompt_submit(&worktree)
+            .expect_err("missing opted-in policy must fail after runtime regeneration");
+        assert!(
+            error.to_string().contains("read opted-in PM policy"),
+            "{error}"
+        );
 
         assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
         assert_eq!(snapshot_worktree(&worktree), prior_tree);
+        assert_eq!(
+            snapshot_worktree(&runtime),
+            prior_runtime,
+            "late failure must restore prior runtime asset bytes"
+        );
         assert_eq!(
             std::fs::read(&exclude).expect("read restored exclude"),
             prior_exclude,
@@ -757,24 +948,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn managed_asset_refresh_rejects_indirect_roots_without_touching_external_content() {
+    fn managed_asset_refresh_preserves_project_indirect_roots_without_touching_external_content() {
         use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().expect("gwt home");
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
-        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let (_env_lock, _fixture_home, _repo, worktree, target) = pm_refresh_fixture();
         let external = home.path().join("external-claude");
         std::fs::create_dir_all(&external).expect("external Claude root");
         std::fs::write(external.join("sentinel.txt"), b"external content\n")
             .expect("external sentinel");
         symlink(&external, worktree.join(".claude")).expect("indirect managed root");
-        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
 
+        let prior_link = std::fs::read_link(worktree.join(".claude")).expect("source link target");
         handle_user_prompt_submit(&worktree)
-            .expect_err("indirect managed roots must fail before materialization");
+            .expect("project-owned root symlink must not block isolated runtime generation");
 
-        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        assert!(runtime.join(".claude/skills/gwt-pm/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_link(worktree.join(".claude")).unwrap(),
+            prior_link
+        );
         assert!(std::fs::symlink_metadata(worktree.join(".claude"))
             .expect("managed-root symlink metadata")
             .file_type()
@@ -794,14 +992,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn managed_asset_refresh_rejects_indirect_nested_skill_roots_without_touching_external_content()
-    {
+    fn managed_asset_refresh_preserves_project_indirect_nested_skill_roots_without_touching_external_content(
+    ) {
         use std::os::unix::fs::symlink;
 
         let home = tempfile::tempdir().expect("gwt home");
         let canonical_home = std::fs::canonicalize(home.path()).expect("canonical gwt home");
         let _home_guard = ScopedGwtHome::set(&canonical_home);
-        let (_env_lock, _fixture_home, _repo, worktree, _target) = pm_refresh_fixture();
+        let (_env_lock, _fixture_home, _repo, worktree, target) = pm_refresh_fixture();
         let external = home.path().join("external-skills");
         let external_skill = external.join("gwt-stale");
         std::fs::create_dir_all(&external_skill).expect("external skills root");
@@ -811,20 +1009,28 @@ mod tests {
             .expect("external stale skill");
         std::fs::create_dir_all(worktree.join(".claude")).expect("Claude root");
         symlink(&external, worktree.join(".claude/skills")).expect("indirect nested managed root");
-        let prior_head = run_git(&worktree, &["rev-parse", "HEAD"]);
         let prior_external = snapshot_worktree(&external);
 
+        let prior_link =
+            std::fs::read_link(worktree.join(".claude/skills")).expect("source link target");
         handle_user_prompt_submit(&worktree)
-            .expect_err("indirect nested skill roots must fail before materialization");
+            .expect("project-owned skills symlink must not block isolated runtime generation");
 
-        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), prior_head);
+        assert_eq!(run_git(&worktree, &["rev-parse", "HEAD"]), target);
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        assert!(runtime.join(".claude/skills/gwt-pm/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_link(worktree.join(".claude/skills")).unwrap(),
+            prior_link
+        );
         assert_eq!(snapshot_worktree(&external), prior_external);
         assert!(
             std::fs::symlink_metadata(worktree.join(".claude/skills"))
                 .expect("nested managed-root symlink metadata")
                 .file_type()
                 .is_symlink(),
-            "the rejected nested symlink must remain byte-for-byte owned by the prior checkout"
+            "the project-owned symlink must remain intact outside runtime generation"
         );
     }
 
@@ -842,7 +1048,9 @@ mod tests {
         let _hermes_guard = ScopedEnvVar::set("HERMES_HOME", &hermes_source);
 
         handle_user_prompt_submit(&worktree).expect("initial managed asset refresh");
-        let managed_env = worktree.join(".gwt/hermes/.env");
+        let runtime =
+            crate::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).expect("PM runtime");
+        let managed_env = runtime.join(".gwt/hermes/.env");
         assert!(
             std::fs::symlink_metadata(&managed_env)
                 .expect("managed Hermes credential metadata")
@@ -924,7 +1132,8 @@ mod tests {
         )
         .expect("prepare receipt");
         let input = serde_json::json!({
-            "prompt": format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]")
+            "prompt": pm_registry::protected_pm_delivery_prompt(operation_id, body)
+                .expect("protected PM prompt")
         })
         .to_string();
 
@@ -1031,6 +1240,66 @@ mod tests {
             ),
             HookOutput::StopBlock { .. }
         ));
+    }
+
+    /// Issue #3825 AC-1 / AC-4: `loop_interval_secs` is the Stop-gate floor and
+    /// nothing else. The cycle it opens must never carry that cadence as a
+    /// subscribe budget, so the floor is observed through the floor itself.
+    #[test]
+    fn next_stop_cycle_reloads_the_updated_loop_interval() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+
+        let first = handle_at(
+            &worktree,
+            "2026-08-08T00:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+        let HookOutput::StopBlock { reason } = first else {
+            panic!("expected initial cycle, got {first:?}");
+        };
+        assert!(
+            !reason.contains("timeout_seconds:60"),
+            "the 60-second cadence must never become the subscribe budget; got: {reason}"
+        );
+        assert!(reason.contains("`params.timeout_seconds:5`"));
+
+        // The default 60s floor is in force: ten seconds later is still too
+        // soon for the next cycle.
+        assert_eq!(
+            handle_at(
+                &worktree,
+                "2026-08-08T00:00:10Z",
+                true,
+                Some(FIXTURE_PM_SESSION)
+            ),
+            HookOutput::Silent,
+            "the unmodified 60-second floor must park a cycle ten seconds in"
+        );
+
+        let prefs_path = pm_registry::pm_loop_state_path_for_pm_worktree(&worktree)
+            .expect("loop state path")
+            .parent()
+            .expect("project state")
+            .join("pm.json");
+        pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.settings.loop_interval_secs = 10;
+        })
+        .expect("update loop interval");
+
+        // Twenty seconds in, only the reloaded 10-second floor can open a
+        // cycle — the 60-second one would still park.
+        let next = handle_at(
+            &worktree,
+            "2026-08-08T00:00:20Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+        let HookOutput::StopBlock { reason } = next else {
+            panic!("updated interval must apply to the next Stop cycle, got {next:?}");
+        };
+        assert!(reason.contains("`params.timeout_seconds:5`"));
     }
 
     /// Monitor off = parked project; and no other worktree is ever driven.
@@ -1173,12 +1442,24 @@ mod tests {
         assert_eq!(state.last_continued_at, None);
     }
 
+    fn fixture_issue(number: u64) -> crate::IssueMonitorIssue {
+        crate::IssueMonitorIssue {
+            number,
+            title: format!("Issue {number}"),
+            labels: vec!["auto-merge".to_string()],
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        }
+    }
+
     /// FR-110 (T-204): unconsumed observations hold the park — while the
-    /// durable monitor state still shows work a supervisor must look at
-    /// (running launches, failures, needs-human), empty-cycle counting must
-    /// not retire the PM.
+    /// durable monitor state keeps changing (a running launch plus a queue
+    /// that grows every cycle), empty-cycle counting must not retire the PM.
     #[test]
-    fn park_counting_holds_while_unconsumed_observations_remain() {
+    fn park_counting_holds_while_unconsumed_observations_keep_changing() {
         let (_env_lock, home, _repo, worktree) = pm_fixture();
         let _guard = set_fixture_gwt_home(&home);
         let state_path =
@@ -1195,39 +1476,126 @@ mod tests {
         );
         crate::scan_issue_monitor_candidates(
             &mut monitor,
-            &[crate::IssueMonitorIssue {
-                number: 42,
-                title: "Issue 42".to_string(),
-                labels: vec!["auto-merge".to_string()],
-                state: crate::IssueMonitorIssueState::Open,
-                body: None,
-                url: None,
-                readiness: crate::IssueMonitorReadiness::NotApplicable,
-                updated_at: None,
-            }],
+            &[fixture_issue(42)],
             "2026-08-10T00:00:00Z",
         );
         monitor.complete_active_launch(42, "tab-1::agent-1");
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
 
-        // Far past the cap: with a live launch the loop must keep driving.
+        // Far past the cap: with a live launch and a snapshot that changes
+        // every cycle (a new queued Issue), the loop must keep driving.
         let mut minute = 0;
-        for _ in 0..20 {
+        for cycle in 0..20u64 {
             let now = format!("2026-08-10T01:{minute:02}:00Z");
+            // A new escalation arrives every cycle, so the snapshot the PM
+            // looks at is never the one it saw last time.
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
+            );
+            monitor.escalate_to_needs_human(
+                100 + cycle,
+                crate::NeedsHumanKind::UserChoiceRequired,
+                "a decision only the user can make",
+            );
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
             assert!(
                 matches!(
                     handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
                     HookOutput::StopBlock { .. }
                 ),
-                "a supervising PM must not park while a launch is live (cycle at {now})"
+                "a supervising PM must not park while the snapshot keeps changing (cycle at {now})"
             );
             minute += 2;
         }
         let state = pm_registry::load_pm_loop_state(&state_path).expect("state");
         assert_eq!(
             state.consecutive_continuations, 0,
-            "cycles with unconsumed observations are not empty cycles"
+            "cycles with changing unconsumed observations are not empty cycles"
         );
+    }
+
+    /// SPEC #4093 AC-12 (Issue #3879): a running launch whose snapshot never
+    /// changes is not supervision work. Each identical cycle counts as empty,
+    /// the directive tells the PM to skip live GitHub reads, and the cap parks
+    /// the loop instead of burning quota on the same snapshot forever.
+    #[test]
+    fn unchanged_snapshot_counts_as_empty_even_while_a_launch_runs() {
+        let (_env_lock, home, _repo, worktree) = pm_fixture();
+        let _guard = set_fixture_gwt_home(&home);
+        let state_path =
+            pm_registry::pm_loop_state_path_for_pm_worktree(&worktree).expect("pm loop state path");
+        let prefs_path = state_path
+            .parent()
+            .expect("project state dir")
+            .join("issue-monitor.json");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
+        );
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[fixture_issue(42)],
+            "2026-08-10T00:00:00Z",
+        );
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
+
+        let first = handle_at(
+            &worktree,
+            "2026-08-10T01:00:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+        assert!(
+            matches!(first, HookOutput::StopBlock { .. }),
+            "the first look at a snapshot is a cycle"
+        );
+        let second = handle_at(
+            &worktree,
+            "2026-08-10T01:02:00Z",
+            false,
+            Some(FIXTURE_PM_SESSION),
+        );
+        match &second {
+            HookOutput::StopBlock { reason, .. } => {
+                assert!(
+                    reason.contains("snapshot is unchanged since the previous cycle"),
+                    "the PM is told to skip live GitHub reads: {reason}"
+                );
+                let concern_duty = reason
+                    .find("concern.list")
+                    .expect("an unchanged Monitor snapshot still requires Concern supervision");
+                let early_end = reason
+                    .find("end the cycle unless")
+                    .expect("fixture must exercise the unchanged-snapshot early-end clause");
+                assert!(
+                    concern_duty < early_end,
+                    "Concern duties must run before the unchanged-snapshot early end: {reason}"
+                );
+            }
+            other => panic!("second identical cycle still continues once: {other:?}"),
+        }
+        let state = pm_registry::load_pm_loop_state(&state_path).expect("state");
+        assert_eq!(
+            state.consecutive_continuations, 1,
+            "the identical cycle spent one unit of the park budget"
+        );
+
+        let mut minute = 4;
+        let mut parked = false;
+        for _ in 0..PM_LOOP_MAX_CONSECUTIVE + 2 {
+            let now = format!("2026-08-10T01:{minute:02}:00Z");
+            if matches!(
+                handle_at(&worktree, &now, false, Some(FIXTURE_PM_SESSION)),
+                HookOutput::Silent
+            ) {
+                parked = true;
+                break;
+            }
+            minute += 2;
+        }
+        assert!(parked, "identical cycles reach the cap and park the loop");
     }
 
     /// FR-110 (T-204): with nothing unconsumed the cap still parks the PM —
