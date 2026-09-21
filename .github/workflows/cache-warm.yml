@@ -157,9 +157,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-workspace
-      # check-macos is the only macOS PR job, and it only checks. Building more
-      # than it consumes would pay a 10x-billed runner for artifacts nothing
-      # restores.
+      # Issue #4522 added `Clippy (macOS)`, which runs the ubuntu clippy gate
+      # verbatim (`--workspace --all-targets --all-features`), so the macOS PR
+      # surface is now the whole workspace including test targets — the same
+      # shape as Linux, and `cargo check -p gwt-core -p gwt` no longer reaches
+      # most of what it restores. rust-cache prunes the workspace crates' own
+      # artifacts before saving, so this warms dependency builds only, and
+      # `--no-run` reaches every one of them without executing the suite.
       - name: Build the macOS dependency graph
-        run: cargo check -p gwt-core -p gwt
-        timeout-minutes: 35
+        run: cargo test --workspace --all-features --no-run
+        timeout-minutes: 45

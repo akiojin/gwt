@@ -54,6 +54,7 @@ pub mod recovery_delivery;
 pub mod runtime_daemon_events;
 pub mod session_inventory;
 pub mod spec_tasks;
+pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;

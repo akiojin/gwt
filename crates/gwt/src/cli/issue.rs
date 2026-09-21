@@ -481,6 +481,14 @@ fn attach_memory_pressure(status: &mut crate::IssueMonitorAgentStatus) {
     status.memory_pressure = Some(crate::memory_pressure::probe());
 }
 
+/// Issue #4386 AC-1: the CPU Spotlight's indexing daemon is spending on this
+/// host. It indexes the `target/` directory of every worktree, so on a host
+/// with hundreds of them it outranks the agents themselves — a cost that
+/// otherwise only reads as "the host is slow".
+fn attach_spotlight(status: &mut crate::IssueMonitorAgentStatus) {
+    status.spotlight = Some(crate::spotlight::probe());
+}
+
 /// Issue #4087 AC-1: the Issue cache full-refresh cadence, read from the
 /// cache on disk at status time so a stopped refresh is visible next to
 /// `scan_stall` in the one snapshot the PM already reads.
@@ -625,6 +633,7 @@ fn run_monitor_status<E: CliEnv>(
     attach_disk_space(&project_root, &mut status);
     attach_build_artifact_gc(&project_root, &mut status);
     attach_memory_pressure(&mut status);
+    attach_spotlight(&mut status);
     attach_issue_cache_status(&project_root, &mut status);
     // Keep the existing owner slots and add physical observations without
     // changing the meaning of active_launches or feeding admission.
@@ -6296,6 +6305,50 @@ mod tests {
         );
     }
 
+    /// Issue #4386 AC-1/AC-3: Spotlight's indexing CPU is observable from the
+    /// status the PM already reads, with the threshold that raises the
+    /// saturation warning, and the block is present without a warning on
+    /// hosts that have no Spotlight at all.
+    #[test]
+    fn issue_monitor_status_reports_spotlight_indexing_cpu() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        run(
+            &mut env,
+            IssueCommand::MonitorStatus { project_root: None },
+            &mut out,
+        )
+        .expect("status");
+
+        let status: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("status json: {out}");
+        let spotlight = &status["spotlight"];
+        assert!(
+            spotlight["processes"].is_array(),
+            "status must carry the observed Spotlight processes: {out}"
+        );
+        assert_eq!(
+            spotlight["warn_above_percent"],
+            serde_json::json!(crate::spotlight::WARN_ABOVE_PERCENT),
+            "{out}"
+        );
+        if !cfg!(target_os = "macos") {
+            assert!(
+                spotlight["processes"].as_array().is_some_and(Vec::is_empty),
+                "hosts without Spotlight report no processes: {out}"
+            );
+            assert!(
+                spotlight.get("warning").is_none(),
+                "hosts without Spotlight report no warning: {out}"
+            );
+        }
+    }
+
     /// Issue #4009 AC-4: free space is observable from the status the PM
     /// already reads, with the thresholds that would raise a warning.
     #[test]
@@ -6397,6 +6450,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            spotlight: None,
             build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
@@ -6469,6 +6523,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            spotlight: None,
             build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
@@ -6592,6 +6647,7 @@ mod tests {
                 generation_reclaim: None,
                 disk_space: None,
                 memory_pressure: None,
+                spotlight: None,
                 build_artifact_gc: None,
                 issue_cache: None,
                 review_windows: Vec::new(),
@@ -6660,6 +6716,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            spotlight: None,
             build_artifact_gc: None,
             issue_cache: None,
             review_windows: Vec::new(),
@@ -6781,12 +6838,14 @@ mod tests {
         // compared without it. Issue #4087 AC-1: the same goes for the Issue
         // cache refresh block, read from the cache on disk, and Issue #4009
         // AC-4 for the host free-space block, measured at call time, and
-        // Issue #4234 AC-5 for the gwt process memory block.
+        // Issue #4234 AC-5 for the gwt process memory block, and Issue #4386
+        // AC-1 for the Spotlight indexing block.
         for attached in [
             "github_budget",
             "issue_cache",
             "disk_space",
             "memory_pressure",
+            "spotlight",
         ] {
             assert!(
                 status
@@ -8904,6 +8963,7 @@ mod tests {
             generation_reclaim: None,
             disk_space: None,
             memory_pressure: None,
+            spotlight: None,
             build_artifact_gc: None,
             review_windows: Vec::new(),
             failure_surge: None,
