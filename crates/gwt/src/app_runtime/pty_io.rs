@@ -1185,6 +1185,15 @@ impl AppRuntime {
             }
 
             if let Some(runtime) = runtime.as_mut() {
+                // Issue #4014: the reader thread stays in `read` until the PTY
+                // signals EOF. On Windows the ConPTY output pipe only does so
+                // once the pseudoconsole is closed, and the reader itself pins
+                // the pane - and with it the master - alive, so joining first
+                // would never return. The child was killed and reaped above, so
+                // releasing the descriptors here (Issue #4142 already drops the
+                // master and writer together) closes the pseudoconsole and lets
+                // the join below complete.
+                runtime.pty.release_descriptors();
                 if let Some(handle) = runtime.output_thread.take() {
                     finalizer_ok &= handle.join().is_ok();
                 }
