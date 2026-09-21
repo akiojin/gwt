@@ -1067,7 +1067,7 @@ pub(super) fn run<E: CliEnv>(
                         && work_item_shares_agent_container(item, &agent)
                     {
                         return Err(GwtError::Other(format!(
-                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.work_prune with params.ids=[\"{workspace_id}\"] to detach the stale container ref (dry-run by default; pass params.dry_run=false to apply) (Issue #3684, #4465)"
+                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.work_prune with params.ids=[\"{workspace_id}\"] to detach the stale container ref (dry-run by default; pass params.dry_run=false to apply)"
                         )));
                     }
                 }
@@ -2490,9 +2490,12 @@ fn validate_workspace_ensure_recovery_state(
         // AC-5 / AC-6' / AC-9: name the Works to repair, the operation that
         // repairs them, and a route that exists. The previous text named
         // `workspace.prune`, which has never been an operation — #4396 and
-        // #4465 both burned agents on that dead end.
+        // #4465 both burned agents on that dead end. Issue #3684 and #4465 are
+        // this refusal's provenance; they stay here rather than in the message,
+        // because #3684 closed on 2026-08-27 and a closed Issue is one more
+        // dead end for whoever reads the refusal (#4396).
         return Err(GwtError::Other(format!(
-            "canonical execution container for Session {} is ambiguous across Works: {}; these hold a container ref owned by canonical Work {}. Detach the stale refs with workspace.work_prune params.ids=[{}] (dry-run by default; pass params.dry_run=false to apply), then retry workspace.ensure. To inspect first, run workspace.candidates; to attach explicitly without repairing, run workspace.join params.workspace_id=\"{}\" (Issue #3684, #4465)",
+            "canonical execution container for Session {} is ambiguous across Works: {}; these hold a container ref owned by canonical Work {}. Detach the stale refs with workspace.work_prune params.ids=[{}] (dry-run by default; pass params.dry_run=false to apply), then retry workspace.ensure. work_prune reports the repair as detached=N; closed_candidates and skipped count a different pass and do not mean the detach failed. To inspect first, run workspace.candidates; to attach explicitly without repairing, run workspace.join params.workspace_id=\"{}\"",
             input.agent_session,
             conflicting_work_ids.join(", "),
             canonical_id,
@@ -11050,6 +11053,15 @@ pub(crate) mod tests {
                 "refusal must name {operation}: {message}"
             );
         }
+        // Issue #4396: a tracking number is not a recovery route. This text
+        // cited `(Issue #3684, #4465)`; #3684 closed on 2026-08-27, so an
+        // agent that followed the only pointer it was given reached a closed
+        // Issue and stopped. Provenance belongs in the code comment above,
+        // which no agent has to act on.
+        assert!(
+            !message.contains("Issue #"),
+            "the refusal must not send an agent to a tracking Issue that can close: {message}"
+        );
     }
 
     /// Issue #4465 AC-3': the accretion shape must be a prune candidate. The

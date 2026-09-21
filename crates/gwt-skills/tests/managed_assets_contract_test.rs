@@ -899,6 +899,16 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
         );
+        // Issue #4396: the guidance told agents to disable auto-merge without
+        // naming a way to do it, and the `pr.merge` it named did not exist. An
+        // agent that followed the text stopped and escalated to a PM who had no
+        // such operation either. Name the hold route, not just the requirement.
+        assert!(
+            content.contains("gwtd has no merge operation")
+                && content.contains("An explicit owner-requested hold uses `pr.draft`")
+                && content.contains("Resume with `pr.ready`"),
+            "generated guidance must name `pr.draft` as the route that holds a merge"
+        );
         assert!(
             content.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
                 && content.contains("immutable event shard"),
