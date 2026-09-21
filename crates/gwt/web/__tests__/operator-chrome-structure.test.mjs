@@ -2219,18 +2219,32 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
   const projectOverlay = zIndexToken("--z-project-overlay");
   const overlay = zIndexToken("--z-overlay");
   const modal = zIndexToken("--z-modal");
+  const systemDegradation = zIndexToken("--z-system-degradation");
+  const systemConnection = zIndexToken("--z-system-connection");
+  const systemNotice = zIndexToken("--z-system-notice");
+  const systemContextMenu = zIndexToken("--z-system-context-menu");
+  const systemPopover = zIndexToken("--z-system-popover");
+  const systemWindow = zIndexToken("--z-system-window");
+  const systemModal = zIndexToken("--z-system-modal");
   assert.ok(
     projectOverlay < popover,
     "project popovers must stay above blocking project overlays",
   );
   assert.ok(
     popover < overlay,
-    "the command palette must preserve aria-modal ownership above popovers",
+    "blocking overlays must paint above non-modal popovers",
   );
   assert.ok(
     overlay < modal,
     "shared dialogs must stay above command palette overlays",
   );
+  assert.ok(modal < systemDegradation);
+  assert.ok(systemDegradation < systemConnection);
+  assert.ok(systemConnection < systemNotice);
+  assert.ok(systemNotice < systemContextMenu);
+  assert.ok(systemContextMenu < systemPopover);
+  assert.ok(systemPopover < systemWindow);
+  assert.ok(systemWindow < systemModal);
 
   const tokenizedRules = [
     {
@@ -2253,6 +2267,71 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
       rule: componentsStyle.match(/\.op-palette-backdrop\s*\{[^}]*\}/)?.[0],
       token: "--z-overlay",
     },
+    {
+      name: "operator drawer backdrop",
+      rule: componentsStyle.match(/\.op-drawer-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-overlay",
+    },
+    {
+      name: "operator drawer",
+      rule: componentsStyle.match(/\.op-drawer\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "hotkey dialog overlay",
+      rule: componentsStyle.match(/\.op-hotkey-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "runtime health popover",
+      rule: componentsStyle.match(/\.op-runtime-health-detail\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage popover",
+      rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage modal overlay",
+      rule: componentsStyle.match(/\.op-usage-modal-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "render degradation banner",
+      rule: componentsStyle.match(/\.render-degradation-banner\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-degradation",
+    },
+    {
+      name: "connection overlay",
+      rule: componentsStyle.match(/\.connection-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-connection",
+    },
+    {
+      name: "operator notice stack",
+      rule: inlineStyle.match(/\.operator-notice-stack\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-notice",
+    },
+    {
+      name: "terminal context menu",
+      rule: componentsStyle.match(/\.terminal-context-menu\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-context-menu",
+    },
+    {
+      name: "Board destination popover",
+      rule: inlineStyle.match(/\.board-destination-popover\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-popover",
+    },
+    {
+      name: "global surface window",
+      rule: componentsStyle.match(/\.op-global-window\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-window",
+    },
+    {
+      name: "update modal",
+      rule: componentsStyle.match(/\.update-modal\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-modal",
+    },
   ];
 
   for (const { name, rule, token } of tokenizedRules) {
@@ -2260,6 +2339,19 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
     assert.match(rule, new RegExp(`z-index:\\s*var\\(${token}\\)`));
     assert.doesNotMatch(rule, /z-index:\s*-?\d+/, `${name} must not use a raw z-index`);
   }
+
+  assert.doesNotMatch(
+    `${inlineStyle}\n${componentsStyle}`,
+    /z-index:\s*[1-9]\d{3,}\b/,
+    "global interaction and safety tiers must not reintroduce raw high z-index values",
+  );
+  const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[^}]*\}/)?.[0];
+  assert.ok(modalShellRule, "expected shared modal shell rule");
+  assert.doesNotMatch(
+    modalShellRule,
+    /z-index:/,
+    "the modal backdrop owns the shared modal tier without a competing child tier",
+  );
 
   const panelRule = tokenizedRules[0].rule;
   for (const declaration of [

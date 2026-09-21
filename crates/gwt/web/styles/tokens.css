@@ -18,6 +18,17 @@
   --z-popover: 1300;
   --z-overlay: 1800;
   --z-modal: 2000;
+
+  /* Body-level safety and recovery surfaces intentionally sit above the
+     ordinary #app interaction stack. Keep their established ordering while
+     making the exceptional tiers explicit and reviewable in one place. */
+  --z-system-degradation: 3500;
+  --z-system-connection: 4000;
+  --z-system-notice: 9999;
+  --z-system-context-menu: 10000;
+  --z-system-popover: 10001;
+  --z-system-window: 10050;
+  --z-system-modal: 10100;
 }
 
 :root[data-theme="dark"] {
