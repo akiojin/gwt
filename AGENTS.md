@@ -72,6 +72,30 @@
 4. 今回の要求が求めていない境界をテストしない。緑のテストを更なる抽象化の口実にしない。
 5. テスト追加前に自問する: このテストはどの受け入れ要件を検証するか / 無ければ既存テストはこのリグレッションを見逃すか / 実装より単純か。テストコードが実装より長く複雑なら過剰設計として扱う。
 
+### テスト衛生ゲート（test hygiene gate）
+
+テストの flake を事後に 1 件ずつ直す運用は機能しなかったため（SPEC #4551）、
+既知の flake 機序は `crates/gwt-core/tests/test_hygiene_test.rs` が
+**書いた時点で落とす**。テストコードを書く前に次を守る:
+
+1. **壁時計に依存しない。** テストコード中の `Duration::from_millis(N)` は
+   `N >= 100` のみ許可する。`from_micros` / `from_nanos` は不可。
+   飽和した CI runner のスケジューリング遅延は数十 ms 単位で出るため、
+   100ms 未満の実時間で順序を assert する前提は原理的に固定できない。
+   deadline を「待つ」のではなく「経過を観測してから応答する」形にする。
+2. **process 全体の状態は施錠して触る。** テスト関数内の `env::set_var` /
+   `env::remove_var` / `env::set_current_dir` は、同じ関数内で
+   `gwt_core::test_support::env_lock()` / `env_test_lock()` を取得するか、
+   `ScopedEnvVar` / `ScopedGwtHome` で包む。
+3. **正当な例外は理由付きで宣言する。** 違反行またはその直前行に
+   `// test-hygiene: allow-short-duration <理由>` もしくは
+   `// test-hygiene: allow-unlocked-env <理由>` を置く。理由本文が空なら通らない。
+4. **`test_hygiene_baseline.txt` に行を足さない。** これは SPEC #4551 導入時点の
+   既存違反を据え置いた一覧で、縮む一方の台帳である。違反を直したら該当行を削除する
+   （残っているとゲートが落ちる）。一括整理の後は
+   `cargo test -p gwt-core --test test_hygiene_test -- --ignored regenerate_the_baseline`
+   で再生成できる。
+
 ### モデル配分（Model Allocation）
 
 - 要求の明確化・Plan のレビュー: より強いモデルを使う。
