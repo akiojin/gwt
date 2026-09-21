@@ -3,6 +3,18 @@
 //! `notify` does not expose its stream, so the index watcher uses this private
 //! adapter while retaining `notify-debouncer-mini` for debounce and batching.
 
+// `fsevent-sys` 5.2.0 deprecated its whole C API in favour of
+// `objc2-core-services`, so every `fs::*` call below became a `-D warnings`
+// error the moment the dependency was bumped (c7de44e8f), with no source
+// change of our own. CI has no macOS clippy job, so develop reads green while
+// `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+// fails for every agent on macOS and blocks their verification.
+//
+// The allow keeps that API usable until the backend is ported. The port is a
+// rewrite of this file against `objc2-core-services`, not a lint fix, so it is
+// tracked separately rather than smuggled into an unrelated change.
+#![allow(deprecated)]
+
 use std::{
     ffi::{c_char, c_void, CStr, OsStr},
     os::unix::ffi::OsStrExt,
