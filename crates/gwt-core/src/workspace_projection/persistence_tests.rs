@@ -1,4 +1,5 @@
 use chrono::TimeZone;
+use sha2::Digest;
 
 use crate::paths::{gwt_repo_local_work_event_shard_path, gwt_repo_local_work_events_dir};
 
@@ -12744,6 +12745,147 @@ fn find_work_item_for_container_matches_branch_worktree_and_id() {
     assert!(
         find_work_item_for_container(&projection, project_root, Some("work/other"), None).is_none()
     );
+}
+
+#[test]
+fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() {
+    let project_root = Path::new("/repo");
+    let worktree = Path::new("/wt/issue-4074");
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let predecessor_id =
+        canonical_work_id(project_root, Some("work/issue-4074"), Some(worktree)).unwrap();
+    let successor_id = format!(
+        "work-successor-{}",
+        hex::encode(sha2::Sha256::digest(predecessor_id.as_bytes()))
+    );
+    let mut projection = WorkItemsProjection::empty(now);
+    let mut start = sample_work_event(&predecessor_id, now);
+    start.owner = Some("Issue #4074".to_string());
+    start.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-4074".to_string()),
+        worktree_path: Some(worktree.to_path_buf()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    projection.apply_event(start.clone());
+    projection.apply_event(WorkEvent::new(
+        WorkEventKind::Discard,
+        &predecessor_id,
+        now + chrono::Duration::seconds(1),
+    ));
+    let mut successor = start;
+    successor.id = "successor-start".to_string();
+    successor.work_item_id = successor_id.clone();
+    successor.related_work_item_id = Some(predecessor_id.clone());
+    successor.updated_at = now + chrono::Duration::seconds(2);
+    projection.apply_event(successor);
+    let mut predecessor_owner_upgrade = WorkEvent::new(
+        WorkEventKind::Update,
+        &predecessor_id,
+        now + chrono::Duration::seconds(3),
+    );
+    predecessor_owner_upgrade.owner = Some("SPEC-4074".to_string());
+    projection.apply_event(predecessor_owner_upgrade);
+    assert_eq!(
+        find_work_item_for_container(
+            &projection,
+            project_root,
+            Some("work/issue-4074"),
+            Some(worktree),
+        )
+        .expect("predecessor owner normalization must not break the successor link")
+        .id,
+        successor_id
+    );
+    let mut owner_upgrade = WorkEvent::new(
+        WorkEventKind::Update,
+        &successor_id,
+        now + chrono::Duration::seconds(4),
+    );
+    owner_upgrade.owner = Some("SPEC-4074".to_string());
+    projection.apply_event(owner_upgrade);
+    projection.apply_event(WorkEvent::new(
+        WorkEventKind::Update,
+        &predecessor_id,
+        now + chrono::Duration::seconds(5),
+    ));
+    assert_eq!(projection.work_items[0].id, predecessor_id);
+    assert!(projection.work_items[0].discarded);
+    assert_eq!(projection.work_items[0].owner.as_deref(), Some("SPEC-4074"));
+
+    let current = find_work_item_for_container(
+        &projection,
+        project_root,
+        Some("work/issue-4074"),
+        Some(worktree),
+    )
+    .expect("the successor owns the current container");
+    assert_eq!(current.id, successor_id);
+    assert_eq!(current.owner.as_deref(), Some("SPEC-4074"));
+    assert_eq!(
+        workspace_group_key_for_item(project_root, current),
+        predecessor_id
+    );
+}
+
+#[test]
+fn find_work_item_for_container_rejects_invalid_successor_authority() {
+    let project_root = Path::new("/repo");
+    let worktree = Path::new("/wt/issue-4074");
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let predecessor_id =
+        canonical_work_id(project_root, Some("work/issue-4074"), Some(worktree)).unwrap();
+    let successor_id = format!(
+        "work-successor-{}",
+        hex::encode(sha2::Sha256::digest(predecessor_id.as_bytes()))
+    );
+    for invalid in ["owner", "container", "link"] {
+        let mut projection = WorkItemsProjection::empty(now);
+        let mut start = sample_work_event(&predecessor_id, now);
+        start.owner = Some("Issue #4074".to_string());
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-4074".to_string()),
+            worktree_path: Some(worktree.to_path_buf()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        projection.apply_event(start.clone());
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Discard,
+            &predecessor_id,
+            now + chrono::Duration::seconds(1),
+        ));
+        let mut successor = start;
+        successor.id = "invalid-successor-start".to_string();
+        successor.work_item_id = successor_id.clone();
+        successor.related_work_item_id = Some(predecessor_id.clone());
+        successor.updated_at = now + chrono::Duration::seconds(2);
+        match invalid {
+            "owner" => successor.owner = Some("Issue #4313".to_string()),
+            "container" => {
+                successor
+                    .execution_container
+                    .as_mut()
+                    .unwrap()
+                    .worktree_path = Some(PathBuf::from("/wt/other"));
+            }
+            "link" => successor.related_work_item_id = Some("work-unrelated".to_string()),
+            _ => unreachable!(),
+        }
+        projection.apply_event(successor);
+
+        let current = find_work_item_for_container(
+            &projection,
+            project_root,
+            Some("work/issue-4074"),
+            Some(worktree),
+        )
+        .expect("invalid successor must leave its predecessor authoritative");
+        assert_eq!(current.id, predecessor_id, "invalid successor {invalid}");
+        assert!(current.discarded);
+    }
 }
 
 #[test]
