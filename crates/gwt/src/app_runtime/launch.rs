@@ -5165,6 +5165,15 @@ impl AppRuntime {
                     )
                 })?;
             phases.mark("managed_assets");
+            // Issue #4283 AC-5: a split of the phase above, not a sibling of
+            // it. Materialization takes one lock per worktree and a short one
+            // per repository; when this is most of `managed_assets` the fleet
+            // is queueing rather than the work getting slower.
+            gwt::perf::record_route_phase(
+                gwt::perf::PerfRoute::PaneCreate,
+                "asset_lock_wait",
+                managed_assets.lock_wait,
+            );
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,
                 &worktree_path,
@@ -5584,6 +5593,12 @@ impl AppRuntime {
                 },
             ))
         })();
+
+        // Issue #4283 AC-5: everything above runs on this launch thread, while
+        // `route:pane.create` is closed by the GUI event loop when it handles
+        // the dispatch below. `route:pane.create` minus this sample is that
+        // hand-back, which no mark on this thread can reach.
+        phases.mark_total("launch_thread");
 
         // Drop (= final drain + join) BEFORE dispatching the result so the
         // tail of the mirrored docker output lands in the terminal ahead of
