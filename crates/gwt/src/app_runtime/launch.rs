@@ -981,6 +981,176 @@ fn install_authenticated_active_resume_binding(
     Ok(())
 }
 
+/// SPEC #3248 FR-239 / AS-216: drop the producing owner when this launch opens
+/// a *delivered* one — closed, with its whole source state already in the
+/// configured base.
+///
+/// Dropping it here is what makes Inspection zero-mutation: no Execution
+/// Control Record, no Work, no action obligation, and therefore no
+/// verification, commit, push, or PR is ever demanded of a session that has
+/// nothing to deliver. That demand is the bug — an already shipped Issue could
+/// only settle as terminally Blocked, because no new PR existed to point at.
+///
+/// The GitHub Issue is never touched either way. Only an explicit follow-up
+/// intent produces against a delivered owner (FR-240); ambiguity about the
+/// source surface falls to Inspection rather than to producing work.
+fn producing_owner_after_delivery_check(
+    worktree: &Path,
+    producing_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
+    explicit_follow_up: bool,
+) -> Option<gwt::cli::execution_state::ExecutionOwnerKey> {
+    producing_owner.filter(|owner| {
+        let disposition = gwt::cli::delivered_owner::classify_launch_for_owner(
+            worktree,
+            worktree,
+            owner.number,
+            if explicit_follow_up {
+                gwt::cli::delivered_owner::FollowUpIntent::ExplicitFollowUp
+            } else {
+                gwt::cli::delivered_owner::FollowUpIntent::Default
+            },
+        );
+        if disposition.is_inspection() {
+            tracing::info!(
+                owner = owner.number,
+                disposition = disposition.describe(),
+                "delivered owner opens for inspection; no execution was materialized"
+            );
+        }
+        !disposition.is_inspection()
+    })
+}
+
+#[cfg(test)]
+mod delivered_owner_launch_tests {
+    use super::*;
+
+    fn git(worktree: &Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A worktree whose `origin/develop` already contains its whole source
+    /// state — the shape a delivered owner leaves behind.
+    fn delivered_worktree(worktree: &Path) {
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/t/delivered-owner.git",
+            ],
+            vec!["commit", "--allow-empty", "-qm", "init"],
+            vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            vec!["checkout", "-q", "-b", "work/issue-3290"],
+        ] {
+            git(worktree, &args);
+        }
+    }
+
+    fn cache_owner_state(worktree: &Path, number: u64, state: &str) {
+        let root = gwt::issue_cache::issue_cache_root_for_repo_path(worktree)
+            .expect("the fixture repo resolves a repo hash");
+        let dir = root.join(number.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({"number": number, "state": state, "labels": []}).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn owner(number: u64) -> gwt::cli::execution_state::ExecutionOwnerKey {
+        gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number,
+        }
+    }
+
+    // AC-1 / AS-216: opening a closed, zero-diff owner drops the producing
+    // owner, which is what keeps the launch zero-mutation.
+    #[test]
+    fn a_delivered_owner_opens_for_inspection() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        delivered_worktree(dir.path());
+        cache_owner_state(dir.path(), 3290, "closed");
+
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(3290)), false),
+            None,
+            "a delivered owner materializes no execution"
+        );
+    }
+
+    // AC-1 / AS-217: an explicit follow-up is the one intent that produces
+    // against a delivered owner.
+    #[test]
+    fn an_explicit_follow_up_produces_against_a_delivered_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        delivered_worktree(dir.path());
+        cache_owner_state(dir.path(), 3290, "closed");
+
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(3290)), true),
+            Some(owner(3290))
+        );
+    }
+
+    // AC-1: an open owner, and a closed owner that still holds source work,
+    // both keep the unchanged producing path. This is the regression that
+    // matters most — the check must not quietly stop ordinary launches.
+    #[test]
+    fn open_owners_and_undelivered_source_keep_producing() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        delivered_worktree(dir.path());
+        cache_owner_state(dir.path(), 4545, "open");
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(4545)), false),
+            Some(owner(4545)),
+            "an open owner is never delivered"
+        );
+
+        // An owner the cache does not know is not evidence of delivery.
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(9999)), false),
+            Some(owner(9999))
+        );
+
+        cache_owner_state(dir.path(), 3290, "closed");
+        std::fs::create_dir_all(dir.path().join("crates/gwt/src")).unwrap();
+        std::fs::write(dir.path().join("crates/gwt/src/new.rs"), "pub fn x() {}\n").unwrap();
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), Some(owner(3290)), false),
+            Some(owner(3290)),
+            "a closed owner with undelivered source still produces"
+        );
+    }
+
+    // AC-1: a launch with no linked owner is untouched by the check.
+    #[test]
+    fn an_unlinked_launch_is_unaffected() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            producing_owner_after_delivery_check(dir.path(), None, false),
+            None
+        );
+    }
+}
+
 struct FinalizedAgentCapabilityLaunch<'a> {
     issuer: Option<&'a AgentCapabilityIssuer>,
     sessions_dir: &'a Path,
@@ -5709,6 +5879,11 @@ impl AppRuntime {
                     })
                 })
                 .flatten();
+            let producing_owner = producing_owner_after_delivery_check(
+                &worktree_path,
+                producing_owner,
+                config.explicit_follow_up,
+            );
             let capability_install = FinalizedAgentCapabilityLaunch {
                 issuer: agent_capability_issuer.as_ref(),
                 sessions_dir: &sessions_dir,

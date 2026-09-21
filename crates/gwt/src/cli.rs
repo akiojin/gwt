@@ -14,6 +14,7 @@ mod build;
 mod commands;
 mod concern;
 pub mod daemon;
+pub mod delivered_owner;
 mod diagnostics;
 mod discuss;
 pub(crate) mod discussion;

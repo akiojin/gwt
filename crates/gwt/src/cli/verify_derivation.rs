@@ -267,10 +267,17 @@ fn changed_paths(worktree: &Path) -> Result<Vec<String>, TrivialReason> {
         return Err(TrivialReason::IntegrationBranch);
     }
     let base = integration_merge_base(worktree).ok_or(TrivialReason::MergeBaseUnavailable)?;
-    changed_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
+    changed_source_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
 }
 
-fn changed_paths_since(worktree: &Path, base: &str) -> Result<Vec<String>, String> {
+/// The source paths `worktree` holds that `base` does not: the committed span,
+/// uncommitted changes against HEAD, and untracked files, with `.gwt/` and
+/// `tasks/` bookkeeping excluded. Shared with the delivered-owner classifier so
+/// "nothing to deliver" means exactly what the verification matrix means by it.
+pub(crate) fn changed_source_paths_since(
+    worktree: &Path,
+    base: &str,
+) -> Result<Vec<String>, String> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
     paths.extend(checked_git_lines(
         worktree,
@@ -337,7 +344,7 @@ fn is_ui_surface_path(path: &str) -> bool {
 pub fn has_frontend_changes(worktree: &Path) -> Result<bool, String> {
     let base = integration_merge_base(worktree)
         .ok_or_else(|| "frontend classification requires a readable git merge-base".to_string())?;
-    Ok(changed_paths_since(worktree, &base)?
+    Ok(changed_source_paths_since(worktree, &base)?
         .iter()
         .any(|path| is_ui_surface_path(path)))
 }

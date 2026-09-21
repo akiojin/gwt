@@ -166,6 +166,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "execution.no_action",
+        aliases: &["execution.no-action"],
+    },
+    Operation {
         name: "execution.release_prepared",
         aliases: &[],
     },

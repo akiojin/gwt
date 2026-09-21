@@ -5900,6 +5900,17 @@ fn read_record_contents(worktree: &Path) -> io::Result<Option<String>> {
     Ok(Some(contents))
 }
 
+/// The Execution Control Record's exact stored bytes, or `None` when no record
+/// exists.
+///
+/// The delivered-owner No Action audit hashes these bytes rather than the
+/// parsed record: the point of the audit is to prove the predecessor was never
+/// rewritten, and a re-serialized record would compare equal even if its stored
+/// form had changed.
+pub fn record_contents(worktree: &Path) -> io::Result<Option<String>> {
+    read_record_contents(worktree)
+}
+
 #[derive(Debug, Clone)]
 struct GenerationAuthorityHint {
     owner: Option<ExecutionOwnerKey>,
@@ -11261,6 +11272,14 @@ pub enum ExecutionCommand {
     Reopen {
         reason: String,
     },
+    /// SPEC #3248 FR-241: settle a generation that was materialized for a
+    /// delivered zero-diff owner as a successful non-delivery. It writes a
+    /// machine-local trusted audit and settles this session's obligations;
+    /// it commits nothing, pushes nothing, requires no verification record,
+    /// and rewrites no byte of the predecessor record.
+    NoAction {
+        reason: String,
+    },
     /// Issue #4161: abort the Prepared successors/takeovers that fence an
     /// owner's current generation and refuse every launch. Owner-addressed
     /// like [`ExecutionCommand::OwnerStatus`], because the operator releasing
@@ -11813,8 +11832,9 @@ pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 14] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 15] = [
     "execution.release_prepared",
+    "execution.no_action",
     "execution.continue",
     "execution.status",
     "execution.repair",
@@ -14710,6 +14730,86 @@ fn run_release_prepared(
     Ok(0)
 }
 
+/// SPEC #3248 FR-241 / AS-218: settle an accidentally materialized generation
+/// for a delivered zero-diff owner.
+///
+/// Every refusal here leaves the store exactly as it was found, and the
+/// success path writes one machine-local audit plus this session's own
+/// obligation settlements — nothing in Git, verification, or the PR.
+fn run_no_action(
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::delivered_owner::{NoActionOutcome, NoActionRefusal};
+
+    let outcome = match crate::cli::delivered_owner::record_no_action(worktree, session_id, reason)
+    {
+        Ok(outcome) => outcome,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => {
+            return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
+        }
+        Err(error) => {
+            *refusal = Some(operation_store_failure_refusal(
+                "execution.no_action",
+                &error,
+            ));
+            return Err(SpecOpsError::from(ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error(
+                    "recording execution No Action",
+                    &error,
+                ),
+            )));
+        }
+    };
+    match outcome {
+        NoActionOutcome::Recorded(audit) | NoActionOutcome::AlreadyRecorded(audit) => {
+            out.push_str(&format!(
+                "execution: no action for {kind} #{number} (session {session}) — {reason}\n\
+                 Nothing was committed, pushed, verified, or handed to a PR, and the predecessor record is unchanged (bytes {bytes}).\n",
+                kind = audit.owner_kind.as_str(),
+                number = audit.owner_number,
+                session = audit.session_id,
+                reason = audit.reason,
+                bytes = &audit.predecessor_bytes_sha256[..16],
+            ));
+            Ok(0)
+        }
+        NoActionOutcome::Refused(cause) => {
+            out.push_str(&format!(
+                "execution: no_action refused — {}\n",
+                cause.describe()
+            ));
+            // The refusals an agent can clear itself name the operation that
+            // clears them; the rest stay ordinary authority refusals.
+            *refusal = Some(match &cause {
+                NoActionRefusal::ForeignSession { .. } => agent_recoverable_refusal(
+                    "execution_no_action_foreign_session",
+                    "execution.adopt",
+                ),
+                NoActionRefusal::Tampered => agent_recoverable_refusal(
+                    "execution_no_action_record_tampered",
+                    "execution.repair",
+                ),
+                NoActionRefusal::SourceChanges { .. } => agent_recoverable_refusal(
+                    "execution_no_action_source_changes_present",
+                    "verify.run",
+                ),
+                NoActionRefusal::TerminalPredecessor { .. }
+                | NoActionRefusal::NoRecord
+                | NoActionRefusal::AmbiguousSourceSurface { .. }
+                | NoActionRefusal::ReplacedExecution { .. } => agent_recoverable_refusal(
+                    "execution_no_action_not_applicable",
+                    "execution.status",
+                ),
+            });
+            Ok(2)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExecutionRunResult {
     pub exit_code: i32,
@@ -15259,6 +15359,13 @@ fn run_impl<E: CliEnv>(
             refusal,
         );
     }
+    if let ExecutionCommand::NoAction { reason } = &command {
+        // FR-241: No Action bypasses the Work-event Git settlement gate that
+        // `execution.complete` enforces below, and it may do so only because
+        // `record_no_action` proves there is no deliverable source Work at
+        // all. Nothing here commits, pushes, or reads verification evidence.
+        return run_no_action(&worktree, &session_id, reason, out, refusal);
+    }
     if matches!(&command, ExecutionCommand::Complete) {
         if let Some(reason) =
             crate::cli::verification_record::work_event_settlement_refusal(&worktree)
@@ -15286,7 +15393,8 @@ fn run_impl<E: CliEnv>(
         | ExecutionCommand::Adopt { .. }
         | ExecutionCommand::Repair { .. }
         | ExecutionCommand::Continue { .. }
-        | ExecutionCommand::Reopen { .. } => {
+        | ExecutionCommand::Reopen { .. }
+        | ExecutionCommand::NoAction { .. } => {
             unreachable!("handled above")
         }
         ExecutionCommand::Complete => {
@@ -27902,6 +28010,155 @@ exit 1
             let completed = load(dir.path()).unwrap().unwrap();
             assert_eq!(completed.status, ExecutionControlStatus::Completed);
             assert_eq!(completed.recoveries.len(), 1);
+        }
+
+        /// A delivered worktree: `origin/develop` already contains its whole
+        /// source state, which is the precondition `execution.no_action`
+        /// proves before it will settle anything.
+        fn delivered_repo(dir: &Path) {
+            crate::cli::trusted_store::init_git_repo_with_origin(dir);
+            for args in [
+                vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+                vec!["checkout", "-q", "-b", "work/issue-3248"],
+            ] {
+                let status = gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(&args)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            }
+        }
+
+        // AC-2 / AC-3 / AC-4: `execution.no_action` settles a delivered owner
+        // through the operation surface, and the settlement stays entirely
+        // outside Git, verification, PR, and the predecessor record. The
+        // completion gate keeps refusing afterwards — No Action is a
+        // successful *non*-delivery, never a completion claim.
+        #[test]
+        fn no_action_settles_a_delivered_owner_without_verification_or_completion() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-no-action");
+            let dir = tempfile::tempdir().unwrap();
+            delivered_repo(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-no-action")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let before = record_contents(dir.path()).unwrap().unwrap();
+            let head_before = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "SPEC-3248 の該当 slice は PR #3429 で着地済み".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("no action for spec #3248"), "{out}");
+
+            assert_eq!(
+                record_contents(dir.path()).unwrap().unwrap(),
+                before,
+                "No Action rewrites no byte of the predecessor record"
+            );
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Active);
+            assert_eq!(
+                gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(dir.path())
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+                head_before.stdout,
+                "No Action commits nothing"
+            );
+            assert_ne!(
+                crate::cli::verification_record::evaluate_evidence(
+                    dir.path(),
+                    "sess-no-action",
+                    Some(3248),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "No Action produces no verification evidence"
+            );
+
+            // Idempotent: the second call reports the same settled outcome.
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "SPEC-3248 の該当 slice は PR #3429 で着地済み".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(record_contents(dir.path()).unwrap().unwrap(), before);
+
+            // FR-243: the completion gate is unmoved by a No Action.
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(
+                code, 2,
+                "a No Action must never satisfy the completion gate: {out}"
+            );
+        }
+
+        // AC-2 / AS-219: a worktree with real source work refuses, and the
+        // refusal carries an agent-recoverable route rather than stranding the
+        // session.
+        #[test]
+        fn no_action_refuses_real_source_work_through_the_operation_surface() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-no-action");
+            let dir = tempfile::tempdir().unwrap();
+            delivered_repo(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-no-action")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            fs::create_dir_all(dir.path().join("crates/gwt/src")).unwrap();
+            fs::write(dir.path().join("crates/gwt/src/new.rs"), "pub fn x() {}\n").unwrap();
+
+            let output = run_governed_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "nothing to deliver".to_string(),
+                },
+            )
+            .expect("the refusal answers rather than failing the process");
+            assert_eq!(output.exit_code, 2, "{}", output.output);
+            assert!(
+                output.output.contains("crates/gwt/src/new.rs"),
+                "the refusal names the source it found: {}",
+                output.output
+            );
+            let refusal = output.refusal.expect("a structured refusal");
+            assert_eq!(
+                refusal.reason_code,
+                "execution_no_action_source_changes_present"
+            );
         }
 
         #[test]
