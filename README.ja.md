@@ -837,6 +837,27 @@ gwtd <<'JSON'
 JSON
 ```
 
+- レビューへ渡す前に SPEC artifact を lint する: FR / AS / T 番号、Traceability
+  表との整合、supersede のインライン注記、section マーカー / roundtrip の健全性を
+  検査し、結果を Intake Inspection Snapshot に記録し、Finding Disposition Ledger
+  を seed して reviewer checklist を出力します。critical finding があると非ゼロ
+  終了します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.lint","params":{"number":1784}}
+JSON
+```
+
+- 完了を宣言してよいかを判定する: 各 section が snapshot と一致する GitHub 実体
+  readback を持ち、critical finding がすべて disposition 済みであることを確認します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.inspection.complete","params":{"number":1784}}
+JSON
+```
+
 ## ログ
 
 - アプリログ:
