@@ -1995,9 +1995,9 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         {
             None
         }
-        WorkEventSettlementStatus::Blocked(blocker) => {
-            Some(work_event_settlement_blocker_description(&blocker))
-        }
+        WorkEventSettlementStatus::Blocked(blocker) => Some(
+            work_event_settlement_blocker_description(&blocker, worktree),
+        ),
     }
 }
 
@@ -2064,6 +2064,22 @@ pub(crate) fn work_event_settlement_pending_description(
 
 pub(crate) fn work_event_settlement_blocker_description(
     blocker: &WorkEventSettlementBlocker,
+    worktree: &Path,
+) -> String {
+    work_event_settlement_blocker_description_with_gate(
+        blocker,
+        crate::cli::hook::workflow_policy::identity_gate_closed(worktree),
+    )
+}
+
+/// Issue #4533 (AC-1): the refusal demands a commit, and while the Agent
+/// Workspace identity gate is closed that commit is denied before it runs. The
+/// two rules used to contradict each other in the agent's face. Name the gate
+/// and the exact order that lifts it, so the instruction the agent is given is
+/// one it can actually execute.
+pub(crate) fn work_event_settlement_blocker_description_with_gate(
+    blocker: &WorkEventSettlementBlocker,
+    identity_gate_closed: bool,
 ) -> String {
     let reason = match blocker {
         WorkEventSettlementBlocker::PathDirty { states } => {
@@ -2121,8 +2137,19 @@ pub(crate) fn work_event_settlement_blocker_description(
                 .to_string(),
     };
     format!(
-        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory."
+        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
+        identity_gate_escape_suffix(identity_gate_closed)
     )
+}
+
+/// Issue #4533 (AC-1/AC-3): the ordered escape from the identity gate,
+/// appended to any refusal that demands a commit while the gate is closed.
+/// Empty when the gate is open, so the common refusal stays short.
+fn identity_gate_escape_suffix(identity_gate_closed: bool) -> &'static str {
+    if !identity_gate_closed {
+        return "";
+    }
+    " The Agent Workspace identity gate is closed for this session, so that commit and push are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then commit, push, and retry. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
 }
 
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
