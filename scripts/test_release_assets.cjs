@@ -330,7 +330,7 @@ run("Nightly CI proves the Rust suites with default parallelism three times", ()
   assert.match(nightlyWorkflow, /^ {2}test-windows-default-parallel:$/m);
   assert.match(nightlyWorkflow, /Remove-Item Env:RUST_TEST_THREADS/);
   assert.match(nightlyWorkflow, /1\.\.3 \| ForEach-Object/);
-  assert.match(nightlyWorkflow, /cargo test -p gwt --lib --all-features/);
+  assert.match(nightlyWorkflow, /cargo test -p gwt --lib --bin gwt --all-features/);
   // A scheduled run has no pull request to turn red, so the failure has to
   // reach a named destination or the schedule silently stops meaning anything.
   assert.match(nightlyWorkflow, /if: failure\(\)/);
@@ -363,10 +363,7 @@ run("Nightly CI proves the Rust suites with default parallelism three times", ()
     .filter((line) => line.startsWith("cargo "));
   assert.deepStrictEqual(
     loopCommands,
-    [
-      "cargo test -p gwt --lib --all-features",
-      "cargo test -p gwt --bin gwt --all-features",
-    ],
+    ["cargo test -p gwt --lib --bin gwt --all-features"],
     "the timed loop must run exactly the targets proven green under Windows default parallelism"
   );
   // The `--bin gwt` tests must be compiled outside the timed loop as well
