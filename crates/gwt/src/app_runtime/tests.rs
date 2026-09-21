@@ -22077,6 +22077,59 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         .join(format!("{predecessor_session_id}.toml"));
     let predecessor_session_bytes = fs::read(&predecessor_session_path).expect("old Session bytes");
 
+    let mut predecessor_active = sample_active_agent_session("tab-1", &window_id);
+    predecessor_active.session_id = predecessor_session_id.to_string();
+    predecessor_active.branch_name = "work/issue-2359".to_string();
+    predecessor_active.worktree_path = repo.clone();
+    save_workspace_launch_projection(
+        &repo,
+        &predecessor_active,
+        Some("origin/develop"),
+        Some(owner.number),
+        Some(owner),
+        None,
+        WorkspaceLaunchProjectionKind::StartWork,
+        &HashSet::from([predecessor_session_id.to_string()]),
+    )
+    .expect("publish predecessor Work");
+    let predecessor_work =
+        gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+            &repo,
+            &repo,
+            |projection, _, _| {
+                let mut other_host = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Update,
+                    projection.id.clone(),
+                    Utc::now(),
+                );
+                other_host.execution_container = Some(
+                    gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                        branch: Some(predecessor_active.branch_name.clone()),
+                        worktree_path: Some(PathBuf::from("E:\\gwt\\work\\issue-2359")),
+                        pr_number: None,
+                        pr_url: None,
+                        pr_state: None,
+                    },
+                );
+                let event = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Discard,
+                    projection.id.clone(),
+                    Utc::now(),
+                );
+                Ok((projection.id.clone(), vec![other_host, event]))
+            },
+        )
+        .expect("discard predecessor Work");
+    let predecessor_work_snapshot =
+        gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .into_iter()
+            .find(|work| work.id == predecessor_work)
+            .expect("discarded predecessor Work");
+    assert_eq!(predecessor_work_snapshot.execution_containers.len(), 2);
+
     let mut candidate =
         gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     candidate.id = candidate_session_id.to_string();
@@ -22191,6 +22244,69 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
         fs::read(predecessor_session_path).expect("old Session readback"),
         predecessor_session_bytes,
         "fresh activation must not rewrite the predecessor Session",
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        works
+            .work_items
+            .iter()
+            .find(|work| work.id == predecessor_work),
+        Some(&predecessor_work_snapshot),
+        "fresh activation must preserve the discarded Work and its Session membership",
+    );
+    let successor = works
+        .work_items
+        .iter()
+        .find(|work| {
+            work.agents
+                .iter()
+                .any(|agent| agent.session_id == candidate_session_id)
+        })
+        .expect("fresh Session belongs to a successor Work");
+    assert_ne!(successor.id, predecessor_work);
+    assert!(!successor.discarded);
+    assert!(successor.related_work_item_ids.contains(&predecessor_work));
+    save_workspace_launch_projection(
+        &repo,
+        runtime.active_agent_sessions.get(&window_id).unwrap(),
+        None,
+        Some(owner.number),
+        Some(owner),
+        None,
+        WorkspaceLaunchProjectionKind::Resume {
+            created_by_start_work: true,
+        },
+        &HashSet::from([candidate_session_id.to_string()]),
+    )
+    .expect("retry must reuse the same successor Work");
+    assert!(
+        save_workspace_launch_projection(
+            &repo,
+            &predecessor_active,
+            None,
+            Some(owner.number),
+            Some(owner),
+            None,
+            WorkspaceLaunchProjectionKind::Resume {
+                created_by_start_work: true
+            },
+            &HashSet::from([predecessor_session_id.to_string()]),
+        )
+        .is_err(),
+        "a discarded predecessor Session cannot be moved to its successor"
+    );
+    let retry_works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry_works.work_items.len(), 2);
+    assert_eq!(
+        retry_works
+            .work_items
+            .iter()
+            .find(|work| work.id == predecessor_work),
+        Some(&predecessor_work_snapshot)
     );
 }
 
@@ -45391,6 +45507,144 @@ fn app_runtime_routine_control_fallback_preserves_effect_authority_and_journal()
     assert_eq!(persisted.priority_order, vec![99, 42]);
     assert_eq!(persisted.effect_authority_epoch, 7);
     assert_eq!(persisted.pending_effects, journal);
+}
+
+// SPEC #3165 TQ-9: the row's "Add to queue" action is the user's way to put an
+// Issue into this terminal's implementation queue. It is the requested feature's
+// main direction — "remove" is only its counterpart — so the GUI must reach
+// `terminal_queue_push` the same way it reaches the removal, and it must not
+// touch another terminal's queue.
+#[test]
+fn app_runtime_issue_monitor_queue_push_adds_only_to_the_local_terminal_queue() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let queue = |numbers: &[u64]| gwt::issue_monitor::IssueMonitorTerminalQueue {
+        entries: numbers
+            .iter()
+            .map(
+                |number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "operator".to_string(),
+                },
+            )
+            .collect(),
+        last_seen_at: None,
+    };
+    let host = gwt::process::current_hostname();
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 1,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    seeded.terminal_queues.insert(host.clone(), queue(&[42]));
+    seeded
+        .terminal_queues
+        .insert(format!("{host}-other"), queue(&[42]));
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorQueuePush {
+            issue_numbers: vec![43],
+        },
+    );
+
+    assert!(!events.is_empty(), "push answers with a refreshed snapshot");
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let numbers = |terminal: &str| {
+        persisted.terminal_queues[terminal]
+            .entries
+            .iter()
+            .map(|entry| entry.number)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(numbers(&host), vec![42, 43]);
+    assert_eq!(numbers(&format!("{host}-other")), vec![42]);
+    let queued_by = persisted.terminal_queues[&host]
+        .entries
+        .iter()
+        .find(|entry| entry.number == 43)
+        .map(|entry| entry.queued_by.clone());
+    assert_eq!(
+        queued_by.as_deref(),
+        Some("operator"),
+        "a queue push from the row is the operator's own act"
+    );
+}
+
+// SPEC #3165 TQ-9 / AC-4: the row's "Remove from queue" action removes the
+// Issue from this terminal's queue and leaves other terminals' queues alone.
+#[test]
+fn app_runtime_issue_monitor_queue_remove_drops_only_the_local_terminal_entry() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let queue = |numbers: &[u64]| gwt::issue_monitor::IssueMonitorTerminalQueue {
+        entries: numbers
+            .iter()
+            .map(
+                |number| gwt::issue_monitor::IssueMonitorTerminalQueueEntry {
+                    number: *number,
+                    queued_at: "2026-09-10T00:00:00Z".to_string(),
+                    queued_by: "operator".to_string(),
+                },
+            )
+            .collect(),
+        last_seen_at: None,
+    };
+    let host = gwt::process::current_hostname();
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 1,
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    seeded
+        .terminal_queues
+        .insert(host.clone(), queue(&[42, 43]));
+    seeded
+        .terminal_queues
+        .insert(format!("{host}-other"), queue(&[42]));
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorQueueRemove {
+            issue_numbers: vec![42],
+        },
+    );
+
+    assert!(
+        !events.is_empty(),
+        "removal answers with a refreshed snapshot"
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    let numbers = |terminal: &str| {
+        persisted.terminal_queues[terminal]
+            .entries
+            .iter()
+            .map(|entry| entry.number)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(numbers(&host), vec![43]);
+    assert_eq!(numbers(&format!("{host}-other")), vec![42]);
 }
 
 #[test]

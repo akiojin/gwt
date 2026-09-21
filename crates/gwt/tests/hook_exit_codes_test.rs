@@ -176,6 +176,7 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.stdin = serde_json::json!({
@@ -209,6 +210,22 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
         stdout.lines().count() == 1,
         "event dispatcher must emit exactly one JSON line, got: {stdout}"
     );
+    let stderr = String::from_utf8(env.stderr).unwrap();
+    assert!(!stderr.contains("parked in NeedsHuman"), "{stderr}");
+    assert!(
+        !stderr.contains("Stop working on this Issue now"),
+        "{stderr}"
+    );
+    // AC-3: a denial the agent can clear itself must say so, otherwise the
+    // agent reads the bare gate reason as a park and stops (Issue #4488).
+    let visible = stderr
+        .lines()
+        .next()
+        .expect("gate reason")
+        .chars()
+        .take(256)
+        .collect::<String>();
+    assert!(visible.contains("does not park the Issue"), "{visible}");
 }
 
 /// Issue #3716: Grok treats exit 2 as a gate denial but reads the visible
@@ -236,6 +253,13 @@ fn grok_question_denial_exposes_the_handoff_reason_on_stderr() {
         .expect("save Grok Session");
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
 
+    let prefs_path = gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+    let mut prefs = gwt::IssueMonitorPrefs::default();
+    let mut other = gwt::issue_monitor::AutonomousIssueRecord::new(4474);
+    other.phase = gwt::issue_monitor::AutonomousPhase::NeedsHuman;
+    prefs.autonomous_records.push(other);
+    gwt::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+
     let mut env = TestEnv::new(worktree);
     env.stdin = serde_json::json!({
         "hookEventName": "pre_tool_use",
@@ -250,10 +274,11 @@ fn grok_question_denial_exposes_the_handoff_reason_on_stderr() {
     })
     .to_string();
 
+    let question_input = env.stdin.clone();
     let code = dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"]));
 
     assert_eq!(code, 2, "Grok question must be denied before its UI opens");
-    let stderr = String::from_utf8(env.stderr).expect("stderr UTF-8");
+    let stderr = String::from_utf8(env.stderr.clone()).expect("stderr UTF-8");
     let reason = stderr.lines().next().expect("Grok gate reason");
     let visible_reason = reason.chars().take(256).collect::<String>();
     assert!(
@@ -262,10 +287,43 @@ fn grok_question_denial_exposes_the_handoff_reason_on_stderr() {
         "Grok reads the first stderr line as its visible gate reason: {stderr:?}",
     );
     assert!(
-        visible_reason.contains("Stop working on this Issue now")
-            && visible_reason.contains("NeedsHuman"),
-        "the truncated Grok reason must retain the park/stop instruction: {visible_reason:?}",
+        !visible_reason.contains("parked in NeedsHuman"),
+        "another Issue's park and this pending handoff are not this owner's park: {visible_reason:?}",
     );
+    let stdout = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(!stdout.contains("It is parked for a human"), "{stdout}");
+    assert!(!stdout.contains("slot has been released"), "{stdout}");
+
+    let mut prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let mut owner = gwt::issue_monitor::AutonomousIssueRecord::new(3716);
+    owner.phase = gwt::issue_monitor::AutonomousPhase::NeedsHuman;
+    owner.needs_human_kind = Some(gwt::issue_monitor::NeedsHumanKind::StrandedExecutionGeneration);
+    prefs.autonomous_records.push(owner);
+    gwt::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    env.stdout.clear();
+    env.stderr.clear();
+    env.stdin = question_input;
+    assert_eq!(
+        dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"])),
+        2
+    );
+    let stderr = String::from_utf8(env.stderr).unwrap();
+    let visible = stderr
+        .lines()
+        .next()
+        .unwrap()
+        .chars()
+        .take(256)
+        .collect::<String>();
+    assert!(
+        visible.contains("Issue #3716 is parked in NeedsHuman"),
+        "{visible}"
+    );
+    // AC-3: the park branch names the human decision instead of leaving the
+    // agent to infer it from the gate reason.
+    assert!(visible.contains("a human must decide"), "{visible}");
+    assert!(!visible.contains("does not park the Issue"), "{visible}");
+    assert!(!visible.contains("human judgment is required"), "{visible}");
 }
 
 #[test]

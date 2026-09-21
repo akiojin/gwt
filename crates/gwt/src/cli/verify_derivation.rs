@@ -297,6 +297,26 @@ fn is_frontend_path(path: &str) -> bool {
             .any(|ext| path.ends_with(ext))
 }
 
+/// A frontend path that exercises the UI rather than rendering it.
+///
+/// Issue #4510: these still belong to the frontend *matrix* — changing a
+/// Playwright spec is exactly the reason to run the Playwright suite — but
+/// they are not a UI *surface*, because there is no rendered change for a
+/// human to look at. Conflating the two made a PR whose entire diff was one
+/// `*.spec.ts` demand a visual confirmation nobody could give (PR #4374).
+fn is_frontend_test_path(path: &str) -> bool {
+    path.starts_with("crates/gwt/playwright/tests/")
+        || path.contains("/__tests__/")
+        || [".spec.ts", ".spec.js", ".test.ts", ".test.js"]
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+}
+
+/// Whether a changed path renders UI a human could be asked to look at.
+fn is_ui_surface_path(path: &str) -> bool {
+    is_frontend_path(path) && !is_frontend_test_path(path)
+}
+
 /// Inspect frontend changes even when plan derivation is trivial on an
 /// integration branch. An unknown base or unreadable diff cannot prove that
 /// a Ready handoff has no UI surface.
@@ -305,7 +325,7 @@ pub fn has_frontend_changes(worktree: &Path) -> Result<bool, String> {
         .ok_or_else(|| "frontend classification requires a readable git merge-base".to_string())?;
     Ok(changed_paths_since(worktree, &base)?
         .iter()
-        .any(|path| is_frontend_path(path)))
+        .any(|path| is_ui_surface_path(path)))
 }
 
 fn is_docs_path(path: &str) -> bool {
@@ -338,6 +358,7 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
     let mut workspace_rust = false;
     let mut skills = false;
     let mut frontend = false;
+    let mut ui_surface = false;
     let mut docs_files: Vec<String> = Vec::new();
     let mut other = false;
 
@@ -348,6 +369,7 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
             docs_files.push(path.clone());
         } else if is_frontend_path(path) {
             frontend = true;
+            ui_surface |= is_ui_surface_path(path);
         } else if is_rust_path(path) {
             match crate_of(path) {
                 Some(name) => {
@@ -396,7 +418,15 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
         test_packages.insert("gwt-skills");
     }
     if frontend {
-        surfaces.push("frontend".to_string());
+        // Issue #4510: the matrix is the same either way, but the label is the
+        // only thing the Ready handoff reads to decide whether a human has
+        // anything to look at. A test-only frontend change declares itself as
+        // such so the visual gate is not raised over a `*.spec.ts`.
+        surfaces.push(if ui_surface {
+            "frontend".to_string()
+        } else {
+            "frontend-tests".to_string()
+        });
         test_packages.insert("gwt");
     }
     if other {
@@ -608,6 +638,78 @@ mod tests {
         assert!(
             has_frontend_changes(dir.path()).unwrap(),
             "a committed rename must retain the removed frontend surface"
+        );
+    }
+
+    /// Issue #4510 AC-2: a frontend *test* file exercises the UI, it never
+    /// renders one. Counting `*.spec.ts` as a UI surface made a PR whose whole
+    /// diff was one Playwright spec demand a human visual check that had
+    /// nothing to look at (PR #4374). The verification matrix still treats the
+    /// same path as frontend — the Playwright suite must run — so only the
+    /// Ready-handoff question changes here.
+    #[test]
+    fn frontend_test_only_changes_are_not_a_ui_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+
+        write(
+            dir.path(),
+            "crates/gwt/playwright/tests/pane-close-latency-live.spec.ts",
+            "test('pane close', async () => {});\n",
+        );
+        assert!(
+            !has_frontend_changes(dir.path()).unwrap(),
+            "a Playwright spec renders no UI of its own"
+        );
+        write(
+            dir.path(),
+            "crates/gwt/web/__tests__/kanban.test.js",
+            "test('kanban', () => {});\n",
+        );
+        assert!(
+            !has_frontend_changes(dir.path()).unwrap(),
+            "a web unit test renders no UI of its own"
+        );
+        // The matrix is unchanged — the suite that covers these paths still
+        // runs — but the surface declares itself as test-only so the Ready
+        // handoff does not raise a visual gate over it.
+        let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
+        assert!(
+            plan.commands
+                .contains(&package_test_command_for("gwt", VerificationHost::Other)),
+            "test-only frontend changes still run the gwt package gate: {:?}",
+            plan.commands
+        );
+        assert!(
+            plan.surfaces.contains(&"frontend-tests".to_string())
+                && !plan.surfaces.contains(&"frontend".to_string()),
+            "{:?}",
+            plan.surfaces
+        );
+
+        write(dir.path(), "crates/gwt/web/app.js", "export const x = 1;\n");
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a real UI module is still a UI surface"
+        );
+
+        let committed = tempfile::tempdir().unwrap();
+        fixture(committed.path());
+        write(
+            committed.path(),
+            "crates/gwt/playwright/tests/live.spec.ts",
+            "test('live', async () => {});\n",
+        );
+        write(
+            committed.path(),
+            "crates/gwt/web/styles/tokens.css",
+            ":root {}\n",
+        );
+        git(committed.path(), &["add", "."]);
+        git(committed.path(), &["commit", "-qm", "feat: ui and spec"]);
+        assert!(
+            has_frontend_changes(committed.path()).unwrap(),
+            "a spec alongside a stylesheet keeps the stylesheet's UI surface"
         );
     }
 

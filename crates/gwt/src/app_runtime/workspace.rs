@@ -206,6 +206,21 @@ pub(super) struct WorkspaceLaunchTransition<'a> {
     pub(super) now: chrono::DateTime<chrono::Utc>,
 }
 
+impl WorkspaceLaunchTransition<'_> {
+    fn owner(&self) -> Option<String> {
+        self.canonical_owner
+            .map(workspace_owner_label)
+            .or_else(|| {
+                self.resume_context
+                    .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
+            })
+            .or_else(|| {
+                self.linked_issue_number
+                    .map(|number| format!("Issue #{number}"))
+            })
+    }
+}
+
 /// Canonical Work owner label for a trusted execution owner key.
 pub(super) fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
     match owner.kind {
@@ -248,20 +263,17 @@ pub(super) fn save_workspace_launch_projection(
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
-    let work_id = gwt_core::workspace_projection::canonical_work_id(
-        project_root,
-        Some(session.branch_name.as_str()),
-        Some(session.worktree_path.as_path()),
-    );
     gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
         project_root,
         &session.worktree_path,
-        |projection, _work_items, _work_items_persisted| {
-            let work_event = apply_workspace_launch_transition(
+        |projection, work_items, _work_items_persisted| {
+            let work_event = apply_workspace_launch_for_current_work(
+                project_root,
                 projection,
+                work_items,
                 session,
                 WorkspaceLaunchTransition {
-                    work_id,
+                    work_id: None,
                     base_branch,
                     linked_issue_number,
                     canonical_owner,
@@ -270,11 +282,107 @@ pub(super) fn save_workspace_launch_projection(
                     live_session_ids,
                     now,
                 },
-            );
+            )?;
             Ok(((), vec![work_event]))
         },
     )
     .map_err(|error| error.to_string())
+}
+
+/// Select the Work lifetime before attaching a new Session, under the same
+/// transaction as launch publication (and fresh ECR activation).
+pub(super) fn apply_workspace_launch_for_current_work(
+    project_root: &Path,
+    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
+    work_items: &gwt_core::workspace_projection::WorkItemsProjection,
+    session: &ActiveAgentSession,
+    mut transition: WorkspaceLaunchTransition<'_>,
+) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
+    use gwt_core::workspace_projection::{
+        can_upgrade_work_owner, canonical_work_id, current_work_id, successor_work_id,
+        workspace_group_key_for_item, WorkEventKind,
+    };
+    let canonical_id = canonical_work_id(
+        project_root,
+        Some(&session.branch_name),
+        Some(&session.worktree_path),
+    );
+    transition.work_id = current_work_id(
+        work_items,
+        project_root,
+        Some(&session.branch_name),
+        Some(&session.worktree_path),
+    );
+    let mut predecessor_id = None;
+    if let Some(current) = work_items
+        .work_items
+        .iter()
+        .find(|item| Some(&item.id) == transition.work_id.as_ref())
+        .filter(|item| item.discarded || Some(&item.id) != canonical_id.as_ref())
+    {
+        let owner = transition.owner();
+        let owner_matches = current.owner == owner
+            || can_upgrade_work_owner(current.owner.as_deref(), owner.as_deref());
+        // Shared Work history can include other hosts' paths. Require one
+        // exact local container without dropping those historical references.
+        let container_matches = current
+            .execution_containers
+            .iter()
+            .filter(|container| {
+                canonical_work_id(
+                    project_root,
+                    container.branch.as_deref(),
+                    container.worktree_path.as_deref(),
+                ) == canonical_id
+                    && container.worktree_path.as_deref().is_some_and(|path| {
+                        path == session.worktree_path
+                            || dunce::canonicalize(path)
+                                .ok()
+                                .zip(dunce::canonicalize(&session.worktree_path).ok())
+                                .is_some_and(|(left, right)| left == right)
+                    })
+            })
+            .count()
+            == 1;
+        if !owner_matches || !container_matches {
+            return Err(gwt_core::error::GwtError::Other(format!(
+                "cannot launch successor of Work {}: owner or execution container mismatch",
+                current.id
+            )));
+        }
+        if work_items.work_items.iter().any(|item| {
+            item.discarded
+                && Some(workspace_group_key_for_item(project_root, item)) == canonical_id
+                && item
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session.session_id)
+        }) {
+            return Err(gwt_core::error::GwtError::Other(format!(
+                "Session {} belongs to a discarded Work; start a new Session for the successor",
+                session.session_id
+            )));
+        }
+        if current.discarded {
+            let successor_id = successor_work_id(&current.id);
+            if work_items
+                .work_items
+                .iter()
+                .any(|item| item.id == successor_id)
+            {
+                return Err(gwt_core::error::GwtError::Other(format!(
+                    "cannot launch successor of Work {}: successor {successor_id} has invalid lineage", current.id)));
+            }
+            predecessor_id = Some(current.id.clone());
+            transition.work_id = Some(successor_id);
+        }
+    }
+    let mut event = apply_workspace_launch_transition(projection, session, transition);
+    if let Some(predecessor_id) = predecessor_id {
+        event.kind = WorkEventKind::Start;
+        event.related_work_item_id = Some(predecessor_id);
+    }
+    Ok(event)
 }
 
 pub(super) fn apply_workspace_launch_transition(
@@ -282,19 +390,7 @@ pub(super) fn apply_workspace_launch_transition(
     session: &ActiveAgentSession,
     transition: WorkspaceLaunchTransition<'_>,
 ) -> gwt_core::workspace_projection::WorkEvent {
-    let owner = transition
-        .canonical_owner
-        .map(workspace_owner_label)
-        .or_else(|| {
-            transition
-                .resume_context
-                .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
-        })
-        .or_else(|| {
-            transition
-                .linked_issue_number
-                .map(|issue_number| format!("Issue #{issue_number}"))
-        });
+    let owner = transition.owner();
     // #3065: drop dead agent entries before computing the running-agents
     // status text. Agent launch never prunes Shell Work.
     projection.retain_live_agents_keep_shells(

@@ -26,7 +26,9 @@ pub mod store_migration;
 mod work_items;
 
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
-pub use identity::{canonical_work_id, workspace_group_key_for_item};
+pub use identity::{
+    can_upgrade_work_owner, canonical_work_id, successor_work_id, workspace_group_key_for_item,
+};
 pub use lifecycle::{
     decide_work_close, derive_merged_done_equivalent, recompute_lifecycle_stage,
     recompute_work_active_lifecycle, WorkActiveLifecycleState, WorkAgentRuntime, WorkCloseDecision,
@@ -35,7 +37,7 @@ pub use lifecycle::{
 };
 pub use persistence::{
     append_workspace_journal_entry_to_path, append_workspace_work_event_to_path, apply_prune_plan,
-    classify_workspace_projections, decode_workspace_work_event_line,
+    classify_workspace_projections, current_work_id, decode_workspace_work_event_line,
     decompose_legacy_multi_branch_work_items, decompose_legacy_multi_branch_work_items_paths,
     detach_foreign_container_refs, detach_foreign_container_refs_for_work_event_root,
     emit_workspace_discard_event_for_session, emit_workspace_discard_event_for_session_outcome,
@@ -103,6 +105,7 @@ pub use projection::{
     WorkspaceProjectionUpdate, WorkspaceStartUpdate,
 };
 pub use work_items::workspace_execution_container_same;
+pub use work_items::MAX_INLINE_WORK_EVENTS;
 pub use work_items::{
     DuplicateWorkEventProvenance, WorkAgentRef, WorkEvent, WorkEventApplyOutcome, WorkEventKind,
     WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceIssueLink,

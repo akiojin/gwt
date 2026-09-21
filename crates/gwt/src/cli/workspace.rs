@@ -972,7 +972,8 @@ pub(super) fn run<E: CliEnv>(
                 .latest_agent_for_session(&agent_session)
                 .cloned();
             let canonical_id = session_agent.as_ref().and_then(|agent| {
-                gwt_core::workspace_projection::canonical_work_id(
+                gwt_core::workspace_projection::current_work_id(
+                    &projection,
                     env.repo_path(),
                     agent.branch.as_deref(),
                     agent.worktree_path.as_deref(),
@@ -1032,6 +1033,7 @@ pub(super) fn run<E: CliEnv>(
             title_summary,
         } => {
             transact_workspace_state(env.repo_path(), |projection, work_items, _persisted| {
+                reject_discarded_session_attachment(work_items, &agent_session)?;
                 let Some(item) = work_items
                     .work_items
                     .iter()
@@ -1055,7 +1057,8 @@ pub(super) fn run<E: CliEnv>(
                 // Issue #3684 AC-1: never attach a session to a same-container
                 // duplicate of its canonical Work — that double attach makes
                 // `workspace.ensure` fail closed with no recovery path.
-                if let Some(canonical_id) = gwt_core::workspace_projection::canonical_work_id(
+                if let Some(canonical_id) = gwt_core::workspace_projection::current_work_id(
+                    work_items,
                     env.repo_path(),
                     agent.branch.as_deref(),
                     agent.worktree_path.as_deref(),
@@ -1064,7 +1067,7 @@ pub(super) fn run<E: CliEnv>(
                         && work_item_shares_agent_container(item, &agent)
                     {
                         return Err(GwtError::Other(format!(
-                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.work_prune with params.ids=[\"{workspace_id}\"] to detach the stale container ref (dry-run by default; pass params.dry_run=false to apply) (Issue #3684, #4465)"
+                            "cannot join Work {workspace_id}: it is a same-container duplicate of the canonical Work {canonical_id} for Session {agent_session}; run workspace.ensure to bind the canonical Work, or workspace.work_prune with params.ids=[\"{workspace_id}\"] to detach the stale container ref (dry-run by default; pass params.dry_run=false to apply)"
                         )));
                     }
                 }
@@ -1104,13 +1107,15 @@ pub(super) fn run<E: CliEnv>(
         } => {
             let workspace_id =
                 transact_workspace_state(env.repo_path(), |projection, existing, _persisted| {
+                    reject_discarded_session_attachment(existing, &agent_session)?;
                     let Some(agent) = projection.latest_agent_for_session(&agent_session).cloned()
                     else {
                         return Err(GwtError::Other(format!(
                             "agent session not found: {agent_session}"
                         )));
                     };
-                    let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+                    let canonical_id = gwt_core::workspace_projection::current_work_id(
+                        existing,
                         env.repo_path(),
                         agent.branch.as_deref(),
                         agent.worktree_path.as_deref(),
@@ -1860,7 +1865,13 @@ pub(super) fn ensure_workspace_for_agent(
             // same-container duplicates of the canonical Work before the
             // mutation transaction, so a session poisoned by the pre-guard
             // `workspace.join` trap recovers instead of staying fail-closed.
-            if let Some(canonical_id) = gwt_core::workspace_projection::canonical_work_id(
+            let work_items = load_workspace_work_items_from_path(
+                &gwt_workspace_work_items_path_for_repo_path(&recovery.project_state_root),
+            )
+            .map_err(core_error)?
+            .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now()));
+            if let Some(canonical_id) = gwt_core::workspace_projection::current_work_id(
+                &work_items,
                 &recovery.project_state_root,
                 Some(recovery.branch_identity.as_str()),
                 Some(recovery.worktree_identity.as_path()),
@@ -1887,11 +1898,19 @@ pub(super) fn ensure_workspace_for_agent(
                 // container resolves, instead of refusing the session forever.
                 // #3684's claim heal does not reach this: the stale Work keeps
                 // its own container, so it is never a whole-Work duplicate.
+                // Discarded Works retain their container history, including
+                // the provenance needed to resolve an active successor.
+                let repairable_work_ids = work_items
+                    .work_items
+                    .iter()
+                    .filter(|item| !item.discarded)
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>();
                 let detached = gwt_core::workspace_projection::detach_foreign_container_refs_for_work_event_root(
                     &recovery.project_state_root,
                     &recovery.work_event_root,
                     &canonical_id,
-                    &[],
+                    &repairable_work_ids,
                     |container| workspace_execution_container_matches_recovery(container, &recovery),
                 )
                 .map_err(core_error)?;
@@ -2225,29 +2244,7 @@ fn workspace_ensure_agent_identity_matches(
 /// knowledge-launch wizard stamped before it was aligned with the binding).
 /// Both are one-way: nothing downgrades a durable SPEC owner.
 fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str>) -> bool {
-    let Some(stored) = stored else {
-        return false;
-    };
-    let Some(durable) = durable else {
-        return false;
-    };
-    let Some((prefix, stored_number)) = ["Issue #", "SPEC #"].into_iter().find_map(|prefix| {
-        stored
-            .strip_prefix(prefix)
-            .and_then(|number| number.parse::<u64>().ok())
-            .map(|number| (prefix, number))
-    }) else {
-        return false;
-    };
-    let Some(durable_number) = durable
-        .strip_prefix("SPEC-")
-        .and_then(|number| number.parse::<u64>().ok())
-    else {
-        return false;
-    };
-    stored == format!("{prefix}{stored_number}")
-        && durable == format!("SPEC-{durable_number}")
-        && stored_number == durable_number
+    gwt_core::workspace_projection::can_upgrade_work_owner(stored, durable)
 }
 
 fn workspace_ensure_shadow_is_historical(item: &WorkItem, current_session: &str) -> bool {
@@ -2258,6 +2255,25 @@ fn workspace_ensure_shadow_is_historical(item: &WorkItem, current_session: &str)
         && (item.is_terminal() || item.status_category == WorkspaceStatusCategory::Idle)
 }
 
+fn reject_discarded_session_attachment(
+    work_items: &WorkItemsProjection,
+    session_id: &str,
+) -> gwt_core::error::Result<()> {
+    if let Some(work) = work_items.work_items.iter().find(|work| {
+        work.discarded
+            && work
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == session_id)
+    }) {
+        return Err(GwtError::Other(format!(
+            "Session {session_id} belongs to discarded Work {}; start a new Session for the successor",
+            work.id
+        )));
+    }
+    Ok(())
+}
+
 fn validate_workspace_ensure_recovery_state(
     recovery: &crate::agent_project_state::ValidatedWorkspaceRecoverySession,
     input: &WorkspaceEnsureInput,
@@ -2266,7 +2282,8 @@ fn validate_workspace_ensure_recovery_state(
     projection: &WorkspaceProjection,
     existing: &WorkItemsProjection,
 ) -> gwt_core::error::Result<WorkspaceEnsureAuthorityState> {
-    let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+    let canonical_id = gwt_core::workspace_projection::current_work_id(
+        existing,
         &recovery.project_state_root,
         Some(recovery.branch_identity.as_str()),
         Some(recovery.worktree_identity.as_path()),
@@ -2473,9 +2490,12 @@ fn validate_workspace_ensure_recovery_state(
         // AC-5 / AC-6' / AC-9: name the Works to repair, the operation that
         // repairs them, and a route that exists. The previous text named
         // `workspace.prune`, which has never been an operation — #4396 and
-        // #4465 both burned agents on that dead end.
+        // #4465 both burned agents on that dead end. Issue #3684 and #4465 are
+        // this refusal's provenance; they stay here rather than in the message,
+        // because #3684 closed on 2026-08-27 and a closed Issue is one more
+        // dead end for whoever reads the refusal (#4396).
         return Err(GwtError::Other(format!(
-            "canonical execution container for Session {} is ambiguous across Works: {}; these hold a container ref owned by canonical Work {}. Detach the stale refs with workspace.work_prune params.ids=[{}] (dry-run by default; pass params.dry_run=false to apply), then retry workspace.ensure. To inspect first, run workspace.candidates; to attach explicitly without repairing, run workspace.join params.workspace_id=\"{}\" (Issue #3684, #4465)",
+            "canonical execution container for Session {} is ambiguous across Works: {}; these hold a container ref owned by canonical Work {}. Detach the stale refs with workspace.work_prune params.ids=[{}] (dry-run by default; pass params.dry_run=false to apply), then retry workspace.ensure. work_prune reports the repair as detached=N; closed_candidates and skipped count a different pass and do not mean the detach failed. To inspect first, run workspace.candidates; to attach explicitly without repairing, run workspace.join params.workspace_id=\"{}\"",
             input.agent_session,
             conflicting_work_ids.join(", "),
             canonical_id,
@@ -2597,7 +2617,8 @@ fn apply_workspace_ensure_transition(
             stored.worktree_path = agent.worktree_path.clone();
         }
     }
-    let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+    let canonical_id = gwt_core::workspace_projection::current_work_id(
+        existing,
         work_identity_root,
         recovery
             .map(|recovery| recovery.branch_identity.as_str())
@@ -3925,6 +3946,54 @@ pub(crate) mod tests {
             };
             assert_eq!(reason("w-unknown"), Some("owner_state_unknown"));
             assert_eq!(reason("w-open"), Some("owner_open"));
+        }
+
+        // Issue #4508 AC-3: inline-history compaction marks a Work item as
+        // carrying authoritative legacy metadata. Prune classification reads
+        // owner state, not history, so a compacted Work whose owner is still
+        // open must stay skipped as `owner_open` rather than become a
+        // destruction candidate.
+        #[test]
+        fn a_compacted_work_with_an_open_owner_is_still_skipped_as_owner_open() {
+            let mut compacted = work("w-open", Some("4508"), WorkspaceStatusCategory::Active);
+            for index in 0..(gwt_core::workspace_projection::MAX_INLINE_WORK_EVENTS * 3) {
+                compacted.events.push(WorkEvent::new(
+                    WorkEventKind::Update,
+                    "w-open",
+                    compacted.created_at + chrono::Duration::seconds(index as i64),
+                ));
+            }
+            let mut projection = WorkItemsProjection {
+                updated_at: compacted.updated_at,
+                work_items: vec![
+                    compacted,
+                    work("w-closed", Some("4234"), WorkspaceStatusCategory::Active),
+                ],
+            };
+            assert!(projection.compact_inline_events() > 0);
+            assert!(projection.work_items[0].legacy_metadata_authoritative);
+
+            let plan =
+                super::super::classify_stale_works(&projection.work_items, |number| match number {
+                    4508 => Some(true),
+                    _ => Some(false),
+                });
+
+            assert_eq!(
+                plan.skipped
+                    .iter()
+                    .find(|item| item.work_id == "w-open")
+                    .map(|item| item.reason.as_str()),
+                Some("owner_open"),
+                "compaction must not turn an open owner's Work into a prune candidate"
+            );
+            assert_eq!(
+                plan.candidates
+                    .iter()
+                    .map(|candidate| candidate.work_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["w-closed"]
+            );
         }
 
         #[test]
@@ -8055,6 +8124,193 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn workspace_ensure_and_update_use_successor_of_discarded_work() {
+        use sha2::Digest;
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let session_id = "session-successor-work";
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
+        let predecessor_id = seed_exact_workspace_work(
+            &project_root,
+            &worktree,
+            "session-discarded-work",
+            Some("Issue #3412"),
+            "codex",
+        );
+        record_recovery_work_event(
+            &project_root,
+            &worktree,
+            WorkEvent::new(WorkEventKind::Discard, &predecessor_id, Utc::now()),
+        );
+        let predecessor = load_workspace_work_items(&project_root)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .into_iter()
+            .find(|work| work.id == predecessor_id)
+            .unwrap();
+        let successor_id = format!(
+            "work-successor-{}",
+            hex::encode(sha2::Sha256::digest(predecessor_id.as_bytes()))
+        );
+        let mut start = WorkEvent::new(WorkEventKind::Start, &successor_id, Utc::now());
+        start.owner = predecessor.owner.clone();
+        start.execution_container = predecessor.execution_containers.first().cloned();
+        start.related_work_item_id = Some(predecessor_id.clone());
+        start.agent_session_id = Some(session_id.to_string());
+        start.agent_id = Some("codex".to_string());
+        record_recovery_work_event(&project_root, &worktree, start);
+        let input = WorkspaceEnsureInput {
+            agent_session: session_id.to_string(),
+            title_summary: "Resume successor Work".to_string(),
+            current_focus: None,
+            spec: None,
+            issue: None,
+            topic: None,
+            boundary: None,
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                ensure_workspace_for_agent(&worktree, input.clone())
+                    .expect("ensure must reuse the active successor")
+                    .workspace_id,
+                successor_id
+            );
+        }
+        seed_workspace_container_shadow(
+            &project_root,
+            &worktree,
+            "work-legacy-dup",
+            "session-old",
+            WorkspaceStatusCategory::Idle,
+        );
+        let work_items_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let mut items = load_workspace_work_items_from_path(&work_items_path)
+            .unwrap()
+            .unwrap();
+        let mut duplicate_agent = items
+            .work_items
+            .iter()
+            .find(|work| work.id == successor_id)
+            .unwrap()
+            .agents[0]
+            .clone();
+        duplicate_agent.attached_by = Some(WorkEventKind::Claim);
+        items
+            .work_items
+            .iter_mut()
+            .find(|work| work.id == "work-legacy-dup")
+            .unwrap()
+            .agents
+            .push(duplicate_agent);
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &work_items_path,
+            &items,
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_workspace_for_agent(&worktree, input)
+                .expect("successor must retain duplicate Claim self-healing")
+                .workspace_id,
+            successor_id
+        );
+        let mut env = TestEnv::new(worktree.clone());
+        run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: Some("active".to_string()),
+                status_text: None,
+                summary: Some("Successor update".to_string()),
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some(session_id.to_string()),
+                current_focus: None,
+                title_summary: None,
+            },
+            &mut String::new(),
+        )
+        .expect("update must resolve the successor authority");
+        let works = load_workspace_work_items(&project_root).unwrap().unwrap();
+        assert_eq!(
+            works
+                .work_items
+                .iter()
+                .find(|work| work.id == predecessor_id),
+            Some(&predecessor)
+        );
+        assert_eq!(works.work_items.len(), 3);
+        assert!(!works
+            .work_items
+            .iter()
+            .find(|work| work.id == "work-legacy-dup")
+            .unwrap()
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == session_id));
+        assert_eq!(
+            works
+                .work_items
+                .iter()
+                .find(|work| work.id == successor_id)
+                .unwrap()
+                .summary
+                .as_deref(),
+            Some("Successor update")
+        );
+        let mut projection = load_workspace_projection(&project_root).unwrap().unwrap();
+        let mut old_agent = projection
+            .latest_agent_for_session(session_id)
+            .unwrap()
+            .clone();
+        old_agent.session_id = "session-discarded-work".to_string();
+        old_agent.workspace_id = Some(predecessor_id.clone());
+        projection.agents.push(old_agent);
+        save_workspace_projection(&project_root, &projection).unwrap();
+        let before = workspace_recovery_state_bytes(&workspace_recovery_state_paths(
+            &project_root,
+            &worktree,
+        ));
+        let mut env = TestEnv::new(project_root.clone());
+        for command in [
+            WorkspaceCommand::Join {
+                agent_session: "session-discarded-work".to_string(),
+                workspace_id: successor_id.clone(),
+                current_focus: None,
+                title_summary: None,
+            },
+            WorkspaceCommand::Create {
+                agent_session: "session-discarded-work".to_string(),
+                title_summary: "Invalid old Session join".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: Some(3412),
+                split_from: None,
+                boundary: None,
+            },
+        ] {
+            let error = run(&mut env, command, &mut String::new())
+                .expect_err("old Session must stay on discarded predecessor");
+            assert!(error.to_string().contains("discarded Work"), "{error}");
+            assert_eq!(
+                workspace_recovery_state_bytes(&workspace_recovery_state_paths(
+                    &project_root,
+                    &worktree
+                )),
+                before
+            );
+        }
+    }
+
+    #[test]
     fn workspace_ensure_rejects_terminal_canonical_work_without_mutation() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
@@ -10797,6 +11053,15 @@ pub(crate) mod tests {
                 "refusal must name {operation}: {message}"
             );
         }
+        // Issue #4396: a tracking number is not a recovery route. This text
+        // cited `(Issue #3684, #4465)`; #3684 closed on 2026-08-27, so an
+        // agent that followed the only pointer it was given reached a closed
+        // Issue and stopped. Provenance belongs in the code comment above,
+        // which no agent has to act on.
+        assert!(
+            !message.contains("Issue #"),
+            "the refusal must not send an agent to a tracking Issue that can close: {message}"
+        );
     }
 
     /// Issue #4465 AC-3': the accretion shape must be a prune candidate. The
