@@ -25,6 +25,313 @@ fn open_directory_for_mtime(path: &std::path::Path) -> std::io::Result<std::fs::
     std::fs::File::open(path)
 }
 
+/// Build one Work item carrying `events` inline events, as a legacy
+/// uncompacted projection written before Issue #4508.
+fn legacy_uncompacted_work_item(
+    id: &str,
+    owner: &str,
+    events: usize,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> WorkItem {
+    let mut projection = WorkItemsProjection::empty(started_at);
+    let mut start = WorkEvent::new(WorkEventKind::Start, id, started_at);
+    start.title = Some(format!("owner {owner}"));
+    start.owner = Some(owner.to_string());
+    projection.apply_event(start);
+    for index in 1..events {
+        let mut update = WorkEvent::new(
+            WorkEventKind::Update,
+            id,
+            started_at + chrono::Duration::seconds(index as i64),
+        );
+        update.progress_summary = Some(format!("{id} update {index}"));
+        projection.apply_event(update);
+    }
+    projection.work_items.pop().expect("work item")
+}
+
+/// Issue #4508 AC-2: the projection that exists on disk today carries a fully
+/// uncompacted history. Loading it must keep every Work item and its owner.
+#[test]
+fn legacy_uncompacted_works_json_loads_with_every_work_item_and_owner_intact() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let items = (0..40)
+        .map(|index| {
+            legacy_uncompacted_work_item(
+                &format!("work-{index}"),
+                &format!("#{}", 4000 + index),
+                MAX_INLINE_WORK_EVENTS * 8,
+                started_at + chrono::Duration::hours(index as i64),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_owners = items
+        .iter()
+        .map(|item| (item.id.clone(), item.owner.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let legacy = WorkItemsProjection {
+        updated_at: started_at,
+        work_items: items,
+    };
+    // Written the pre-#4508 way so the fixture really is an uncompacted file.
+    std::fs::write(
+        &work_items_path,
+        serde_json::to_vec_pretty(&legacy).expect("serialize legacy projection"),
+    )
+    .expect("write legacy works.json");
+
+    let loaded = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load legacy works.json")
+        .expect("projection");
+
+    let loaded_owners = loaded
+        .work_items
+        .iter()
+        .map(|item| (item.id.clone(), item.owner.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        loaded_owners, expected_owners,
+        "compaction must not lose a Work item or its owner"
+    );
+    for item in &loaded.work_items {
+        assert!(
+            item.events.len() <= MAX_INLINE_WORK_EVENTS,
+            "{} kept {} inline events",
+            item.id,
+            item.events.len()
+        );
+        assert!(item.progress_summary.is_some());
+    }
+}
+
+/// Issue #4508 AC-6: the field inventory `WorkItem` carried before inline
+/// compaction shipped, read with `deny_unknown_fields` exactly as the real
+/// `WorkItem` is. It stands in for a binary that does not contain this change:
+/// on 2026-09-19 one added field in `works.json` stopped `workspace.*` across
+/// every running gwt on the host, so a compacted projection has to stay inside
+/// this inventory.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreCompactionWorkItem {
+    id: String,
+    title: serde_json::Value,
+    #[serde(default)]
+    intent: serde_json::Value,
+    #[serde(default)]
+    summary: serde_json::Value,
+    #[serde(default)]
+    progress_summary: serde_json::Value,
+    status_category: serde_json::Value,
+    #[serde(default)]
+    owner: serde_json::Value,
+    created_at: serde_json::Value,
+    updated_at: serde_json::Value,
+    #[serde(default)]
+    completed_at: serde_json::Value,
+    #[serde(default)]
+    agents: serde_json::Value,
+    #[serde(default)]
+    execution_containers: serde_json::Value,
+    #[serde(default)]
+    board_refs: serde_json::Value,
+    #[serde(default)]
+    related_work_item_ids: serde_json::Value,
+    #[serde(default)]
+    events: serde_json::Value,
+    #[serde(default)]
+    legacy_metadata_snapshot: Option<Box<PreCompactionWorkItem>>,
+    #[serde(default)]
+    legacy_metadata_authoritative: serde_json::Value,
+    #[serde(default)]
+    legacy_metadata_snapshot_at: serde_json::Value,
+    #[serde(default)]
+    duplicate_event_containers: serde_json::Value,
+    #[serde(default)]
+    discarded: serde_json::Value,
+    #[serde(default)]
+    discarded_at: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreCompactionProjection {
+    updated_at: serde_json::Value,
+    #[serde(default)]
+    work_items: Vec<PreCompactionWorkItem>,
+}
+
+/// Issue #4508 AC-6: a `works.json` written after compaction must still load
+/// in a reader that predates it. Compaction is only allowed to remove history,
+/// never to widen the schema.
+#[test]
+fn a_compacted_works_json_still_loads_in_a_reader_that_predates_compaction() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let projection = WorkItemsProjection {
+        updated_at: started_at,
+        work_items: vec![legacy_uncompacted_work_item(
+            "work-forward-compat",
+            "#4508",
+            MAX_INLINE_WORK_EVENTS * 6,
+            started_at,
+        )],
+    };
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection).expect("save");
+
+    let reloaded = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load")
+        .expect("projection");
+    let item = &reloaded.work_items[0];
+    assert_eq!(item.events.len(), MAX_INLINE_WORK_EVENTS);
+    assert!(
+        item.legacy_metadata_authoritative && item.legacy_metadata_snapshot_at.is_some(),
+        "the fixture must really have been compacted"
+    );
+
+    let written = std::fs::read_to_string(&work_items_path).expect("read works.json");
+    let legacy: PreCompactionProjection = serde_json::from_str(&written)
+        .expect("a binary that predates compaction must still read works.json");
+    assert_eq!(legacy.work_items.len(), 1);
+    assert_eq!(legacy.work_items[0].id, "work-forward-compat");
+}
+
+/// Issue #4508 AC-4: what `WorkItemsCache` keeps resident must be bounded by
+/// the inline cap, not by how many events the project ever recorded.
+#[test]
+fn work_items_cache_residency_is_bounded_by_the_inline_event_cap() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let current_path = tmp.path().join("current.json");
+    let journal_path = tmp.path().join("journal.jsonl");
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).expect("repo dir");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let mut resident = Vec::new();
+    for (label, events_per_item) in [
+        ("small", MAX_INLINE_WORK_EVENTS * 4),
+        ("large", MAX_INLINE_WORK_EVENTS * 40),
+    ] {
+        let work_items_path = tmp.path().join(format!("{label}-works.json"));
+        let projection = WorkItemsProjection {
+            updated_at: started_at,
+            work_items: (0..4)
+                .map(|index| {
+                    legacy_uncompacted_work_item(
+                        &format!("work-{index}"),
+                        &format!("#{}", 4000 + index),
+                        events_per_item,
+                        started_at + chrono::Duration::hours(index as i64),
+                    )
+                })
+                .collect(),
+        };
+        std::fs::write(
+            &work_items_path,
+            serde_json::to_vec_pretty(&projection).expect("serialize"),
+        )
+        .expect("write works.json");
+
+        let mut cache = WorkItemsCache::new();
+        let (loaded, _) = cache
+            .load_or_synthesize_shared_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("load");
+        assert_eq!(cache.parse_count, 1);
+        assert_eq!(loaded.work_items.len(), 4);
+        resident.push(loaded.inline_event_count());
+    }
+
+    assert_eq!(
+        resident[0], resident[1],
+        "a project with ten times the history must not cost ten times the residency"
+    );
+    assert!(resident[1] <= 4 * MAX_INLINE_WORK_EVENTS);
+}
+
+/// Issue #4508 AC-1: an immutable source keeps offering events that compaction
+/// already folded away. Re-ingesting it must not re-grow the history, and must
+/// not report the projection as changed.
+#[test]
+fn reingesting_a_compacted_source_neither_regrows_history_nor_rewrites_the_projection() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let started_at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let mut events = Vec::new();
+    let mut start = WorkEvent::new(WorkEventKind::Start, "work-reingest", started_at);
+    start.title = Some("Re-ingest owner".to_string());
+    start.owner = Some("#4508".to_string());
+    events.push(start);
+    for index in 1..(MAX_INLINE_WORK_EVENTS * 3) {
+        let mut update = WorkEvent::new(
+            WorkEventKind::Update,
+            "work-reingest",
+            started_at + chrono::Duration::seconds(index as i64),
+        );
+        update.progress_summary = Some(format!("update {index}"));
+        events.push(update);
+    }
+    let source = events
+        .iter()
+        .map(|event| serde_json::to_string(event).expect("encode event"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let first = crate::work_events_intake::ingest_work_events_content(&work_items_path, &source)
+        .expect("first ingest");
+    assert_eq!(first.applied, events.len());
+
+    let after_first = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load")
+        .expect("projection");
+    assert_eq!(after_first.inline_event_count(), MAX_INLINE_WORK_EVENTS);
+    let bytes_after_first = std::fs::metadata(&work_items_path).expect("stat").len();
+
+    let second = crate::work_events_intake::ingest_work_events_content(&work_items_path, &source)
+        .expect("second ingest");
+    assert_eq!(
+        second.applied, 0,
+        "a source whose events are already folded applies nothing"
+    );
+
+    let after_second = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load")
+        .expect("projection");
+    assert_eq!(after_second.inline_event_count(), MAX_INLINE_WORK_EVENTS);
+    assert_eq!(
+        std::fs::metadata(&work_items_path).expect("stat").len(),
+        bytes_after_first,
+        "re-ingesting a folded source must not rewrite works.json"
+    );
+    let item = &after_second.work_items[0];
+    assert_eq!(item.id, "work-reingest");
+    assert_eq!(item.owner.as_deref(), Some("#4508"));
+    assert_eq!(item.created_at, started_at);
+}
+
 // SPEC-2359 close-latency root fix: the works.json cache must stop
 // re-parsing unchanged files, observe content changes, and never cache a
 // synthesized fallback against a missing works.json.
