@@ -11,6 +11,8 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const runtimeCpuUnitsPattern =
+  /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 // Issue #3365 — the renderWorkspace key/skip lifecycle lives in this module.
 const workspaceRenderSyncSource = readFileSync(
   resolve(here, "../workspace-render-sync.js"),
@@ -1297,6 +1299,12 @@ test("body markup wires Mission Briefing reveal lines (US-1 AS-1)", () => {
   assert.match(online.textContent, /OPERATOR ONLINE/);
 });
 
+test("head suppresses the browser's implicit favicon request", () => {
+  const favicon = document.querySelector('link[rel="icon"]');
+  assert.ok(favicon, "expected an explicit favicon declaration");
+  assert.equal(favicon.getAttribute("href"), "data:,");
+});
+
 test("font preload hints exist for Mona/Hubot/JetBrains", () => {
   const preloads = Array.from(document.querySelectorAll("link[rel=preload][as=font]")).map((l) => l.href);
   for (const expected of ["MonaSans.woff2", "HubotSans-Bold.woff2", "JetBrainsMono.woff2"]) {
@@ -1354,15 +1362,19 @@ test("Status Strip exposes a compact PERF cell for runtime health", () => {
   const cell = document.getElementById("op-strip-runtime-health");
   assert.ok(cell, "expected runtime health PERF cell");
   assert.match(cell.textContent ?? "", /PERF/);
-  assert.equal(cell.getAttribute("aria-label"), "Runtime performance");
+  assert.match(cell.getAttribute("aria-label") ?? "", /Runtime performance/);
+  assert.match(cell.getAttribute("aria-label") ?? "", runtimeCpuUnitsPattern);
+  assert.match(cell.getAttribute("title") ?? "", runtimeCpuUnitsPattern);
   assert.match(operatorShellSource, /applyRuntimeHealth/);
 });
 
 test("Runtime health PERF detail uses structured diagnostic classes", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   for (const token of [
+    "formatRuntimeAggregateCpu",
     "runtimeHealthStateLabel",
     "op-runtime-health-detail__summary",
+    "op-runtime-health-detail__units",
     "op-runtime-health-detail__chip",
     "op-runtime-health-detail__queue",
     "op-runtime-health-detail__process-list",
@@ -1375,8 +1387,13 @@ test("Runtime health PERF detail uses structured diagnostic classes", () => {
   }
   assert.match(
     operatorShellSource,
-    /value\.textContent\s*=\s*`\$\{runtimeHealthStateLabel\(state\)\}\s+\$\{formatRuntimeCpu/,
-    "compact PERF value must be severity-first",
+    /const cpuLabel\s*=\s*formatRuntimeAggregateCpu\(snapshot\.cpu_percent\)/,
+    "compact PERF value must derive its CPU label from the aggregate-only formatter",
+  );
+  assert.match(
+    operatorShellSource,
+    /value\.textContent\s*=\s*`\$\{stateLabel\}\s+\$\{cpuLabel\}\s+\$\{memoryLabel\}`/,
+    "compact PERF value must remain severity-first and render the aggregate CPU label",
   );
   assert.match(
     css,
@@ -2139,6 +2156,166 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
         `${id}: aria-labelledby="${labelledby}" must point at an existing element`,
       );
     }
+  }
+});
+
+test("shared overlays use semantic z-index tokens in interaction order", () => {
+  const projectSwitcherPanel = document.getElementById("project-switcher-panel");
+  assert.ok(projectSwitcherPanel, "expected project switcher popover");
+  assert.equal(
+    projectSwitcherPanel.parentElement?.id,
+    "app",
+    "fixed project popover must escape the project-bar stacking context",
+  );
+
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const baseTokens = tokensCss.match(/:root\s*\{([^}]*)\}/)?.[1];
+  assert.ok(baseTokens, "expected unthemed :root tokens");
+
+  const zIndexToken = (name) => {
+    const match = baseTokens.match(new RegExp(`${name}:\\s*(\\d+)\\s*;`));
+    assert.ok(match, `expected integer ${name} in the base token set`);
+    return Number(match[1]);
+  };
+
+  const popover = zIndexToken("--z-popover");
+  const projectOverlay = zIndexToken("--z-project-overlay");
+  const overlay = zIndexToken("--z-overlay");
+  const modal = zIndexToken("--z-modal");
+  const systemDegradation = zIndexToken("--z-system-degradation");
+  const systemConnection = zIndexToken("--z-system-connection");
+  const systemNotice = zIndexToken("--z-notice-stack");
+  const systemContextMenu = zIndexToken("--z-system-context-menu");
+  const systemPopover = zIndexToken("--z-system-popover");
+  const systemWindow = zIndexToken("--z-system-window");
+  const systemModal = zIndexToken("--z-system-modal");
+  assert.ok(
+    projectOverlay < popover,
+    "project popovers must stay above blocking project overlays",
+  );
+  assert.ok(
+    popover < overlay,
+    "blocking overlays must paint above non-modal popovers",
+  );
+  assert.ok(
+    overlay < modal,
+    "shared dialogs must stay above command palette overlays",
+  );
+  assert.ok(modal < systemDegradation);
+  assert.ok(systemDegradation < systemConnection);
+  assert.ok(systemConnection < systemNotice);
+  assert.ok(systemNotice < systemContextMenu);
+  assert.ok(systemContextMenu < systemPopover);
+  assert.ok(systemPopover < systemWindow);
+  assert.ok(systemWindow < systemModal);
+
+  const tokenizedRules = [
+    {
+      name: "project switcher popover",
+      rule: inlineStyle.match(/\.project-switcher-panel\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "shared modal backdrop",
+      rule: inlineStyle.match(/\.modal-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "project picker and onboarding overlay",
+      rule: inlineStyle.match(/\.project-picker,\s*\.project-onboarding\s*\{[^}]*\}/)?.[0],
+      token: "--z-project-overlay",
+    },
+    {
+      name: "command palette overlay",
+      rule: componentsStyle.match(/\.op-palette-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-overlay",
+    },
+    {
+      name: "runtime health popover",
+      rule: componentsStyle.match(/\.op-runtime-health-detail\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage popover",
+      rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage modal overlay",
+      rule: componentsStyle.match(/\.op-usage-modal-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "render degradation banner",
+      rule: componentsStyle.match(/\.render-degradation-banner\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-degradation",
+    },
+    {
+      name: "connection overlay",
+      rule: componentsStyle.match(/\.connection-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-connection",
+    },
+    {
+      name: "operator notice stack",
+      rule: inlineStyle.match(/\.operator-notice-stack\s*\{[^}]*\}/)?.[0],
+      token: "--z-notice-stack",
+    },
+    {
+      name: "terminal context menu",
+      rule: componentsStyle.match(/\.terminal-context-menu\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-context-menu",
+    },
+    {
+      name: "Board destination popover",
+      rule: inlineStyle.match(/\.board-destination-popover\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-popover",
+    },
+    {
+      name: "global surface window",
+      rule: componentsStyle.match(/\.op-global-window\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-window",
+    },
+    {
+      name: "update modal",
+      rule: componentsStyle.match(/\.update-modal\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-modal",
+    },
+  ];
+
+  for (const { name, rule, token } of tokenizedRules) {
+    assert.ok(rule, `expected ${name} CSS rule`);
+    assert.match(rule, new RegExp(`z-index:\\s*var\\(${token}\\)`));
+    assert.doesNotMatch(rule, /z-index:\s*-?\d+/, `${name} must not use a raw z-index`);
+  }
+
+  assert.doesNotMatch(
+    `${inlineStyle}\n${componentsStyle}`,
+    /z-index:\s*[1-9]\d{3,}\b/,
+    "global interaction and safety tiers must not reintroduce raw high z-index values",
+  );
+  const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[^}]*\}/)?.[0];
+  assert.ok(modalShellRule, "expected shared modal shell rule");
+  assert.doesNotMatch(
+    modalShellRule,
+    /z-index:/,
+    "the modal backdrop owns the shared modal tier without a competing child tier",
+  );
+
+  const panelRule = tokenizedRules[0].rule;
+  for (const declaration of [
+    "font-family: var(--font-mono)",
+    "font-size: var(--type-xs)",
+    "font-stretch: 75%",
+    "color: var(--color-text-muted)",
+    "letter-spacing: var(--tracking-mono)",
+    "text-transform: none",
+    "font-weight: 500",
+  ]) {
+    assert.match(
+      panelRule,
+      new RegExp(declaration.replace(/[()]/g, "\\$&")),
+      `reparented project switcher must preserve ${declaration}`,
+    );
   }
 });
 

@@ -41,6 +41,37 @@ pub(crate) struct DeclaredBlock {
     pub missing_verification: Option<String>,
 }
 
+pub(crate) fn run_collect_governed<E: CliEnv>(
+    env: &mut E,
+    cmd: CliCommand,
+) -> Result<super::governance::GovernedCommandOutput, Box<super::governance::GovernedCommandFailure>>
+{
+    match cmd {
+        CliCommand::Execution(inner) => {
+            let mut output = String::new();
+            let result = super::execution_state::run_governed(env, inner, &mut output)?;
+            Ok(super::governance::GovernedCommandOutput {
+                exit_code: result.exit_code,
+                output,
+                refusal: result.refusal,
+            })
+        }
+        other => {
+            let (exit_code, output) = super::run_collect(env, other).map_err(|error| {
+                Box::new(super::governance::GovernedCommandFailure {
+                    error,
+                    refusal: None,
+                })
+            })?;
+            Ok(super::governance::GovernedCommandOutput {
+                exit_code,
+                output,
+                refusal: None,
+            })
+        }
+    }
+}
+
 pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     let input = match env.read_stdin() {
         Ok(input) => input,
@@ -64,16 +95,25 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     // this is a no-op in tests and in the argv path.
     let read_only = super::hook::workflow_policy::is_read_only_json_envelope_operation(&operation);
     let operation_started = std::time::Instant::now();
-    let outcome = super::run_collect(env, parsed.command);
+    let outcome = run_collect_governed(env, parsed.command);
     crate::perf::record_operation(&operation, operation_started.elapsed(), read_only);
     match outcome {
-        Ok((code, output)) => {
+        Ok(result) => {
+            let super::governance::GovernedCommandOutput {
+                exit_code: code,
+                output,
+                refusal,
+            } = result;
             let mut payload = serde_json::json!({
                 "ok": code == 0,
                 "operation": operation,
                 "exit_code": code,
                 "output": output,
             });
+            if let Some(refusal) = refusal.as_ref() {
+                payload["refusal"] = serde_json::to_value(refusal)
+                    .expect("operation refusal metadata must serialize");
+            }
             attach_project_store(&mut payload);
             if let Err(err) = write_response(env.stdout(), &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -83,7 +123,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 (0, None) => {}
                 _ => {
                     report_operation_refusal(env, &operation, &output);
-                    super::board::auto_file_operation_refusal(env, &operation, &output);
+                    if let Some(refusal) = refusal.as_ref() {
+                        super::board::auto_file_structured_operation_refusal(
+                            env, &operation, &output, refusal,
+                        );
+                    } else if !operation.starts_with("execution.") {
+                        super::board::auto_file_operation_refusal(env, &operation, &output);
+                    }
                 }
             }
             code
@@ -92,14 +138,18 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         // surface. Without this, stdout stayed empty and a machine caller
         // could not distinguish "the operation failed at stage X" from "the
         // process never answered". The stderr line stays for humans.
-        Err(err) => {
-            let message = err.to_string();
+        Err(failure) => {
+            let message = failure.error.to_string();
             let mut payload = serde_json::json!({
                 "ok": false,
                 "operation": operation,
                 "exit_code": 1,
                 "error": message,
             });
+            if let Some(refusal) = failure.refusal.as_ref() {
+                payload["refusal"] = serde_json::to_value(refusal)
+                    .expect("operation refusal metadata must serialize");
+            }
             attach_project_store(&mut payload);
             if let Err(err) = write_response(env.stdout(), &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -110,7 +160,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             // comes first — the escalation must never delay or replace the
             // operation's own reply.
             report_operation_refusal(env, &operation, &message);
-            super::board::auto_file_operation_refusal(env, &operation, &message);
+            if let Some(refusal) = failure.refusal.as_ref() {
+                super::board::auto_file_structured_operation_refusal(
+                    env, &operation, &message, refusal,
+                );
+            } else if !operation.starts_with("execution.") {
+                super::board::auto_file_operation_refusal(env, &operation, &message);
+            }
             1
         }
     }
@@ -342,6 +398,18 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
         }),
+        "issue.spec.lint" => CliCommand::Issue(IssueCommand::SpecLint {
+            number: required_u64(params, "number")?,
+            sections: optional_string_vec(params, "sections")?,
+            snapshot: optional_bool(params, "snapshot")?.unwrap_or(true),
+            directive_epoch: optional_string(params, "directive_epoch")?,
+            phase_slice: optional_string(params, "phase_slice")?,
+        }),
+        "issue.spec.inspection.complete" | "issue.spec.inspection-complete" => {
+            CliCommand::Issue(IssueCommand::SpecInspectionComplete {
+                number: required_u64(params, "number")?,
+            })
+        }
         "issue.spec.rename" => CliCommand::Issue(IssueCommand::SpecRename {
             number: required_u64(params, "number")?,
             title: required_string(params, "title")?,

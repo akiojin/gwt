@@ -24,6 +24,7 @@ pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
 pub(crate) mod index;
+pub(crate) mod intake_inspection;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
 mod issue_spec;
@@ -41,6 +42,7 @@ pub(crate) mod register;
 mod release;
 pub(crate) mod search;
 mod skill_state_runtime;
+pub(crate) mod spec_artifact_lint;
 #[cfg(test)]
 mod test_support;
 mod title_summary_guard;

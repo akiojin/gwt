@@ -360,6 +360,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "issue.spec.inspection.complete",
+        aliases: &["issue.spec.inspection-complete"],
+    },
+    Operation {
+        name: "issue.spec.lint",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.spec.list",
         aliases: &[],
     },

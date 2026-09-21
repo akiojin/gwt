@@ -1995,9 +1995,9 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         {
             None
         }
-        WorkEventSettlementStatus::Blocked(blocker) => {
-            Some(work_event_settlement_blocker_description(&blocker))
-        }
+        WorkEventSettlementStatus::Blocked(blocker) => Some(
+            work_event_settlement_blocker_description(&blocker, worktree),
+        ),
     }
 }
 
@@ -2026,6 +2026,37 @@ pub(crate) fn work_event_receipt_authorizes_current_generation(
         ),
         None => Ok(execution_state::current_execution_binding(worktree, owner)?.is_none()),
     }
+}
+
+/// #4523: `execution.reopen` appends its Blocked -> Active lifecycle event to
+/// the same generation, which advances `ledger_head_hash` and would otherwise
+/// invalidate the very record the reopen consumed — forcing a second, identical
+/// full verification matrix before the first PR mutation.
+///
+/// A run record may therefore name the exact current binding or an authentic
+/// same-Session lifecycle prefix of the current generation, exactly as
+/// [`work_event_receipt_authorizes_current_generation`] already allows for Work
+/// settlement receipts. Predecessors, successors, takeovers, and foreign
+/// Sessions stay refused, and worktree freshness remains a separate gate.
+fn record_binding_authorizes_current_generation(
+    worktree: &Path,
+    session_id: &str,
+    record: &VerificationRunRecord,
+) -> bool {
+    let Some(recorded) = record.execution_binding.as_ref() else {
+        return false;
+    };
+    let Ok(Some(execution)) = execution_state::load(worktree) else {
+        return false;
+    };
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: execution.owner_kind,
+        number: execution.owner_number,
+    };
+    execution_state::execution_binding_authorizes_current_generation(
+        worktree, owner, session_id, recorded,
+    )
+    .unwrap_or(false)
 }
 
 /// #4011: a stale-generation receipt on a live canonical Work is repairable
@@ -2064,6 +2095,22 @@ pub(crate) fn work_event_settlement_pending_description(
 
 pub(crate) fn work_event_settlement_blocker_description(
     blocker: &WorkEventSettlementBlocker,
+    worktree: &Path,
+) -> String {
+    work_event_settlement_blocker_description_with_gate(
+        blocker,
+        crate::cli::hook::workflow_policy::identity_gate_closed(worktree),
+    )
+}
+
+/// Issue #4533 (AC-1): the refusal demands a commit, and while the Agent
+/// Workspace identity gate is closed that commit is denied before it runs. The
+/// two rules used to contradict each other in the agent's face. Name the gate
+/// and the exact order that lifts it, so the instruction the agent is given is
+/// one it can actually execute.
+pub(crate) fn work_event_settlement_blocker_description_with_gate(
+    blocker: &WorkEventSettlementBlocker,
+    identity_gate_closed: bool,
 ) -> String {
     let reason = match blocker {
         WorkEventSettlementBlocker::PathDirty { states } => {
@@ -2121,8 +2168,19 @@ pub(crate) fn work_event_settlement_blocker_description(
                 .to_string(),
     };
     format!(
-        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory."
+        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
+        identity_gate_escape_suffix(identity_gate_closed)
     )
+}
+
+/// Issue #4533 (AC-1/AC-3): the ordered escape from the identity gate,
+/// appended to any refusal that demands a commit while the gate is closed.
+/// Empty when the gate is open, so the common refusal stays short.
+fn identity_gate_escape_suffix(identity_gate_closed: bool) -> &'static str {
+    if !identity_gate_closed {
+        return "";
+    }
+    " The Agent Workspace identity gate is closed for this session, so that commit and push are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then commit, push, and retry. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
 }
 
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
@@ -2585,6 +2643,47 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
     env.into_iter().collect()
 }
 
+/// Cargo's test-only self dependency can overwrite the operational gwtd with
+/// an armed debug artifact, even without --all-features (Issue #4317).
+/// This recovery belongs only to the gwt workspace, not projects using gwt.
+fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
+    // Windows' canonical matrix is library-only because the running gwtd.exe
+    // cannot be replaced (#4182). That matrix does not overwrite the binary.
+    if cfg!(windows)
+        || !commands.iter().any(|command| {
+            split_command_line(command).is_ok_and(|args| {
+                args.first().map(String::as_str) == Some("cargo")
+                    && args.get(1).map(String::as_str) == Some("test")
+            })
+        })
+    {
+        return None;
+    }
+    let manifest =
+        |path: &Path| toml::from_str::<toml::Value>(&fs::read_to_string(path).ok()?).ok();
+    let workspace = manifest(&worktree.join("Cargo.toml"))?;
+    if !workspace
+        .get("workspace")?
+        .get("members")?
+        .as_array()?
+        .iter()
+        .any(|member| member.as_str() == Some("crates/gwt"))
+    {
+        return None;
+    }
+    let package = manifest(&worktree.join("crates/gwt/Cargo.toml"))?;
+    if package.get("package")?.get("name")?.as_str()? != "gwt"
+        || package.get("features")?.get("test-gh-guard").is_none()
+        || !package.get("bin")?.as_array()?.iter().any(|binary| {
+            binary.get("name").and_then(toml::Value::as_str) == Some("gwtd")
+                && binary.get("path").and_then(toml::Value::as_str) == Some("src/bin/gwtd.rs")
+        })
+    {
+        return None;
+    }
+    Some("cargo build -p gwt --bin gwtd")
+}
+
 fn execute_command_with_isolation(
     worktree: &Path,
     command: &str,
@@ -3035,6 +3134,20 @@ where
             "warning: GWT_ALLOW_REAL_GH is set; verify.run does not pass it to child commands so tests keep their gh guard\n",
         );
     }
+    // Restore even after a failing test, and record recovery failures through
+    // the same result path so an unusable artifact can never report PASS
+    // (Issue #4317). Appending it to the run's own command list keeps it on
+    // the progress count and in the persisted results.
+    let restored;
+    let commands = match gwtd_artifact_restoration(worktree, commands) {
+        Some(restoration) => {
+            let mut extended = commands.to_vec();
+            extended.push(restoration.to_string());
+            restored = extended;
+            restored.as_slice()
+        }
+        None => commands,
+    };
     let commands_started = std::time::Instant::now();
     if let Some(on_progress) = options.on_progress.as_mut() {
         on_progress(0, commands.len(), std::time::Duration::ZERO);
@@ -3065,7 +3178,7 @@ where
         transcript.push_str(&tail);
         transcript.push_str(&format!("exit: {exit_code}\n"));
         results.push(VerificationCommandResult {
-            command: command.clone(),
+            command: command.to_string(),
             exit_code,
             output_tail: persisted_failure_output(exit_code, &tail),
             headed_e2e,
@@ -3707,7 +3820,9 @@ fn evaluate_evidence_snapshot_inner(
             Ok((_, binding)) => binding,
             Err(_) => return EvidenceStatus::Unreadable,
         };
-        if record.execution_binding != current_binding {
+        if record.execution_binding != current_binding
+            && !record_binding_authorizes_current_generation(worktree, session_id, record)
+        {
             return EvidenceStatus::WrongGeneration;
         }
     }
@@ -5123,6 +5238,11 @@ mod tests {
 
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            persisted.commands.len(),
+            1,
+            "an unrelated Cargo project must not receive a gwt artifact build"
+        );
         let output_tail = &persisted.commands[0].output_tail;
         assert!(
             output_tail.contains("tests::named_failure_for_verification_record"),
@@ -5134,6 +5254,43 @@ mod tests {
             "persisted output exceeded the stdout+stderr tail budget: {} bytes",
             output_tail.len()
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn gwtd_artifact_restoration_failure_is_recorded_after_passing_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        // The library passes, but restoring the intentionally missing binary fails.
+        fs::write(package.join("src/lib.rs"), "#[test] fn passes() {}\n").unwrap();
+
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact",
+            &["cargo test -p gwt --all-features --lib".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
+        assert_eq!(record.commands.len(), 2, "{transcript}");
+        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
+        assert!(!record.all_passed, "{transcript}");
+        let persisted = load(dir.path()).unwrap().unwrap();
+        assert!(!persisted.commands[1].output_tail.is_empty());
     }
 
     // Spawn failures are recorded as failed results, never dropped runs.

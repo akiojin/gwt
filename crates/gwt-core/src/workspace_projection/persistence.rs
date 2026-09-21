@@ -3217,11 +3217,26 @@ fn validate_session_bound_owner_claim(
     Ok(())
 }
 
+/// Compare two persisted Session-bound paths.
+///
+/// A Work item routinely records execution containers created on another host,
+/// and those paths do not resolve here. Such a path cannot be this Session's
+/// container, so it compares unequal rather than failing the whole transaction:
+/// treating it as an I/O failure aborted every `workspace.update` for the Work
+/// and reached the agent as a permanent `transaction_conflict` (#4443). Every
+/// other I/O failure stays fail-closed, and two paths that are textually the
+/// same still match even when neither resolves.
 fn session_bound_paths_match(left: Option<&Path>, right: Option<&Path>) -> Result<bool> {
     let (Some(left), Some(right)) = (left, right) else {
         return Ok(false);
     };
-    Ok(canonical_session_bound_path(left)? == canonical_session_bound_path(right)?)
+    match (
+        resolved_session_bound_path(left)?,
+        resolved_session_bound_path(right)?,
+    ) {
+        (Some(left), Some(right)) => Ok(left == right),
+        _ => Ok(left == right),
+    }
 }
 
 fn canonical_session_bound_path(path: &Path) -> Result<PathBuf> {
@@ -3230,6 +3245,20 @@ fn canonical_session_bound_path(path: &Path) -> Result<PathBuf> {
         .map_err(|_| {
             GwtError::Other("Session-bound workspace path could not be canonicalized".to_string())
         })
+}
+
+/// Canonicalize a persisted path, reporting a path that does not exist as
+/// unresolved instead of as a failure.
+fn resolved_session_bound_path(path: &Path) -> Result<Option<PathBuf>> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(Some(crate::paths::normalize_windows_child_process_path(
+            &path,
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(GwtError::Other(
+            "Session-bound workspace path could not be canonicalized".to_string(),
+        )),
+    }
 }
 
 /// Compare persisted candidate state with an already-canonical authority.
@@ -5228,6 +5257,10 @@ pub fn worktree_sources_needing_backfill(
 /// re-ingested copy of this event (W-16 intake on another machine) cannot
 /// regress a terminal item; the Idle surface state comes from the kind
 /// mapping in `workspace_work_event_status`.
+///
+/// Issue #4479 AC-1: the owner the branch already names travels on the event,
+/// so a Work materialized here is never created with `owner: null` while its
+/// execution container points at an Issue branch.
 pub fn record_workspace_backfill_event_paths(
     work_items_path: &Path,
     events_path: &Path,
@@ -5248,6 +5281,7 @@ fn workspace_backfill_event(
 ) -> WorkEvent {
     let mut event = WorkEvent::new(WorkEventKind::Backfill, work_id, updated_at);
     event.title = Some(branch.to_string());
+    event.owner = work_owner_for_branch(branch);
     event.execution_container = Some(WorkspaceExecutionContainerRef {
         branch: Some(branch.to_string()),
         worktree_path: Some(worktree_path.to_path_buf()),

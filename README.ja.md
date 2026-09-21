@@ -357,6 +357,12 @@ Priority の変更と daemon 不在時の設定変更は、実行中 instance �
 場合のみ対象になります。稼働中の worktree、main worktree、呼び出し元の worktree、
 実行中の `gwtd` を置く worktree には、どのフラグを渡しても決して触れません。
 
+Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考え方を使います。
+マージ済みまたは差分の無い Workspace は、未コミットの差分が gwt 自身の書き込み
+（`.gwt/` namespace、materialize された `gwt-*` skill / command、手書きの内容を含まない
+`.codex/hooks.json` / `.claude/settings.local.json`）だけであれば cleanup-ready のまま
+数えられます。それ以外の未コミット変更があれば、その Workspace は件数から外れます。
+
 ### Autonomous モード（opt-in）
 
 Autonomous モードはループ全体を無人で実行します: 適格 Issue → 自動起動 → 実装 →
@@ -837,6 +843,27 @@ gwtd <<'JSON'
 JSON
 ```
 
+- レビューへ渡す前に SPEC artifact を lint する: FR / AS / T 番号、Traceability
+  表との整合、supersede のインライン注記、section マーカー / roundtrip の健全性を
+  検査し、結果を Intake Inspection Snapshot に記録し、Finding Disposition Ledger
+  を seed して reviewer checklist を出力します。critical finding があると非ゼロ
+  終了します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.lint","params":{"number":1784}}
+JSON
+```
+
+- 完了を宣言してよいかを判定する: 各 section が snapshot と一致する GitHub 実体
+  readback を持ち、critical finding がすべて disposition 済みであることを確認します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.inspection.complete","params":{"number":1784}}
+JSON
+```
+
 ## ログ
 
 - アプリログ:
@@ -874,6 +901,13 @@ macOS では1秒間隔で3回採取し、同じプロセスが全標本で CPU 1
 警告します。プロセスや標本を取得できなかった場合は低負荷と断定しません。
 警告は観測結果であり、特定 worktree が原因である証明ではありません。
 稼働中のファイル監視利用者と Spotlight のプライバシー設定を確認してください。
+
+Spotlight のインデックス処理そのものは Issue Monitor の snapshot から読めます。
+`issue.monitor.status` の `spotlight` は `mds_stores` プロセスとその CPU 率を
+列挙し、100% を超えたプロセスがある場合に `warning` を載せます。worktree が
+数百規模のホストでは、この daemon がエージェント本体を上回る CPU 消費者になり、
+そうでなければ「ホストが重い」としか観測できません。Spotlight の無い
+プラットフォームでは、プロセスも警告も無い状態でこのブロックを返します。
 
 ## 開発
 

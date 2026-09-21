@@ -54,6 +54,7 @@ pub mod recovery_delivery;
 pub mod runtime_daemon_events;
 pub mod session_inventory;
 pub mod spec_tasks;
+pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
@@ -210,7 +211,8 @@ pub use launch_wizard::{
     ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
-    refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    managed_asset_lock_path, refresh_existing_managed_gwt_assets_for_worktree,
+    refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     refresh_managed_gwt_assets_for_worktree, ManagedAssetMaterialization,
 };

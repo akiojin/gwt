@@ -6834,6 +6834,61 @@ fn session_bound_update_rejects_explicit_owner_conflict_without_mutation() {
     t812_assert_rejected_without_mutation(&result, &before, &after, "explicit owner conflict");
 }
 
+/// Issue #4443: a Work item routinely carries execution containers recorded on
+/// another host, and those paths do not resolve here. Treating an absent path
+/// as an I/O failure aborted the whole Session-bound transaction before
+/// `revalidate` ever ran, which reached the agent as a `transaction_conflict`
+/// that no retry, `workspace.ensure`, or `execution.continue` could clear.
+#[test]
+fn session_bound_update_ignores_execution_container_recorded_on_another_host() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+
+    let foreign_worktree = temp.path().join("another-host").join("work").join("target");
+    assert!(
+        !foreign_worktree.exists(),
+        "precondition: the other host's worktree does not exist here"
+    );
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems")
+        .expect("WorkItems projection");
+    work_items
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("target Work")
+        .execution_containers
+        .push(WorkspaceExecutionContainerRef {
+            branch: Some(T812_TARGET_BRANCH.to_string()),
+            worktree_path: Some(foreign_worktree),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+    save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+        .expect("seed the other host's execution container");
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Active),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("another host's container must not block this one".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("an execution container from another host must not fail the transaction");
+}
+
 #[test]
 fn session_bound_update_runs_pre_persist_hook_before_any_surface_mutation() {
     let _guard = lock_test_env();
@@ -12206,6 +12261,57 @@ fn backfill_records_work_item_for_worktree_without_record() {
         event.status_category, None,
         "backfill must not carry an explicit status so apply_event terminal \
              preservation keeps closed items closed when the event is re-ingested"
+    );
+    assert_eq!(
+        item.owner, None,
+        "a branch that names no Issue stays ownerless"
+    );
+}
+
+/// Issue #4479 AC-1/AC-4: the worktree scan is the only path that materializes
+/// a Work from nothing, and it used to leave `owner: null` even when the
+/// container already named the Issue branch. `workspace.ensure` then refused
+/// that record as an owner mismatch with `stored=<none>` and no route back.
+/// The regression is pinned on the exact reported shape: one Backfill event,
+/// `created_at == updated_at`, and an Issue branch.
+#[test]
+fn backfill_owns_the_work_when_the_worktree_branch_names_an_issue() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_root = temp.path().join("repo");
+    let worktree = temp.path().join("work-issue-4477");
+    fs::create_dir_all(&worktree).expect("worktree dir");
+    let work_items_path = temp.path().join("works.json");
+    let now = Utc.with_ymd_and_hms(2026, 9, 16, 11, 37, 7).unwrap();
+
+    let backfilled = reconcile_worktree_work_items_paths(
+        &work_items_path,
+        &project_root,
+        &[backfill_source(Some("work/issue-4477"), &worktree)],
+        now,
+    )
+    .expect("reconcile");
+    assert_eq!(backfilled, 1);
+
+    let projection = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load works")
+        .expect("projection exists");
+    let item = &projection.work_items[0];
+    assert_eq!(
+        item.owner.as_deref(),
+        Some("Issue #4477"),
+        "a Work whose container points at an Issue branch must carry that owner \
+         from the instant it is created"
+    );
+    assert_eq!(
+        item.created_at, item.updated_at,
+        "the reported record was never updated after creation; the owner has to \
+         be right at creation, not repaired later"
+    );
+    assert_eq!(
+        item.events.last().expect("backfill event").owner.as_deref(),
+        Some("Issue #4477"),
+        "the owner travels on the event, so a re-ingested copy on another \
+         machine folds to the same owner"
     );
 }
 

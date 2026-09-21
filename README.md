@@ -385,6 +385,13 @@ are kept by default because their rebuild lands on whoever opens them next.
 Running worktrees, the main worktree, the calling worktree, and the worktree
 hosting the running `gwtd` are never touched, whatever the flags say.
 
+The Workspace panel's `Clean Up Ready` count uses the same idea for whole
+worktrees: a merged or change-free Workspace stays cleanup-ready when its only
+uncommitted difference is something gwt itself wrote — its `.gwt/` namespace,
+the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
+`.claude/settings.local.json` that still carries no hand-written content.
+Anything else you have not committed keeps the Workspace out of the count.
+
 ### Autonomous mode (opt-in)
 
 Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →
@@ -879,6 +886,28 @@ gwtd <<'JSON'
 JSON
 ```
 
+- Lint a SPEC artifact before handing it to a reviewer. The run checks FR / AS
+  / T numbering, traceability-table consistency, supersede inline annotations,
+  and section marker / roundtrip health, records the result in the Intake
+  Inspection Snapshot, seeds the Finding Disposition Ledger, and prints the
+  reviewer checklist. It exits non-zero when a critical finding is present.
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.lint","params":{"number":1784}}
+JSON
+```
+
+- Check whether the SPEC may be declared complete. Every section needs a
+  GitHub-entity readback matching the snapshot, and every critical finding
+  needs a disposition:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.inspection.complete","params":{"number":1784}}
+JSON
+```
+
 ## Logs
 
 - App logs:
@@ -919,6 +948,13 @@ and warns when the same process exceeds 100% CPU in all three samples. Missing
 processes or unavailable samples do not imply low CPU usage. A warning is an
 observation, not proof that a particular worktree caused the load; inspect
 active filesystem consumers and Spotlight privacy settings before attributing it.
+
+Spotlight's own indexing daemon is reported from the Issue Monitor snapshot
+instead: `spotlight` in `issue.monitor.status` lists every `mds_stores`
+process with its CPU percentage and carries a `warning` once one of them
+exceeds 100%. On a host with hundreds of worktrees the daemon can outrank the
+agents themselves, which otherwise only reads as a slow host. The block is
+present with no processes and no warning on platforms without Spotlight.
 
 ## Development
 

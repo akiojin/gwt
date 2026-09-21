@@ -114,6 +114,33 @@ pub fn workspace_group_key_for_item(project_root: &Path, item: &WorkItem) -> Str
     item.id.clone()
 }
 
+/// The durable Work owner a branch already names, or `None` when it names no
+/// Issue.
+///
+/// Issue #4479: the worktree scan materializes a Work from a branch alone, and
+/// leaving `owner` unset there produced records whose container pointed at
+/// `work/issue-<n>` while `owner` stayed null. `workspace.ensure` then read the
+/// absent owner as a competing claim and refused with `stored=<none>`, which no
+/// operation could repair.
+///
+/// `work/issue-<n>` is minted by the launch wizard
+/// (`knowledge_launch_target_branch_name`), so this is that function's inverse
+/// rather than a heuristic: only the exact shape resolves, and every other
+/// branch — including a decorated variant like `work/issue-42-followup` — stays
+/// ownerless rather than inventing a claim on an Issue.
+pub fn work_owner_for_branch(branch: &str) -> Option<String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    let identity = canonical_work_branch_identity(branch);
+    let digits = identity.strip_prefix("work/issue-")?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("Issue #{}", digits.parse::<u64>().ok()?))
+}
+
 pub(super) fn canonical_work_branch_identity(branch: &str) -> String {
     if let Some(name) = branch.strip_prefix("refs/remotes/") {
         return name.strip_prefix("origin/").unwrap_or(name).to_string();
@@ -156,6 +183,52 @@ fn canonical_work_slug(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #4479 AC-1: a Work whose execution container points at an Issue
+    /// branch must never store `owner: null`. `work/issue-<n>` is minted by
+    /// `knowledge_launch_target_branch_name`, so reading the owner back out of
+    /// it is that function's inverse, not a guess.
+    #[test]
+    fn work_owner_for_branch_reads_the_issue_back_out_of_a_minted_branch() {
+        assert_eq!(
+            work_owner_for_branch("work/issue-4477").as_deref(),
+            Some("Issue #4477")
+        );
+        for spelling in [
+            "origin/work/issue-4477",
+            "refs/remotes/origin/work/issue-4477",
+            "  work/issue-4477  ",
+        ] {
+            assert_eq!(
+                work_owner_for_branch(spelling).as_deref(),
+                Some("Issue #4477"),
+                "{spelling} names the same owner as the bare branch"
+            );
+        }
+    }
+
+    /// Fail-closed: only the exact minted shape yields an owner. Anything else
+    /// stays ownerless rather than inventing a claim on an Issue.
+    #[test]
+    fn work_owner_for_branch_refuses_every_branch_that_is_not_a_minted_issue_branch() {
+        for branch in [
+            "",
+            "   ",
+            "develop",
+            "work/issue-",
+            "work/issue-abc",
+            "work/issue-12x",
+            "work/issue-4477-followup",
+            "feature/issue-4477",
+            "work/spec-4477",
+        ] {
+            assert_eq!(
+                work_owner_for_branch(branch),
+                None,
+                "{branch:?} must not be read as an Issue owner"
+            );
+        }
+    }
 
     #[test]
     fn workspace_group_key_groups_same_branch_across_spellings_and_ids() {

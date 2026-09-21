@@ -198,6 +198,10 @@ fn evaluate_title_summary_guard(
         return Ok(HookOutput::Silent);
     }
 
+    if is_identity_gate_exempt_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+
     if is_title_sensitive_tool(event) && !is_read_only_exploration_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
             "Agent Workspace identity is required before work starts. Run workspace.update with purpose + current_focus to set it",
@@ -208,7 +212,12 @@ Required command shape:\n\
   JSON\n\n\
 Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
-Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.",
+Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
+If workspace.update itself is refused because this worktree holds another Session's Execution Control Record, take it over first and then set the identity, one single-segment gwtd command each:\n\
+  1. execution.adopt (params.reason)\n\
+  2. workspace.ensure (params.purpose + params.current_focus)\n\
+  3. workspace.update (params.purpose + params.current_focus)\n\
+While the gate is closed you may also run execution.repair, execution.reopen, execution.release_prepared, and memory.add. Shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -511,6 +520,78 @@ fn is_workspace_identity_update_event(event: &HookEvent) -> bool {
         return false;
     };
     is_workspace_identity_update_command(command)
+}
+
+fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
+    if event.tool_name.as_deref() != Some("Bash") {
+        return false;
+    }
+    event
+        .command()
+        .and_then(json_envelope_operation)
+        .as_deref()
+        .is_some_and(is_identity_gate_exempt_operation)
+}
+
+/// Issue #4533: the operations a session may run while the Agent Workspace
+/// identity gate is closed, beyond the read-only set.
+///
+/// The gate exists so an unregistered Session cannot change production code
+/// before Workspace can show which window is doing what. Two narrow classes do
+/// not threaten that, and refusing them is what closed the interlock #4533
+/// reports:
+///
+/// - `execution.adopt` / `execution.repair` / `execution.reopen` /
+///   `execution.release_prepared` are recovery-only. They are exactly what
+///   `execution.status` advertises in `available_recoveries`, and a session
+///   that cannot set its title is the only kind of session that ever needs
+///   them. With them blocked, the refusal text named the correct exit
+///   (`execution.adopt`, then `workspace.ensure`) while the gate held that
+///   exit shut, and the session could neither escape nor settle.
+/// - `memory.add` appends one entry to the machine-local work-notes log. It
+///   touches nothing under version control. Without it a trapped session
+///   cannot even record why it is trapped, so the next generation repeats the
+///   same path (AC-3).
+///
+/// `available_recoveries` can also name `verify.plan` / `verify.run`, and
+/// those stay gated on purpose: they take the host-wide verification lease and
+/// mint a session-bound evidence record, which is exactly the anonymous
+/// side effect the gate exists to prevent. They are reachable the moment the
+/// gate lifts, which the escape above always does.
+///
+/// AC-2 — a bookkeeping-only `git commit` is deliberately **not** exempted.
+/// The `chore(work):` convention bounds the subject line, never the index: a
+/// commit run under that subject carries whatever is staged, including
+/// arbitrary production edits, which is precisely what the gate exists to
+/// stop. Hook-side inspection cannot bound the index either, because the
+/// staging happens in earlier commands the hook has already allowed or denied
+/// independently. The commit therefore stays behind the gate, and the way out
+/// is to lift the gate first — which
+/// [`crate::cli::verification_record::work_event_settlement_blocker_description`]
+/// now spells out in the refusal itself (AC-1).
+pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "execution.adopt"
+            | "execution.repair"
+            | "execution.reopen"
+            | "execution.release_prepared"
+            | "execution.release-prepared"
+            | "memory.add"
+    )
+}
+
+/// Issue #4533 (AC-1): whether the identity gate would currently deny this
+/// session's writes in `worktree_root`. Mirrors the context [`evaluate`]
+/// builds, including the review-dispatch and PM exemptions, so a refusal
+/// cannot advertise an escape the session does not actually need.
+pub(crate) fn identity_gate_closed(worktree_root: &Path) -> bool {
+    if crate::issue_monitor_review::review_dispatch_session_active()
+        || pm_identity_exempt_session_for_worktree(worktree_root)
+    {
+        return false;
+    }
+    current_agent_workspace_identity_missing(worktree_root).unwrap_or(false)
 }
 
 fn is_workspace_identity_update_command(command: &str) -> bool {
@@ -1874,6 +1955,188 @@ mod tests {
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    /// Issue #4533 (AC-5/AC-6): the operations `execution.status` advertises in
+    /// `available_recoveries` must survive the gate. Denying them closed the
+    /// interlock the issue reports — the refusal text named the exit and the
+    /// gate held that exit shut.
+    #[test]
+    fn title_summary_guard_allows_execution_recovery_operations_before_identity_is_set() {
+        for command in [
+            envelope_command("execution.adopt", r#"{"reason":"relaunch takeover"}"#),
+            envelope_command("execution.repair", r#"{"reason":"integrity failure"}"#),
+            envelope_command("execution.reopen", r#"{"reason":"blocker resolved"}"#),
+            envelope_command(
+                "execution.release_prepared",
+                r#"{"reason":"stale fence","operation_id":"op-1"}"#,
+            ),
+        ] {
+            assert_eq!(
+                evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+
+        // `available_recoveries` can also name the verification pair. Those are
+        // not exempt — they run the whole matrix and mint a session-bound
+        // record — so the contract is that lifting the gate reaches them. Fix
+        // that half too, or the escape is only half an escape.
+        for command in [
+            envelope_command("verify.plan", r#"{"derive":true}"#),
+            envelope_command("verify.run", r#"{"commands":["cargo test -p gwt"]}"#),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true)
+                        .expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "verification stays gated: {command}"
+            );
+            assert_eq!(
+                evaluate_title_summary_guard(&bash_event(&command), false).expect("guard output"),
+                HookOutput::Silent,
+                "lifting the gate must reach it: {command}"
+            );
+        }
+    }
+
+    /// Issue #4533 (AC-3): a gated session must still be able to record why it
+    /// is stuck, or the next generation walks into the same trap.
+    #[test]
+    fn title_summary_guard_allows_memory_add_before_identity_is_set() {
+        let command = envelope_command(
+            "memory.add",
+            r#"{"title":"identity gate interlock","context":"gate","learning":"x","future_action":"y"}"#,
+        );
+
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),
+            HookOutput::Silent,
+            "{command}"
+        );
+    }
+
+    /// Issue #4533 (AC-2): the recorded decision is that a bookkeeping-only
+    /// shell commit stays behind the gate. A `chore(work):` subject bounds the
+    /// message, never the index, so exempting it would carry arbitrary
+    /// production edits through the gate.
+    #[test]
+    fn title_summary_guard_still_blocks_bookkeeping_only_commits() {
+        for command in [
+            "git add .gwt/work/events && git commit -m 'chore(work): receipt'",
+            "git commit -m 'chore(work): receipt'",
+            "git push origin HEAD",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(command), true).expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4533 (AC-5): the exemption is scoped to the recovery and
+    /// bookkeeping operations. Every other execution operation still waits for
+    /// the identity.
+    #[test]
+    fn title_summary_guard_exemption_does_not_open_the_rest_of_the_execution_surface() {
+        for command in [
+            envelope_command("execution.complete", "{}"),
+            envelope_command("execution.blocked", r#"{"reason":"gate"}"#),
+            envelope_command("build.start", r#"{"spec":4533}"#),
+            envelope_command("pr.create", r#"{"title":"x"}"#),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true)
+                        .expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4533 (AC-4): the full interlock, end to end.
+    ///
+    /// Reproduce the state the issue reports — identity gate closed, Work
+    /// event store dirty, the session holding a foreign/terminal Execution
+    /// Control Record — and assert the two halves now agree: the refusal names
+    /// an ordered escape, and every operation it names clears the gate.
+    #[test]
+    fn identity_gate_and_dirty_work_event_store_no_longer_interlock() {
+        use crate::cli::verification_record::{
+            work_event_settlement_blocker_description_with_gate, WorkEventPathState,
+            WorkEventSettlementBlocker,
+        };
+
+        let blocker = WorkEventSettlementBlocker::PathDirty {
+            states: vec![WorkEventPathState::Untracked],
+        };
+        let refusal = work_event_settlement_blocker_description_with_gate(&blocker, true);
+
+        // The refusal still demands the commit, but no longer demands it
+        // silently behind a gate that forbids it.
+        assert!(refusal.contains("chore(work):"), "{refusal}");
+        assert!(refusal.contains("identity gate is closed"), "{refusal}");
+        for step in [
+            "`execution.adopt`",
+            "`workspace.ensure`",
+            "`workspace.update`",
+            "`memory.add`",
+        ] {
+            assert!(
+                refusal.contains(step),
+                "escape step {step} missing:\n{refusal}"
+            );
+        }
+        let adopt_at = refusal.find("`execution.adopt`").expect("adopt step");
+        let ensure_at = refusal.find("`workspace.ensure`").expect("ensure step");
+        let update_at = refusal.find("`workspace.update`").expect("update step");
+        assert!(
+            adopt_at < ensure_at && ensure_at < update_at,
+            "the escape must be ordered adopt -> ensure -> update:\n{refusal}"
+        );
+
+        // Every escape step the refusal names must actually clear the gate.
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let gated = WorkflowContext::unknown().with_title_summary_missing(true);
+        for command in [
+            envelope_command(
+                "execution.adopt",
+                r#"{"reason":"inherited blocked record"}"#,
+            ),
+            envelope_command(
+                "workspace.ensure",
+                r#"{"purpose":"Issue 4533","current_focus":"gate escape"}"#,
+            ),
+            envelope_command(
+                "workspace.update",
+                r#"{"purpose":"Issue 4533","current_focus":"gate escape"}"#,
+            ),
+            envelope_command(
+                "memory.add",
+                r#"{"title":"identity gate interlock","context":"c","learning":"l","future_action":"f"}"#,
+            ),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &gated)
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "the refusal names this escape step, so the gate must allow it: {command}"
+            );
+        }
+
+        // With the gate open the refusal stays exactly as it was.
+        let ungated = work_event_settlement_blocker_description_with_gate(&blocker, false);
+        assert!(!ungated.contains("identity gate"), "{ungated}");
+        assert!(refusal.starts_with(&ungated), "{refusal}\n---\n{ungated}");
     }
 
     #[test]
