@@ -936,7 +936,6 @@ impl PtyHandle {
         }
     }
 
-
     /// Try to wait for the child process without blocking.
     ///
     /// Returns `Some(ExitStatus)` if the child has exited, `None` if still running.
@@ -1960,7 +1959,9 @@ mod tests {
         // Issue #4142 hands a released handle an already-drained reader rather
         // than an error, so a reader thread that arrives after the release
         // still finishes on EOF instead of reporting the pane as errored.
-        let mut late = handle.reader().expect("released handle still hands out a reader");
+        let mut late = handle
+            .reader()
+            .expect("released handle still hands out a reader");
         let mut buffer = [0u8; 16];
         assert_eq!(
             late.read(&mut buffer).expect("drained reader read"),
