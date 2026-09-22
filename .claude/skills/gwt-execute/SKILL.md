@@ -65,6 +65,33 @@ included):
 - blocked by the environment or missing verification: JSON operation
   `execution.blocked` with a non-empty `params.reason` and optional
   `params.missing_verification`. Blocked is not done — report the blocker.
+- already delivered with nothing to produce: JSON operation
+  `execution.no_action` with a non-empty `params.reason`. No Action is a
+  successful *non-delivery*: it is neither Completed nor Blocked, so it never
+  claims the work shipped and it never files a blocker against an owner that
+  has nothing wrong with it.
+
+`execution.no_action` exists for exactly one situation: a producing generation
+was materialized for a **delivered owner** — a closed owner whose whole source
+state the configured base already contains — so there is no source work to
+verify, commit, push, or hand to a PR. It proves that zero source surface
+itself and refuses otherwise, so it cannot be used to skip real work:
+
+- it refuses when the worktree holds any source the base does not contain, when
+  the session does not hold the record, when the record was edited outside the
+  canonical operations, when the execution is already terminal, and when the
+  source surface cannot be proven at all;
+- every refusal changes nothing — no execution record, Work, Session, Git, or
+  obligation byte moves;
+- on success it writes one machine-local integrity-hashed audit, settles this
+  action's own obligations, and leaves the predecessor record byte-identical.
+  It commits nothing, pushes nothing, requires no verification record, and
+  creates or mutates no PR.
+
+A delivered owner is not a blocker: never reach for `execution.blocked` because
+an owner turned out to be already shipped. Conversely, never reach for
+`execution.no_action` to escape work that exists — it will refuse, and the
+refusal names the source it found.
 
 `execution.blocked` is a terminal outcome, not a pause. Never use it while
 waiting for a temporary question, owner decision, or verification that can

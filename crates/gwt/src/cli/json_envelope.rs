@@ -1085,6 +1085,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.no_action" | "execution.no-action" => {
+            let reason = required_string(params, "reason")?;
+            reject_unknown_params(params, &["reason"], "execution.no_action")?;
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::NoAction {
+                reason,
+            })
+        }
         "execution.release_prepared" => {
             // Issue #4161: owner-addressed like `execution.status`, because the
             // Session that left the Prepared fence behind is gone and the
@@ -4850,6 +4857,36 @@ mod tests {
         assert!(matches!(
             err("execution.reopen", json!({})),
             CliParseError::MissingFlag("reason")
+        ));
+        // Issue #4545 AC-2: `execution.no_action` takes a non-empty reason and
+        // nothing else — an unknown parameter is refused rather than ignored,
+        // so a caller cannot smuggle a scope the operation does not honour.
+        assert!(matches!(
+            ok(
+                "execution.no_action",
+                json!({"reason": "already delivered"})
+            ),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::NoAction { .. })
+        ));
+        assert!(matches!(
+            err("execution.no_action", json!({})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            err(
+                "execution.no_action",
+                json!({"reason": "already delivered", "issue": 3290})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            parse(&envelope(
+                "execution.no-action",
+                json!({"reason": "already delivered"})
+            ))
+            .expect("the dash spelling resolves")
+            .command,
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::NoAction { .. })
         ));
         assert!(matches!(
             ok(
