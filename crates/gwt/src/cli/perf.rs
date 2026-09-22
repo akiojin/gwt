@@ -22,6 +22,8 @@ pub const PERF_STREAMS: &[&str] = &["ui", "op", "resource"];
 /// `perf.*` command model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PerfCommand {
+    /// `perf.startup` — the latest process startup, without mixing runs.
+    Startup,
     /// `perf.summary` — p50 / p95 / worst per stream and target.
     Summary {
         /// RFC3339 lower bound of the aggregated period.
@@ -104,6 +106,21 @@ pub fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let _ = env;
     match command {
+        PerfCommand::Startup => {
+            let records = read_records(&PerfFilter {
+                target: Some("startup:".to_string()),
+                ..PerfFilter::default()
+            })
+            .map_err(|error| SpecOpsError::from(ApiError::Network(error.to_string())))?;
+            render(
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "startup": crate::perf::startup::latest_startup(&records),
+                }),
+                out,
+            )?;
+            Ok(0)
+        }
         PerfCommand::Summary {
             since,
             stream,
@@ -288,7 +305,7 @@ mod tests {
         assert_eq!(payload["sample_count"], 0);
         assert_eq!(
             payload["missing_routes"].as_array().expect("array").len(),
-            7
+            crate::perf::PerfRoute::ALL.len()
         );
     }
 
@@ -298,5 +315,40 @@ mod tests {
         assert!(parse_stream("frontend").is_err());
         assert!(parse_since("2026-09-08T10:00:00Z").is_ok());
         assert!(parse_since("yesterday").is_err());
+    }
+
+    #[test]
+    fn both_reports_distinguish_legacy_and_shared_detection_without_rewriting_history() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let legacy = sample("route:search", "ui", 10_000.0);
+        let mut shared = sample("route:search", "ui", 11_000.0);
+        shared["detector_version"] = serde_json::json!(1);
+        let mut excluded = sample("route:startup", "ui", 12_000.0);
+        excluded["detector_version"] = serde_json::json!(1);
+        seed_perf_log(&[legacy, shared, excluded]);
+        let path = gwt_logs_dir().join("perf/perf-2026-09-08.jsonl");
+        let before = fs::read(&path).expect("original log");
+        let mut env = TestEnv::new(home.path().to_path_buf());
+
+        for command in [
+            PerfCommand::Summary {
+                since: None,
+                stream: Some("ui".to_string()),
+                target: Some("route:search".to_string()),
+            },
+            PerfCommand::Violations {
+                since: None,
+                stream: Some("ui".to_string()),
+                target: Some("route:search".to_string()),
+            },
+        ] {
+            let mut out = String::new();
+            assert_eq!(run(&mut env, command, &mut out).expect("report runs"), 0);
+            let payload: serde_json::Value = serde_json::from_str(&out).expect("report JSON");
+            assert_eq!(payload["detector_coverage"]["legacy_sample_count"], 1);
+            assert_eq!(payload["detector_coverage"]["shared_sample_count"], 1);
+        }
+        assert_eq!(fs::read(path).expect("unchanged log"), before);
     }
 }

@@ -58,7 +58,9 @@ fn denial_for_env(label: &str, has_env: impl Fn(&str) -> bool) -> Option<String>
     Some(format!(
         "{REAL_GH_BLOCKED_ERROR_CODE}: '{label}' would reach the real GitHub API from a test. \
          Stub gh first (GWT_TEST_GH_SANDBOX=1 with a PATH fake, GWT_TEST_GH=<path>, or \
-         GWT_FAKE_GH_MODE), or opt in to the live API with GWT_ALLOW_REAL_GH=1 (Issue #3675)."
+         GWT_FAKE_GH_MODE), or opt in to the live API with GWT_ALLOW_REAL_GH=1 (Issue #3675). \
+         If cargo test left your checkout's target/debug/gwtd guarded, restore the operational \
+         artifact from the checkout root with `cargo build -p gwt --bin gwtd`, then retry."
     ))
 }
 
@@ -81,6 +83,10 @@ mod tests {
         assert!(
             detail.contains("gh pr view 12"),
             "detail must name the refused call: {detail}"
+        );
+        assert!(
+            detail.contains("cargo build -p gwt --bin gwtd"),
+            "a guarded operational artifact needs a normal-build recovery command: {detail}"
         );
     }
 

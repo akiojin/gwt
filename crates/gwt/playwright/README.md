@@ -1,9 +1,9 @@
-# Playwright — SPEC-2356 Operator Design System / SPEC-1939 Phase 12 / 13 e2e
+# Playwright — WebView behavior E2E
 
-Visual regression baseline for the Operator Design System surfaces and
-behaviour e2e for the Project Index health UX (SPEC-1939 Phase 12, with
-the Phase 13 badge withdrawal applied — see "SPEC-1939 Phase 12 / 13 e2e"
-below).
+Rendered behavior coverage for the Operator Design System surfaces, project
+entry flow, and Project Index health UX. The suite exercises both dark and
+light themes with deterministic embedded-backend fixtures; live-backend specs
+run when `GWT_PLAYWRIGHT_BASE_URL` is set.
 
 ## Run
 
@@ -13,12 +13,6 @@ below).
 bash scripts/run-visual-tests.sh
 ```
 
-## Update baseline (when intentional design change lands)
-
-```bash
-bash scripts/run-visual-tests.sh --update-snapshots
-```
-
 ## Test layout
 
 | Spec | カバー範囲 | スタイル |
@@ -26,14 +20,15 @@ bash scripts/run-visual-tests.sh --update-snapshots
 | `tests/chrome.spec.ts` | Operator chrome smoke (Project Bar / Status Strip / hover-reveal peek 帯) | live-gwt (skip-if-no-`GWT_PLAYWRIGHT_BASE_URL`) |
 | `tests/theme-toggle.spec.ts` | Dark↔Light 200ms 切替、xterm 追従 | live-gwt (skip-if-no-`GWT_PLAYWRIGHT_BASE_URL`) |
 | `tests/reduced-motion.spec.ts` | Living Telemetry 縮退 | live-gwt (skip-if-no-`GWT_PLAYWRIGHT_BASE_URL`) |
-| `tests/kanban.spec.ts` | SPEC-2017 Knowledge Bridge Kanban visual snapshots | embedded-frontend fixture |
+| `tests/kanban.spec.ts` | SPEC-2017 Knowledge Bridge list/detail behavior | embedded-frontend fixture |
 | `tests/index-status.spec.ts` | SPEC-1939 Phase 13 Index status surface (per-tab dot / Settings.Index / per-cell rebuild) | embedded-frontend fixture |
+| `tests/project-open-surfaces.spec.ts` | Project Picker / Open Folder / Clone / non-Git onboarding | embedded-frontend fixture through the shared live harness |
 
 `live-gwt` specs require the CI workflow (or a developer) to launch a
 real `gwt` instance and export `GWT_PLAYWRIGHT_BASE_URL`. `embedded-frontend`
 specs serve `crates/gwt/web/**` through Playwright `page.route` and stub
-`WebSocket` directly, so they run unmodified under the standard
-`Visual Regression` workflow.
+`WebSocket` directly, so they run unmodified under the standard frontend
+WebView E2E job.
 
 ## SPEC-1939 Phase 12 / 13 e2e
 
@@ -42,8 +37,8 @@ specs serve `crates/gwt/web/**` through Playwright `page.route` and stub
 through Playwright `page.route()` and replaces `WebSocket` with a
 deterministic backend that emits canned `workspace_state` and
 `project_index_status` events. **No live gwt process / xvfb / WebKit
-required**, so the suite runs reliably under the existing
-`Visual Regression` workflow without any extra orchestration.
+required**, so the suite runs reliably under the existing frontend WebView E2E
+job without any extra orchestration.
 
 > **Phase 13 scope change.** The project-bar `Index:` badge has been
 > withdrawn (concept separation between repo-shared `issues`/`specs`

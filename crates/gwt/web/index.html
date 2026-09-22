@@ -53,14 +53,6 @@
                 aria-controls="project-switcher-panel"
                 title="Switch projects"
               >Projects</button>
-              <div
-                class="project-switcher-panel"
-                id="project-switcher-panel"
-                role="listbox"
-                aria-label="Projects"
-                aria-hidden="true"
-                hidden
-              ></div>
             </div>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
             <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
@@ -403,14 +395,14 @@
             id="op-strip-runtime-health"
             tabindex="0"
             data-state="warming"
-            aria-label="Runtime performance"
-            title="Runtime performance warming"
+            aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
+            title="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
           >
             <span class="op-status-strip__label">PERF</span>
             <span
               class="op-status-strip__value"
               id="op-strip-runtime-health-value"
-              aria-label="Runtime performance"
+              aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             >CPU -- MEM --</span>
           </div>
           <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
@@ -436,6 +428,17 @@
           </div>
         </footer>
       </div>
+      <!-- Issue #3753: the fixed Projects popover is an #app-level layer.
+           Keeping it inside .project-bar would trap it in that grid item's
+           stacking context, below project picker/onboarding overlays. -->
+      <div
+        class="project-switcher-panel"
+        id="project-switcher-panel"
+        role="listbox"
+        aria-label="Projects"
+        aria-hidden="true"
+        hidden
+      ></div>
       <div
         class="op-briefing"
         id="op-briefing"
@@ -824,6 +827,63 @@
           aria-label="Work Resume Picker"
           tabindex="-1"
         ></div>
+      </div>
+
+      <!-- SPEC-1921 Phase 80: read-only durable delivery Recovery Center. -->
+      <div
+        class="modal-backdrop"
+        id="recovery-center-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell recovery-center-modal__shell"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="recovery-center-title"
+          tabindex="-1"
+        >
+          <header class="modal-header recovery-center-modal__header">
+            <div>
+              <p class="recovery-center-modal__kicker">DURABLE DELIVERY</p>
+              <h2 id="recovery-center-title">Recovery Center</h2>
+            </div>
+            <button
+              type="button"
+              class="wizard-button recovery-center-modal__close"
+              data-recovery-center-close
+              aria-label="Close Recovery Center"
+            >×</button>
+          </header>
+          <div class="modal-body recovery-center-modal__body">
+            <div class="recovery-center-filters" aria-label="Recovery filters">
+              <label>
+                <span>State</span>
+                <select id="recovery-center-state-filter">
+                  <option value="attention">Attention</option>
+                  <option value="all">All states</option>
+                  <option value="pending">Pending</option>
+                  <option value="acknowledged">Acknowledged</option>
+                  <option value="conflicted">Conflicted</option>
+                </select>
+              </label>
+              <label>
+                <span>Worktree</span>
+                <select id="recovery-center-worktree-filter">
+                  <option value="all">All forms</option>
+                  <option value="ephemeral">Ephemeral</option>
+                  <option value="branch-backed">Branch-backed</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+              </label>
+            </div>
+            <div class="recovery-center-status" role="status"></div>
+            <div class="recovery-center-list" role="listbox" aria-label="Recovery deliveries"></div>
+          </div>
+          <footer class="modal-footer recovery-center-modal__footer">
+            <span class="recovery-center-count" aria-live="polite">0 shown · 0 total</span>
+            <button type="button" class="wizard-button" data-recovery-center-close>Close</button>
+          </footer>
+        </div>
       </div>
 
       <!-- SPEC-2017 US-9: Knowledge Bridge Drawer. Re-uses the

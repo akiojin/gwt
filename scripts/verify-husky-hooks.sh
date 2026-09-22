@@ -34,31 +34,37 @@ require_not_contains() {
   fi
 }
 
-require_order() {
+# Same as require_not_contains, but ignores comment lines so a hook may still
+# explain in prose which command it deliberately does not run.
+require_code_not_contains() {
   local file="$1"
-  local first="$2"
-  local second="$3"
-  local first_line
-  local second_line
-  first_line=$(grep -Fn "$first" "$file" | head -n 1 | cut -d: -f1 || true)
-  second_line=$(grep -Fn "$second" "$file" | head -n 1 | cut -d: -f1 || true)
-  if [ -z "$first_line" ] || [ -z "$second_line" ] || [ "$first_line" -ge "$second_line" ]; then
-    fail "Expected '$first' to appear before '$second' in $file"
+  local pattern="$2"
+  if sed 's/[[:space:]]*#.*$//' "$file" | grep -Fq -- "$pattern"; then
+    fail "Unexpected command found in $file: $pattern"
   fi
 }
 
 require_file "$PRE_PUSH"
-require_contains "$PRE_PUSH" "cargo clippy --all-targets --all-features -- -D warnings"
 require_contains "$PRE_PUSH" "cargo fmt --all -- --check"
-require_contains "$PRE_PUSH" "ensure_coverage_tooling"
-require_contains "$PRE_PUSH" "rustup component add llvm-tools-preview"
-require_contains "$PRE_PUSH" "cargo install cargo-llvm-cov --locked"
-require_contains "$PRE_PUSH" "cargo llvm-cov --version"
-require_order "$PRE_PUSH" "if cargo llvm-cov --version >/dev/null 2>&1; then" "if command -v rustup >/dev/null 2>&1; then"
-require_contains "$PRE_PUSH" "cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json"
-require_contains "$PRE_PUSH" "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90"
-require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md"
+require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks"
 require_contains "$PRE_PUSH" "bash scripts/validate-skill-frontmatter.sh"
+
+# SPEC #3576: `git push` must never start a heavy Cargo job. Those jobs compile
+# the workspace and saturate the host's CPU, and they run outside the
+# host-wide verification lease because the hook hangs off `git push`, not off
+# `gwtd`. Once #4339 made every worktree materialize its hooks, a single push
+# per worktree was enough to run several instrumented suites at once, which is
+# what produced the wall-clock fixture failures and the misread lease holders.
+# Every check removed here is already enforced per pull request by the Lint and
+# Test workflows, so this keeps the gate and drops only the duplicate.
+require_code_not_contains "$PRE_PUSH" "cargo clippy"
+require_code_not_contains "$PRE_PUSH" "cargo llvm-cov"
+require_code_not_contains "$PRE_PUSH" "cargo install cargo-llvm-cov --locked"
+require_code_not_contains "$PRE_PUSH" "rustup component add llvm-tools-preview"
+require_code_not_contains "$PRE_PUSH" "ensure_coverage_tooling"
+require_code_not_contains "$PRE_PUSH" "check-coverage-threshold.mjs"
+require_code_not_contains "$PRE_PUSH" "cargo test"
+require_code_not_contains "$PRE_PUSH" "cargo build"
 
 require_file "$COMMIT_MSG"
 require_contains "$COMMIT_MSG" 'bunx --package @commitlint/cli commitlint --edit "$1"'

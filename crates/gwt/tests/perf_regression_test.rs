@@ -43,6 +43,8 @@ fn sample_record(target: &str, value: f64) -> PerfLogRecord {
         budget: None,
         consecutive_count: None,
         duration_seconds: None,
+        detector_version: None,
+        startup: None,
     }
 }
 
@@ -102,6 +104,86 @@ fn an_in_budget_series_is_not_flagged() {
     let summary = summarize(&records, &budgets, None);
     assert!(!summary.targets[0].over_budget);
     assert_eq!(summary.violation_count, 0);
+}
+
+/// Issue #4292: each CLI process sees only one measurement per target, so
+/// violations must survive real process exits, not only runtime recreation.
+#[test]
+fn sustained_route_and_operation_overages_survive_separate_processes() {
+    const CHILD_HOME: &str = "GWT_PERF_REGRESSION_CHILD_HOME";
+    let config = PerfConfig::default();
+    if let Some(home) = std::env::var_os(CHILD_HOME) {
+        let _gwt_home = ScopedGwtHome::set(std::path::PathBuf::from(home));
+        let mut runtime =
+            PerfRuntime::appending_to_established_log(&config).expect("child perf runtime");
+        assert!(
+            runtime.is_enabled(),
+            "the parent established the fixture log"
+        );
+        for route in PerfRoute::ALL {
+            let elapsed = Duration::from_secs_f64(route.budget_ms(runtime.budgets()) / 500.0);
+            runtime.record_route(route, elapsed);
+        }
+        runtime.record_operation("issue.view", Duration::from_millis(500), true);
+        return;
+    }
+
+    let home = tempfile::tempdir().expect("isolated perf HOME");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    drop(PerfRuntime::from_config(&config).expect("establish fixture log like the GUI"));
+    for _ in 0..3 {
+        let output = gwt_core::process::hidden_command(
+            std::env::current_exe().expect("current test binary"),
+        )
+        .args([
+            "--exact",
+            "sustained_route_and_operation_overages_survive_separate_processes",
+        ])
+        .env(CHILD_HOME, home.path())
+        .output()
+        .expect("run a separate perf collector process");
+        assert!(
+            output.status.success(),
+            "child collector failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let records = read_records_from_dir(&gwt_logs_dir().join("perf"), &PerfFilter::default())
+        .expect("read cross-process evidence");
+    for target in PerfRoute::ALL
+        .map(PerfRoute::target)
+        .into_iter()
+        .chain(["gwtd:issue.view".to_string()])
+    {
+        let target_records: Vec<_> = records
+            .iter()
+            .filter(|record| record.target == target)
+            .collect();
+        assert_eq!(
+            target_records
+                .iter()
+                .filter(|record| record.is_sample())
+                .count(),
+            3,
+            "{target}"
+        );
+        assert_eq!(
+            target_records
+                .iter()
+                .filter(|record| record.is_violation())
+                .count(),
+            1,
+            "{target}"
+        );
+        assert!(
+            target_records
+                .iter()
+                .all(|record| record.detector_version == Some(1)),
+            "{target}"
+        );
+    }
 }
 
 /// The collector must stay far inside the budget of the routes it measures.

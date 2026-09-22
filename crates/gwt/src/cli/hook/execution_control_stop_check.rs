@@ -56,6 +56,32 @@ pub fn handle_with_input(
     if record.status != ExecutionControlStatus::Active {
         return HookOutput::Silent;
     }
+    // SPEC #3248 FR-243: a trusted No Action is a successful non-delivery
+    // terminal outcome, so it releases Stop like a settlement does — but it is
+    // neither Completed nor Blocked, and the record stays Active. The lookup
+    // fails closed: it is bound to this session, requires an integrity-valid
+    // audit, and requires that audit to quote this exact predecessor record,
+    // so a stale or edited one releases nothing.
+    if let Some(audit) =
+        crate::cli::delivered_owner::trusted_no_action_for_session(&resolved, current.trim())
+    {
+        super::diagnostics::record_stop_gate_decision(
+            &resolved,
+            serde_json::json!({
+                "message": "Stop released by a trusted No Action: the owner was already delivered and there was no source work to settle",
+                "gate": "execution-control-stop-check",
+                "issue": 4545,
+                "session_id": current.trim(),
+                "owner": format!(
+                    "{kind} #{number}",
+                    kind = audit.owner_kind.as_str(),
+                    number = audit.owner_number
+                ),
+                "reason": audit.reason,
+            }),
+        );
+        return HookOutput::Silent;
+    }
 
     let owner = format!(
         "{kind} #{number}",
@@ -67,6 +93,7 @@ pub fn handle_with_input(
          Continue the execution workflow until the owner's scope is implemented, verified, and handed off. Settle the execution before stopping:\n\
          - done and verified: run JSON operation `execution.complete` (a successful `build.complete` with `params.spec:<n>` also settles it for gwt-build-spec flows), or\n\
          - blocked by the environment or missing verification: run JSON operation `execution.blocked` with a non-empty `params.reason` and optional `params.missing_verification`. Blocked is not done — report the blocker.\n\
+         - already delivered with nothing to produce: run JSON operation `execution.no_action` with a non-empty `params.reason`. It succeeds only when the base already contains this worktree's whole source state, and it is not Blocked — a delivered owner is not a blocker.\n\
          Do not settle as complete without the verification evidence the owner requires.",
         entrypoint = record.entrypoint,
     ))
@@ -270,6 +297,154 @@ mod tests {
             !reason.contains("Repair it with JSON operation `execution.adopt`"),
             "{reason}"
         );
+    }
+
+    /// A delivered worktree: a git repo whose `origin/develop` already
+    /// contains its whole source state, plus a machine-local gwt home so the
+    /// No Action audit lands in a trusted store this test owns.
+    fn delivered_worktree() -> (
+        gwt_core::test_support::ScopedGwtHome,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        for args in [
+            vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            vec!["checkout", "-q", "-b", "work/issue-3290"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+        (guard, home, dir)
+    }
+
+    // AC-4 / FR-243: a trusted No Action releases Stop as a successful
+    // non-delivery. The record itself stays Active — No Action is neither
+    // Completed nor Blocked — so only the audit can be what released it.
+    #[test]
+    fn trusted_no_action_releases_stop_without_completing_or_blocking() {
+        let (_home_guard, _home, dir) = delivered_worktree();
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Issue,
+            3290,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "the active record gates Stop before the No Action"
+        );
+
+        crate::cli::delivered_owner::record_no_action(
+            dir.path(),
+            "sess-1",
+            "owner #3290 was delivered in PR #3328",
+        )
+        .unwrap();
+
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            HookOutput::Silent,
+            "a trusted No Action is a successful non-delivery terminal outcome"
+        );
+        let record = crate::cli::execution_state::load(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.status,
+            ExecutionControlStatus::Active,
+            "No Action must not be recorded as Completed or Blocked"
+        );
+        assert!(
+            record.settled_at.is_none() && record.blocked_reason.is_none(),
+            "No Action writes nothing into the predecessor record"
+        );
+    }
+
+    // AC-4: the release is fail-closed. Another session's Stop is unaffected,
+    // and an audit edited outside the canonical operation releases nothing.
+    #[test]
+    fn no_action_stop_release_fails_closed() {
+        let (_home_guard, _home, dir) = delivered_worktree();
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Issue,
+            3290,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::delivered_owner::record_no_action(dir.path(), "sess-1", "already delivered")
+            .unwrap();
+
+        // Another session holds no authority over this record, so the gate is
+        // silent for the pre-existing reason (FR-014t) rather than because of
+        // the audit — the audit itself never crosses sessions.
+        assert!(
+            crate::cli::delivered_owner::trusted_no_action_for_session(dir.path(), "sess-2")
+                .is_none()
+        );
+
+        let mut audit = crate::cli::delivered_owner::load_audit(dir.path())
+            .unwrap()
+            .unwrap();
+        audit.reason = "forged".to_string();
+        let bytes = serde_json::to_vec_pretty(&audit).unwrap();
+        crate::cli::trusted_store::write(
+            dir.path(),
+            crate::cli::delivered_owner::NO_ACTION_AUDIT_FILE,
+            &bytes,
+        )
+        .unwrap();
+        std::fs::write(
+            crate::cli::delivered_owner::audit_mirror_path(dir.path()),
+            &bytes,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "an edited audit must not release the gate"
+        );
+    }
+
+    // AC-4: the block names the No Action route, so a session parked on a
+    // delivered owner can find the exit that is not `execution.blocked`.
+    #[test]
+    fn the_block_names_the_no_action_route() {
+        let dir = mk_worktree();
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Issue,
+            3290,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        let HookOutput::StopBlock { reason } = handle_with_input(dir.path(), "{}", Some("sess-1"))
+        else {
+            panic!("expected StopBlock");
+        };
+        assert!(reason.contains("execution.no_action"), "{reason}");
     }
 
     // SPEC #3245 FR-007: the former intake-lane exclusion is gone — a
