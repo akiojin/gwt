@@ -271,14 +271,25 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
 /// window between readings the poll interval instead of one this call has to
 /// sleep through, and a longer window is what keeps a slow-but-moving holder
 /// off the "may be hung" verdict (Issue #4409 AC-9/AC-10).
-fn describe_holder(coordinator: &IndexCoordinator, probe: &mut HolderProbe) -> HolderNotice {
+fn describe_holder(
+    coordinator: &IndexCoordinator,
+    probe: &mut HolderProbe,
+    worktree: &Path,
+) -> HolderNotice {
     match coordinator.heavy_lease_status() {
         Ok(status) => {
+            // Issue #4561: a `daemon` holder runs its commands outside its
+            // own tree, so that tree alone reports it stalled however hard
+            // the verification is working.
+            let workload = crate::cli::verification_lease::holder_activity::workload_for(
+                status.holder_spawn_host.as_deref(),
+                || crate::cli::daemon::verification_host::live_daemon_pids(worktree),
+            );
             let activity = status
                 .owner
                 .as_ref()
                 .filter(|_| status.held)
-                .and_then(|owner| probe.observe(owner.pid, status.acquired_at_ms));
+                .and_then(|owner| probe.observe(owner.pid, &workload, status.acquired_at_ms));
             holder_notice(&status, activity.as_ref())
         }
         Err(err) => HolderNotice {
@@ -367,7 +378,7 @@ impl BoardNotice {
 /// admission through `Admission::summary`.
 pub(crate) fn admit<E: CliEnv>(
     env: &mut E,
-    _worktree: &Path,
+    worktree: &Path,
     max_wait: Duration,
 ) -> Result<Admission, SpecOpsError> {
     let key = verification_lease::verification_key(env)?;
@@ -412,7 +423,7 @@ pub(crate) fn admit<E: CliEnv>(
         match guard.acquire_heavy_with_ttl(remaining.min(POLL), LEASE_TTL) {
             Ok(lease) => break lease,
             Err(CoordinatorError::Timeout { .. }) => {
-                let holder = describe_holder(&coordinator, &mut probe);
+                let holder = describe_holder(&coordinator, &mut probe, worktree);
                 if Instant::now() >= deadline {
                     let _ = guard.complete(JobOutcome::Failed {
                         message: "host admission deferred".to_string(),
@@ -650,6 +661,7 @@ mod tests {
             processes: 1,
             window_ms: 1_200,
             host_cpu_percent: Some(95.0),
+            delegated: false,
         };
         let notice = holder_notice(&status, Some(&starved));
         assert!(notice.detail.contains("pid 21468"), "{}", notice.detail);
@@ -664,6 +676,7 @@ mod tests {
             processes: 5,
             window_ms: 1_200,
             host_cpu_percent: Some(95.0),
+            delegated: false,
         };
         let notice = holder_notice(&status, Some(&progressing));
         assert!(notice.detail.contains("progressing"), "{}", notice.detail);
