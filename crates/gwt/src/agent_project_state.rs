@@ -2520,8 +2520,12 @@ fn validate_mutation_session_id(
 }
 
 fn classify_target_error(error: GwtError) -> AgentWorkspaceUpdateError {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("workspace.ensure") {
+    let reason = error.to_string();
+    let message = reason.to_ascii_lowercase();
+    // These shared producers currently return GwtError::Other for all three
+    // recovery categories. Keep their classification contract, but never
+    // discard the original diagnostic when translating to the bridge error.
+    let mut classified = if message.contains("workspace.ensure") {
         AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired,
             "Session-bound Work target is missing or ambiguous; run workspace.ensure for this Session before retrying workspace.update",
@@ -2530,7 +2534,9 @@ fn classify_target_error(error: GwtError) -> AgentWorkspaceUpdateError {
         relaunch_required_error()
     } else {
         provenance_mismatch_error()
-    }
+    };
+    classified.message = format!("{}: {reason}", classified.message);
+    classified
 }
 
 fn provenance_mismatch_error() -> AgentWorkspaceUpdateError {
@@ -4494,6 +4500,49 @@ fn fill_option_path(target: &mut Option<PathBuf>, source: Option<&Path>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_target_error_preserves_distinct_workspace_ensure_causes() {
+        let missing =
+            workspace_ensure_error("session-4607", "canonical Session assignment is missing");
+        let ambiguous =
+            workspace_ensure_error("session-4607", "assigned Work work-4607 is ambiguous");
+        let missing_reason = missing.to_string();
+        let ambiguous_reason = ambiguous.to_string();
+        let missing = classify_target_error(missing);
+        let ambiguous = classify_target_error(ambiguous);
+
+        assert_eq!(
+            missing.code,
+            AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+        );
+        assert_eq!(ambiguous.code, missing.code);
+        assert_ne!(missing.message, ambiguous.message);
+        assert!(missing.message.contains(&missing_reason));
+        assert!(ambiguous.message.contains(&ambiguous_reason));
+    }
+
+    #[test]
+    fn classify_target_error_preserves_other_causes_and_codes() {
+        for (reason, code) in [
+            (
+                "Session repo hash is missing; relaunch the Session",
+                AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+            ),
+            (
+                "Session ledger is missing for Session session-4607",
+                AgentWorkspaceUpdateErrorCode::RelaunchRequired,
+            ),
+            (
+                "canonical repository mismatch: project_state_root is missing",
+                AgentWorkspaceUpdateErrorCode::ProvenanceMismatch,
+            ),
+        ] {
+            let error = classify_target_error(mutation_error(reason));
+            assert_eq!(error.code, code);
+            assert!(error.message.contains(reason), "{}", error.message);
+        }
+    }
 
     fn agent_summary(
         session_id: &str,
