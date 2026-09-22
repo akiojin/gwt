@@ -463,12 +463,28 @@ fn attach_disk_space(project_root: &std::path::Path, status: &mut crate::IssueMo
 
 /// Issue #4391 AC-3: the last automatic build-artifact reclaim, read from
 /// the run history the daemon appends to. Read-only: no history, no field.
+///
+/// Issue #4594 AC-5: the outcome is materialized here rather than passed
+/// through, so `candidates: 0` always says which zero it is. A run recorded
+/// before #4566 carries no `outcome` key, and a reader that only looked at
+/// that field saw `null` and could not tell a broken enumeration from an
+/// idle host — which is exactly the pair this field exists to separate.
 fn attach_build_artifact_gc(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
 ) {
-    status.build_artifact_gc =
-        crate::worktree::gc::last_record(&crate::worktree::gc::record_path(project_root));
+    status.build_artifact_gc = last_build_artifact_gc_record(project_root);
+}
+
+fn last_build_artifact_gc_record(
+    project_root: &std::path::Path,
+) -> Option<crate::worktree::gc::BuildArtifactGcRecord> {
+    crate::worktree::gc::last_record(&crate::worktree::gc::record_path(project_root)).map(
+        |mut record| {
+            record.recorded_outcome = Some(record.outcome());
+            record
+        },
+    )
 }
 
 /// Issue #4234 AC-5: resident size of every gwt GUI process on the host,
@@ -4826,6 +4842,38 @@ mod tests {
             .as_str()
             .expect("detail text")
             .contains("claim_id"));
+    }
+
+    /// Issue #4594 AC-5: a run recorded before #4566 carries no `outcome`
+    /// key, and `candidates: 0` alone cannot say whether the sweep found
+    /// nothing or never got a worktree list. The status names the outcome for
+    /// every record it publishes, old and new, so the reader never has to
+    /// re-derive it from `error`.
+    #[test]
+    fn build_artifact_gc_status_names_the_outcome_of_a_legacy_record() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let record_path = crate::worktree::gc::record_path(&repo);
+        std::fs::create_dir_all(record_path.parent().expect("record dir")).expect("record dir");
+        std::fs::write(
+            &record_path,
+            concat!(
+                r#"{"started_at":"s","finished_at":"f","trigger":"disk space low","#,
+                r#""base":"develop","candidates":0,"reclaimable_bytes":0,"#,
+                r#""reclaimed_bytes":0,"error":"git worktree list failed"}"#,
+                "\n"
+            ),
+        )
+        .expect("seed record");
+        let record = last_build_artifact_gc_record(&repo).expect("record");
+        assert_eq!(
+            record.recorded_outcome,
+            Some(crate::worktree::gc::BuildArtifactGcOutcome::EnumerationFailed)
+        );
+        let json = serde_json::to_value(&record).expect("serialize");
+        assert_eq!(json["outcome"], "enumeration_failed", "{json}");
     }
 
     /// Issue #3992 AC-5 / AC-7: the operator release goes through the same

@@ -26,9 +26,79 @@ pub struct RepoHash(String);
 /// resolution contract.
 pub type ProjectKey = RepoHash;
 
+/// Why a string could not be read back as a [`ProjectKey`].
+///
+/// Issue #4535 AC-1: a ProjectKey addresses a directory under
+/// `~/.gwt/projects/`, so any value that survives parsing is joined onto a
+/// filesystem path. Parsing therefore rejects every value that is not exactly
+/// the 16 lowercase hex digits [`compute_repo_hash`] produces — `..`, a
+/// separator, or a decorated hash never reaches [`gwt_project_dir`] as a
+/// traversal.
+///
+/// [`gwt_project_dir`]: crate::paths::gwt_project_dir
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectKeyParseError {
+    /// The value was empty or only whitespace.
+    Empty,
+    /// The value was not exactly 16 characters long.
+    InvalidLength { actual: usize },
+    /// The value contained a character that is not a lowercase hex digit.
+    InvalidCharacter { found: char },
+}
+
+impl fmt::Display for ProjectKeyParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "project key is empty"),
+            Self::InvalidLength { actual } => write!(
+                f,
+                "project key must be exactly {HASH_HEX_LEN} lowercase hex digits (got {actual} characters)"
+            ),
+            Self::InvalidCharacter { found } => write!(
+                f,
+                "project key must contain only lowercase hex digits (found {found:?})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProjectKeyParseError {}
+
 impl RepoHash {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Read a [`ProjectKey`] back from an untrusted string.
+    ///
+    /// The value must be exactly what [`compute_repo_hash`] emits: 16
+    /// lowercase hex digits. Whitespace is not trimmed and case is not
+    /// folded — a ProjectKey is compared byte-for-byte to route a project
+    /// store, so two spellings of one repository would split that store.
+    pub fn parse(value: &str) -> Result<Self, ProjectKeyParseError> {
+        if value.is_empty() {
+            return Err(ProjectKeyParseError::Empty);
+        }
+        if let Some(found) = value
+            .chars()
+            .find(|c| !c.is_ascii_digit() && !matches!(c, 'a'..='f'))
+        {
+            return Err(ProjectKeyParseError::InvalidCharacter { found });
+        }
+        if value.chars().count() != HASH_HEX_LEN {
+            return Err(ProjectKeyParseError::InvalidLength {
+                actual: value.chars().count(),
+            });
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+
+impl std::str::FromStr for RepoHash {
+    type Err = ProjectKeyParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
     }
 }
 
@@ -775,6 +845,68 @@ mod tests {
             .as_str()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    /// Issue #4535 AC-1: a parsed ProjectKey is joined onto `~/.gwt/projects/`,
+    /// so every traversal-shaped spelling has to be refused before it can name
+    /// a directory outside the project store.
+    #[test]
+    fn project_key_parse_rejects_traversal_like_values() {
+        for value in [
+            "..",
+            ".",
+            "../../etc/pa",
+            "..f0f0f0f0f0f0f0",
+            "a/../b0b0b0b0b0b0",
+            "0123456789abcd/.",
+            "0123456789abc..",
+            r"..\windows\syst",
+            "~/0123456789abc",
+        ] {
+            assert!(
+                RepoHash::parse(value).is_err(),
+                "traversal-like project key {value:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn project_key_parse_rejects_non_canonical_hash_spellings() {
+        use ProjectKeyParseError::*;
+
+        assert_eq!(RepoHash::parse(""), Err(Empty));
+        // Uppercase would route the same repository to a second store on a
+        // case-sensitive filesystem.
+        assert!(matches!(
+            RepoHash::parse("0123456789ABCDEF"),
+            Err(InvalidCharacter { .. })
+        ));
+        assert!(matches!(
+            RepoHash::parse(" 0123456789abcde"),
+            Err(InvalidCharacter { found: ' ' })
+        ));
+        assert_eq!(
+            RepoHash::parse("0123456789abcde"),
+            Err(InvalidLength { actual: 15 })
+        );
+        assert_eq!(
+            RepoHash::parse("0123456789abcdef0"),
+            Err(InvalidLength { actual: 17 })
+        );
+    }
+
+    /// The parse is the inverse of [`compute_repo_hash`]: every value the
+    /// hasher emits must round-trip, and `FromStr` must agree with `parse`.
+    #[test]
+    fn project_key_parse_round_trips_a_computed_hash() {
+        let computed = compute_repo_hash("https://github.com/akiojin/gwt.git");
+
+        let parsed: ProjectKey = RepoHash::parse(computed.as_str()).expect("computed hash parses");
+        assert_eq!(parsed, computed);
+        assert_eq!(
+            computed.as_str().parse::<RepoHash>().expect("FromStr"),
+            computed
+        );
     }
 
     #[test]
