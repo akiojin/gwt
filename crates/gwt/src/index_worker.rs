@@ -1303,6 +1303,8 @@ fn run_rebuild_runner_observing_deadline(
     qos: &str,
 ) -> io::Result<gwt_core::process_console::SpawnOutput> {
     let args = protocol_aware_rebuild_runner_args(context, action, qos);
+    #[cfg(test)]
+    let args = crate::cli::index::runtime::rebuild_runner_fixture_args().unwrap_or(args);
 
     gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
     gwt_core::process_console::spawn_logged_blocking(
@@ -1365,6 +1367,8 @@ fn run_rebuild_runner_for_target(
     if action.label == "issues" || gwt_core::operation_deadline::current().is_none() {
         if rebuild_action_uses_file_index_v2(action) {
             let args = protocol_aware_rebuild_runner_args(context, action, qos);
+            #[cfg(test)]
+            let args = crate::cli::index::runtime::rebuild_runner_fixture_args().unwrap_or(args);
             return gwt_core::process::hidden_command(&context.python)
                 .args(&args)
                 .current_dir(&context.project_root)
