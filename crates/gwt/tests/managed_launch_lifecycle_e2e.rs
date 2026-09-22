@@ -228,9 +228,7 @@ fn a_supported_launch_leaves_no_gate_decision_and_nothing_is_refused() {
     )
     .expect("a supported launch proceeds");
 
-    assert!(permission_readiness::load(dir)
-        .expect("load")
-        .is_none());
+    assert!(permission_readiness::load(dir).expect("load").is_none());
     assert!(permission_readiness::settlement_refusal(dir).is_none());
 }
 
@@ -346,8 +344,7 @@ fn skip_permissions_does_not_exempt_the_pr_or_verification_gates() {
     )
     .expect("record the regression");
 
-    let refusal =
-        permission_readiness::settlement_refusal(dir).expect("settlement is refused");
+    let refusal = permission_readiness::settlement_refusal(dir).expect("settlement is refused");
     assert!(
         refusal.contains("permission_prompt_regression"),
         "{refusal}"
@@ -442,15 +439,8 @@ fn read_source(root: &Path, relative: &str) -> String {
 fn a_block_in_one_worktree_does_not_refuse_another() {
     let fx = Fixture::with_worktrees(2);
     let (blocked, clear) = (fx.path(0), fx.path(1));
-    permission_readiness::record_prompt_regression(
-        blocked,
-        "issue",
-        4544,
-        "sess-4544",
-        "codex",
-        1,
-    )
-    .unwrap();
+    permission_readiness::record_prompt_regression(blocked, "issue", 4544, "sess-4544", "codex", 1)
+        .unwrap();
 
     assert!(permission_readiness::settlement_refusal(blocked).is_some());
     assert!(permission_readiness::settlement_refusal(clear).is_none());
