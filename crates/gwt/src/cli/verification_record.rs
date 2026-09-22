@@ -5207,6 +5207,7 @@ pub(crate) mod tests {
         let request = delegated_spawn_request(
             dir.path(),
             &args,
+            &[],
             false,
             Some(&capture),
             dir.path().join("stdout"),
@@ -5241,6 +5242,7 @@ pub(crate) mod tests {
         let plain = delegated_spawn_request(
             dir.path(),
             &args,
+            &[],
             false,
             None,
             dir.path().join("stdout"),
@@ -5248,6 +5250,44 @@ pub(crate) mod tests {
         );
         assert_eq!(plain.args, vec!["playwright".to_string()]);
         assert!(!plain.env.iter().any(|(existing, _)| *existing == key));
+    }
+
+    /// #3698: a leading `KEY=value` token is the only way to express CI's
+    /// rustdoc gate (`cargo doc` has no `-- -D warnings`), so the delegated
+    /// child has to receive it as environment just like the in-process one
+    /// does. Dropping it here would make the daemon-hosted matrix pass a
+    /// rustdoc gate that never enforced `-D warnings`.
+    #[test]
+    fn a_delegated_command_carries_its_leading_env_assignments() {
+        let dir = tempfile::tempdir().unwrap();
+        let (assignments, args) = take_env_assignments(
+            split_command_line(r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps"#)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let request = delegated_spawn_request(
+            dir.path(),
+            &args,
+            &assignments,
+            false,
+            None,
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+
+        assert_eq!(request.program, "cargo");
+        assert_eq!(
+            request
+                .env
+                .iter()
+                .filter(|(key, _)| key == "RUSTDOCFLAGS")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["-D warnings"],
+            "the delegated child must get the assignment exactly once: {:?}",
+            request.env
+        );
     }
 
     #[test]
