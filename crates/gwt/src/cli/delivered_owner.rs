@@ -16,9 +16,16 @@
 //!   no Execution Control Record, no Work, no obligation. Ambiguity about the
 //!   source surface fails to Inspection rather than to producing work.
 //! - [`record_no_action`] settles a generation that was materialized anyway.
-//!   It proves the zero source surface, writes a machine-local trusted audit,
-//!   and touches nothing else: not the predecessor record's bytes, not Git,
-//!   not verification, not the PR.
+//!   It proves the zero source surface, writes a machine-local trusted audit
+//!   that preserves the predecessor's bytes verbatim, advances the execution
+//!   to its terminal No Action state, and touches nothing else: not Git, not
+//!   verification, not the PR.
+//!
+//! The settlement is what keeps the outcome legible to a reader that predates
+//! `execution.no_action` (Issue #4590): such a reader knows only the record's
+//! three statuses, so an execution left Active after a correct No Action
+//! wedges its Stop gate forever. The audit — not the status — is what tells
+//! this successful non-delivery from a delivery.
 //!
 //! Neither path ever mutates GitHub. Reopening a closed Issue is explicitly
 //! out of scope — the owner stays closed and the audit stays local.
@@ -39,7 +46,7 @@ use crate::cli::execution_state::{
 /// Trusted-store file holding this worktree's latest No Action audit.
 pub const NO_ACTION_AUDIT_FILE: &str = "execution-no-action.json";
 
-const NO_ACTION_AUDIT_SCHEMA_VERSION: u32 = 1;
+const NO_ACTION_AUDIT_SCHEMA_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Owner lifecycle
@@ -282,9 +289,9 @@ pub fn classify_launch_for_owner(
 /// no source work to deliver (FR-241).
 ///
 /// It stands beside the Execution Control Record rather than inside it: the
-/// predecessor's bytes are hashed and quoted, never rewritten, so a legacy,
-/// integrity-missing, or otherwise unrepairable predecessor survives a No
-/// Action untouched (AS-221).
+/// predecessor's bytes are hashed, quoted, and preserved verbatim, so a
+/// legacy, integrity-missing, or otherwise unrepairable predecessor survives a
+/// No Action byte-identically (AS-221, Issue #4590 AC-2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoActionAudit {
     pub schema_version: u32,
@@ -298,6 +305,17 @@ pub struct NoActionAudit {
     pub predecessor_content_hash: String,
     /// sha256 over the predecessor record's exact stored bytes.
     pub predecessor_bytes_sha256: String,
+    /// The predecessor record's exact stored bytes (Issue #4590 AC-2).
+    ///
+    /// The canonical projection advances to a terminal state so that readers
+    /// which predate `execution.no_action` see a settled execution, so the
+    /// byte-identical predecessor lives here instead of in place.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub predecessor_execution_control_json: String,
+    /// When the predecessor generation was launched. Immutable across the
+    /// settlement, so it — not the record bytes — is what binds this audit to
+    /// its own generation after the projection advances.
+    pub predecessor_launched_at: DateTime<Utc>,
     pub predecessor_status: ExecutionControlStatus,
     /// The integration base that proved the zero source surface.
     pub source_base: String,
@@ -411,6 +429,20 @@ pub fn load_audit(worktree: &Path) -> io::Result<Option<NoActionAudit>> {
     let Some(contents) = contents else {
         return Ok(None);
     };
+    // An audit from a superseded schema reads as absent rather than as an
+    // error: the only writer is `record_no_action`, which re-proves the zero
+    // source surface and records a current audit, so refusing the whole
+    // operation over a stale file would strand the very sessions Issue #4590
+    // is about.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+        if value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(NO_ACTION_AUDIT_SCHEMA_VERSION))
+        {
+            return Ok(None);
+        }
+    }
     match serde_json::from_str::<NoActionAudit>(&contents) {
         Ok(audit) => Ok(Some(audit)),
         Err(error) => Err(io::Error::new(io::ErrorKind::InvalidData, error)),
@@ -421,16 +453,48 @@ fn owner_label(kind: ExecutionOwnerKind, number: u64) -> String {
     format!("{} #{number}", kind.as_str())
 }
 
+/// Whether `audit` was recorded for exactly this generation.
+///
+/// The binding is the predecessor's launch timestamp rather than its stored
+/// bytes: the settlement advances the canonical projection (Issue #4590), so
+/// the bytes stop matching the moment the No Action succeeds, while
+/// `launched_at` is immutable for the lifetime of a generation. A replacement
+/// generation for the same owner and session carries a different one, so the
+/// lookup still fails closed.
 fn audit_matches_execution(
     audit: &NoActionAudit,
     record: &ExecutionControlRecord,
     session_id: &str,
-    predecessor_bytes_sha256: &str,
 ) -> bool {
     audit.owner_kind == record.owner_kind
         && audit.owner_number == record.owner_number
         && audit.session_id == session_id
-        && audit.predecessor_bytes_sha256 == predecessor_bytes_sha256
+        && audit.predecessor_launched_at == record.launched_at
+}
+
+/// Advance the canonical projection to its terminal No Action state.
+///
+/// Idempotent: an execution that is already terminal stays as it is.
+fn settle_as_no_action(worktree: &Path, session_id: &str, reason: &str) -> io::Result<()> {
+    use crate::cli::execution_state::{ExecutionSettlement, SettleResult};
+
+    match crate::cli::execution_state::settle(
+        worktree,
+        session_id,
+        ExecutionSettlement::NoAction {
+            reason: reason.to_string(),
+        },
+    )? {
+        SettleResult::Settled(_) | SettleResult::AlreadySettled(_) | SettleResult::NoRecord => {
+            Ok(())
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "execution.no_action recorded its audit but could not settle the execution: {other:?}"
+            ),
+        )),
+    }
 }
 
 /// A trusted No Action audit for the session currently holding `worktree`'s
@@ -448,24 +512,21 @@ pub fn trusted_no_action_for_session(worktree: &Path, session_id: &str) -> Optio
     if record.primary_session_id != session_id {
         return None;
     }
-    let bytes = crate::cli::execution_state::record_contents(worktree)
-        .ok()
-        .flatten()?;
     let audit = load_audit(worktree).ok().flatten()?;
     if !audit_integrity_ok(&audit) {
         return None;
     }
-    audit_matches_execution(&audit, &record, session_id, &sha256_hex(bytes.as_bytes()))
-        .then_some(audit)
+    audit_matches_execution(&audit, &record, session_id).then_some(audit)
 }
 
 /// Record a Git-free No Action for the current session's active generation
 /// (FR-241, AS-218/AS-219).
 ///
-/// On success this writes exactly one machine-local trusted audit and settles
-/// this session's own open action obligations. It performs no Git commit or
-/// push, requests no verification record, creates and mutates no PR, and does
-/// not rewrite a single byte of the predecessor Execution Control Record.
+/// On success this writes exactly one machine-local trusted audit, preserving
+/// the predecessor Execution Control Record's exact bytes inside it, settles
+/// this session's own open action obligations, and settles the execution
+/// itself. It performs no Git commit or push, requests no verification record,
+/// and creates and mutates no PR.
 pub fn record_no_action(
     worktree: &Path,
     session_id: &str,
@@ -489,24 +550,17 @@ pub fn record_no_action(
             holder_session_id: record.primary_session_id,
         }));
     }
-    if record.status != ExecutionControlStatus::Active {
-        return Ok(NoActionOutcome::Refused(
-            NoActionRefusal::TerminalPredecessor {
-                status: record.status,
-            },
-        ));
-    }
-    let Some(predecessor_bytes) = crate::cli::execution_state::record_contents(worktree)? else {
-        return Ok(NoActionOutcome::Refused(NoActionRefusal::NoRecord));
-    };
-    let predecessor_bytes_sha256 = sha256_hex(predecessor_bytes.as_bytes());
-
-    // Idempotency comes before the probe: a No Action already on record is a
-    // settled outcome, and re-proving it would let an unrelated later edit in
-    // the worktree turn a successful settlement into a refusal.
+    // Idempotency comes before the terminal check and before the probe: a No
+    // Action already on record is a settled outcome, the settlement itself is
+    // what made the record terminal, and re-proving it would let an unrelated
+    // later edit in the worktree turn a successful settlement into a refusal.
     if let Some(stored) = load_audit(worktree)? {
         if audit_integrity_ok(&stored) {
-            if audit_matches_execution(&stored, &record, session_id, &predecessor_bytes_sha256) {
+            if audit_matches_execution(&stored, &record, session_id) {
+                // Converge a No Action whose audit landed but whose
+                // settlement did not: the audit alone leaves the execution
+                // Active, which is exactly the wedge of Issue #4590.
+                settle_as_no_action(worktree, session_id, &stored.reason)?;
                 return Ok(NoActionOutcome::AlreadyRecorded(Box::new(stored)));
             }
             if stored.owner_kind == record.owner_kind
@@ -524,6 +578,18 @@ pub fn record_no_action(
             }
         }
     }
+
+    if record.status != ExecutionControlStatus::Active {
+        return Ok(NoActionOutcome::Refused(
+            NoActionRefusal::TerminalPredecessor {
+                status: record.status,
+            },
+        ));
+    }
+    let Some(predecessor_bytes) = crate::cli::execution_state::record_contents(worktree)? else {
+        return Ok(NoActionOutcome::Refused(NoActionRefusal::NoRecord));
+    };
+    let predecessor_bytes_sha256 = sha256_hex(predecessor_bytes.as_bytes());
 
     let source_base = match probe_source_surface(worktree) {
         SourceSurface::Zero { base } => base,
@@ -547,6 +613,8 @@ pub fn record_no_action(
         reason: reason.to_string(),
         predecessor_content_hash: record.content_hash.clone(),
         predecessor_bytes_sha256,
+        predecessor_execution_control_json: predecessor_bytes,
+        predecessor_launched_at: record.launched_at,
         predecessor_status: record.status,
         source_base,
         recorded_at: Utc::now(),
@@ -564,6 +632,15 @@ pub fn record_no_action(
         }
         std::fs::write(&mirror, &bytes)
     })?;
+
+    // Issue #4590 AC-1: the audit is written first so a failure here is
+    // retryable, then the canonical projection advances to its terminal No
+    // Action state. Readers that predate `execution.no_action` know only the
+    // record's three statuses, so leaving it Active would wedge their Stop
+    // gate on an execution that settled correctly. The predecessor's exact
+    // bytes are preserved in the audit above, and the owner ledger records
+    // the settlement as a non-delivery.
+    settle_as_no_action(worktree, session_id, reason)?;
 
     // AS-218: the obligations this action armed are settled as No Action. The
     // settlement helper is already scoped to this session's own state, so no
@@ -787,8 +864,9 @@ mod tests {
         }
     }
 
-    // AC-2 / AS-218: a zero-diff No Action succeeds, is idempotent, and leaves
-    // the predecessor record byte-identical.
+    // AC-2 / AS-218: a zero-diff No Action succeeds, is idempotent, and
+    // preserves the predecessor byte-identically — in the audit, because the
+    // canonical projection settles (Issue #4590).
     #[test]
     fn no_action_succeeds_idempotently_and_preserves_predecessor_bytes() {
         let fx = fixture();
@@ -809,10 +887,10 @@ mod tests {
             "the audit quotes the predecessor bytes"
         );
         assert_eq!(
-            fx.record_bytes(),
-            before,
-            "No Action must not rewrite one byte of the predecessor record"
+            audit.predecessor_execution_control_json, before,
+            "No Action preserves the predecessor's bytes verbatim"
         );
+        let settled = fx.record_bytes();
 
         let NoActionOutcome::AlreadyRecorded(again) =
             record_no_action(fx.path(), "sess-1", "owner #3290 shipped in PR #3328").unwrap()
@@ -820,7 +898,11 @@ mod tests {
             panic!("a second No Action is idempotent");
         };
         assert_eq!(*again, *audit, "the stored audit is returned unchanged");
-        assert_eq!(fx.record_bytes(), before);
+        assert_eq!(
+            fx.record_bytes(),
+            settled,
+            "a repeated No Action rewrites nothing"
+        );
 
         // The audit is machine-local: it lives in the trusted store, not in
         // the repository.
@@ -977,8 +1059,8 @@ mod tests {
 
     // AC-2 / AC-3 / AS-221: a legacy predecessor carrying no integrity hash is
     // still a valid record (pre-P9a launches wrote them), so No Action accepts
-    // it — and preserves it. The audit quotes the missing hash as missing and
-    // the byte hash separately; the stored record is never upgraded in place.
+    // it — and preserves it. The audit quotes the missing hash as missing, the
+    // byte hash separately, and the legacy bytes themselves verbatim.
     #[test]
     fn no_action_preserves_a_legacy_integrity_missing_predecessor() {
         let fx = fixture();
@@ -1005,9 +1087,13 @@ mod tests {
             sha256_hex(before.as_bytes())
         );
         assert_eq!(
+            audit.predecessor_execution_control_json, before,
+            "the legacy predecessor is preserved exactly as it was found"
+        );
+        assert_ne!(
             fx.record_bytes(),
             before,
-            "a legacy predecessor is never rewritten or upgraded in place"
+            "the projection still settles, so a no_action-blind reader is released"
         );
     }
 
@@ -1060,6 +1146,145 @@ mod tests {
         assert!(
             trusted_no_action_for_session(fx.path(), "sess-1").is_none(),
             "an edited audit is no audit at all"
+        );
+    }
+
+    // Issue #4590 AC-1: the settled trace has to be legible to a reader that
+    // knows nothing about `execution.no_action`. Such a reader only knows the
+    // three Execution Control Record statuses, so No Action leaves the
+    // execution terminal rather than Active.
+    #[test]
+    fn no_action_leaves_the_execution_terminal_for_a_status_only_reader() {
+        let fx = fixture();
+        fx.launch("sess-1");
+
+        record_no_action(fx.path(), "sess-1", "owner #3290 shipped in PR #3328").unwrap();
+
+        let record = crate::cli::execution_state::load(fx.path())
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            record.status,
+            ExecutionControlStatus::Active,
+            "a status-only reader must see a settled execution"
+        );
+        assert!(
+            record.settled_at.is_some(),
+            "the settlement carries its timestamp"
+        );
+        assert!(
+            record.blocked_reason.is_none(),
+            "a delivered owner is never a blocker"
+        );
+        assert!(
+            record.completion_evidence.is_none(),
+            "No Action consumes no verification evidence"
+        );
+        assert!(
+            crate::cli::execution_state::integrity_ok(&record),
+            "the settled record stays integrity-valid"
+        );
+    }
+
+    // Issue #4590: an audit written by the schema that shipped before this fix
+    // must not strand the session. It reads as absent, so the operation
+    // re-proves the zero source surface and settles the execution properly.
+    #[test]
+    fn a_superseded_audit_schema_reads_as_absent_instead_of_stranding_the_session() {
+        let fx = fixture();
+        fx.launch("sess-1");
+        let stale = serde_json::json!({
+            "schema_version": 1,
+            "owner_kind": "issue",
+            "owner_number": 3290,
+            "session_id": "sess-1",
+            "reason": "already delivered",
+            "predecessor_content_hash": "",
+            "predecessor_bytes_sha256": "deadbeef",
+            "predecessor_status": "active",
+            "source_base": "origin/develop",
+            "recorded_at": "2026-09-22T00:00:00Z",
+            "content_hash": "unverifiable",
+        });
+        let bytes = serde_json::to_vec_pretty(&stale).unwrap();
+        crate::cli::trusted_store::write(fx.path(), NO_ACTION_AUDIT_FILE, &bytes).unwrap();
+        std::fs::write(audit_mirror_path(fx.path()), &bytes).unwrap();
+
+        assert!(
+            load_audit(fx.path()).unwrap().is_none(),
+            "a superseded audit schema is not an error and not an audit"
+        );
+        assert!(
+            matches!(
+                record_no_action(fx.path(), "sess-1", "already delivered").unwrap(),
+                NoActionOutcome::Recorded(_)
+            ),
+            "the operation records a current audit instead of refusing"
+        );
+        assert_ne!(
+            crate::cli::execution_state::load(fx.path())
+                .unwrap()
+                .unwrap()
+                .status,
+            ExecutionControlStatus::Active,
+            "and the execution ends up settled"
+        );
+    }
+
+    // Issue #4590 AC-2: the predecessor is preserved byte-identically. It
+    // moves into the settled trace verbatim instead of staying in place, so
+    // the guarantee survives the terminal projection.
+    #[test]
+    fn no_action_preserves_the_predecessor_bytes_verbatim_in_the_audit() {
+        let fx = fixture();
+        fx.launch("sess-1");
+        let before = fx.record_bytes();
+
+        let NoActionOutcome::Recorded(audit) =
+            record_no_action(fx.path(), "sess-1", "already delivered").unwrap()
+        else {
+            panic!("a delivered owner records No Action");
+        };
+
+        assert_eq!(
+            audit.predecessor_execution_control_json, before,
+            "the audit keeps the predecessor record byte-identical"
+        );
+        assert_eq!(
+            audit.predecessor_bytes_sha256,
+            sha256_hex(before.as_bytes()),
+            "the preserved bytes are the ones the audit quotes"
+        );
+        assert_eq!(audit.predecessor_status, ExecutionControlStatus::Active);
+    }
+
+    // Issue #4590 AC-2 (PM condition 1): the verbatim predecessor bytes are
+    // covered by the audit's integrity hash. Without that they would be the
+    // one unprotected part of the evidence that the predecessor was preserved,
+    // so editing them would forge exactly the guarantee AC-2 asks for.
+    #[test]
+    fn the_preserved_predecessor_bytes_are_covered_by_the_audit_integrity_hash() {
+        let fx = fixture();
+        fx.launch("sess-1");
+        record_no_action(fx.path(), "sess-1", "already delivered").unwrap();
+
+        let mut audit = load_audit(fx.path()).unwrap().unwrap();
+        assert!(audit_integrity_ok(&audit));
+
+        audit
+            .predecessor_execution_control_json
+            .push_str("\n<!-- forged -->");
+        assert!(
+            !audit_integrity_ok(&audit),
+            "editing the preserved bytes must break the audit's integrity hash"
+        );
+
+        let bytes = serde_json::to_vec_pretty(&audit).unwrap();
+        crate::cli::trusted_store::write(fx.path(), NO_ACTION_AUDIT_FILE, &bytes).unwrap();
+        std::fs::write(audit_mirror_path(fx.path()), &bytes).unwrap();
+        assert!(
+            trusted_no_action_for_session(fx.path(), "sess-1").is_none(),
+            "and an audit with forged predecessor bytes is no audit at all"
         );
     }
 }

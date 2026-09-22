@@ -1281,6 +1281,44 @@ mod tests {
         assert_eq!(coords, None);
     }
 
+    /// Issue #4535 AC-5: startup restores every unique project workspace, so
+    /// the auto-start rule is what keeps that from spawning one agent process
+    /// per restored project. Agent panes stay dormant and are revived only by
+    /// the resume path; a Shell pane the user never closed still comes back.
+    #[test]
+    fn restored_agent_panes_never_auto_start_while_shell_panes_do() {
+        let restored = |preset: WindowPreset, agent_id: Option<&str>| {
+            let mut window = gwt::default_workspace_state().windows.remove(0);
+            window.preset = preset;
+            window.agent_id = agent_id.map(str::to_string);
+            // Exactly what `pause_process_windows_for_restore` leaves behind.
+            window.status = gwt::WindowState::Stopped;
+            window
+        };
+
+        for preset in [
+            WindowPreset::Agent,
+            WindowPreset::Claude,
+            WindowPreset::Codex,
+        ] {
+            assert!(
+                !super::should_auto_start_restored_window(&restored(preset, None)),
+                "a restored {preset:?} pane must not spawn its agent process at startup"
+            );
+        }
+        assert!(
+            !super::should_auto_start_restored_window(&restored(
+                WindowPreset::Shell,
+                Some("agent-1")
+            )),
+            "an agent-occupied pane is an agent pane whatever its preset says"
+        );
+        assert!(
+            super::should_auto_start_restored_window(&restored(WindowPreset::Shell, None)),
+            "a Shell pane the user never closed must still come back"
+        );
+    }
+
     #[test]
     fn prune_missing_recent_projects_drops_entries_whose_paths_are_gone() {
         // Issue #1678: stale entries must be removed before the next persist
