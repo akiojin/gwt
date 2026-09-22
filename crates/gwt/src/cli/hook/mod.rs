@@ -19,6 +19,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+mod context;
 pub mod coordination_event;
 pub mod diagnostics;
 pub mod effect_classifier;
@@ -28,6 +29,7 @@ pub mod execution_control_stop_check;
 pub mod forward;
 pub mod health;
 mod identity;
+pub mod known_workarounds;
 pub mod pm_loop_stop_check;
 pub mod provider_event;
 pub mod runtime_state;
@@ -66,7 +68,22 @@ pub(crate) use identity::{
 /// must be deterministic per worktree so an ambient value from another session
 /// can never redirect policy.
 pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
-    crate::pm_registry::is_pm_worktree(&gwt_core::paths::resolve_current_worktree_root(worktree))
+    // Hooks may supply a nested cwd. Find the PM root without repeatedly
+    // spawning git on the warm prompt path, and retain the full canonical
+    // registry check so an ordinary branch named pm/worktree cannot match.
+    worktree.ancestors().any(|ancestor| {
+        if ancestor.file_name() != Some(std::ffi::OsStr::new("worktree"))
+            || ancestor.parent().and_then(std::path::Path::file_name)
+                != Some(std::ffi::OsStr::new("pm"))
+        {
+            return false;
+        }
+        if crate::pm_registry::is_pm_worktree(ancestor) {
+            return true;
+        }
+        let canonical = dunce::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+        crate::pm_registry::is_canonical_pm_worktree(&canonical)
+    })
 }
 
 /// Every hook name exposed via `gwtd hook <name>`.
@@ -271,13 +288,36 @@ pub(crate) fn refresh_managed_assets_for_hook_front_door(
         .map_err(|err| err.to_string())
 }
 
+/// A denial does not park an Issue. Report only the owning Session's observed
+/// phase; missing identity or unreadable preferences cannot establish a park.
+fn parked_owner_issue() -> Option<u64> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    let session = gwt_agent::Session::load_and_migrate(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    let issue = session.linked_issue_number?;
+    let prefs = crate::issue_monitor::load_issue_monitor_prefs(
+        &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&session.worktree_path),
+    )
+    .ok()?;
+    prefs
+        .autonomous_records
+        .iter()
+        .any(|record| {
+            record.issue_number == issue
+                && record.phase == crate::issue_monitor::AutonomousPhase::NeedsHuman
+        })
+        .then_some(issue)
+}
+
 pub fn run_daemon_hook<E: CliEnv>(
     env: &mut E,
     name: &str,
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, provider_event, runtime_state,
+        block_bash_policy, event_dispatcher, known_workarounds, provider_event, runtime_state,
         skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
         skill_register_spec_stop_check, workflow_policy, HookKind, HookOutput,
     };
@@ -304,6 +344,14 @@ pub fn run_daemon_hook<E: CliEnv>(
     }
     /// `Ok(exit_code)` when the envelope reached stdout, `Err(1)` otherwise.
     fn write_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> Result<i32, i32> {
+        // Issue #4542: denials are constructed in a dozen gates but serialized
+        // only here, so the known-workaround advisory attaches once and every
+        // present and future gate inherits it. It is fail-open by construction:
+        // a missing index, an exhausted budget or an unwritable ledger returns
+        // the gate's own text untouched, so this can never turn a denial into
+        // an error or a stall.
+        let repo_root = env.repo_path().to_path_buf();
+        let output = &known_workarounds::augment_denial(&repo_root, output.clone());
         match output.serialize_to(env.stdout()) {
             Ok(()) => {
                 if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
@@ -312,12 +360,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                     // than Claude's hookSpecificOutput JSON envelope.
                     let headline = deny_reason.lines().next().unwrap_or(deny_reason).trim();
                     // Grok truncates the first stderr line to 256 characters.
-                    // Keep the terminal action in that bounded prefix; the
+                    // Keep each gate's recovery in that bounded prefix; the
                     // full provider-neutral detail remains in stdout for
                     // adapters that consume the structured envelope.
-                    let grok_reason = format!(
-                        "{headline}. Stop working on this Issue now if human judgment is still required; it is parked in NeedsHuman."
-                    );
+                    // Name which kind of gate this is, so the agent never has
+                    // to infer a park from a gate it can clear itself.
+                    let grok_reason = match parked_owner_issue() {
+                        Some(issue) => format!(
+                            "{headline}. Issue #{issue} is parked in NeedsHuman: a human must decide before it continues."
+                        ),
+                        None => format!(
+                            "{headline}. This denial does not park the Issue; clear the stated gate and keep working."
+                        ),
+                    };
                     let _ = writeln!(env.stderr(), "{grok_reason}");
                 }
                 Ok(output.exit_code())
@@ -712,6 +767,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resident_pm_policy_recognizes_nested_cwd_only_under_canonical_pm_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let pm = gwt_core::paths::gwt_projects_dir().join("repo-hash/pm/worktree");
+        let nested = pm.join("crates/gwt/src");
+        fs::create_dir_all(&nested).expect("nested PM cwd");
+
+        assert!(is_resident_pm_worktree(&pm));
+        assert!(is_resident_pm_worktree(&nested));
+        assert!(is_resident_pm_worktree(
+            &dunce::canonicalize(&nested).expect("canonical cwd")
+        ));
+        assert!(!is_resident_pm_worktree(
+            &temp.path().join("production/pm/worktree/crates/gwt/src")
+        ));
+    }
+
+    #[test]
     fn invalid_hook_event_is_written_to_the_error_ledger() {
         let temp = tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
@@ -726,6 +799,62 @@ mod tests {
                     && row.message.contains("NotARealEvent")
             }),
             "hook failure must land in the error ledger: {listed:?}"
+        );
+    }
+
+    /// Issue #4542 AC-1/AC-2: the known-workaround advisory hangs off the one
+    /// place every gate's denial is serialized. This asserts both halves of
+    /// that wiring from the outside: the funnel really runs the advisory (the
+    /// occurrence ledger gained this signature), and a repository with neither
+    /// corpus still emits the gate's own denial, unchanged and well-formed,
+    /// instead of an error.
+    #[test]
+    fn denials_run_the_known_workaround_advisory_and_stay_intact_without_a_corpus() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": temp
+                    .path()
+                    .join(".gwt/skill-state/execution-control.json")
+                    .display()
+                    .to_string()
+            },
+        })
+        .to_string();
+
+        let code = run_daemon_hook(&mut env, "workflow-policy", &[]).expect("run hook");
+
+        assert_eq!(code, 2, "the trusted-state write guard must still deny");
+        let stdout = String::from_utf8(env.stdout.clone()).expect("utf8 stdout");
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("deny envelope");
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("deny reason");
+        assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            reason.starts_with(
+                "Execution/evidence state files are written only by their canonical operations"
+            ),
+            "the gate's own summary must survive the advisory: {reason}"
+        );
+        assert!(
+            !reason.contains("Known workarounds"),
+            "no corpus means no advisory, not a broken denial: {reason}"
+        );
+
+        let ledger = gwt_core::paths::gwt_work_notes_dir(temp.path()).join("deny-signatures.json");
+        let recorded = fs::read_to_string(&ledger).unwrap_or_else(|err| {
+            panic!(
+                "the denial funnel must count the block signature at {}: {err}",
+                ledger.display()
+            )
+        });
+        assert!(
+            recorded.contains("execution evidence state files written only canonical operations"),
+            "the normalized block signature must be the ledger key: {recorded}"
         );
     }
 

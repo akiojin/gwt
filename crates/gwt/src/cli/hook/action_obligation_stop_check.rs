@@ -15,7 +15,29 @@
 use std::path::Path;
 
 use super::{envelope::stop_hook_active_from, HookOutput};
-use crate::cli::action_obligation;
+use crate::cli::{action_obligation, execution_state};
+
+/// Name the Session holding this worktree's execution control record when the
+/// caller is not that Session — an orphan window (Issue #4454).
+///
+/// An orphan holds no authority over the Work, so every settlement path this
+/// gate names (`verify.run`, `pr.*`, `issue.*`) refuses it, and so does the
+/// deferral path: `execution.blocked` points at `execution.adopt`, which
+/// refuses for want of the same authority. The obligation then has no exit at
+/// all and the session cannot stop — measured live on 2026-09-16 (#4234),
+/// five refusals in one cycle. Never arm one, and release one already on
+/// record at Stop.
+///
+/// An unreadable record yields `None`, so the gate is unchanged whenever
+/// orphanhood cannot be proven.
+fn foreign_record_holder(
+    worktree: &Path,
+    session: &str,
+) -> Option<execution_state::ForeignExecutionRecordHolder> {
+    execution_state::foreign_record_holder(worktree, session)
+        .ok()
+        .flatten()
+}
 
 /// UserPromptSubmit entry: arm typed obligations for producing prompts. A
 /// missing or unparsable prompt arms nothing — unclassifiable input must not
@@ -70,6 +92,12 @@ pub(crate) fn handle_user_prompt_submit_with_context(
     else {
         return;
     };
+    // Issue #4454: an orphan window can settle nothing, so it must arm
+    // nothing. Not arming is the primary fix; the Stop-side release below
+    // covers obligations already on record.
+    if foreign_record_holder(&resolved, &session_id).is_some() {
+        return;
+    }
     if let Err(error) = action_obligation::mark_from_prompt(&resolved, &session_id, &prompt) {
         tracing::warn!(?error, "action obligation arming failed");
     }
@@ -111,6 +139,31 @@ pub(crate) fn handle_with_input_with_context(
     };
     let open = action_obligation::open_kinds(&resolved, session.trim());
     if open.is_empty() {
+        return HookOutput::Silent;
+    }
+    // Issue #4454: an obligation armed before this window lost (or never
+    // held) the Work's authority must not strand it either. Release Stop and
+    // record why, naming the Session that does hold the record (AC-2).
+    if let Some(holder) = foreign_record_holder(&resolved, session.trim()) {
+        super::diagnostics::record_stop_gate_decision(
+            &resolved,
+            serde_json::json!({
+                "message": "Stop released without settling producing obligations: this session holds no execution authority for the Work",
+                "gate": "action-obligation-stop-check",
+                "issue": 4454,
+                "session_id": session.trim(),
+                "record_holder_session_id": holder.holder_session_id,
+                "owner": format!(
+                    "{kind} #{number}",
+                    kind = holder.owner_kind.as_str(),
+                    number = holder.owner_number
+                ),
+                "open_obligations": open
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>(),
+            }),
+        );
         return HookOutput::Silent;
     }
     let kinds = open
@@ -290,6 +343,162 @@ mod tests {
             ),
             "non-PM sessions must keep the prompt-to-action gate"
         );
+    }
+
+    /// Issue #4454 AC-1 / AC-3: an orphan window — one whose worktree's
+    /// execution control record belongs to another session — is never asked to
+    /// settle a producing obligation.
+    ///
+    /// Observed live on 2026-09-16 (#4234): every settlement path this gate
+    /// names (`verify.run`, `pr.*`, `issue.*`) and the deferral path
+    /// (`execution.blocked`) refused the window for want of authority, and
+    /// `execution.adopt` — the operation `execution.blocked` pointed at —
+    /// refused too. Five refusals, no exit, and the session could not stop at
+    /// all.
+    #[test]
+    fn an_orphan_window_stops_without_settling_obligations() {
+        let dir = mk_worktree();
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            4234,
+            "owner-sess",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        action_obligation::mark_from_prompt(dir.path(), "orphan-sess", "バグを修正して").unwrap();
+
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("orphan-sess")),
+            HookOutput::Silent,
+            "a window holding no execution authority must not be asked to settle"
+        );
+    }
+
+    /// Issue #4454 AC-4: the exemption is keyed on a record that positively
+    /// names another session. The session the record belongs to keeps the gate
+    /// exactly as it was, and so does a worktree with no record at all (covered
+    /// by `open_obligations_block_until_settled`).
+    #[test]
+    fn the_record_holding_session_keeps_the_obligation_gate() {
+        let dir = mk_worktree();
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            4234,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        action_obligation::mark_from_prompt(dir.path(), "sess-1", "バグを修正して").unwrap();
+
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "the authority-holding session must keep the unchanged settlement contract"
+        );
+    }
+
+    /// SPEC #3248 FR-243 (Issue #4545 AC-4): a trusted No Action settles the
+    /// obligations this action armed, so the prompt-to-action gate releases
+    /// through its ordinary settlement contract rather than through a special
+    /// case — and it releases only for the session that recorded it.
+    #[test]
+    fn a_trusted_no_action_settles_this_sessions_obligations() {
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        for args in [
+            vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            vec!["checkout", "-q", "-b", "work/issue-3290"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            3290,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        action_obligation::mark_from_prompt(dir.path(), "sess-1", "残りの実装を進めて").unwrap();
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "the armed obligation gates Stop before the No Action"
+        );
+
+        crate::cli::delivered_owner::record_no_action(
+            dir.path(),
+            "sess-1",
+            "owner #3290 was delivered before this launch",
+        )
+        .unwrap();
+
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            HookOutput::Silent,
+            "No Action settles the obligations it armed"
+        );
+        let settled = action_obligation::load(dir.path()).unwrap().unwrap();
+        assert!(
+            settled.obligations.iter().all(|entry| entry
+                .settled
+                .as_ref()
+                .is_some_and(|settlement| settlement.evidence.starts_with("execution.no_action"))),
+            "the settlement names the operation that produced it: {settled:?}"
+        );
+    }
+
+    /// Issue #4454 AC-2: the grounds for the exemption survive the session in
+    /// the project log — including which session actually holds the record.
+    /// A refusal the agent never sees is not evidence.
+    #[test]
+    fn the_orphan_exemption_is_recorded_in_the_project_log() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = mk_worktree();
+        let resolved = gwt_core::paths::resolve_current_worktree_root(dir.path());
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            4234,
+            "owner-sess",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        action_obligation::mark_from_prompt(dir.path(), "orphan-sess", "実装して").unwrap();
+
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("orphan-sess")),
+            HookOutput::Silent
+        );
+
+        let log_dir = gwt_core::paths::gwt_project_logs_dir_for_project_path(&resolved);
+        let log = std::fs::read_to_string(gwt_core::logging::current_log_file(&log_dir))
+            .expect("project log written at Stop");
+        assert!(log.contains("owner-sess"), "{log}");
+        assert!(log.contains("orphan-sess"), "{log}");
+        assert!(log.contains("issue #4234"), "{log}");
     }
 
     // SPEC-3393 P4: assistant prose is not gate state. Historical summaries

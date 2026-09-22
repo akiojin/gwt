@@ -51,6 +51,20 @@ pub fn adopt_authenticated_execution(
             "execution.adopt requires schema version 1 and a non-empty reason",
         ));
     }
+    // Issue #4443 AC-10: the reserved recovery-envelope namespace is a caller
+    // input error. Left to the CLI guard downstream it surfaced as an opaque
+    // `http_status=500 code=internal`, which reads as an unhandled exception
+    // and tells the agent nothing it can act on.
+    if request
+        .reason
+        .trim()
+        .starts_with(crate::cli::execution_state::RECOVERY_ENVELOPE_PREFIX)
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "execution.adopt reason uses a reserved recovery-envelope namespace; pass a plain reason describing the takeover",
+        ));
+    }
     if request.claimed_session_id != session_id {
         return Err(execution_binding_error(
             "execution_adoption_session_mismatch",
@@ -244,13 +258,24 @@ pub struct AgentWorkspaceUpdateError {
     pub diagnostic_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mismatched_fields: Vec<String>,
+    /// Issue #4443 AC-2: the gwtd operations the caller can run to get out of
+    /// this refusal. Derived from the refusal's own prose, so it cannot name a
+    /// route the Host did not mean, and restricted to
+    /// [`crate::cli::execution_state::AGENT_RECOVERY_OPERATIONS`] so it cannot
+    /// name an operation that does not exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_operations: Vec<String>,
 }
 
 impl AgentWorkspaceUpdateError {
     pub fn new(code: AgentWorkspaceUpdateErrorCode, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
+            recovery_operations: crate::cli::execution_state::recovery_operations_named_in(
+                &message,
+            ),
             code,
-            message: message.into(),
+            message,
             diagnostic_reason: None,
             mismatched_fields: Vec::new(),
         }
@@ -2153,6 +2178,7 @@ fn resolve_authenticated_session_work_mutation_target(
             agent_id: &authority.agent_id,
             require_single_session_assignment,
             allow_terminal: false,
+            require_exclusive_container: true,
         },
     )
     .map_err(classify_target_error)?;
@@ -2387,6 +2413,15 @@ fn workspace_revalidation_error(code: AgentWorkspaceUpdateErrorCode) -> AgentWor
 }
 
 fn classify_workspace_transaction_error(error: &GwtError) -> AgentWorkspaceUpdateError {
+    // The refusal below tells the agent to inspect the Host gwt log, and the
+    // bridge withholds the message itself, so this is the only place the cause
+    // can be recovered from. It used to log nothing at all, which left a
+    // permanent `transaction_conflict` with no way to tell a lost race from a
+    // durable state defect (#4443).
+    tracing::warn!(
+        error = %error,
+        "Host workspace transaction failed without committing"
+    );
     if error
         .to_string()
         .to_ascii_lowercase()
@@ -2430,6 +2465,46 @@ impl SessionWorkMutationTarget {
             agent_id: self.agent_id.clone(),
         }
     }
+}
+
+/// Read the durable Session's assigned Work without requiring a writable
+/// container. Other Works sharing that container do not change this Work's
+/// lifecycle. Missing legacy Session ledgers remain distinguishable from
+/// invalid managed authority so callers cannot fall back after a refusal.
+pub(crate) fn session_work_is_terminal(
+    invocation_cwd: &Path,
+    session_id: &str,
+) -> Result<Option<bool>> {
+    gwt_agent::validate_session_id_path_component(session_id)
+        .map_err(|error| mutation_error(format!("invalid or unsafe Session id: {error}")))?;
+    let Some(session) = try_load_session(session_id)? else {
+        return Ok(None);
+    };
+    if session.id != session_id
+        || session.runtime_target != LaunchRuntimeTarget::Host
+        || session.docker_runtime_binding.is_some()
+    {
+        return Err(mutation_error(
+            "terminal Work read requires the exact Host Session",
+        ));
+    }
+    let identity = validate_host_session_identity(invocation_cwd, &session)?;
+    let (owner, agent_id) = durable_session_work_authority(&session, identity.branch_authority)?;
+    let work = resolve_unique_existing_work(
+        &identity.project_state_root,
+        &identity.work_event_root,
+        session_id,
+        &identity.branch_identity,
+        &identity.worktree_identity,
+        SessionWorkAuthorityExpectation {
+            owner: owner.as_deref(),
+            agent_id: &agent_id,
+            require_single_session_assignment: true,
+            allow_terminal: true,
+            require_exclusive_container: false,
+        },
+    )?;
+    Ok(Some(work.is_terminal))
 }
 
 pub(crate) fn resolve_session_work_mutation_target(
@@ -2563,6 +2638,7 @@ pub(crate) fn snapshot_bound_terminal_compatibility_authority(
             agent_id: &agent_id,
             require_single_session_assignment: true,
             allow_terminal: true,
+            require_exclusive_container: true,
         },
     )?;
     if resolved_work.done && resolved_work.discarded {
@@ -3061,6 +3137,7 @@ fn resolve_host_session_work_mutation_target(
             agent_id: &agent_id,
             require_single_session_assignment: false,
             allow_terminal: false,
+            require_exclusive_container: true,
         },
     )?;
 
@@ -3613,6 +3690,7 @@ struct SessionWorkAuthorityExpectation<'a> {
     agent_id: &'a str,
     require_single_session_assignment: bool,
     allow_terminal: bool,
+    require_exclusive_container: bool,
 }
 
 struct ResolvedExistingWorkAuthority {
@@ -3836,15 +3914,17 @@ fn resolve_unique_existing_work(
         {
             continue;
         }
-        if other.execution_containers.iter().any(|container| {
-            mutation_container_matches(
-                container,
-                branch_identity,
-                worktree_identity,
-                work_event_root,
-                false,
-            )
-        }) {
+        if expected.require_exclusive_container
+            && other.execution_containers.iter().any(|container| {
+                mutation_container_matches(
+                    container,
+                    branch_identity,
+                    worktree_identity,
+                    work_event_root,
+                    false,
+                )
+            })
+        {
             return Err(workspace_ensure_error(
                 session_id,
                 &format!(
@@ -4557,6 +4637,46 @@ mod tests {
             message.to_ascii_lowercase().contains(expected),
             "target-resolution error must identify {expected}: {message}"
         );
+    }
+
+    #[test]
+    fn session_work_terminal_read_uses_assigned_work_across_split_roots() {
+        with_split_root_exact_unbound_fixture(|project, worktree, _, _, session| {
+            let mut session = session.clone();
+            session.linked_issue_number = Some(4368);
+            save_session_fixture(&session);
+            let work_id = "work-exact-terminal-assignment";
+            seed_unique_mutation_target(project, worktree, &session, work_id);
+            let mut items = mutation_work_items(worktree, &session, work_id);
+            items.work_items[0].status_category =
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+            let mut other = items.work_items[0].clone();
+            other.id = "work-other-legitimate-owner".to_string();
+            other.owner = Some("Issue #2359".to_string());
+            other.agents.clear();
+            other.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+            items.work_items.push(other);
+            save_mutation_work_items(project, &items);
+            let before = WorkMutationSnapshot::capture(project, worktree);
+
+            assert_eq!(
+                session_work_is_terminal(worktree, &session.id).unwrap(),
+                Some(true)
+            );
+            assert!(before
+                .changed_surfaces(&WorkMutationSnapshot::capture(project, worktree))
+                .is_empty());
+
+            items.work_items[0].status_category =
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+            items.work_items[1].status_category =
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+            save_mutation_work_items(project, &items);
+            assert_eq!(
+                session_work_is_terminal(worktree, &session.id).unwrap(),
+                Some(false)
+            );
+        });
     }
 
     fn with_strict_target_fixture(test: impl FnOnce(&Path, &Session)) {

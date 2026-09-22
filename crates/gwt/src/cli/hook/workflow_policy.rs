@@ -21,6 +21,7 @@ use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{paths::gwt_sessions_dir, workspace_projection::load_workspace_projection};
 
 use crate::discussion_resume::PendingDiscussionGoal;
+use crate::pm_registry::pm_identity_exempt_session_for_worktree;
 
 use super::{block_bash_policy, effect_classifier, HookError, HookEvent, HookOutput};
 
@@ -33,6 +34,11 @@ pub struct WorkflowContext {
     /// Record). Its contract is the inverse of a producing session's: publish
     /// the verdict, touch nothing the implementer produced.
     pub review_dispatch_session: bool,
+    /// Issue #4442: this session is the project's resident PM window, which is
+    /// launched with `suppress_execution_control` and therefore can never
+    /// satisfy the identity gate. Decided by
+    /// [`crate::pm_registry::pm_identity_exempt_session`].
+    pub pm_session: bool,
 }
 
 impl WorkflowContext {
@@ -55,6 +61,11 @@ impl WorkflowContext {
 
     pub fn with_review_dispatch_session(mut self, review_dispatch_session: bool) -> Self {
         self.review_dispatch_session = review_dispatch_session;
+        self
+    }
+
+    pub fn with_pm_session(mut self, pm_session: bool) -> Self {
+        self.pm_session = pm_session;
         self
     }
 }
@@ -81,9 +92,13 @@ pub fn evaluate_with_context(
     // so `workspace.update` can never succeed there. Demanding the title first
     // would deny every non-read-only command — including the verdict publish
     // that is the window's entire job — for the whole life of the session.
+    // Issue #4442: the resident PM window is the other session launched with
+    // `suppress_execution_control`, and the gate traps it the same way. It is
+    // exempted here rather than through the review guard above, because
+    // draining `pr.*` and delivering rulings on the Board is the PM's job.
     let title_summary = evaluate_title_summary_guard(
         event,
-        context.title_summary_missing && !context.review_dispatch_session,
+        context.title_summary_missing && !context.review_dispatch_session && !context.pm_session,
     )?;
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
@@ -97,17 +112,15 @@ pub fn evaluate_with_context(
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
-    let context =
-        WorkflowContext::default()
-            .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
-            .with_pending_discussion_goal(
-                crate::discussion_resume::load_pending_goal(worktree_root)
-                    .ok()
-                    .flatten(),
-            )
-            .with_review_dispatch_session(
-                crate::issue_monitor_review::review_dispatch_session_active(),
-            );
+    let context = WorkflowContext::default()
+        .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
+        .with_pending_discussion_goal(
+            crate::discussion_resume::load_pending_goal(worktree_root)
+                .ok()
+                .flatten(),
+        )
+        .with_review_dispatch_session(crate::issue_monitor_review::review_dispatch_session_active())
+        .with_pm_session(pm_identity_exempt_session_for_worktree(worktree_root));
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -185,9 +198,13 @@ fn evaluate_title_summary_guard(
         return Ok(HookOutput::Silent);
     }
 
+    if is_identity_gate_exempt_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+
     if is_title_sensitive_tool(event) && !is_read_only_exploration_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
-            "Agent Workspace identity is required before work starts",
+            "Agent Workspace identity is required before work starts. Run workspace.update with purpose + current_focus to set it",
             "Set both a short work name and current focus before exploration, implementation, or verification commands. This is required so Workspace can show which window is doing what.\n\n\
 Required command shape:\n\
   gwtd <<'JSON'\n\
@@ -195,7 +212,12 @@ Required command shape:\n\
   JSON\n\n\
 Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
-Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.",
+Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
+If workspace.update itself is refused because this worktree holds another Session's Execution Control Record, take it over first and then set the identity, one single-segment gwtd command each:\n\
+  1. execution.adopt (params.reason)\n\
+  2. workspace.ensure (params.purpose + params.current_focus)\n\
+  3. workspace.update (params.purpose + params.current_focus)\n\
+While the gate is closed you may also run execution.repair, execution.reopen, execution.release_prepared, and memory.add. Shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -356,7 +378,7 @@ fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, H
     Ok(HookOutput::pre_tool_use_permission(
         "Execution/evidence state files are written only by their canonical operations",
         "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
-Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.repair` / `execution.reopen` for execution authority, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.no_action` / `execution.adopt` / `execution.repair` / `execution.reopen` for execution authority, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
@@ -498,6 +520,86 @@ fn is_workspace_identity_update_event(event: &HookEvent) -> bool {
         return false;
     };
     is_workspace_identity_update_command(command)
+}
+
+fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
+    if event.tool_name.as_deref() != Some("Bash") {
+        return false;
+    }
+    event
+        .command()
+        .and_then(json_envelope_operation)
+        .as_deref()
+        .is_some_and(is_identity_gate_exempt_operation)
+}
+
+/// Issue #4533: the operations a session may run while the Agent Workspace
+/// identity gate is closed, beyond the read-only set.
+///
+/// The gate exists so an unregistered Session cannot change production code
+/// before Workspace can show which window is doing what. Two narrow classes do
+/// not threaten that, and refusing them is what closed the interlock #4533
+/// reports:
+///
+/// - `execution.adopt` / `execution.repair` / `execution.reopen` /
+///   `execution.release_prepared` are recovery-only. They are exactly what
+///   `execution.status` advertises in `available_recoveries`, and a session
+///   that cannot set its title is the only kind of session that ever needs
+///   them. With them blocked, the refusal text named the correct exit
+///   (`execution.adopt`, then `workspace.ensure`) while the gate held that
+///   exit shut, and the session could neither escape nor settle.
+/// - `memory.add` appends one entry to the machine-local work-notes log. It
+///   touches nothing under version control. Without it a trapped session
+///   cannot even record why it is trapped, so the next generation repeats the
+///   same path (AC-3).
+///
+/// `available_recoveries` can also name `verify.plan` / `verify.run`, and
+/// those stay gated on purpose: they take the host-wide verification lease and
+/// mint a session-bound evidence record, which is exactly the anonymous
+/// side effect the gate exists to prevent. They are reachable the moment the
+/// gate lifts, which the escape above always does.
+///
+/// AC-2 — a bookkeeping-only `git commit` is deliberately **not** exempted.
+/// The `chore(work):` convention bounds the subject line, never the index: a
+/// commit run under that subject carries whatever is staged, including
+/// arbitrary production edits, which is precisely what the gate exists to
+/// stop. Hook-side inspection cannot bound the index either, because the
+/// staging happens in earlier commands the hook has already allowed or denied
+/// independently. The commit therefore stays behind the gate, and the way out
+/// is to lift the gate first — which
+/// [`crate::cli::verification_record::work_event_settlement_blocker_description`]
+/// now spells out in the refusal itself (AC-1).
+pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "execution.adopt"
+            | "execution.repair"
+            | "execution.reopen"
+            | "execution.release_prepared"
+            | "execution.release-prepared"
+            // SPEC #3248 FR-241: `execution.no_action` writes one
+            // machine-local audit and settles this session's own obligations.
+            // It commits nothing, pushes nothing, and takes no lease, so it
+            // carries none of the anonymous side effects the gate exists to
+            // prevent — and a session launched onto an already delivered owner
+            // is exactly the kind that cannot set a title yet needs to settle.
+            | "execution.no_action"
+            | "execution.no-action"
+            | "memory.add"
+    )
+}
+
+/// Issue #4533 (AC-1): whether the identity gate would currently deny this
+/// session's writes in `worktree_root`. Mirrors the context [`evaluate`]
+/// builds, including the review-dispatch and PM exemptions, so a refusal
+/// cannot advertise an escape the session does not actually need.
+pub(crate) fn identity_gate_closed(worktree_root: &Path) -> bool {
+    if crate::issue_monitor_review::review_dispatch_session_active()
+        || pm_identity_exempt_session_for_worktree(worktree_root)
+    {
+        return false;
+    }
+    current_agent_workspace_identity_missing(worktree_root).unwrap_or(false)
 }
 
 fn is_workspace_identity_update_command(command: &str) -> bool {
@@ -1205,6 +1307,184 @@ mod tests {
         }
     }
 
+    use crate::pm_registry::pm_identity_exempt_session;
+
+    fn pm_context() -> WorkflowContext {
+        // The PM window is launched with `suppress_execution_control`: the
+        // title is missing and can never be set, which is exactly the state
+        // that used to deny everything for the life of the window.
+        WorkflowContext::unknown()
+            .with_title_summary_missing(true)
+            .with_pm_session(true)
+    }
+
+    /// Issue #4442 AC-1: the resident PM window keeps Bash / Write / Edit for
+    /// its whole life even though its identity can never be set.
+    #[test]
+    fn pm_session_keeps_its_tools_without_a_title_summary() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let events = [
+            bash_event("git log --oneline -20"),
+            bash_event("cargo test -p gwt --bin gwt workflow_policy"),
+            HookEvent {
+                tool_name: Some("Write".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": worktree.join("pm-notes.md").to_string_lossy(),
+                    "content": "cycle notes",
+                })),
+                transcript_path: None,
+                cwd: None,
+            },
+            HookEvent {
+                tool_name: Some("Edit".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": worktree.join("pm-notes.md").to_string_lossy(),
+                    "old_string": "a",
+                    "new_string": "b",
+                })),
+                transcript_path: None,
+                cwd: None,
+            },
+        ];
+        for event in events {
+            assert_eq!(
+                evaluate_with_context(&event, worktree, &pm_context()).expect("guard output"),
+                HookOutput::Silent,
+                "{:?}",
+                event.tool_name
+            );
+        }
+    }
+
+    /// Issue #4442 AC-2: the PM's own job — draining PRs and delivering
+    /// rulings on the Board — must run. The review dispatch guard denies
+    /// `pr.*` and it must not reach the PM.
+    #[test]
+    fn pm_session_may_run_pr_operations_and_post_to_the_board() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            envelope_command("pr.update_branch", r#"{"number":4410}"#),
+            envelope_command("pr.ready", r#"{"number":4374}"#),
+            envelope_command("pr.comment", r#"{"number":4428,"body":"ruling"}"#),
+            envelope_command("board.post", r#"{"kind":"decision","body":"ruling"}"#),
+            envelope_command("issue.comment", r#"{"number":4442,"body":"ruling"}"#),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &pm_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4442 AC-4: a window that is both marked and dispatched for
+    /// review keeps the stricter review contract. The PM exemption lifts the
+    /// identity gate; it never opens the reviewer's write surface.
+    #[test]
+    fn pm_marker_does_not_loosen_the_review_dispatch_contract() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let context = pm_context().with_review_dispatch_session(true);
+        let command = envelope_command("pr.edit", r#"{"number":4000,"body":"approved"}"#);
+        assert!(
+            matches!(
+                evaluate_with_context(&bash_event(&command), worktree, &context)
+                    .expect("guard output"),
+                HookOutput::PreToolUsePermission { .. }
+            ),
+            "review dispatch must keep denying `pr.edit`"
+        );
+    }
+
+    /// Issue #4442 AC-3 / AC-5: the three cases that decide the exemption.
+    /// The marker alone is not enough — a session that holds an Execution
+    /// Control Record can satisfy `workspace.update`, so it keeps the gate
+    /// even if a stale or inherited marker is in its environment.
+    #[test]
+    fn pm_identity_exemption_requires_the_marker_and_the_absence_of_an_execution_record() {
+        assert!(
+            pm_identity_exempt_session(true, false),
+            "marker present, no Execution Control Record: the PM case"
+        );
+        assert!(
+            !pm_identity_exempt_session(false, false),
+            "no marker: an ordinary ownerless session keeps the gate"
+        );
+        assert!(
+            !pm_identity_exempt_session(true, true),
+            "an Execution Control Record can satisfy the gate, so the gate applies"
+        );
+    }
+
+    /// Issue #4442 AC-5, at the policy level: the same three cases decide
+    /// whether the identity gate fires.
+    #[test]
+    fn the_title_summary_gate_fires_for_every_session_but_the_pm() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let event = bash_event("cargo test -p gwt");
+        for (pm_marker, execution_control, expect_gate) in [
+            (true, false, false),
+            (false, false, true),
+            (true, true, true),
+        ] {
+            let context = WorkflowContext::unknown()
+                .with_title_summary_missing(true)
+                .with_pm_session(pm_identity_exempt_session(pm_marker, execution_control));
+            let output = evaluate_with_context(&event, worktree, &context).expect("guard output");
+            assert_eq!(
+                matches!(output, HookOutput::PreToolUsePermission { .. }),
+                expect_gate,
+                "marker={pm_marker} execution_control={execution_control}"
+            );
+        }
+    }
+
+    /// Issue #4442 AC-1, restated as the escape it exists for: a PM window
+    /// trapped by the gate could not even declare that it was stuck. The
+    /// settlement and reporting envelopes must run.
+    #[test]
+    fn pm_session_can_declare_its_own_state() {
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        for command in [
+            envelope_command("execution.blocked", r#"{"reason":"stuck"}"#),
+            envelope_command("board.post", r#"{"kind":"blocked","body":"stuck"}"#),
+            "git add -A".to_string(),
+            "git commit -m 'chore(work): notes'".to_string(),
+            "git push origin HEAD".to_string(),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &pm_context())
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4442 AC-3: the marker is read from the environment both PM
+    /// launch paths already write, and only a non-empty value counts.
+    #[test]
+    fn the_pm_marker_is_read_from_the_existing_launch_environment() {
+        use crate::pm_registry::{pm_session_from_env, GWT_PM_SCRATCH_DIR_ENV};
+
+        let present = |value: &'static str| {
+            pm_session_from_env(move |name| {
+                (name == GWT_PM_SCRATCH_DIR_ENV).then(|| value.to_string())
+            })
+        };
+        assert!(present(
+            "/Users/x/.gwt/projects/abc/project-state/pm-scratch"
+        ));
+        assert!(!present(""));
+        assert!(!present("   "));
+        assert!(!pm_session_from_env(|_| None));
+    }
+
     /// Non-regression: the review contract applies only to review windows. An
     /// ordinary producing session keeps both the title gate and its full
     /// write surface.
@@ -1520,10 +1800,14 @@ mod tests {
         };
         let context = WorkflowContext::unknown().with_title_summary_missing(true);
 
-        assert!(matches!(
-            evaluate_with_context(&event, repo.path(), &context).expect("guard output"),
-            HookOutput::PreToolUsePermission { .. }
-        ));
+        let output = evaluate_with_context(&event, repo.path(), &context).expect("guard output");
+        let visible = output.summary().chars().take(256).collect::<String>();
+        assert!(visible.contains("workspace.update"), "{visible}");
+        assert!(
+            visible.contains("purpose") && visible.contains("current_focus"),
+            "{visible}"
+        );
+        assert!(!output.permission_decision_reason().contains("Stop working"));
     }
 
     #[test]
@@ -1679,6 +1963,188 @@ mod tests {
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    /// Issue #4533 (AC-5/AC-6): the operations `execution.status` advertises in
+    /// `available_recoveries` must survive the gate. Denying them closed the
+    /// interlock the issue reports — the refusal text named the exit and the
+    /// gate held that exit shut.
+    #[test]
+    fn title_summary_guard_allows_execution_recovery_operations_before_identity_is_set() {
+        for command in [
+            envelope_command("execution.adopt", r#"{"reason":"relaunch takeover"}"#),
+            envelope_command("execution.repair", r#"{"reason":"integrity failure"}"#),
+            envelope_command("execution.reopen", r#"{"reason":"blocker resolved"}"#),
+            envelope_command(
+                "execution.release_prepared",
+                r#"{"reason":"stale fence","operation_id":"op-1"}"#,
+            ),
+        ] {
+            assert_eq!(
+                evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+
+        // `available_recoveries` can also name the verification pair. Those are
+        // not exempt — they run the whole matrix and mint a session-bound
+        // record — so the contract is that lifting the gate reaches them. Fix
+        // that half too, or the escape is only half an escape.
+        for command in [
+            envelope_command("verify.plan", r#"{"derive":true}"#),
+            envelope_command("verify.run", r#"{"commands":["cargo test -p gwt"]}"#),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true)
+                        .expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "verification stays gated: {command}"
+            );
+            assert_eq!(
+                evaluate_title_summary_guard(&bash_event(&command), false).expect("guard output"),
+                HookOutput::Silent,
+                "lifting the gate must reach it: {command}"
+            );
+        }
+    }
+
+    /// Issue #4533 (AC-3): a gated session must still be able to record why it
+    /// is stuck, or the next generation walks into the same trap.
+    #[test]
+    fn title_summary_guard_allows_memory_add_before_identity_is_set() {
+        let command = envelope_command(
+            "memory.add",
+            r#"{"title":"identity gate interlock","context":"gate","learning":"x","future_action":"y"}"#,
+        );
+
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(&command), true).expect("guard output"),
+            HookOutput::Silent,
+            "{command}"
+        );
+    }
+
+    /// Issue #4533 (AC-2): the recorded decision is that a bookkeeping-only
+    /// shell commit stays behind the gate. A `chore(work):` subject bounds the
+    /// message, never the index, so exempting it would carry arbitrary
+    /// production edits through the gate.
+    #[test]
+    fn title_summary_guard_still_blocks_bookkeeping_only_commits() {
+        for command in [
+            "git add .gwt/work/events && git commit -m 'chore(work): receipt'",
+            "git commit -m 'chore(work): receipt'",
+            "git push origin HEAD",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(command), true).expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4533 (AC-5): the exemption is scoped to the recovery and
+    /// bookkeeping operations. Every other execution operation still waits for
+    /// the identity.
+    #[test]
+    fn title_summary_guard_exemption_does_not_open_the_rest_of_the_execution_surface() {
+        for command in [
+            envelope_command("execution.complete", "{}"),
+            envelope_command("execution.blocked", r#"{"reason":"gate"}"#),
+            envelope_command("build.start", r#"{"spec":4533}"#),
+            envelope_command("pr.create", r#"{"title":"x"}"#),
+        ] {
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&bash_event(&command), true)
+                        .expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    /// Issue #4533 (AC-4): the full interlock, end to end.
+    ///
+    /// Reproduce the state the issue reports — identity gate closed, Work
+    /// event store dirty, the session holding a foreign/terminal Execution
+    /// Control Record — and assert the two halves now agree: the refusal names
+    /// an ordered escape, and every operation it names clears the gate.
+    #[test]
+    fn identity_gate_and_dirty_work_event_store_no_longer_interlock() {
+        use crate::cli::verification_record::{
+            work_event_settlement_blocker_description_with_gate, WorkEventPathState,
+            WorkEventSettlementBlocker,
+        };
+
+        let blocker = WorkEventSettlementBlocker::PathDirty {
+            states: vec![WorkEventPathState::Untracked],
+        };
+        let refusal = work_event_settlement_blocker_description_with_gate(&blocker, true);
+
+        // The refusal still demands the commit, but no longer demands it
+        // silently behind a gate that forbids it.
+        assert!(refusal.contains("chore(work):"), "{refusal}");
+        assert!(refusal.contains("identity gate is closed"), "{refusal}");
+        for step in [
+            "`execution.adopt`",
+            "`workspace.ensure`",
+            "`workspace.update`",
+            "`memory.add`",
+        ] {
+            assert!(
+                refusal.contains(step),
+                "escape step {step} missing:\n{refusal}"
+            );
+        }
+        let adopt_at = refusal.find("`execution.adopt`").expect("adopt step");
+        let ensure_at = refusal.find("`workspace.ensure`").expect("ensure step");
+        let update_at = refusal.find("`workspace.update`").expect("update step");
+        assert!(
+            adopt_at < ensure_at && ensure_at < update_at,
+            "the escape must be ordered adopt -> ensure -> update:\n{refusal}"
+        );
+
+        // Every escape step the refusal names must actually clear the gate.
+        let worktree_dir = tempfile::tempdir().expect("worktree");
+        let worktree = worktree_dir.path();
+        let gated = WorkflowContext::unknown().with_title_summary_missing(true);
+        for command in [
+            envelope_command(
+                "execution.adopt",
+                r#"{"reason":"inherited blocked record"}"#,
+            ),
+            envelope_command(
+                "workspace.ensure",
+                r#"{"purpose":"Issue 4533","current_focus":"gate escape"}"#,
+            ),
+            envelope_command(
+                "workspace.update",
+                r#"{"purpose":"Issue 4533","current_focus":"gate escape"}"#,
+            ),
+            envelope_command(
+                "memory.add",
+                r#"{"title":"identity gate interlock","context":"c","learning":"l","future_action":"f"}"#,
+            ),
+        ] {
+            assert_eq!(
+                evaluate_with_context(&bash_event(&command), worktree, &gated)
+                    .expect("guard output"),
+                HookOutput::Silent,
+                "the refusal names this escape step, so the gate must allow it: {command}"
+            );
+        }
+
+        // With the gate open the refusal stays exactly as it was.
+        let ungated = work_event_settlement_blocker_description_with_gate(&blocker, false);
+        assert!(!ungated.contains("identity gate"), "{ungated}");
+        assert!(refusal.starts_with(&ungated), "{refusal}\n---\n{ungated}");
     }
 
     #[test]

@@ -354,6 +354,11 @@ pub fn default_session_state() -> PersistedSessionState {
 
 pub fn pause_process_windows_for_restore(state: &mut PersistedWindowCanvasState) {
     for window in &mut state.windows {
+        // Keep the durable failure signal: otherwise the next restore may
+        // mistake a diagnostic Agent pane for an empty stopped placeholder.
+        if window.preset.is_agent_terminal() && window.status == WindowState::Error {
+            continue;
+        }
         if window.preset.requires_process() {
             window.status = WindowState::Stopped;
         }
@@ -1287,6 +1292,15 @@ mod tests {
             WindowState::Stopped,
             "Agent windows must be paused on restore"
         );
+        state.windows[0].status = WindowState::Error;
+        for _ in 0..2 {
+            pause_process_windows_for_restore(&mut state);
+            assert_eq!(
+                state.windows[0].status,
+                WindowState::Error,
+                "a diagnostic window must not become an empty stopped placeholder"
+            );
+        }
     }
 
     #[test]

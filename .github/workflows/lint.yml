@@ -4,6 +4,16 @@ on:
   pull_request:
     branches: [develop, main]
 
+# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
+# update-branch `synchronize` starts a fresh run, and without this group the
+# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
+# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
+# only this PR's older run of this workflow. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   audit:
     name: Cargo Deny (advisories + sources)
@@ -51,6 +61,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
         continue-on-error: true
       - uses: actions/setup-node@v7
         with:
@@ -98,11 +110,61 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: lint-windows
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Run Windows Clippy
         run: cargo clippy -p gwt -p gwt-core --all-targets --all-features -- -D warnings
         timeout-minutes: 30
+
+  # Issue #4522. `#[cfg(target_os = "macos")]` code is not compiled by the
+  # ubuntu or windows clippy jobs, so a lint violation behind it was invisible
+  # to CI. On 2026-09-20 the `fsevent-sys` 4.1.0 -> 5.2.0 bump (dependabot PR
+  # #4515) deprecated the crate's whole C API; CI merged it green while
+  # `gwt-core` stopped compiling under `-D warnings` on every macOS host at
+  # once, and no agent could deliver a PR until the suppression landed.
+  #
+  # Scope is deliberately the ubuntu job's gate verbatim rather than the
+  # narrowed Windows one. This command is what `verify.plan` derives and every
+  # macOS agent must pass locally before it can deliver
+  # (crates/gwt/src/cli/verify_derivation.rs `CI_CLIPPY_GATE`), and pinning the
+  # two to the same string is the whole point: narrowing to `-p gwt -p
+  # gwt-core` would leave the macOS-gated code in gwt-agent, gwt-config and
+  # gwt-clipboard unlinted here while still failing the local gate, which is
+  # the same divergence in a smaller shape. The repository is public, so the
+  # macOS runner costs queue time rather than billed minutes; `macos-workspace`
+  # is warmed for it by cache-warm.yml.
+  lint-macos:
+    name: Clippy (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      # Mirrors build.yml's check-macos: the pre-installed Rust on macOS
+      # runners is broken, and the reset has to happen before the toolchain
+      # action so every macOS job hashes the same `rustc -vV` into the cache
+      # key.
+      - name: Reset broken pre-installed Rust on macOS runners
+        shell: bash
+        run: |
+          set -e
+          rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-workspace
+        continue-on-error: true
+      # 45 and not the Windows job's 30: `Check (macOS)` runs 1-2 min warm, and
+      # the ubuntu clippy gate runs ~4.5 min warm, but `macos-workspace` is
+      # warmed from this commit onward and the first runs restore a scope built
+      # for `cargo check -p gwt-core -p gwt` alone. The cap is the outer net for
+      # that cold start, not the expected duration.
+      - name: Run macOS Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        timeout-minutes: 45
 
   commitlint:
     name: Commit Message Lint

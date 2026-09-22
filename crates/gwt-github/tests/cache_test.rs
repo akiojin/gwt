@@ -9,7 +9,7 @@ use std::{
 
 use gwt_github::{
     body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
-    cache::{Cache, CacheEntry, ReceiptRenewal, ValidatedCacheEntry},
+    cache::{Cache, CacheEntry, ValidatedCacheEntry, ValidationReceiptRenewal},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
 };
@@ -196,7 +196,7 @@ fn matching_validation_receipt_marks_snapshot_fresh() {
     assert!(cache
         .renew_validation_receipt_if_current(&snapshot)
         .unwrap()
-        .published());
+        .renewed());
 
     match cache
         .load_validated_entry(snapshot.number, Duration::from_secs(60))
@@ -216,7 +216,7 @@ fn validation_receipt_is_bound_to_the_snapshot_contents() {
     assert!(cache
         .renew_validation_receipt_if_current(&snapshot)
         .unwrap()
-        .published());
+        .renewed());
 
     let mut replacement = snapshot.clone();
     replacement.body = "concurrent replacement".to_string();
@@ -242,7 +242,7 @@ fn failed_snapshot_write_leaves_validation_receipt_absent() {
     assert!(cache
         .renew_validation_receipt_if_current(&first)
         .unwrap()
-        .published());
+        .renewed());
     let receipt = cache.validation_receipt_path(first.number);
 
     fs::remove_file(tmp.path().join("42/body.md")).unwrap();
@@ -266,7 +266,7 @@ fn identical_snapshot_commits_rotate_generation_and_invalidate_receipt() {
     assert!(cache
         .renew_validation_receipt_if_generation(&snapshot, Some(&first))
         .unwrap()
-        .published());
+        .renewed());
 
     cache.write_snapshot(&snapshot).unwrap();
     let second = cache.current_generation(snapshot.number).unwrap().unwrap();
@@ -341,7 +341,7 @@ fn validation_publication_rejects_a_changed_generation() {
     assert!(!cache
         .renew_validation_receipt_if_generation(&first, Some(&stale_generation))
         .unwrap()
-        .published());
+        .renewed());
     assert!(!cache.validation_receipt_path(first.number).exists());
 }
 
@@ -361,8 +361,59 @@ fn validation_publication_rejects_mixed_files_with_the_old_generation() {
     assert!(!cache
         .renew_validation_receipt_if_generation(&expected, Some(&generation))
         .unwrap()
-        .published());
+        .renewed());
     assert!(!cache.validation_receipt_path(expected.number).exists());
+}
+
+/// Issue #4436 AC-4: a renewal names which of the four refusals happened, and
+/// only a concurrent writer answers `cache_changed`.
+///
+/// Every refusal used to be reported to operators as "the cache changed; retry
+/// the operation". Three of them describe the persisted entry, so retrying
+/// re-ran the same refusal against a `meta.json` that never moved.
+#[test]
+fn validation_renewal_distinguishes_a_concurrent_writer_from_a_stable_cache() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    let generation = cache.current_generation(snapshot.number).unwrap().unwrap();
+
+    assert_eq!(
+        cache
+            .renew_validation_receipt_if_generation(&snapshot, Some(&generation))
+            .unwrap(),
+        ValidationReceiptRenewal::Renewed
+    );
+
+    // The caller's generation is no longer the persisted one: a real race, and
+    // the only outcome a retry can resolve.
+    cache.write_snapshot(&snapshot).unwrap();
+    let changed = cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&generation))
+        .unwrap();
+    assert_eq!(changed, ValidationReceiptRenewal::GenerationChanged);
+    assert!(changed.cache_changed());
+
+    // The generation is still the caller's, but the persisted bytes are not the
+    // validated snapshot. Nothing changed under the caller; the entry is simply
+    // not what was validated.
+    let current = cache.current_generation(snapshot.number).unwrap().unwrap();
+    fs::write(tmp.path().join("42/body.md"), "partial writer body").unwrap();
+    let mismatch = cache
+        .renew_validation_receipt_if_generation(&snapshot, Some(&current))
+        .unwrap();
+    assert_eq!(mismatch, ValidationReceiptRenewal::SnapshotMismatch);
+    assert!(
+        !mismatch.cache_changed(),
+        "a stable generation must never be reported as a concurrent writer"
+    );
+
+    // No entry at all, and no generation to bind a receipt to.
+    let missing = mk_snapshot(43, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    let unbound = cache.renew_validation_receipt_if_current(&missing).unwrap();
+    assert_eq!(unbound, ValidationReceiptRenewal::EntryUnreadable);
+    assert!(!unbound.cache_changed());
 }
 
 #[test]
@@ -756,7 +807,7 @@ Rest of the body is human prose, not a real SPEC.\n"
         cache
             .renew_validation_receipt_if_current(&snapshot)
             .unwrap()
-            .published(),
+            .renewed(),
         "a malformed SPEC body must still receive a validation receipt"
     );
     assert!(matches!(
@@ -807,7 +858,7 @@ fn write_snapshot_with_receipt_publishes_proof_in_one_step() {
 
     assert_eq!(
         cache.write_snapshot_with_receipt(&snapshot).unwrap(),
-        ReceiptRenewal::Published
+        ValidationReceiptRenewal::Renewed
     );
     assert!(cache.validation_receipt_path(snapshot.number).exists());
     match cache
@@ -834,7 +885,7 @@ fn write_snapshot_with_receipt_repairs_an_entry_that_lost_its_receipt() {
 
     assert_eq!(
         cache.write_snapshot_with_receipt(&snapshot).unwrap(),
-        ReceiptRenewal::Published
+        ValidationReceiptRenewal::Renewed
     );
     assert!(matches!(
         cache
@@ -844,71 +895,30 @@ fn write_snapshot_with_receipt_repairs_an_entry_that_lost_its_receipt() {
     ));
 }
 
-// Issue #4392 AC-4: a refused renewal reports which precondition failed, so a
-// caller can print the operation that actually recovers it instead of always
-// advising a retry.
+// Issue #4392 AC-4: `reason()` says what went wrong; a caller also has to be
+// able to say what to do. Every outcome a retry cannot clear must name the
+// repair operation instead of repeating that a retry will not help.
 #[test]
-fn receipt_renewal_reports_why_it_refused() {
-    let tmp = TempDir::new().unwrap();
-    let cache = Cache::new(tmp.path().to_path_buf());
-    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("first", "tasks"));
-
+fn every_renewal_outcome_names_the_operation_that_recovers_it() {
+    assert!(ValidationReceiptRenewal::Renewed.remedy().is_empty());
     assert_eq!(
-        cache
-            .renew_validation_receipt_if_current(&snapshot)
-            .unwrap(),
-        ReceiptRenewal::EntryMissing,
-        "nothing cached yet"
+        ValidationReceiptRenewal::GenerationChanged.remedy(),
+        "retry the operation"
     );
 
-    cache.write_snapshot(&snapshot).unwrap();
-    let stale = cache.current_generation(snapshot.number).unwrap().unwrap();
-    cache.write_snapshot(&snapshot).unwrap();
-    assert_eq!(
-        cache
-            .renew_validation_receipt_if_generation(&snapshot, Some(&stale))
-            .unwrap(),
-        ReceiptRenewal::GenerationChanged
-    );
-
-    let current = cache.current_generation(snapshot.number).unwrap().unwrap();
-    let mut diverged = snapshot.clone();
-    diverged.body = mk_body_with_spec_and_tasks_in_body("diverged", "tasks");
-    assert_eq!(
-        cache
-            .renew_validation_receipt_if_generation(&diverged, Some(&current))
-            .unwrap(),
-        ReceiptRenewal::SnapshotMismatch
-    );
-
-    assert!(!cache.validation_receipt_path(snapshot.number).exists());
-}
-
-// Issue #4392 AC-4: every refusal reason names a next operation. A reason that
-// retrying cannot clear must point at the repair operation instead.
-#[test]
-fn receipt_renewal_reasons_name_the_next_operation() {
-    assert!(ReceiptRenewal::Published.published());
-    assert!(ReceiptRenewal::Published.next_action().is_empty());
-
-    for reason in [
-        ReceiptRenewal::GenerationChanged,
-        ReceiptRenewal::EntryMissing,
-        ReceiptRenewal::SnapshotMismatch,
-        ReceiptRenewal::GenerationMissing,
+    for outcome in [
+        ValidationReceiptRenewal::GenerationMissing,
+        ValidationReceiptRenewal::EntryUnreadable,
+        ValidationReceiptRenewal::SnapshotMismatch,
     ] {
-        assert!(!reason.published(), "{reason:?}");
-        let action = reason.next_action();
         assert!(
-            action.contains("retry the operation") || action.contains("issue.cache.repair"),
-            "{reason:?} must name the next operation, got {action:?}"
+            !outcome.cache_changed(),
+            "{outcome:?} is not a concurrent writer"
+        );
+        assert!(
+            outcome.remedy().contains("issue.cache.repair"),
+            "{outcome:?} never clears on a retry, so it must name the repair operation, got {:?}",
+            outcome.remedy()
         );
     }
-
-    assert!(
-        ReceiptRenewal::GenerationMissing
-            .next_action()
-            .contains("issue.cache.repair"),
-        "a cache entry with no generation never heals by retrying"
-    );
 }

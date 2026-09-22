@@ -156,6 +156,25 @@ export function renderBranchCleanupModal({
       }
       dialogEl.appendChild(progressList);
     }
+    // Issue #4433: the socket dropped while the cleanup was running. The
+    // cleanup itself is unaffected, so say the status feed is reconnecting
+    // rather than reporting a failure — and leave the user a way out.
+    if (state.cleanupModal.connectionInterrupted) {
+      const status = createNode(
+        "div",
+        "branch-cleanup-connection-status",
+        "Reconnecting to cleanup status…",
+      );
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      dialogEl.appendChild(status);
+      const footer = createNode("div", "modal-footer");
+      const close = createNode("button", "wizard-button", "Close");
+      close.type = "button";
+      close.addEventListener("click", onCancel);
+      footer.appendChild(close);
+      dialogEl.appendChild(footer);
+    }
     return;
   }
 

@@ -26,7 +26,6 @@ use super::{
     record::{PerfRecord, PerfStream, PerfUnit},
     route::PerfRoute,
     self_budget::SelfBudgetGovernor,
-    smoothing::ViolationSmoother,
     PerfSink, OPERATION_ROLE_MUTATION, OPERATION_ROLE_READ, OPERATION_TARGET_PREFIX,
 };
 
@@ -36,7 +35,6 @@ static GLOBAL: OnceLock<Mutex<PerfRuntime>> = OnceLock::new();
 pub struct PerfRuntime {
     sink: PerfSink,
     budgets: PerfBudgets,
-    smoother: ViolationSmoother,
     governor: SelfBudgetGovernor,
     last_collection_at: Option<Instant>,
 }
@@ -56,7 +54,6 @@ impl PerfRuntime {
         Ok(Self {
             sink,
             budgets: PerfBudgets::resolve(&config.budgets),
-            smoother: ViolationSmoother::new(),
             governor: SelfBudgetGovernor::new(config.self_budget_cpu_percent),
             last_collection_at: None,
         })
@@ -101,6 +98,30 @@ impl PerfRuntime {
         );
     }
 
+    /// Record one non-time quantity of a route (Issue #4397 AC-4), such as a
+    /// state size or an item count: an unbudgeted sample in its own unit.
+    pub fn record_route_metric(
+        &mut self,
+        route: PerfRoute,
+        metric: &str,
+        value: f64,
+        unit: PerfUnit,
+    ) {
+        if !self.sink.is_enabled() || !value.is_finite() {
+            return;
+        }
+        if self.governor.should_sample() {
+            let sample = PerfRecord::sample(
+                Utc::now(),
+                PerfStream::Ui,
+                route.metric_target(metric),
+                value,
+                unit,
+            );
+            let _ = self.sink.append(&sample);
+        }
+    }
+
     /// Record one gwtd operation measurement.
     pub fn record_operation(&mut self, operation: &str, elapsed: Duration, read_only: bool) {
         let role = if read_only {
@@ -143,24 +164,10 @@ impl PerfRuntime {
                 PerfRecord::sample(now, stream, &target, value_ms, PerfUnit::Milliseconds),
                 role,
             );
-            let _ = self.sink.append(&sample);
-
-            if let Some(details) =
-                budget.and_then(|budget| self.smoother.observe(&target, value_ms, budget, now))
-            {
-                let violation = with_role(
-                    PerfRecord::violation(
-                        now,
-                        stream,
-                        &target,
-                        value_ms,
-                        PerfUnit::Milliseconds,
-                        details,
-                    ),
-                    role,
-                );
-                let _ = self.sink.append(&violation);
-            }
+            let _ = match budget {
+                Some(budget) => self.sink.append_budgeted(&sample, budget),
+                None => self.sink.append(&sample),
+            };
         }
 
         self.governor
@@ -232,6 +239,11 @@ pub fn record_route_phase(route: PerfRoute, phase: &str, elapsed: Duration) {
     with_runtime(|runtime| runtime.record_route_phase(route, phase, elapsed));
 }
 
+/// Record one route metric, or do nothing when uninstalled.
+pub fn record_route_metric(route: PerfRoute, metric: &str, value: f64, unit: PerfUnit) {
+    with_runtime(|runtime| runtime.record_route_metric(route, metric, value, unit));
+}
+
 /// Record one gwtd operation measurement, or do nothing when uninstalled.
 pub fn record_operation(operation: &str, elapsed: Duration, read_only: bool) {
     with_runtime(|runtime| runtime.record_operation(operation, elapsed, read_only));
@@ -278,16 +290,30 @@ impl Drop for RouteTimer {
 /// the route total is the caller's `record_route`.
 pub struct RoutePhaseClock {
     route: PerfRoute,
+    started: Instant,
     last_mark: Instant,
 }
 
 impl RoutePhaseClock {
     /// Start the clock for `route`.
     pub fn start(route: PerfRoute) -> Self {
+        let now = Instant::now();
         Self {
             route,
-            last_mark: Instant::now(),
+            started: now,
+            last_mark: now,
         }
+    }
+
+    /// Record everything the clock has seen so far as `phase`, without moving
+    /// the mark.
+    ///
+    /// A route that spans more than one thread cannot mark its remainder: the
+    /// span between the last mark and the route's own end belongs to whoever
+    /// finishes it. Recording the clock's total lets a reader subtract it from
+    /// `route:<route>` and see that remainder (Issue #4283 AC-5).
+    pub fn mark_total(&self, phase: &str) {
+        record_route_phase(self.route, phase, self.started.elapsed());
     }
 
     /// Record the span since the previous mark as `phase`.
@@ -314,6 +340,20 @@ mod tests {
     fn read_all() -> Vec<crate::perf::summary::PerfLogRecord> {
         read_records_from_dir(&gwt_logs_dir().join("perf"), &PerfFilter::default())
             .expect("read perf records")
+    }
+
+    #[test]
+    fn a_busy_detector_keeps_an_unverified_sample_after_a_bounded_wait() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let mut runtime = PerfRuntime::from_config(&PerfConfig::default()).expect("runtime");
+        let lock = fs::File::create(gwt_logs_dir().join("perf/detector.lock")).expect("lock file");
+        fs2::FileExt::lock_exclusive(&lock).expect("hold detector");
+        runtime.record_route(PerfRoute::Search, Duration::from_millis(5000));
+        let records = read_all();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].is_sample());
+        assert_eq!(records[0].detector_version, None);
     }
 
     #[test]
@@ -411,6 +451,45 @@ mod tests {
         );
     }
 
+    /// Issue #4397 AC-4: the intake state size and the per-pass re-derivation
+    /// count land beside the route as unbudgeted samples in their own unit.
+    #[test]
+    fn route_metrics_land_as_unbudgeted_samples_in_their_unit() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let mut runtime =
+            PerfRuntime::from_config(&PerfConfig::default()).expect("create perf runtime");
+
+        runtime.record_route_metric(
+            PerfRoute::WorkEventsIngest,
+            "state_bytes",
+            4096.0,
+            PerfUnit::Bytes,
+        );
+        runtime.record_route_metric(
+            PerfRoute::WorkEventsIngest,
+            "sources_rederived",
+            40.0,
+            PerfUnit::Count,
+        );
+
+        let records = read_all();
+        assert_eq!(records.len(), 2, "two samples, no violation");
+        assert_eq!(records[0].target, "metric:work_events.ingest.state_bytes");
+        assert_eq!(records[0].unit, "bytes");
+        assert_eq!(
+            records[1].target,
+            "metric:work_events.ingest.sources_rederived"
+        );
+        assert_eq!(records[1].unit, "count");
+        assert!((records[1].value - 40.0).abs() < f64::EPSILON);
+        assert_eq!(
+            crate::perf::summary::budget_for_target(&records[0].target, None, runtime.budgets()),
+            None,
+            "metrics carry no budget"
+        );
+    }
+
     #[test]
     fn a_phase_clock_records_each_mark_as_the_span_since_the_previous_mark() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -418,9 +497,12 @@ mod tests {
         assert!(install(&PerfConfig::default()) || is_installed());
 
         let mut clock = RoutePhaseClock::start(PerfRoute::PaneCreate);
+        let initial_mark = clock.last_mark;
         std::thread::sleep(Duration::from_millis(20));
         clock.mark("worktree");
+        let first_mark = clock.last_mark;
         clock.mark("docker");
+        let second_mark = clock.last_mark;
 
         let records: Vec<_> = read_all()
             .into_iter()
@@ -428,11 +510,27 @@ mod tests {
             .collect();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].target, "phase:pane.create.worktree");
-        assert!(records[0].value >= 20.0, "first mark spans the sleep");
+        let first_span_ms = first_mark.duration_since(initial_mark).as_secs_f64() * 1000.0;
+        assert!((records[0].value - first_span_ms).abs() < 1e-6);
         assert_eq!(records[1].target, "phase:pane.create.docker");
+        let second_span_ms = second_mark.duration_since(first_mark).as_secs_f64() * 1000.0;
         assert!(
-            records[1].value < 20.0,
+            (records[1].value - second_span_ms).abs() < 1e-6,
             "second mark spans only its own step"
+        );
+
+        // Issue #4283 AC-5: the route ends on another thread, so the clock also
+        // reports its own total — what a reader subtracts from the route to see
+        // the hand-back it cannot mark.
+        clock.mark_total("launch_thread");
+        let total = read_all()
+            .into_iter()
+            .find(|record| record.target == "phase:pane.create.launch_thread")
+            .expect("total sample");
+        assert!(
+            total.value >= 20.0,
+            "the total spans every mark, not just the last one: {}",
+            total.value
         );
     }
 

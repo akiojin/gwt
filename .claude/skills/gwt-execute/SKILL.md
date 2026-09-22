@@ -34,16 +34,24 @@ error.
 
 ## Lifecycle
 
-Use the existing build lifecycle JSON operations for every implementation mode.
-The operation names and state file remain compatibility surfaces.
+Use the existing build lifecycle JSON operations for Issue-backed work.
+The operation names and state file remain compatibility surfaces. The `spec`
+parameter carries the owner Issue number; it does not require a `gwt-spec`
+label. Keep that same number throughout the lifecycle.
 
-- `build.start` with `params.spec:<n>` when the owner is a gwt-spec tagged Issue
-  or `params.task:<description>` for standalone work.
-- `build.phase` with `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at
-  each TDD milestone.
-- `build.complete` only after verification passed and the Ready PR Gate is
-  satisfied for a releaseable slice.
-- `build.abort` with a concrete reason when implementation cannot proceed.
+- `build.start` with `params.spec:<n>` for every Issue owner, including plain
+  Issues in direct mode.
+- `build.phase` with the same `params.spec:<n>` and
+  `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at each TDD milestone.
+- `build.complete` with the same `params.spec:<n>` only after verification
+  passed and the Ready PR Gate is satisfied for a releaseable slice.
+- `build.abort` with the same `params.spec:<n>` and a concrete `params.reason`
+  when implementation cannot proceed.
+
+Without an owner Issue, do not call `build.*` or invent an Issue number.
+Standalone work follows the approved task, TDD, and applicable verification
+workflow below without this Issue-bound lifecycle. If the work acquires a
+durable owner under the existing ownership rules, use that Issue number.
 
 If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`.
 
@@ -57,6 +65,33 @@ included):
 - blocked by the environment or missing verification: JSON operation
   `execution.blocked` with a non-empty `params.reason` and optional
   `params.missing_verification`. Blocked is not done — report the blocker.
+- already delivered with nothing to produce: JSON operation
+  `execution.no_action` with a non-empty `params.reason`. No Action is a
+  successful *non-delivery*: it is neither Completed nor Blocked, so it never
+  claims the work shipped and it never files a blocker against an owner that
+  has nothing wrong with it.
+
+`execution.no_action` exists for exactly one situation: a producing generation
+was materialized for a **delivered owner** — a closed owner whose whole source
+state the configured base already contains — so there is no source work to
+verify, commit, push, or hand to a PR. It proves that zero source surface
+itself and refuses otherwise, so it cannot be used to skip real work:
+
+- it refuses when the worktree holds any source the base does not contain, when
+  the session does not hold the record, when the record was edited outside the
+  canonical operations, when the execution is already terminal, and when the
+  source surface cannot be proven at all;
+- every refusal changes nothing — no execution record, Work, Session, Git, or
+  obligation byte moves;
+- on success it writes one machine-local integrity-hashed audit, settles this
+  action's own obligations, and leaves the predecessor record byte-identical.
+  It commits nothing, pushes nothing, requires no verification record, and
+  creates or mutates no PR.
+
+A delivered owner is not a blocker: never reach for `execution.blocked` because
+an owner turned out to be already shipped. Conversely, never reach for
+`execution.no_action` to escape work that exists — it will refuse, and the
+refusal names the source it found.
 
 `execution.blocked` is a terminal outcome, not a pause. Never use it while
 waiting for a temporary question, owner decision, or verification that can
@@ -100,8 +135,11 @@ integrity-failed record is repaired in place with JSON operation
 `execution.repair`: it quarantines the corrupt record under a unique
 `.corrupt-*` path with a trusted audit entry and atomically materializes a
 fresh Active record, so the same execution lifetime can continue. Diagnose
-first with `execution.status` — its `available_recoveries` names the exact
-operation to run.
+first with `execution.status` — its `available_recoveries` names only the
+operations the current session can actually run (`verify.plan` / `verify.run`
+are listed only when this session holds verification authority). When the
+record is terminal and `recovery_hint` is `fresh_launch_required`, nothing in
+this session can recover it: stop and use a fresh linked-owner launch.
 
 When a launch is refused with `... refuses while a Prepared successor or
 takeover targets the current generation`, an operation that prepared a
@@ -179,27 +217,35 @@ absence proves nothing — it is written only when the project opted into
 unattended mode, so monitor launches used to misread themselves as human-driven
 and stall (#3777, #3697, #4217).
 
-In an `autonomous` launch the handoff is waived: nobody is watching, and calling
-the question tool parks the owner Issue instead of pausing for an answer. Record
-`User Verification Result: deferred (autonomous execution)` when a UI surface is
-in scope (`n/a` when none is) and cover UI-affecting work with your own
-automated headed run — real browser, dark and light themes, zero console / page
-errors — reported on the separate `Agent Visual Check:` line. Your own
-browser-check is never a `User Verification Result`, and neither autonomous
-value is ever written as `skipped(<reason>)` or `confirmed`.
+In an `autonomous` launch, skip the user handoff and record
+`User Verification Result: n/a (autonomous)`. Do not ask for visual confirmation
+or send a verification URL. Cover any UI surface with the agent's own automated
+headed E2E, recorded separately as `Agent Visual Check: pass` (`n/a (no UI
+surface)` otherwise). Never turn the agent's check into human `confirmed`.
 
-**Never settle an autonomous execution as blocked over a missing visual
-check.** `execution.blocked` is terminal: it defers every open obligation and
-revokes `pr.edit`, so the stall becomes a closed loop (#4214). gwt refuses that
-settlement on an autonomous route. Hand off a Draft PR and settle the execution
-normally — that is what releases the slot.
+Run the full matrix through `verify.run`. For UI work, select its Playwright
+commands with `params.headed_e2e_commands`; each entry must exactly match an
+entry in `params.commands`. gwtd adds `--headed` and its embedded reporter and
+records actual Chromium results for both dark and light themes. Use
+`browser-check` for an isolated checkout instance; the E2E tests must assert the
+changed behavior and zero console/page errors. An autonomous UI Ready handoff
+requires those measured passing results in the same fresh verification record.
 
-PR work goes through `gwt-manage-pr`. Do not create or update a Ready PR until
-pre-PR verification passes and the `User Verification Result` is `confirmed`,
-`n/a`, or `n/a (autonomous)`. A `deferred (autonomous execution)` result
-authorizes a **Draft** PR only, and gwt enforces that: `pr.ready` and non-draft
-`pr.create` refuse a body carrying it. The owner sweeps the deferred PRs later
-(`pr.list` with `include: ["body"]`, field `deferred_user_verification`).
+PR work goes through `gwt-manage-pr`. After automated verification and all
+other Ready PR Gate conditions pass, create a Ready PR (or call `pr.ready` for
+an existing Draft), then follow the existing CI auto-merge path until the PR is
+merged. Do not stop at Draft creation. Automated test / headed E2E / CI failures,
+known blockers, and other Ready Gate failures still require repair.
+
+The legacy `deferred (autonomous execution)` value remains compatible on
+existing autonomous PRs: fresh passing evidence permits Ready without rewriting
+the PR body or obtaining human confirmation. Manual launch verification stays
+unchanged.
+
+**Never call `execution.blocked` merely because an autonomous launch has no
+human visual confirmation.** It is a terminal outcome, not a pause. Continue
+through verification, Ready PR, and CI auto-merge; settle the execution after
+the scoped delivery is complete.
 
 ## Canonical verification admission
 

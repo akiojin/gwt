@@ -6,6 +6,7 @@ import type { Page, TestInfo } from "@playwright/test";
 type LiveGwtOptions = {
   enableTestBridge?: boolean;
   keepPresetModal?: boolean;
+  suppressProjectSurfaces?: boolean;
   suppressUpdateApplyStart?: boolean;
 };
 
@@ -153,11 +154,10 @@ export async function gotoLiveGwt(
 
   await page.goto(base);
 
-  const hiddenStartupSelectors = [
-    "#op-briefing",
-    "#project-picker",
-    "#project-onboarding",
-  ];
+  const hiddenStartupSelectors = ["#op-briefing"];
+  if (options.suppressProjectSurfaces) {
+    hiddenStartupSelectors.push("#project-picker", "#project-onboarding");
+  }
   if (!options.keepPresetModal) {
     hiddenStartupSelectors.push("#preset-modal");
   }
@@ -170,11 +170,17 @@ export async function gotoLiveGwt(
     `,
   });
 
-  await page.evaluate(() => {
-    for (const id of ["op-briefing", "project-picker", "project-onboarding"]) {
+  await page.evaluate(({ suppressProjectSurfaces }) => {
+    const hiddenStartupIds = ["op-briefing"];
+    if (suppressProjectSurfaces) {
+      hiddenStartupIds.push("project-picker", "project-onboarding");
+    }
+    for (const id of hiddenStartupIds) {
       const element = document.getElementById(id);
       if (element) element.hidden = true;
     }
+  }, {
+    suppressProjectSurfaces: Boolean(options.suppressProjectSurfaces),
   });
 
   if (options.enableTestBridge) {

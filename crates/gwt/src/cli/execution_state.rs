@@ -51,7 +51,7 @@ pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-c
 /// silently rewrite this independently hashed record.
 pub const EXECUTION_GENERATION_POINTER_STATE_RELATIVE: &str =
     ".gwt/skill-state/execution-generation-pointer.json";
-const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
+pub(crate) const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
 const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
@@ -63,6 +63,30 @@ const BINDING_REPAIR_OPERATION_ID: &str = "continue-work-local-repair";
 const GENERATION_BINDING_MISMATCH_PREFIX: &str = "generation settlement binding mismatch:";
 const RECOVERY_SESSION_CHANGED_PREFIX: &str = "execution_recovery_session_changed:";
 const ACTIVE_BINDING_LEASE_WAIT: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct RecoverySessionChangedError(String);
+
+impl std::fmt::Display for RecoverySessionChangedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{RECOVERY_SESSION_CHANGED_PREFIX} {}", self.0)
+    }
+}
+
+impl std::error::Error for RecoverySessionChangedError {}
+
+fn recovery_session_changed_error(detail: impl Into<String>) -> io::Error {
+    io::Error::new(
+        ErrorKind::PermissionDenied,
+        RecoverySessionChangedError(detail.into()),
+    )
+}
+
+fn is_recovery_session_changed_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<RecoverySessionChangedError>())
+}
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -2335,6 +2359,9 @@ pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool 
             ) | (
                 SuccessorPredecessorStatus::Completed,
                 MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+            ) | (
+                SuccessorPredecessorStatus::Active,
+                CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
             )
         )
 }
@@ -2945,7 +2972,7 @@ pub struct OwnerExecutionDiagnosis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_worktree: Option<String>,
     /// Exact runtime evidence for the holder: `live`, `terminal`, `defunct`,
-    /// `host_dead`, `absent`, `unknown`, or `not_evaluated`.
+    /// `host_dead`, `child_exited`, `absent`, `unknown`, or `not_evaluated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_runtime: Option<String>,
     /// Whether the generation reaper is allowed to release this generation as
@@ -5873,6 +5900,17 @@ fn read_record_contents(worktree: &Path) -> io::Result<Option<String>> {
     Ok(Some(contents))
 }
 
+/// The Execution Control Record's exact stored bytes, or `None` when no record
+/// exists.
+///
+/// The delivered-owner No Action audit hashes these bytes rather than the
+/// parsed record: the point of the audit is to prove the predecessor was never
+/// rewritten, and a re-serialized record would compare equal even if its stored
+/// form had changed.
+pub fn record_contents(worktree: &Path) -> io::Result<Option<String>> {
+    read_record_contents(worktree)
+}
+
 #[derive(Debug, Clone)]
 struct GenerationAuthorityHint {
     owner: Option<ExecutionOwnerKey>,
@@ -7328,6 +7366,9 @@ pub fn prepared_owner_launch_successor_for_predecessor(
         .filter(|attempt| {
             attempt.status == ContinuationAttemptStatus::Prepared
                 && is_owner_launch_successor_attempt(attempt)
+                // Concurrent launches are independent requests, not a replay
+                // of the terminal predecessor's manual launch.
+                && attempt.predecessor_status != SuccessorPredecessorStatus::Active
                 && attempt.predecessor.generation_id == current.identity.generation_id
         });
     let candidate = candidates.next().cloned();
@@ -9929,8 +9970,18 @@ fn update_exact_recovery_session_with_publisher<T>(
         },
     ) {
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated((value, binding))) => {
-            if let Some(publisher) = publisher.as_mut() {
-                publisher.publish(binding.expect("Host adoption retains its Session binding"));
+            // Issue #4443 AC-10: an unbound Session here is a refusal, not an
+            // invariant violation. Panicking crossed the `spawn_blocking`
+            // boundary and the adoption handler answered `500 code=internal`.
+            match (publisher.as_mut(), binding) {
+                (Some(publisher), Some(binding)) => publisher.publish(binding),
+                (Some(_), None) => {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "Host adoption cannot publish authority: the durable Session carries no execution binding; run JSON operation `execution.continue` to bind canonical authority first",
+                    ))
+                }
+                (None, _) => {}
             }
             Ok(value)
         }
@@ -9964,20 +10015,12 @@ fn ensure_recovery_session_snapshot_unchanged(
         {
             Ok(())
         }
-        gwt_agent::SessionPathState::Present(_) | gwt_agent::SessionPathState::Missing => {
-            Err(io::Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed after recovery preflight"
-                ),
-            ))
-        }
-        gwt_agent::SessionPathState::Error(error) => Err(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session became unreadable after recovery preflight: {error}"
-            ),
-        )),
+        gwt_agent::SessionPathState::Present(_) | gwt_agent::SessionPathState::Missing => Err(
+            recovery_session_changed_error("durable Session changed after recovery preflight"),
+        ),
+        gwt_agent::SessionPathState::Error(error) => Err(recovery_session_changed_error(format!(
+            "durable Session became unreadable after recovery preflight: {error}"
+        ))),
     }
 }
 
@@ -10764,6 +10807,49 @@ pub fn settle(
     })
 }
 
+/// Identity of the Session holding a worktree's execution control record when
+/// the caller is not that Session (Issue #4454).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignExecutionRecordHolder {
+    pub holder_session_id: String,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+}
+
+/// Prove that `session_id` holds no execution authority over this worktree's
+/// Work, and name the Session that does (Issue #4454).
+///
+/// Stop gates use this to tell an orphan window from an authority holder
+/// before demanding a settlement. Every refusal path stays conservative: a
+/// missing record (never launched, so the settlement operations accept the
+/// caller), a failed integrity check (the execution control gate owns that
+/// case and blocks first), and a concurrent generation owned by `session_id`
+/// all return `None`. A Session that might hold authority is therefore never
+/// mistaken for an orphan.
+pub(crate) fn foreign_record_holder(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<ForeignExecutionRecordHolder>> {
+    let Some(flat) = load(worktree)? else {
+        return Ok(None);
+    };
+    if !integrity_ok(&flat) || flat.primary_session_id == session_id {
+        return Ok(None);
+    }
+    let owner = ExecutionOwnerKey {
+        kind: flat.owner_kind,
+        number: flat.owner_number,
+    };
+    if concurrent_generation_record_for_session(worktree, owner, session_id)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(ForeignExecutionRecordHolder {
+        holder_session_id: flat.primary_session_id,
+        owner_kind: flat.owner_kind,
+        owner_number: flat.owner_number,
+    }))
+}
+
 /// SPEC #3590 FR-009: the execution projection a Session owns when the flat
 /// one names a concurrent Session instead.
 ///
@@ -11186,6 +11272,14 @@ pub enum ExecutionCommand {
     Reopen {
         reason: String,
     },
+    /// SPEC #3248 FR-241: settle a generation that was materialized for a
+    /// delivered zero-diff owner as a successful non-delivery. It writes a
+    /// machine-local trusted audit and settles this session's obligations;
+    /// it commits nothing, pushes nothing, requires no verification record,
+    /// and rewrites no byte of the predecessor record.
+    NoAction {
+        reason: String,
+    },
     /// Issue #4161: abort the Prepared successors/takeovers that fence an
     /// owner's current generation and refuse every launch. Owner-addressed
     /// like [`ExecutionCommand::OwnerStatus`], because the operator releasing
@@ -11533,6 +11627,11 @@ pub struct ExecutionDiagnosisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_probes: Vec<crate::cli::governance::RecoveryProbe>,
     pub available_recoveries: Vec<String>,
+    /// Machine-readable guidance when `available_recoveries` cannot help this
+    /// Session: [`RECOVERY_HINT_FRESH_LAUNCH_REQUIRED`] for a terminal record
+    /// that only a fresh linked-owner launch can proceed from (Issue #4029).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
     pub warnings: Vec<String>,
     /// Issue #4217 FR-002: `manual` or `autonomous` — who started this
     /// session, read from the durable Session the launcher wrote.
@@ -11697,17 +11796,92 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
     "workspace.ensure",
 ];
 
+/// Verification recoveries that `verify.*` accepts only from the Session
+/// holding current verification authority (Issue #4029).
+///
+/// They stay visible to GUI projections, but `execution.status` advertises
+/// them only after the same authority gate `verify.plan` / `verify.run`
+/// enforce has accepted the caller.
+const VERIFICATION_RECOVERY_OPERATIONS: [&str; 2] = ["verify.plan", "verify.run"];
+
+/// Recoveries that act on the execution record itself. When none of them is
+/// advertised for a terminal record, this Session cannot recover the record
+/// and `recovery_hint` names the fresh linked-owner launch instead.
+const EXECUTION_RECORD_RECOVERY_OPERATIONS: [&str; 6] = [
+    "execution.continue",
+    "execution.repair",
+    "execution.adopt",
+    "execution.reopen",
+    "verify.plan",
+    "verify.run",
+];
+
+/// `recovery_hint` value: the record is terminal and no operation-local
+/// recovery is available to this Session; only a fresh linked-owner launch
+/// can proceed (Issue #4029 AC-2).
+pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
+
+/// Issue #4443 AC-2: the gwtd operations a Host refusal may name to an agent.
+///
+/// A refusal that reaches an agent over the capability bridge carries operation
+/// names from this list and nothing else. Membership is the truthfulness check:
+/// #4396 stalled an agent for over an hour by naming `workspace.prune`, which
+/// does not exist, and free-form refusal prose cannot cross the bridge because
+/// it may carry host-side paths and identifiers.
+///
+/// Ordered so that a name containing another is matched first;
+/// [`recovery_operations_named_in`] then reports the specific operation rather
+/// than the one embedded in it.
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 15] = [
+    "execution.release_prepared",
+    "execution.no_action",
+    "execution.continue",
+    "execution.status",
+    "execution.repair",
+    "execution.reopen",
+    "execution.adopt",
+    "workspace.ensure",
+    "workspace.update",
+    // Issue #4465: the container-ambiguity refusal names these three. They
+    // were absent, so the one refusal that actually needed a prune route could
+    // not carry it across the bridge and the agent was left guessing.
+    "workspace.work_prune",
+    "workspace.candidates",
+    "workspace.join",
+    "build.abort",
+    "verify.plan",
+    "verify.run",
+];
+
+/// The recovery operations `message` names, deduplicated and ordered as in
+/// [`AGENT_RECOVERY_OPERATIONS`]. Refusals already state their route in prose;
+/// this lifts it into a structured field the agent bridge is allowed to carry.
+#[must_use]
+pub fn recovery_operations_named_in(message: &str) -> Vec<String> {
+    let mut remaining = message.to_string();
+    let mut named = Vec::new();
+    for operation in AGENT_RECOVERY_OPERATIONS {
+        if remaining.contains(operation) {
+            // Blank the match so `execution.continue` is not also reported as
+            // `execution.repair`'s shorter neighbours in a later pass.
+            remaining = remaining.replace(operation, " ");
+            named.push(operation.to_string());
+        }
+    }
+    named
+}
+
 /// Recoveries that need no session identity or execution authority, so naming
 /// one is always truthful (Issue #4074 AC-3).
 ///
 /// `gwt-execute` and `relaunch` are instructions to the human or the Monitor
-/// rather than gwtd operations; `verify.plan` / `verify.run` are accepted from
-/// any session that owns the record, so the enumeration names them only for the
-/// owning caller (Issue #4154). Everything else must be probe-gated — see
-/// [`PROTECTED_RECOVERY_OPERATIONS`].
+/// rather than gwtd operations; `verify.plan` / `verify.run` are named only
+/// for a caller that owns the record (Issue #4154) and are then probe-gated
+/// through the authority they actually enforce (Issue #4029). Everything else
+/// must be probe-gated too — see [`PROTECTED_RECOVERY_OPERATIONS`] and
+/// [`VERIFICATION_RECOVERY_OPERATIONS`].
 #[cfg(test)]
-const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 4] =
-    ["gwt-execute", "relaunch", "verify.plan", "verify.run"];
+const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 2] = ["gwt-execute", "relaunch"];
 
 /// The recoveries a diagnosis names before the probes decide which of them the
 /// caller would actually be allowed to run.
@@ -11772,15 +11946,41 @@ fn base_execution_recoveries(
 /// route, so it cannot drift that way.
 ///
 /// `None` when the session is unknown here; callers treat that as attended.
+///
+/// Issue #4510: the stamp is authoritative when it says `Autonomous`, but a
+/// `Manual` stamp is not proof of a human. Some launch paths reach the Session
+/// writer without passing the Monitor's stamping step, and the resulting
+/// mis-stamp is unrecoverable downstream — the agent may not write its own
+/// `User Verification Result: confirmed`, and no PR body wording can undo it
+/// (PR #4374 stalled fully green for exactly this reason). So a `Manual` stamp
+/// is cross-checked against the launch prompt the Monitor itself composed,
+/// which is a fact about the launch route rather than a preference.
 #[must_use]
 pub fn session_launch_route(session_id: Option<&str>) -> Option<gwt_agent::LaunchRoute> {
     let session_id = session_id
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
-    gwt_agent::Session::load(&path)
-        .ok()
-        .map(|session| session.launch_route)
+    let session = gwt_agent::Session::load(&path).ok()?;
+    if session.launch_route != gwt_agent::LaunchRoute::Autonomous
+        && launched_by_issue_monitor(&session)
+    {
+        return Some(gwt_agent::LaunchRoute::Autonomous);
+    }
+    Some(session.launch_route)
+}
+
+/// Whether the Issue Monitor composed this session's launch prompt.
+///
+/// The prompt is written into `launch_args` by the launcher and says so in
+/// its own words, so it is evidence from the launch route itself — the same
+/// class of fact as the `gwt-auto-improve:` claim prefix, but one that lives
+/// in the durable record this function already reads.
+fn launched_by_issue_monitor(session: &gwt_agent::Session) -> bool {
+    session
+        .launch_args
+        .iter()
+        .any(|arg| arg.contains(crate::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE))
 }
 
 /// Whether a settlement reason blames a human who was supposed to look at the
@@ -11831,12 +12031,12 @@ fn autonomous_verification_block_refusal(
         "execution: blocked refused — this is an autonomous launch \
          (launch_route: autonomous), so a missing user or visual verification \
          is not a blocker: nobody is watching by design. Record \
-         `{label} {deferred}` in the PR body, hand off a Draft PR, and settle \
-         this execution normally; the owner sweeps the deferred PRs later. If \
+         `{label} n/a (autonomous)` in the PR body. Run the required automated \
+         verification, including headed E2E for UI changes, hand off a Ready PR \
+         for CI auto-merge, and settle this execution normally. If \
          something else is genuinely blocking you, restate params.reason \
          without the verification clause.\n",
         label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
-        deferred = gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
     ))
 }
 
@@ -11912,6 +12112,7 @@ fn diagnose_with_mode(
         open_obligations: Vec::new(),
         recovery_probes: Vec::new(),
         available_recoveries: vec!["gwt-execute".to_string()],
+        recovery_hint: None,
         warnings: Vec::new(),
         // The route belongs to the session, not to the record, so it is
         // reported even when this worktree carries no Execution Control
@@ -12429,7 +12630,13 @@ fn finalize_recovery_probes(
             probe_execution_repair_for_recovery(worktree, session_id, recovery_context),
             probe_execution_adopt_for_recovery(worktree, caller, recovery_context),
             probe_execution_reopen_for_recovery(worktree, caller, recovery_context),
-            crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            workspace_update_recovery_probe(
+                worktree,
+                &snapshot,
+                session_id,
+                recovery_context,
+                crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            ),
             crate::cli::workspace::probe_workspace_ensure(worktree, &ensure_candidate),
         ]
     } else {
@@ -12446,6 +12653,14 @@ fn finalize_recovery_probes(
         .map(invalid_execution_recovery_scope_probe)
         .collect()
     };
+    let probes = probes
+        .into_iter()
+        .chain(verification_recovery_probes(
+            worktree,
+            session_id,
+            snapshot.ecr_status,
+        ))
+        .collect::<Vec<_>>();
     for probe in &probes {
         snapshot
             .available_recoveries
@@ -12456,8 +12671,176 @@ fn finalize_recovery_probes(
     }
     snapshot.available_recoveries.sort();
     snapshot.available_recoveries.dedup();
+    if snapshot.ecr_status == ExecutionDiagnosisState::Active
+        && snapshot.binding_state == ExecutionBindingState::Bound
+        && snapshot.available_recoveries.is_empty()
+    {
+        if let Some(guidance) = recovery_context
+            .and_then(|context| context.as_ref().ok())
+            .and_then(discarded_canonical_work_guidance)
+        {
+            // This is a human instruction, not an executable recovery operation.
+            // #4074 owns successor Work materialization.
+            snapshot
+                .available_recoveries
+                .push("gwt-execute".to_string());
+            snapshot.warnings.push(guidance);
+        }
+    }
     snapshot.recovery_probes = probes;
+    snapshot.recovery_hint = execution_recovery_hint(&snapshot);
     snapshot
+}
+
+/// The Host refuses `workspace.update` unless the caller's Session holds the
+/// *current Active* execution binding: `active_execution_binding()` is `None`
+/// for a `Prepared` or `Inspection` authority, and
+/// `validate_current_execution_binding_authority` rejects a superseded one.
+/// Both answer `ExecutionBindingMismatch`, which the bridge reports as
+/// `authority_mismatch` at HTTP 409 with no local fallback.
+///
+/// The Work-mutation probe validates Session identity, cwd, repo and Work
+/// resolution but never reads generation currency, so it reported `Available`
+/// for a caller the Host would refuse. Gate its verdict through the same
+/// predicate the Host enforces (Issue #4029 AC-2).
+///
+/// A caller with no durable binding keeps the probe's own verdict: it never
+/// reaches the bound Host path, so its `workspace.update` is not the
+/// advertisement this Issue is about.
+fn workspace_update_recovery_probe(
+    worktree: &Path,
+    snapshot: &ExecutionDiagnosisSnapshot,
+    session_id: Option<&str>,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+    probe: crate::cli::governance::RecoveryProbe,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceCause, GovernanceMetadata, RecoveryProbe};
+
+    if !probe.advertise() {
+        return probe;
+    }
+    let (Some(owner_kind), Some(owner_number)) = (snapshot.owner_kind, snapshot.owner_number)
+    else {
+        return probe;
+    };
+    let (Some(session_id), Some(Ok(recovery_context))) = (session_id, recovery_context) else {
+        return probe;
+    };
+    let Some(binding) = recovery_context.session().execution_binding.as_ref() else {
+        return probe;
+    };
+    let owner = ExecutionOwnerKey {
+        kind: owner_kind,
+        number: owner_number,
+    };
+    // Cloned up front so the refusal builder does not borrow `probe`, which the
+    // authorized arm moves.
+    let governance = probe.governance.clone();
+    let unavailable = move |cause, reason: &str| {
+        RecoveryProbe::unavailable(
+            "workspace.update",
+            GovernanceMetadata {
+                cause: Some(cause),
+                retryable: Some(false),
+                ..governance.clone()
+            },
+            reason,
+        )
+    };
+    match current_active_execution_binding_matches(worktree, owner, session_id, &binding.identity) {
+        Ok(true) => probe,
+        Ok(false) => unavailable(
+            GovernanceCause::Authority,
+            "workspace_update_execution_binding_not_current",
+        ),
+        Err(error) => unavailable(GovernanceCause::Integrity, &error.to_string()),
+    }
+}
+
+/// Probe `verify.plan` / `verify.run` through the exact authority gate the
+/// operations enforce, so `execution.status` never advertises them to a
+/// Session that `verify.*` would refuse (Issue #4029 AC-1).
+///
+/// The verification lane only recovers a Blocked record (fresh derived
+/// evidence feeds `execution.reopen`); every other record state refuses it
+/// as not applicable before any authority lookup runs.
+fn verification_recovery_probes(
+    worktree: &Path,
+    session_id: Option<&str>,
+    ecr_status: ExecutionDiagnosisState,
+) -> Vec<crate::cli::governance::RecoveryProbe> {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    let metadata = |cause| GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        cause,
+        retryable: Some(false),
+        ..GovernanceMetadata::default()
+    };
+    let refusal = match session_id {
+        _ if ecr_status != ExecutionDiagnosisState::Blocked => Some((
+            GovernanceCause::DomainInvalid,
+            "verify_recovery_requires_blocked",
+        )),
+        None => Some((GovernanceCause::ManagedIdentity, "session_id_unavailable")),
+        Some(session_id)
+            if !crate::cli::verification_record::caller_has_verification_authority(
+                worktree, session_id,
+            ) =>
+        {
+            Some((
+                GovernanceCause::Authority,
+                "verify.* requires current verification authority",
+            ))
+        }
+        Some(_) => None,
+    };
+    VERIFICATION_RECOVERY_OPERATIONS
+        .into_iter()
+        .map(|operation| match refusal {
+            Some((cause, reason)) => {
+                RecoveryProbe::unavailable(operation, metadata(Some(cause)), reason)
+            }
+            None => RecoveryProbe::available(operation, metadata(None)),
+        })
+        .collect()
+}
+
+/// A terminal record that advertises no execution-record recovery cannot be
+/// continued from this Session; only a fresh linked-owner launch proceeds
+/// (Issue #4029 AC-2).
+fn execution_recovery_hint(snapshot: &ExecutionDiagnosisSnapshot) -> Option<String> {
+    let recoverable = snapshot
+        .available_recoveries
+        .iter()
+        .any(|operation| EXECUTION_RECORD_RECOVERY_OPERATIONS.contains(&operation.as_str()));
+    (snapshot.binding_state == ExecutionBindingState::Terminal && !recoverable)
+        .then(|| RECOVERY_HINT_FRESH_LAUNCH_REQUIRED.to_string())
+}
+
+fn discarded_canonical_work_guidance(
+    context: &crate::agent_project_state::ExecutionRecoveryContext,
+) -> Option<String> {
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        context.project_state_root(),
+        Some(context.session().branch.as_str()),
+        Some(context.worktree()),
+    )?;
+    let works_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(context.project_state_root());
+    let works =
+        gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path).ok()??;
+    let work = works.work_items.iter().find(|work| work.id == work_id)?;
+    work.discarded.then(|| {
+        format!(
+            "canonical Work {work_id} is Discarded; successor Work materialization is required \
+             (owner #4074). Human action: open Issue #4074 in gwt and select Start Work to \
+             arrange implementation. The current Work cannot recover until that support is available."
+        )
+    })
 }
 
 /// Replace an operation-specific terminal refusal with guidance derived from
@@ -12468,6 +12851,26 @@ pub(crate) fn terminal_recovery_refusal(
     refusal: &str,
 ) -> String {
     let diagnosis = diagnose(invocation_scope, Some(session_id));
+    if diagnosis.ecr_status == ExecutionDiagnosisState::Active
+        && diagnosis.binding_state == ExecutionBindingState::Bound
+        && diagnosis.available_recoveries == ["gwt-execute"]
+    {
+        if let Some(guidance) = crate::agent_project_state::resolve_execution_recovery_context(
+            invocation_scope,
+            session_id,
+        )
+        .ok()
+        .as_ref()
+        .and_then(discarded_canonical_work_guidance)
+        {
+            let refusal = refusal
+                .split_once(
+                    "; run workspace.ensure for this Session before retrying workspace.update",
+                )
+                .map_or(refusal, |(reason, _)| reason);
+            return format!("{refusal}; {guidance}");
+        }
+    }
     if diagnosis.binding_state != ExecutionBindingState::Terminal {
         return refusal.to_string();
     }
@@ -12486,8 +12889,13 @@ pub(crate) fn terminal_recovery_refusal(
         .and_then(|probe| probe.reason.as_deref())
         .map(|reason| format!("; recovery_probes[execution.reopen]={reason}"))
         .unwrap_or_default();
+    let hint = diagnosis
+        .recovery_hint
+        .as_deref()
+        .map(|hint| format!("; recovery_hint={hint}"))
+        .unwrap_or_default();
     format!(
-        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}",
+        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}{hint}",
         ecr_status = match diagnosis.ecr_status {
             ExecutionDiagnosisState::Active => "active",
             ExecutionDiagnosisState::Completed => "completed",
@@ -12663,14 +13071,85 @@ fn protected_recovery_metadata(
 #[derive(Debug, Clone)]
 struct RecoveryPrerequisiteRefusal {
     cause: crate::cli::governance::GovernanceCause,
+    reason_code: String,
     reason: String,
+    recoverability: crate::cli::governance::RefusalRecoverability,
+    recovery_action: Option<String>,
+    escalation_kind: Option<gwt_core::board_escalation::OperationRefusalKind>,
 }
 
 impl RecoveryPrerequisiteRefusal {
     fn new(cause: crate::cli::governance::GovernanceCause, reason: impl Into<String>) -> Self {
+        use crate::cli::governance::{GovernanceCause, RefusalRecoverability};
+        use gwt_core::board_escalation::OperationRefusalKind;
+        let (recoverability, recovery_action, escalation_kind) = match cause {
+            GovernanceCause::NotReady
+            | GovernanceCause::TransientGovernance
+            | GovernanceCause::ExternalWait => (
+                RefusalRecoverability::AgentRecoverable,
+                Some("execution.status".to_string()),
+                None,
+            ),
+            GovernanceCause::Authority | GovernanceCause::ManagedIdentity => (
+                RefusalRecoverability::HumanRequired,
+                None,
+                Some(OperationRefusalKind::Authority),
+            ),
+            GovernanceCause::Integrity => (
+                RefusalRecoverability::HumanRequired,
+                Some("execution.repair".to_string()),
+                Some(OperationRefusalKind::Integrity),
+            ),
+            GovernanceCause::DomainInvalid => (
+                RefusalRecoverability::HumanRequired,
+                None,
+                Some(OperationRefusalKind::Immutability),
+            ),
+            GovernanceCause::StructuralGovernance => (
+                RefusalRecoverability::HumanRequired,
+                None,
+                Some(OperationRefusalKind::Permission),
+            ),
+        };
         Self {
             cause,
+            reason_code: cause.as_str().to_string(),
             reason: reason.into(),
+            recoverability,
+            recovery_action,
+            escalation_kind,
+        }
+    }
+
+    fn agent_recoverable(
+        reason_code: impl Into<String>,
+        recovery_action: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            cause: crate::cli::governance::GovernanceCause::NotReady,
+            reason_code: reason_code.into(),
+            reason: reason.into(),
+            recoverability: crate::cli::governance::RefusalRecoverability::AgentRecoverable,
+            recovery_action: Some(recovery_action.into()),
+            escalation_kind: None,
+        }
+    }
+
+    fn human_required(
+        reason_code: impl Into<String>,
+        cause: crate::cli::governance::GovernanceCause,
+        escalation_kind: gwt_core::board_escalation::OperationRefusalKind,
+        recovery_action: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            cause,
+            reason_code: reason_code.into(),
+            reason: reason.into(),
+            recoverability: crate::cli::governance::RefusalRecoverability::HumanRequired,
+            recovery_action,
+            escalation_kind: Some(escalation_kind),
         }
     }
 }
@@ -12943,8 +13422,11 @@ fn evaluate_execution_reopen_prerequisites(
             ));
         }
         ExecutionControlStatus::Completed => {
-            return Err(unavailable_recovery_prerequisite(
+            return Err(RecoveryPrerequisiteRefusal::human_required(
+                "record_terminal",
                 GovernanceCause::DomainInvalid,
+                gwt_core::board_escalation::OperationRefusalKind::Immutability,
+                None,
                 format!(
                     "Completed {kind} #{number} is immutable; use a fresh launch for new work",
                     kind = record.owner_kind.as_str(),
@@ -12983,16 +13465,18 @@ fn evaluate_execution_reopen_prerequisites(
     use crate::cli::verification_record as vr;
     let plan = vr::load_plan(worktree)
         .map_err(|error| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::Integrity,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_plan_unreadable",
+                "verify.plan",
                 format!(
                     "verification plan is unreadable: {error}; rerun verify.plan with params.derive:true"
                 ),
             )
         })?
         .ok_or_else(|| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::NotReady,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_plan_missing",
+                "verify.plan",
                 "no verification plan exists; run verify.plan with params.derive:true, then verify.run",
             )
         })?;
@@ -13001,39 +13485,45 @@ fn evaluate_execution_reopen_prerequisites(
         || plan.session_id != session_id
         || plan.owner_number != Some(record.owner_number)
     {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_plan_scope_mismatch",
+            "verify.plan",
             "verification plan hash/integrity/session/owner does not match the Blocked execution",
         ));
     }
     if !plan.derived {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_plan_not_derived",
+            "verify.plan",
             "recovery requires a derived verification plan; run verify.plan with params.derive:true, then verify.run",
         ));
     }
     if plan.created_at <= blocked_at {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_plan_predates_block",
+            "verify.plan",
             "the derived verification plan must be registered after the block; rerun verify.plan with params.derive:true",
         ));
     }
     let verification = vr::load(worktree)
         .map_err(|error| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::Integrity,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_run_unreadable",
+                "verify.run",
                 format!("verification run is unreadable: {error}; rerun verify.run"),
             )
         })?
         .ok_or_else(|| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::NotReady,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_run_missing",
+                "verify.run",
                 "no verification run record exists; run verify.run",
             )
         })?;
     if verification.content_hash.is_empty() || !vr::integrity_ok(&verification) {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::Integrity,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_integrity_failed",
+            "verify.run",
             "the verification run has no valid integrity hash; rerun verify.run",
         ));
     }
@@ -13048,32 +13538,40 @@ fn evaluate_execution_reopen_prerequisites(
         && !(allow_current_typed_quarantine
             && evidence_status == vr::EvidenceStatus::FreshWithQuarantine)
     {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            format!(
+                "verification_{}",
+                evidence_status_name(evidence_status.clone())
+            ),
+            "verify.run",
             evidence_status.describe(),
         ));
     }
     if !verification.plan_derived {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_not_derived",
+            "verify.run",
             "recovery requires a run bound to a derived verification plan; run verify.plan with params.derive:true, then verify.run",
         ));
     }
     let Some(verification_started_at) = verification.started_at else {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::Integrity,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_started_at_missing",
+            "verify.run",
             "the verification run has no trusted start timestamp; rerun verify.run after the block",
         ));
     };
     if verification_started_at <= blocked_at {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_predates_block",
+            "verify.run",
             "verification must start after the block; rerun verify.run",
         ));
     }
     if verification.created_at <= blocked_at {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_created_before_block",
+            "verify.run",
             "verification evidence must be created after the block; rerun verify.run",
         ));
     }
@@ -13085,8 +13583,9 @@ fn evaluate_execution_reopen_prerequisites(
             )
         })?;
     if fingerprint != verification.worktree_fingerprint {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_worktree_stale",
+            "verify.run",
             "the worktree changed after verification; rerun verify.run on the final state",
         ));
     }
@@ -13493,11 +13992,8 @@ fn repair_session_binding_if_unchanged(
     if updated.save_if_unchanged(&gwt_core::paths::gwt_sessions_dir(), expected_session)? {
         Ok(())
     } else {
-        Err(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed before repair binding CAS"
-            ),
+        Err(recovery_session_changed_error(
+            "durable Session changed before repair binding CAS",
         ))
     }
 }
@@ -14089,12 +14585,13 @@ fn repair_corrupt_execution_impl(
     })
 }
 
-fn run_repair(
+fn run_repair_governed(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     let probe = probe_execution_repair(worktree, Some(session_id));
     if !probe.executable() {
@@ -14116,6 +14613,22 @@ fn run_repair(
                 out.push('\n');
             }
         }
+        *refusal = Some(
+            if probe.governance.cause
+                == Some(crate::cli::governance::GovernanceCause::DomainInvalid)
+            {
+                crate::cli::governance::OperationRefusal::agent_recoverable(
+                    "execution_repair_not_required",
+                    protected_refusal_governance(
+                        crate::cli::governance::GovernanceCause::NotReady,
+                        true,
+                    ),
+                    "execution.status",
+                )
+            } else {
+                recovery_probe_refusal("execution.repair", &probe)
+            },
+        );
         return Ok(2);
     }
     match repair_corrupt_execution_with_session_snapshot(
@@ -14135,6 +14648,11 @@ fn run_repair(
         }
         Err(error) => {
             out.push_str(&format!("execution: repair refused — {error}\n"));
+            *refusal = Some(if is_recovery_session_changed_error(&error) {
+                recovery_session_changed_refusal()
+            } else {
+                operation_store_failure_refusal("execution.repair", &error)
+            });
             Ok(2)
         }
     }
@@ -14212,12 +14730,352 @@ fn run_release_prepared(
     Ok(0)
 }
 
+/// SPEC #3248 FR-241 / AS-218: settle an accidentally materialized generation
+/// for a delivered zero-diff owner.
+///
+/// Every refusal here leaves the store exactly as it was found, and the
+/// success path writes one machine-local audit plus this session's own
+/// obligation settlements — nothing in Git, verification, or the PR.
+fn run_no_action(
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::delivered_owner::{NoActionOutcome, NoActionRefusal};
+
+    let outcome = match crate::cli::delivered_owner::record_no_action(worktree, session_id, reason)
+    {
+        Ok(outcome) => outcome,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => {
+            return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
+        }
+        Err(error) => {
+            *refusal = Some(operation_store_failure_refusal(
+                "execution.no_action",
+                &error,
+            ));
+            return Err(SpecOpsError::from(ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error(
+                    "recording execution No Action",
+                    &error,
+                ),
+            )));
+        }
+    };
+    match outcome {
+        NoActionOutcome::Recorded(audit) | NoActionOutcome::AlreadyRecorded(audit) => {
+            out.push_str(&format!(
+                "execution: no action for {kind} #{number} (session {session}) — {reason}\n\
+                 Nothing was committed, pushed, verified, or handed to a PR, and the predecessor record is unchanged (bytes {bytes}).\n",
+                kind = audit.owner_kind.as_str(),
+                number = audit.owner_number,
+                session = audit.session_id,
+                reason = audit.reason,
+                bytes = &audit.predecessor_bytes_sha256[..16],
+            ));
+            Ok(0)
+        }
+        NoActionOutcome::Refused(cause) => {
+            out.push_str(&format!(
+                "execution: no_action refused — {}\n",
+                cause.describe()
+            ));
+            // The refusals an agent can clear itself name the operation that
+            // clears them; the rest stay ordinary authority refusals.
+            *refusal = Some(match &cause {
+                NoActionRefusal::ForeignSession { .. } => agent_recoverable_refusal(
+                    "execution_no_action_foreign_session",
+                    "execution.adopt",
+                ),
+                NoActionRefusal::Tampered => agent_recoverable_refusal(
+                    "execution_no_action_record_tampered",
+                    "execution.repair",
+                ),
+                NoActionRefusal::SourceChanges { .. } => agent_recoverable_refusal(
+                    "execution_no_action_source_changes_present",
+                    "verify.run",
+                ),
+                NoActionRefusal::TerminalPredecessor { .. }
+                | NoActionRefusal::NoRecord
+                | NoActionRefusal::AmbiguousSourceSurface { .. }
+                | NoActionRefusal::ReplacedExecution { .. } => agent_recoverable_refusal(
+                    "execution_no_action_not_applicable",
+                    "execution.status",
+                ),
+            });
+            Ok(2)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExecutionRunResult {
+    pub exit_code: i32,
+    pub refusal: Option<crate::cli::governance::OperationRefusal>,
+}
+
+fn protected_refusal_governance(
+    cause: crate::cli::governance::GovernanceCause,
+    retryable: bool,
+) -> crate::cli::governance::GovernanceMetadata {
+    crate::cli::governance::GovernanceMetadata {
+        effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+        cause: Some(cause),
+        retryable: Some(retryable),
+        ..crate::cli::governance::GovernanceMetadata::default()
+    }
+}
+
+fn agent_recoverable_refusal(
+    reason_code: impl Into<String>,
+    recovery_action: impl Into<String>,
+) -> crate::cli::governance::OperationRefusal {
+    crate::cli::governance::OperationRefusal::agent_recoverable(
+        reason_code,
+        protected_refusal_governance(crate::cli::governance::GovernanceCause::NotReady, true),
+        recovery_action,
+    )
+}
+
+/// Issue #3696 AC-1: every verification-evidence refusal names `verify.run` as
+/// the agent's own next step. These are the refusals that were being filed as
+/// "PM 側での代行が必要" while the agent could clear them in two minutes.
+fn verification_evidence_refusal(
+    status: &crate::cli::verification_record::EvidenceStatus,
+) -> crate::cli::governance::OperationRefusal {
+    agent_recoverable_refusal(
+        format!("verification_{}", evidence_status_name(status.clone())),
+        "verify.run",
+    )
+}
+
+fn human_required_refusal(
+    reason_code: impl Into<String>,
+    cause: crate::cli::governance::GovernanceCause,
+    kind: gwt_core::board_escalation::OperationRefusalKind,
+    recovery_action: Option<String>,
+) -> crate::cli::governance::OperationRefusal {
+    crate::cli::governance::OperationRefusal::human_required(
+        reason_code,
+        kind,
+        protected_refusal_governance(cause, false),
+        recovery_action,
+    )
+}
+
+fn recovery_probe_refusal(
+    operation: &str,
+    probe: &crate::cli::governance::RecoveryProbe,
+) -> crate::cli::governance::OperationRefusal {
+    use crate::cli::governance::GovernanceCause;
+    use gwt_core::board_escalation::OperationRefusalKind;
+
+    let cause = probe
+        .governance
+        .cause
+        .unwrap_or(GovernanceCause::StructuralGovernance);
+    let operation_code = operation.replace('.', "_");
+    let reason_code = format!("{operation_code}_{}", cause.as_str());
+    match cause {
+        GovernanceCause::NotReady
+        | GovernanceCause::TransientGovernance
+        | GovernanceCause::ExternalWait => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                reason_code,
+                probe.governance.clone(),
+                "execution.status",
+            )
+        }
+        GovernanceCause::Authority | GovernanceCause::ManagedIdentity => {
+            crate::cli::governance::OperationRefusal::human_required(
+                reason_code,
+                OperationRefusalKind::Authority,
+                probe.governance.clone(),
+                None,
+            )
+        }
+        GovernanceCause::Integrity => crate::cli::governance::OperationRefusal::human_required(
+            reason_code,
+            OperationRefusalKind::Integrity,
+            probe.governance.clone(),
+            Some("execution.repair".to_string()),
+        ),
+        GovernanceCause::DomainInvalid => crate::cli::governance::OperationRefusal::human_required(
+            reason_code,
+            OperationRefusalKind::Immutability,
+            probe.governance.clone(),
+            None,
+        ),
+        GovernanceCause::StructuralGovernance => {
+            crate::cli::governance::OperationRefusal::human_required(
+                reason_code,
+                OperationRefusalKind::Permission,
+                probe.governance.clone(),
+                None,
+            )
+        }
+    }
+}
+
+fn recovery_prerequisite_operation_refusal(
+    operation: &str,
+    prerequisite: &RecoveryPrerequisiteRefusal,
+) -> crate::cli::governance::OperationRefusal {
+    let reason_code = format!(
+        "{}_{}",
+        operation.replace('.', "_"),
+        prerequisite.reason_code
+    );
+    let governance = protected_recovery_metadata(
+        Some(prerequisite.cause),
+        prerequisite.recoverability
+            == crate::cli::governance::RefusalRecoverability::AgentRecoverable,
+    );
+    match prerequisite.recoverability {
+        crate::cli::governance::RefusalRecoverability::AgentRecoverable => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                reason_code,
+                governance,
+                prerequisite
+                    .recovery_action
+                    .as_deref()
+                    .unwrap_or("execution.status"),
+            )
+        }
+        crate::cli::governance::RefusalRecoverability::HumanRequired => {
+            crate::cli::governance::OperationRefusal::human_required(
+                reason_code,
+                prerequisite
+                    .escalation_kind
+                    .expect("human-required recovery refusal needs escalation kind"),
+                governance,
+                prerequisite.recovery_action.clone(),
+            )
+        }
+    }
+}
+
+/// The Issue that owns the worktree's execution record, when one is readable.
+///
+/// Read from durable state rather than from the Session, so a refusal caused by
+/// a missing or unreadable Session identity still reaches its owning Issue.
+fn record_owner_number(worktree: &Path) -> Option<u64> {
+    load(worktree)
+        .ok()
+        .flatten()
+        .map(|record| record.owner_number)
+}
+
+fn recovery_session_changed_refusal() -> crate::cli::governance::OperationRefusal {
+    human_required_refusal(
+        "execution_recovery_session_changed",
+        crate::cli::governance::GovernanceCause::ManagedIdentity,
+        gwt_core::board_escalation::OperationRefusalKind::Authority,
+        None,
+    )
+}
+
+fn operation_store_failure_refusal(
+    operation: &str,
+    error: &io::Error,
+) -> crate::cli::governance::OperationRefusal {
+    if error.kind() == ErrorKind::WouldBlock {
+        return crate::cli::governance::OperationRefusal::agent_recoverable(
+            format!("{}_store_busy", operation.replace('.', "_")),
+            protected_refusal_governance(
+                crate::cli::governance::GovernanceCause::TransientGovernance,
+                true,
+            ),
+            operation,
+        );
+    }
+    human_required_refusal(
+        format!("{}_store_unavailable", operation.replace('.', "_")),
+        crate::cli::governance::GovernanceCause::Integrity,
+        gwt_core::board_escalation::OperationRefusalKind::Integrity,
+        None,
+    )
+}
+
+fn continuation_bridge_failure_refusal(
+    reason: crate::daemon_runtime::AgentBridgeFailureReason,
+) -> crate::cli::governance::OperationRefusal {
+    use crate::daemon_runtime::AgentBridgeFailureReason;
+    match reason {
+        AgentBridgeFailureReason::TransportFailure => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                "execution_continuation_transport_unavailable",
+                protected_refusal_governance(
+                    crate::cli::governance::GovernanceCause::TransientGovernance,
+                    true,
+                ),
+                "execution.continue",
+            )
+        }
+        AgentBridgeFailureReason::WorkspaceEnsureRequired => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                "execution_continuation_workspace_ensure_required",
+                protected_refusal_governance(
+                    crate::cli::governance::GovernanceCause::NotReady,
+                    true,
+                ),
+                "workspace.ensure",
+            )
+        }
+        AgentBridgeFailureReason::AuthorityMismatch => human_required_refusal(
+            "execution_continuation_authority_mismatch",
+            crate::cli::governance::GovernanceCause::Authority,
+            gwt_core::board_escalation::OperationRefusalKind::Authority,
+            None,
+        ),
+        AgentBridgeFailureReason::ReceiptMismatch => human_required_refusal(
+            "execution_continuation_receipt_mismatch",
+            crate::cli::governance::GovernanceCause::Integrity,
+            gwt_core::board_escalation::OperationRefusalKind::Integrity,
+            None,
+        ),
+        AgentBridgeFailureReason::OperationRejected => human_required_refusal(
+            "execution_continuation_operation_rejected",
+            crate::cli::governance::GovernanceCause::StructuralGovernance,
+            gwt_core::board_escalation::OperationRefusalKind::Permission,
+            None,
+        ),
+    }
+}
+
+pub(super) fn run_governed<E: CliEnv>(
+    env: &mut E,
+    command: ExecutionCommand,
+    out: &mut String,
+) -> Result<ExecutionRunResult, Box<crate::cli::governance::GovernedCommandFailure>> {
+    let mut refusal = None;
+    match run_impl(env, command, out, &mut refusal) {
+        Ok(exit_code) => Ok(ExecutionRunResult { exit_code, refusal }),
+        Err(error) => Err(Box::new(crate::cli::governance::GovernedCommandFailure {
+            error,
+            refusal,
+        })),
+    }
+}
+
 /// Run an `execution.*` settlement command. Requires `GWT_SESSION_ID` so the
 /// settlement binds to the session that owns the record.
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     command: ExecutionCommand,
     out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let mut refusal = None;
+    run_impl(env, command, out, &mut refusal)
+}
+
+fn run_impl<E: CliEnv>(
+    env: &mut E,
+    command: ExecutionCommand,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     let invocation_scope = env.repo_path().to_path_buf();
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
@@ -14275,13 +15133,31 @@ pub(super) fn run<E: CliEnv>(
                 "execution: {} refused — execution recovery scope is invalid: ambient GWT_SESSION_ID is unavailable\n",
                 recovery_operation.expect("protected recovery operation")
             ));
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_recovery_scope_unavailable",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                )
+                .with_owner(record_owner_number(&worktree)),
+            );
             return Ok(2);
         }
         None => {
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_session_identity_unavailable",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                )
+                .with_owner(record_owner_number(&worktree)),
+            );
             return Err(SpecOpsError::from(ApiError::Unexpected(
                 "execution settlement requires GWT_SESSION_ID to bind to the owning session"
                     .to_string(),
-            )))
+            )));
         }
     };
     let recovery_context = recovery_operation.map(|_| {
@@ -14293,6 +15169,12 @@ pub(super) fn run<E: CliEnv>(
     if let (Some(operation), Some(Err(error))) = (recovery_operation, recovery_context.as_ref()) {
         out.push_str(&format!(
             "execution: {operation} refused — execution recovery scope is invalid: {error}\n"
+        ));
+        *refusal = Some(human_required_refusal(
+            "execution_recovery_scope_invalid",
+            crate::cli::governance::GovernanceCause::Authority,
+            gwt_core::board_escalation::OperationRefusalKind::Authority,
+            None,
         ));
         return Ok(2);
     }
@@ -14337,12 +15219,13 @@ pub(super) fn run<E: CliEnv>(
                 }
             };
         }
-        return run_adopt(
+        return run_adopt_governed(
             recovery_worktree,
             &session_id,
             expected_session,
             reason,
             out,
+            refusal,
         );
     }
     if let ExecutionCommand::Repair { reason } = &command {
@@ -14351,12 +15234,13 @@ pub(super) fn run<E: CliEnv>(
             .and_then(|context| context.as_ref().ok())
             .expect("validated protected recovery context")
             .session();
-        return run_repair(
+        return run_repair_governed(
             recovery_worktree,
             &session_id,
             expected_session,
             reason,
             out,
+            refusal,
         );
     }
     if let ExecutionCommand::Continue { operation_id } = &command {
@@ -14364,21 +15248,43 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(
                 "execution: continuation refused — durable Session recovery context is unavailable; relaunch the Session\n",
             );
+            *refusal = Some(human_required_refusal(
+                "execution_continuation_scope_unavailable",
+                crate::cli::governance::GovernanceCause::ManagedIdentity,
+                gwt_core::board_escalation::OperationRefusalKind::Authority,
+                None,
+            ));
             return Ok(2);
         }
-        let target = crate::daemon_runtime::HookForwardTarget::from_env_strict()
-            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?
-            .ok_or_else(|| {
-                SpecOpsError::from(ApiError::Unexpected(
+        let target = match crate::daemon_runtime::HookForwardTarget::from_env_strict() {
+            Ok(Some(target)) => target,
+            Ok(None) => {
+                *refusal = Some(human_required_refusal(
+                    "execution_host_bridge_unavailable",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                ));
+                return Err(SpecOpsError::from(ApiError::Unexpected(
                     "execution.continue requires the authenticated Host bridge; relaunch the Session"
                         .to_string(),
-                ))
-            })?;
+                )));
+            }
+            Err(error) => {
+                *refusal = Some(human_required_refusal(
+                    "execution_host_bridge_invalid",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                ));
+                return Err(SpecOpsError::from(ApiError::Unexpected(error)));
+            }
+        };
         let request = crate::AgentExecutionContinuationRequest {
             schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
             operation_id: operation_id.clone(),
         };
-        return match crate::daemon_runtime::send_execution_continuation_via_agent_bridge(
+        return match crate::daemon_runtime::send_execution_continuation_via_agent_bridge_detailed(
             &target, &request,
         ) {
             Ok(receipt) => {
@@ -14392,6 +15298,7 @@ pub(super) fn run<E: CliEnv>(
             }
             Err(error) => {
                 out.push_str(&format!("execution: continuation refused — {error}\n"));
+                *refusal = Some(continuation_bridge_failure_refusal(error.reason()));
                 Ok(2)
             }
         };
@@ -14424,7 +15331,7 @@ pub(super) fn run<E: CliEnv>(
                         "typed quarantine verification record disappeared".to_string(),
                     ))
                 })?;
-            if let Err(refusal) =
+            if let Err(quarantine_refusal) =
                 crate::cli::verification_record::validate_current_quarantine_references(
                     env,
                     &verification,
@@ -14432,26 +15339,45 @@ pub(super) fn run<E: CliEnv>(
                 )
             {
                 out.push_str(&format!(
-                    "execution: reopen refused — typed quarantine evidence is not current: {refusal}\n"
+                    "execution: reopen refused — typed quarantine evidence is not current: {quarantine_refusal}\n"
+                ));
+                *refusal = Some(agent_recoverable_refusal(
+                    "verification_quarantine_not_current",
+                    "verify.run",
                 ));
                 return Ok(2);
             }
             expected_verification_hash = Some(verification.content_hash);
         }
-        return run_reopen_with_session_snapshot(
+        return run_reopen_with_session_snapshot_governed(
             recovery_worktree,
             &session_id,
             expected_session,
             expected_verification_hash.as_deref(),
             reason,
             out,
+            refusal,
         );
     }
+    if let ExecutionCommand::NoAction { reason } = &command {
+        // FR-241: No Action bypasses the Work-event Git settlement gate that
+        // `execution.complete` enforces below, and it may do so only because
+        // `record_no_action` proves there is no deliverable source Work at
+        // all. Nothing here commits, pushes, or reads verification evidence.
+        return run_no_action(&worktree, &session_id, reason, out, refusal);
+    }
     if matches!(&command, ExecutionCommand::Complete) {
-        if let Some(refusal) =
+        if let Some(reason) =
             crate::cli::verification_record::work_event_settlement_refusal(&worktree)
         {
-            out.push_str(&format!("execution: completion refused — {refusal}\n"));
+            out.push_str(&format!("execution: completion refused — {reason}\n"));
+            // Issue #3696 AC-1: the exact misfire this Issue was filed for. The
+            // agent clears this by committing and pushing its own Work events,
+            // so it must never reach the PM as "agent 側では解消不能".
+            *refusal = Some(agent_recoverable_refusal(
+                "work_event_delivery_unsettled",
+                "commit_and_push_work_events",
+            ));
             return Ok(2);
         }
     }
@@ -14467,16 +15393,21 @@ pub(super) fn run<E: CliEnv>(
         | ExecutionCommand::Adopt { .. }
         | ExecutionCommand::Repair { .. }
         | ExecutionCommand::Continue { .. }
-        | ExecutionCommand::Reopen { .. } => {
+        | ExecutionCommand::Reopen { .. }
+        | ExecutionCommand::NoAction { .. } => {
             unreachable!("handled above")
         }
         ExecutionCommand::Complete => {
             // T-247: completion cannot paper over unhandled prompt
             // obligations — settle or defer them first.
-            if let Some(refusal) =
+            if let Some(reason) =
                 crate::cli::action_obligation::open_obligation_refusal(&worktree, &session_id, &[])
             {
-                out.push_str(&format!("execution: completion refused — {refusal}\n"));
+                out.push_str(&format!("execution: completion refused — {reason}\n"));
+                *refusal = Some(agent_recoverable_refusal(
+                    "open_action_obligations",
+                    "execution.blocked",
+                ));
                 return Ok(2);
             }
             let evidence = crate::cli::verification_record::evaluate_evidence(
@@ -14500,7 +15431,7 @@ pub(super) fn run<E: CliEnv>(
                             "typed quarantine verification record disappeared".to_string(),
                         ))
                     })?;
-                if let Err(refusal) =
+                if let Err(quarantine_refusal) =
                     crate::cli::verification_record::validate_current_quarantine_references(
                         env,
                         &verification,
@@ -14508,29 +15439,43 @@ pub(super) fn run<E: CliEnv>(
                     )
                 {
                     out.push_str(&format!(
-                        "execution: completion refused — typed quarantine evidence is not current: {refusal}\n"
+                        "execution: completion refused — typed quarantine evidence is not current: {quarantine_refusal}\n"
+                    ));
+                    *refusal = Some(agent_recoverable_refusal(
+                        "verification_quarantine_not_current",
+                        "verify.run",
                     ));
                     return Ok(2);
                 }
                 expected_verification_hash = Some(verification.content_hash);
             }
-            match settle_completed_with_evidence(
+            let settlement = match settle_completed_with_evidence(
                 &worktree,
                 &session_id,
                 None,
                 expected_verification_hash.as_deref(),
-            )
-            .map_err(|err| {
-                SpecOpsError::from(ApiError::Unexpected(
-                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                ))
-            })? {
+            ) {
+                Ok(settlement) => settlement,
+                Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.complete", &err));
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        crate::cli::trusted_store::store_health_error(
+                            "settling execution state",
+                            &err,
+                        ),
+                    )));
+                }
+            };
+            match settlement {
                 Ok(result) => result,
                 Err(status) => {
                     out.push_str(&format!(
                         "execution: completion refused — {}\n",
                         status.describe()
                     ));
+                    // Issue #3696 AC-1: missing / stale / failing verification
+                    // evidence is cleared by `verify.run`, not by the PM.
+                    *refusal = Some(verification_evidence_refusal(&status));
                     return Ok(2);
                 }
             }
@@ -14544,28 +15489,38 @@ pub(super) fn run<E: CliEnv>(
                     "execution.blocked requires a non-empty params.reason".to_string(),
                 )));
             }
-            if let Some(refusal) = autonomous_verification_block_refusal(
+            if let Some(block_refusal) = autonomous_verification_block_refusal(
                 session_launch_route(Some(&session_id)),
                 &reason,
                 missing_verification.as_deref(),
             ) {
-                out.push_str(&refusal);
+                out.push_str(&block_refusal);
+                *refusal = Some(agent_recoverable_refusal(
+                    "execution_blocked_requires_verification",
+                    "verify.run",
+                ));
                 return Ok(2);
             }
             deferral_reason = Some(reason.clone());
-            settle(
+            match settle(
                 &worktree,
                 &session_id,
                 ExecutionSettlement::Blocked {
                     reason,
                     missing_verification,
                 },
-            )
-            .map_err(|err| {
-                SpecOpsError::from(ApiError::Unexpected(
-                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                ))
-            })?
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.blocked", &err));
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        crate::cli::trusted_store::store_health_error(
+                            "settling execution state",
+                            &err,
+                        ),
+                    )));
+                }
+            }
         }
     };
     match result {
@@ -14657,12 +15612,42 @@ pub(super) fn run<E: CliEnv>(
                 }
                 None => "Reload the linked owner before retrying.",
             };
+            // Issue #3696 AC-2: a terminal record and a foreign owner are the
+            // refusals the agent genuinely cannot resolve, so they keep filing.
+            *refusal = Some(
+                match current_record.as_ref().map(|record| record.status) {
+                    Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed) => {
+                        human_required_refusal(
+                            "execution_record_terminal",
+                            crate::cli::governance::GovernanceCause::DomainInvalid,
+                            gwt_core::board_escalation::OperationRefusalKind::Immutability,
+                            None,
+                        )
+                    }
+                    _ => human_required_refusal(
+                        "execution_owner_mismatch",
+                        crate::cli::governance::GovernanceCause::Authority,
+                        gwt_core::board_escalation::OperationRefusalKind::Authority,
+                        Some("execution.adopt".to_string()),
+                    ),
+                }
+                .with_owner(current_record.as_ref().map(|record| record.owner_number)),
+            );
             out.push_str(&format!(
                 "execution: settlement refused — record belongs to session {record_session_id}, not the current session. {handoff}\n",
             ));
             Ok(2)
         }
         SettleResult::BindingMismatch => {
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_binding_mismatch",
+                    crate::cli::governance::GovernanceCause::Authority,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    Some("execution.adopt".to_string()),
+                )
+                .with_owner(record_owner_number(&worktree)),
+            );
             out.push_str(
                 "execution: settlement refused — the durable Session is not bound to the exact current execution generation/head; refresh or take over the current binding before retrying\n",
             );
@@ -14675,6 +15660,22 @@ pub(super) fn run<E: CliEnv>(
                 .map_or("Reload the linked owner before retrying.", |record| {
                     integrity_repair_guidance(record.status)
                 });
+            // Issue #3696 AC-2: integrity is the deliberate exception to AC-1's
+            // "the agent can fix this itself" rule. `execution.repair` is
+            // reachable and the refusal names it, but a record that failed
+            // integrity validation means trusted state was written outside the
+            // canonical operations. Repair quarantines it and mints a fresh
+            // one; the owner has to know that happened, so the escalation
+            // carries the repair route rather than replacing it.
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_record_integrity_failed",
+                    crate::cli::governance::GovernanceCause::Integrity,
+                    gwt_core::board_escalation::OperationRefusalKind::Integrity,
+                    Some("execution.repair".to_string()),
+                )
+                .with_owner(record_owner_number(&worktree)),
+            );
             out.push_str(&format!(
                 "execution: settlement refused — the record failed integrity validation (edited outside the canonical operations). {repair}\n",
             ));
@@ -14686,13 +15687,14 @@ pub(super) fn run<E: CliEnv>(
 /// FR-194..FR-196: recover a resolved terminal block without changing
 /// ownership or fabricating completion. The entire decision and record write
 /// is serialized by the same trusted-store lease used for settlement/adopt.
-fn run_reopen_with_session_snapshot(
+fn run_reopen_with_session_snapshot_governed(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
     expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     run_reopen_impl(
         worktree,
@@ -14701,6 +15703,7 @@ fn run_reopen_with_session_snapshot(
         expected_verification_hash,
         reason,
         out,
+        refusal,
     )
 }
 
@@ -14711,7 +15714,8 @@ fn run_reopen(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_reopen_impl(worktree, session_id, None, None, reason, out)
+    let mut refusal = None;
+    run_reopen_impl(worktree, session_id, None, None, reason, out, &mut refusal)
 }
 
 fn run_reopen_impl(
@@ -14721,13 +15725,14 @@ fn run_reopen_impl(
     expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     if reason.trim().is_empty() {
         return Err(SpecOpsError::from(ApiError::Unexpected(
             "execution.reopen requires a non-empty params.reason".to_string(),
         )));
     }
-    let code = crate::cli::trusted_store::with_write_lease(worktree, || {
+    let code = match crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_reopen_locked(
             worktree,
             session_id,
@@ -14735,13 +15740,17 @@ fn run_reopen_impl(
             expected_verification_hash,
             reason,
             out,
+            refusal,
         ))
-    })
-    .map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })??;
+    }) {
+        Ok(result) => result?,
+        Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
+            return Err(SpecOpsError::from(ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error("settling execution state", &err),
+            )));
+        }
+    };
     // T-248 absorbed core: a real reopen revives the obligations the block
     // deferred, except the kinds the recovery evidence already covers
     // (implementation/verification are proven by the mandatory post-block
@@ -14774,6 +15783,7 @@ fn run_reopen_locked(
     expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     let prerequisites = match evaluate_execution_reopen_prerequisites(
         worktree,
@@ -14781,8 +15791,15 @@ fn run_reopen_locked(
         expected_verification_hash.is_some(),
     ) {
         Ok(prerequisites) => prerequisites,
-        Err(refusal) => {
-            out.push_str(&format!("execution: reopen refused — {}\n", refusal.reason));
+        Err(prerequisite) => {
+            out.push_str(&format!(
+                "execution: reopen refused — {}\n",
+                prerequisite.reason
+            ));
+            *refusal = Some(
+                recovery_prerequisite_operation_refusal("execution.reopen", &prerequisite)
+                    .with_owner(record_owner_number(worktree)),
+            );
             return Ok(2);
         }
     };
@@ -14809,17 +15826,19 @@ fn run_reopen_locked(
             };
             match satisfied {
                 Ok(()) => {}
-                Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+                Err(err) if is_recovery_session_changed_error(&err) => {
                     out.push_str(&format!("execution: reopen refused — {err}\n"));
+                    *refusal = Some(recovery_session_changed_refusal());
                     return Ok(2);
                 }
                 Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
                     return Err(SpecOpsError::from(ApiError::Unexpected(
                         crate::cli::trusted_store::store_health_error(
                             "settling execution state",
                             &err,
                         ),
-                    )))
+                    )));
                 }
             }
             out.push_str(&format!(
@@ -14890,14 +15909,16 @@ fn run_reopen_locked(
     };
     let generation_updated = match generation_update {
         Ok(updated) => updated,
-        Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+        Err(err) if is_recovery_session_changed_error(&err) => {
             out.push_str(&format!("execution: reopen refused — {err}\n"));
+            *refusal = Some(recovery_session_changed_refusal());
             return Ok(2);
         }
         Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
             return Err(SpecOpsError::from(ApiError::Unexpected(
                 crate::cli::trusted_store::store_health_error("settling execution state", &err),
-            )))
+            )));
         }
     };
     if !generation_updated {
@@ -14916,14 +15937,16 @@ fn run_reopen_locked(
         };
         match save_result {
             Ok(()) => {}
-            Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+            Err(err) if is_recovery_session_changed_error(&err) => {
                 out.push_str(&format!("execution: reopen refused — {err}\n"));
+                *refusal = Some(recovery_session_changed_refusal());
                 return Ok(2);
             }
             Err(err) => {
+                *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                )))
+                )));
             }
         }
     }
@@ -14949,6 +15972,7 @@ pub(crate) fn adopt_for_authenticated_host(
 ) -> Result<(), crate::AgentWorkspaceUpdateError> {
     use crate::{AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode};
     let mut out = String::new();
+    let mut refusal = None;
     let code = run_adopt_with_publisher(
         worktree,
         &session.id,
@@ -14956,11 +15980,15 @@ pub(crate) fn adopt_for_authenticated_host(
         reason,
         &mut out,
         Some(publisher),
+        &mut refusal,
     )
-    .map_err(|_| {
+    // Issue #4443 AC-10: the underlying refusal already names the repair route
+    // (`execution.repair`, `verify.plan` ...). Replacing it with a fixed
+    // sentence left the agent with a bare `code=internal` and no way forward.
+    .map_err(|error| {
         AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::Internal,
-            "Host adoption did not complete; inspect execution.status before retrying",
+            format!("Host adoption did not complete: {error}"),
         )
     })?;
     if code != 0 {
@@ -14972,6 +16000,7 @@ pub(crate) fn adopt_for_authenticated_host(
     Ok(())
 }
 
+#[cfg(test)]
 fn run_adopt(
     worktree: &Path,
     session_id: &str,
@@ -14979,7 +16008,35 @@ fn run_adopt(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_adopt_with_publisher(worktree, session_id, expected_session, reason, out, None)
+    let mut refusal = None;
+    run_adopt_with_publisher(
+        worktree,
+        session_id,
+        expected_session,
+        reason,
+        out,
+        None,
+        &mut refusal,
+    )
+}
+
+fn run_adopt_governed(
+    worktree: &Path,
+    session_id: &str,
+    expected_session: &gwt_agent::Session,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    run_adopt_with_publisher(
+        worktree,
+        session_id,
+        expected_session,
+        reason,
+        out,
+        None,
+        refusal,
+    )
 }
 
 fn run_adopt_with_publisher(
@@ -14989,6 +16046,7 @@ fn run_adopt_with_publisher(
     reason: &str,
     out: &mut String,
     mut publisher: Option<&mut dyn ExecutionAdoptionPublisher>,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     if reason.trim().is_empty() {
         return Err(SpecOpsError::from(ApiError::Unexpected(
@@ -15004,10 +16062,14 @@ fn run_adopt_with_publisher(
         out.push_str(
             "execution: adopt refused — exact-unbound Host Sessions must use execution.continue to bind canonical authority\n",
         );
+        *refusal = Some(agent_recoverable_refusal(
+            "execution_adopt_requires_continuation",
+            "execution.continue",
+        ));
         return Ok(2);
     }
     // T-149: adoption is a read-modify-write cycle — leased.
-    crate::cli::trusted_store::with_write_lease(worktree, || {
+    match crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_adopt_locked(
             worktree,
             session_id,
@@ -15015,13 +16077,17 @@ fn run_adopt_with_publisher(
             reason,
             out,
             &mut publisher,
+            refusal,
         ))
-    })
-    .map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })?
+    }) {
+        Ok(result) => result,
+        Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
+            Err(SpecOpsError::from(ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error("settling execution state", &err),
+            )))
+        }
+    }
 }
 
 fn run_adopt_locked(
@@ -15031,6 +16097,7 @@ fn run_adopt_locked(
     reason: &str,
     out: &mut String,
     publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     let mut prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
     let mut reconciled = false;
@@ -15047,22 +16114,31 @@ fn run_adopt_locked(
             Ok(false) => {}
             Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
                 out.push_str(&format!("execution: adopt refused — {err}\n"));
+                *refusal = Some(recovery_session_changed_refusal());
                 return Ok(2);
             }
             Err(err) => {
+                *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error(
                         "reconciling adopted execution authority",
                         &err,
                     ),
-                )))
+                )));
             }
         }
     }
     let prerequisites = match prerequisites {
         Ok(prerequisites) => prerequisites,
-        Err(refusal) => {
-            out.push_str(&format!("execution: adopt refused — {}\n", refusal.reason));
+        Err(prerequisite) => {
+            out.push_str(&format!(
+                "execution: adopt refused — {}\n",
+                prerequisite.reason
+            ));
+            *refusal = Some(
+                recovery_prerequisite_operation_refusal("execution.adopt", &prerequisite)
+                    .with_owner(record_owner_number(worktree)),
+            );
             return Ok(2);
         }
     };
@@ -15073,6 +16149,10 @@ fn run_adopt_locked(
         }
     {
         out.push_str("execution: adopt refused — Host adoption requires a generation binding\n");
+        *refusal = Some(agent_recoverable_refusal(
+            "execution_adopt_requires_generation_binding",
+            "execution.continue",
+        ));
         return Ok(2);
     }
     let mut record = match prerequisites {
@@ -15098,15 +16178,17 @@ fn run_adopt_locked(
                 Ok(()) => {}
                 Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
                     out.push_str(&format!("execution: adopt refused — {err}\n"));
+                    *refusal = Some(recovery_session_changed_refusal());
                     return Ok(2);
                 }
                 Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
                     return Err(SpecOpsError::from(ApiError::Unexpected(
                         crate::cli::trusted_store::store_health_error(
                             "settling execution state",
                             &err,
                         ),
-                    )))
+                    )));
                 }
             }
             crate::cli::verification_record::authenticate_current_generation_caller(
@@ -15144,12 +16226,14 @@ fn run_adopt_locked(
         Ok(updated) => updated,
         Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
             out.push_str(&format!("execution: adopt refused — {err}\n"));
+            *refusal = Some(recovery_session_changed_refusal());
             return Ok(2);
         }
         Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
             return Err(SpecOpsError::from(ApiError::Unexpected(
                 crate::cli::trusted_store::store_health_error("settling execution state", &err),
-            )))
+            )));
         }
     };
     if !generation_updated {
@@ -15164,14 +16248,16 @@ fn run_adopt_locked(
             &record,
         ) {
             Ok(()) => {}
-            Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+            Err(err) if is_recovery_session_changed_error(&err) => {
                 out.push_str(&format!("execution: adopt refused — {err}\n"));
+                *refusal = Some(recovery_session_changed_refusal());
                 return Ok(2);
             }
             Err(err) => {
+                *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                )))
+                )));
             }
         }
     }
@@ -15245,6 +16331,8 @@ mod tests {
                         ) {
                             assert!(
                                 PROTECTED_RECOVERY_OPERATIONS.contains(&operation.as_str())
+                                    || VERIFICATION_RECOVERY_OPERATIONS
+                                        .contains(&operation.as_str())
                                     || SESSION_INDEPENDENT_RECOVERY_OPERATIONS
                                         .contains(&operation.as_str()),
                                 "{state:?}/{binding:?} names `{operation}`, which is neither \
@@ -18516,6 +19604,9 @@ mod tests {
         .unwrap();
 
         let held = diagnose_owner(worktree.path(), owner);
+        // Issue #3712 AC-3: the literal the PM reads for this shape, so a
+        // living GUI Host can never be mistaken for a living agent again.
+        assert_eq!(held.holder_runtime.as_deref(), Some("child_exited"));
         assert!(
             held.reclaimable,
             "a living GUI host does not keep its dead child alive"
@@ -23046,6 +24137,20 @@ mod tests {
             run_collect(&mut env, CliCommand::Execution(command))
         }
 
+        fn run_governed_cmd(
+            repo: &Path,
+            command: ExecutionCommand,
+        ) -> Result<
+            crate::cli::governance::GovernedCommandOutput,
+            Box<crate::cli::governance::GovernedCommandFailure>,
+        > {
+            let mut env = TestEnv::new(repo.to_path_buf());
+            crate::cli::json_envelope::run_collect_governed(
+                &mut env,
+                CliCommand::Execution(command),
+            )
+        }
+
         fn repair_authority_paths(worktree: &Path, owner: ExecutionOwnerKey) -> Vec<PathBuf> {
             let context = GenerationTransactionContext::resolve(worktree, owner).unwrap();
             vec![
@@ -23346,10 +24451,15 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 7);
+            assert_eq!(probes.len(), 9);
             assert!(probes.iter().all(|probe| {
-                probe["state"] == "unavailable"
-                    && probe["reason"] == "execution_recovery_scope_invalid"
+                let operation = probe["operation"].as_str().unwrap_or_default();
+                let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
+                    "verify_recovery_requires_blocked"
+                } else {
+                    "execution_recovery_scope_invalid"
+                };
+                probe["state"] == "unavailable" && probe["reason"] == expected_reason
             }));
         }
 
@@ -23381,6 +24491,63 @@ exit 1
                 ExecutionControlStatus::Active,
             );
             stamp_session_launch_route(session_id, route);
+        }
+
+        /// Issue #4510 AC-1: a `Manual` stamp on a session the Issue Monitor
+        /// started is a mis-stamp, not a human. The launch prompt the Monitor
+        /// composed is in `launch_args`, and it says in its own words that no
+        /// human authored it — so the route is read back from that, the same
+        /// class of launch-route fact as the `gwt-auto-improve:` claim prefix.
+        #[test]
+        fn a_monitor_launch_reads_back_autonomous_despite_a_manual_stamp() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("sessions home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().expect("worktree fixture");
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+            let mut session = gwt_agent::Session::new(
+                repo.path(),
+                "work/issue-3752",
+                gwt_agent::AgentId::ClaudeCode,
+            );
+            session.id = "session-4510-monitor".to_string();
+            session.launch_route = gwt_agent::LaunchRoute::Manual;
+            session.launch_args = vec![
+                "--dangerously-skip-permissions".to_string(),
+                crate::issue_monitor::issue_monitor_launch_prompt(
+                    crate::LinkedIssueKind::Issue,
+                    3752,
+                ),
+            ];
+            session
+                .save(&sessions_dir)
+                .expect("persist monitor session");
+            assert_eq!(
+                session_launch_route(Some("session-4510-monitor")),
+                Some(gwt_agent::LaunchRoute::Autonomous),
+                "the Monitor's own launch prompt outranks a Manual mis-stamp"
+            );
+
+            // A human-driven launch carries no such prompt, so the Manual
+            // stamp stands and the visual-verification gate keeps its teeth.
+            let mut attended =
+                gwt_agent::Session::new(repo.path(), "work/attended", gwt_agent::AgentId::Codex);
+            attended.id = "session-4510-attended".to_string();
+            attended.launch_route = gwt_agent::LaunchRoute::Manual;
+            attended.launch_args =
+                vec!["--resume".to_string(), "fix the kanban column".to_string()];
+            attended
+                .save(&sessions_dir)
+                .expect("persist attended session");
+            assert_eq!(
+                session_launch_route(Some("session-4510-attended")),
+                Some(gwt_agent::LaunchRoute::Manual)
+            );
+            assert_eq!(session_launch_route(Some("session-4510-absent")), None);
         }
 
         /// Issue #4217 AC-2: the route reaches the caller from the durable
@@ -23442,7 +24609,8 @@ exit 1
 
             assert_eq!(code, 2, "{out}");
             assert!(out.contains("launch_route: autonomous"), "{out}");
-            assert!(out.contains("deferred (autonomous execution)"), "{out}");
+            assert!(out.contains("n/a (autonomous)"), "{out}");
+            assert!(out.contains("Ready PR"), "{out}");
             assert_eq!(
                 load(repo.path())
                     .expect("load execution record")
@@ -23832,6 +25000,8 @@ exit 1
                     "execution.continue",
                     "execution.reopen",
                     "execution.repair",
+                    "verify.plan",
+                    "verify.run",
                     "workspace.ensure",
                     "workspace.update",
                 ],
@@ -23974,6 +25144,11 @@ exit 1
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let session_id = "session-adopting";
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            // This exercises the local adopt path. An ambient Host bridge — the
+            // agent session running the suite has one — would route adopt
+            // through the Host instead and never reach the race under test.
+            let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
 
             for race_index in 0..3 {
                 let repo = tempfile::tempdir().unwrap();
@@ -24018,18 +25193,29 @@ exit 1
                     _ => unreachable!(),
                 };
 
-                let (code, out) = run_cmd(
+                let result = run_governed_cmd(
                     repo.path(),
                     ExecutionCommand::Adopt {
                         reason: "recover crashed owner".to_string(),
                     },
                 )
                 .expect("stale recovery preflight must return a typed refusal");
-                assert_eq!(code, 2, "{out}");
+                assert_eq!(result.exit_code, 2, "{}", result.output);
                 assert!(
-                    out.contains(RECOVERY_SESSION_CHANGED_PREFIX)
-                        || out.contains("recovery scope is invalid"),
-                    "{out}"
+                    result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX)
+                        || result.output.contains("recovery scope is invalid"),
+                    "{}",
+                    result.output
+                );
+                let refusal = result.refusal.expect("authority race refusal metadata");
+                assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+                assert_eq!(
+                    refusal.governance.cause,
+                    Some(crate::cli::governance::GovernanceCause::ManagedIdentity)
+                );
+                assert_eq!(
+                    refusal.escalation_kind,
+                    Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
                 );
 
                 let after = recovery_operation_authority_bytes(
@@ -24111,15 +25297,29 @@ exit 1
                     _ => unreachable!(),
                 };
 
-                let result = run_cmd(
+                let result = run_governed_cmd(
                     repo.path(),
                     ExecutionCommand::Reopen {
                         reason: "fresh evidence is available".to_string(),
                     },
+                )
+                .expect("stale reopen preflight must return a refusal");
+                assert_eq!(result.exit_code, 2, "{}", result.output);
+                assert!(
+                    result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX),
+                    "{}",
+                    result.output
                 );
-                let (code, out) = result.expect("stale reopen preflight must return a refusal");
-                assert_eq!(code, 2, "{out}");
-                assert!(out.contains(RECOVERY_SESSION_CHANGED_PREFIX), "{out}");
+                let refusal = result.refusal.expect("authority race refusal metadata");
+                assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+                assert_eq!(
+                    refusal.governance.cause,
+                    Some(crate::cli::governance::GovernanceCause::ManagedIdentity)
+                );
+                assert_eq!(
+                    refusal.escalation_kind,
+                    Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
+                );
                 assert_eq!(
                     snapshot_recovery_authority_files(repo.path()),
                     authority_before
@@ -24467,15 +25667,25 @@ exit 1
                     _ => unreachable!(),
                 };
 
-                let result = run_cmd(
+                let result = run_governed_cmd(
                     repo.path(),
                     ExecutionCommand::Repair {
                         reason: "recover corrupt authority".to_string(),
                     },
+                )
+                .expect("stale repair preflight must return a refusal");
+                assert_eq!(result.exit_code, 2, "{}", result.output);
+                assert!(
+                    result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX),
+                    "{}",
+                    result.output
                 );
-                let (code, out) = result.expect("stale repair preflight must return a refusal");
-                assert_eq!(code, 2, "{out}");
-                assert!(out.contains(RECOVERY_SESSION_CHANGED_PREFIX), "{out}");
+                let refusal = result.refusal.expect("repair authority race metadata");
+                assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+                assert_eq!(
+                    refusal.escalation_kind,
+                    Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
+                );
                 assert_eq!(
                     snapshot_recovery_authority_files(repo.path()),
                     authority_before
@@ -25316,10 +26526,19 @@ exit 1
             );
             assert_eq!(snapshot.verification_state, "missing_record");
             assert_eq!(snapshot.open_obligations, vec!["issue_update"]);
-            assert_eq!(
-                snapshot.available_recoveries,
-                vec!["verify.plan", "verify.run"]
+            // Issue #4029: `sess-status` has no durable Session binding, so
+            // `verify.*` would refuse it and must not be advertised; the
+            // terminal record then points at a fresh launch instead.
+            assert!(
+                snapshot.available_recoveries.is_empty(),
+                "{:?}",
+                snapshot.available_recoveries
             );
+            assert_eq!(
+                snapshot.recovery_hint.as_deref(),
+                Some(RECOVERY_HINT_FRESH_LAUNCH_REQUIRED)
+            );
+            assert_all_operation_local_recovery_probes(&snapshot);
             assert_eq!(
                 snapshot
                     .recovery_probes
@@ -25393,15 +26612,25 @@ exit 1
                 "{adopt_out}"
             );
 
-            let (reopen_code, reopen_out) = run_cmd(
+            let reopen = run_governed_cmd(
                 repo.path(),
                 ExecutionCommand::Reopen {
                     reason: "evidence is not ready".to_string(),
                 },
             )
             .unwrap();
-            assert_eq!(reopen_code, 2, "{reopen_out}");
-            assert!(reopen_out.contains("verify.plan"), "{reopen_out}");
+            assert_eq!(reopen.exit_code, 2, "{}", reopen.output);
+            assert!(reopen.output.contains("verify.plan"), "{}", reopen.output);
+            let refusal = reopen.refusal.expect("typed missing-plan refusal");
+            assert_eq!(
+                refusal.reason_code,
+                "execution_reopen_verification_plan_missing"
+            );
+            assert_eq!(refusal.recovery_action.as_deref(), Some("verify.plan"));
+            assert_eq!(
+                refusal.recoverability,
+                crate::cli::governance::RefusalRecoverability::AgentRecoverable
+            );
             assert_eq!(
                 std::fs::read(&trusted_path).unwrap(),
                 before,
@@ -26766,19 +27995,170 @@ exit 1
                 "recovery extension tamper must fail its independent hash chain"
             );
 
-            // Reopen advances the same generation's ledger head. The
-            // recovery evidence remains in the audit, but exact-binding
-            // completion/PR gates require a fresh plan/run for the reopened
-            // head rather than accepting the superseded Blocked binding.
-            assert!(pr_handoff_refusal(dir.path(), true)
-                .is_some_and(|reason| reason.contains("predecessor")));
-            save_covering_evidence(dir.path(), "sess-reopen", true);
-            assert_eq!(pr_handoff_refusal(dir.path(), true), None);
+            // Issue #4523: reopen advances the same generation's ledger head,
+            // but the record it consumed is that generation's own same-Session
+            // lifecycle prefix, not a predecessor. The PR handoff gate accepts
+            // it, so one terminal recovery costs one verification matrix rather
+            // than two identical ones.
+            assert_eq!(
+                pr_handoff_refusal(dir.path(), true),
+                None,
+                "the verification record execution.reopen consumed must still hand off a PR"
+            );
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
             let completed = load(dir.path()).unwrap().unwrap();
             assert_eq!(completed.status, ExecutionControlStatus::Completed);
             assert_eq!(completed.recoveries.len(), 1);
+        }
+
+        /// A delivered worktree: `origin/develop` already contains its whole
+        /// source state, which is the precondition `execution.no_action`
+        /// proves before it will settle anything.
+        fn delivered_repo(dir: &Path) {
+            crate::cli::trusted_store::init_git_repo_with_origin(dir);
+            for args in [
+                vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+                vec!["checkout", "-q", "-b", "work/issue-3248"],
+            ] {
+                let status = gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(&args)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            }
+        }
+
+        // AC-2 / AC-3 / AC-4: `execution.no_action` settles a delivered owner
+        // through the operation surface, and the settlement stays entirely
+        // outside Git, verification, PR, and the predecessor record. The
+        // completion gate keeps refusing afterwards — No Action is a
+        // successful *non*-delivery, never a completion claim.
+        #[test]
+        fn no_action_settles_a_delivered_owner_without_verification_or_completion() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-no-action");
+            let dir = tempfile::tempdir().unwrap();
+            delivered_repo(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-no-action")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let before = record_contents(dir.path()).unwrap().unwrap();
+            let head_before = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "SPEC-3248 の該当 slice は PR #3429 で着地済み".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("no action for spec #3248"), "{out}");
+
+            assert_eq!(
+                record_contents(dir.path()).unwrap().unwrap(),
+                before,
+                "No Action rewrites no byte of the predecessor record"
+            );
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Active);
+            assert_eq!(
+                gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(dir.path())
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+                head_before.stdout,
+                "No Action commits nothing"
+            );
+            assert_ne!(
+                crate::cli::verification_record::evaluate_evidence(
+                    dir.path(),
+                    "sess-no-action",
+                    Some(3248),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "No Action produces no verification evidence"
+            );
+
+            // Idempotent: the second call reports the same settled outcome.
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "SPEC-3248 の該当 slice は PR #3429 で着地済み".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(record_contents(dir.path()).unwrap().unwrap(), before);
+
+            // FR-243: the completion gate is unmoved by a No Action.
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(
+                code, 2,
+                "a No Action must never satisfy the completion gate: {out}"
+            );
+        }
+
+        // AC-2 / AS-219: a worktree with real source work refuses, and the
+        // refusal carries an agent-recoverable route rather than stranding the
+        // session.
+        #[test]
+        fn no_action_refuses_real_source_work_through_the_operation_surface() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-no-action");
+            let dir = tempfile::tempdir().unwrap();
+            delivered_repo(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-no-action")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            fs::create_dir_all(dir.path().join("crates/gwt/src")).unwrap();
+            fs::write(dir.path().join("crates/gwt/src/new.rs"), "pub fn x() {}\n").unwrap();
+
+            let output = run_governed_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "nothing to deliver".to_string(),
+                },
+            )
+            .expect("the refusal answers rather than failing the process");
+            assert_eq!(output.exit_code, 2, "{}", output.output);
+            assert!(
+                output.output.contains("crates/gwt/src/new.rs"),
+                "the refusal names the source it found: {}",
+                output.output
+            );
+            let refusal = output.refusal.expect("a structured refusal");
+            assert_eq!(
+                refusal.reason_code,
+                "execution_no_action_source_changes_present"
+            );
         }
 
         #[test]
@@ -26887,6 +28267,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -26977,6 +28358,7 @@ exit 1
                     CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                         commands: Vec::new(),
                         max_wait_secs: None,
+                        headed_e2e_commands: Vec::new(),
                         user_verification_result: None,
                     }),
                 )
@@ -27014,6 +28396,122 @@ exit 1
                     "{reason}: execution.reopen must restore Active"
                 );
             }
+        }
+
+        // Issue #4523: `execution.reopen` appends a Blocked -> Active lifecycle
+        // event to the same generation, which advances the ledger head hash
+        // inside `ExecutionBindingIdentity`. The record the reopen consumed must
+        // stay valid for the PR mutation that follows, or every terminal
+        // recovery costs two identical full verification matrices. Tree
+        // freshness stays enforced by the fingerprint gate.
+        #[test]
+        fn reopen_preserves_the_verification_evidence_it_consumed() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
+            let dir = tempfile::tempdir().unwrap();
+            let worktree = dir.path().to_path_buf();
+            crate::cli::trusted_store::init_git_repo_with_origin(&worktree);
+            let git = |args: &[&str]| {
+                let status = gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(&worktree)
+                    .args(args)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            };
+            git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+            git(&["checkout", "-q", "-b", "work/issue-4523"]);
+
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(&worktree, &active_record("sess-reopen")).unwrap();
+            ensure_generation_ledger(&worktree, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            persist_generation_session_binding(&worktree, owner, "sess-reopen", binding.clone());
+            settle_blocked(&worktree, "sess-reopen");
+
+            let mut env = TestEnv::new(worktree.clone());
+            let (plan_code, plan_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: Vec::new(),
+                    derive: true,
+                }),
+            )
+            .unwrap();
+            assert_eq!(plan_code, 0, "{plan_out}");
+            let mut env = TestEnv::new(worktree.clone());
+            let (run_code, run_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                    commands: Vec::new(),
+                    max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
+                    user_verification_result: None,
+                }),
+            )
+            .unwrap();
+            assert_eq!(run_code, 0, "{run_out}");
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "post-block evidence must be fresh before the reopen consumes it"
+            );
+
+            let mut out = String::new();
+            assert_eq!(
+                run_reopen(&worktree, "sess-reopen", "blocker resolved", &mut out).unwrap(),
+                0,
+                "{out}"
+            );
+            assert!(out.contains("reopened"), "{out}");
+            let reopened_binding = current_execution_binding(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                reopened_binding, binding,
+                "the reopen lifecycle event is expected to advance the ledger head"
+            );
+            assert_eq!(
+                reopened_binding.generation_id, binding.generation_id,
+                "reopen stays inside the same execution generation"
+            );
+
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "the record execution.reopen consumed must still authorize the first PR mutation"
+            );
+
+            fs::write(worktree.join("changed-after-reopen.txt"), "dirty").unwrap();
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::StaleFingerprint,
+                "relaxing the generation gate must not relax the tree freshness gate"
+            );
         }
 
         #[test]
@@ -27402,9 +28900,21 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
             let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
             save(dir.path(), &active_record("sess-reopen")).unwrap();
+            persist_recovery_session_snapshot(
+                dir.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                "sess-reopen",
+            );
             let (code, out) = run_cmd(
                 dir.path(),
                 ExecutionCommand::Reopen {
@@ -27494,9 +29004,21 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
             let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
             save(dir.path(), &active_record("sess-reopen")).unwrap();
+            persist_recovery_session_snapshot(
+                dir.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                "sess-reopen",
+            );
 
             let worktree = dir.path().to_path_buf();
             let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
@@ -27511,17 +29033,46 @@ exit 1
             });
             acquired_rx.recv().unwrap();
 
-            let complete = run_cmd(dir.path(), ExecutionCommand::Complete)
+            let complete = run_governed_cmd(dir.path(), ExecutionCommand::Complete)
                 .expect_err("completion must contend on the owner lease");
-            assert!(complete.to_string().contains("retry"), "{complete}");
-            let reopen = run_cmd(
+            assert!(
+                complete.error.to_string().contains("retry"),
+                "{}",
+                complete.error
+            );
+            let complete_refusal = complete.refusal.expect("typed completion contention");
+            assert_eq!(
+                complete_refusal.reason_code,
+                "execution_complete_store_busy"
+            );
+            assert_eq!(
+                complete_refusal.recovery_action.as_deref(),
+                Some("execution.complete")
+            );
+            assert_eq!(
+                complete_refusal.governance.cause,
+                Some(crate::cli::governance::GovernanceCause::TransientGovernance)
+            );
+            assert_eq!(complete_refusal.escalation_kind(), None);
+            let reopen = run_governed_cmd(
                 dir.path(),
                 ExecutionCommand::Reopen {
                     reason: "retry after lease".to_string(),
                 },
             )
             .expect_err("reopen must contend on the owner lease");
-            assert!(reopen.to_string().contains("retry"), "{reopen}");
+            assert!(
+                reopen.error.to_string().contains("retry"),
+                "{}",
+                reopen.error
+            );
+            let reopen_refusal = reopen.refusal.expect("typed reopen contention");
+            assert_eq!(reopen_refusal.reason_code, "execution_reopen_store_busy");
+            assert_eq!(
+                reopen_refusal.recovery_action.as_deref(),
+                Some("execution.reopen")
+            );
+            assert_eq!(reopen_refusal.escalation_kind(), None);
 
             release_tx.send(()).unwrap();
             holder.join().unwrap();
@@ -28387,6 +29938,386 @@ exit 1
         }
 
         #[test]
+        fn complete_op_reports_stale_evidence_as_agent_recoverable_without_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            save_covering_evidence(dir.path(), "sess-op", false);
+            fs::write(
+                dir.path().join("changed-after-verification.rs"),
+                "fn changed() {}\n",
+            )
+            .unwrap();
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+
+            assert_eq!(code, 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("parse JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "verification_stale_fingerprint"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "verify.run");
+            assert_eq!(payload["refusal"]["governance"]["effect"], "protected");
+            assert_eq!(payload["refusal"]["governance"]["cause"], "not_ready");
+            assert_eq!(payload["refusal"]["governance"]["retryable"], true);
+            assert!(
+                payload["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("rerun `verify.run`")),
+                "the existing caller action must remain intact: {payload}"
+            );
+            assert!(
+                gwt_core::coordination::load_open_escalations(dir.path())
+                    .unwrap()
+                    .is_empty(),
+                "a stale verification refusal is the current agent's next action"
+            );
+        }
+
+        #[test]
+        fn complete_without_session_identity_keeps_typed_authority_through_error_envelope() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+
+            assert_eq!(code, 1);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("parse JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_session_identity_unavailable"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(
+                payload["refusal"]["governance"]["cause"],
+                "managed_identity"
+            );
+            assert_eq!(payload["refusal"]["escalation_kind"], "authority");
+            assert!(payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("requires GWT_SESSION_ID")));
+            assert_eq!(
+                gwt_core::coordination::load_open_escalations(dir.path())
+                    .unwrap()
+                    .len(),
+                1,
+                "a missing durable execution identity requires human authority recovery"
+            );
+        }
+
+        #[test]
+        fn complete_repairable_evidence_matrix_never_auto_escalates() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+
+            for (case, expected_reason) in [
+                ("missing", "verification_missing_record"),
+                ("failing", "verification_failing"),
+                ("plan_changed", "verification_plan_changed"),
+            ] {
+                let repo = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+                save(repo.path(), &active_record("sess-op")).unwrap();
+
+                match case {
+                    "missing" => {}
+                    "failing" => {
+                        save_covering_evidence(repo.path(), "sess-op", false);
+                        let mut plan = crate::cli::verification_record::load_plan(repo.path())
+                            .unwrap()
+                            .expect("verification plan");
+                        plan.commands = vec!["git definitely-not-a-subcommand".to_string()];
+                        crate::cli::verification_record::save_plan(repo.path(), &plan).unwrap();
+                        crate::cli::verification_record::run_verification(
+                            repo.path(),
+                            "sess-op",
+                            &plan.commands,
+                        )
+                        .unwrap();
+                    }
+                    "plan_changed" => {
+                        save_covering_evidence(repo.path(), "sess-op", false);
+                        let mut plan = crate::cli::verification_record::load_plan(repo.path())
+                            .unwrap()
+                            .expect("verification plan");
+                        plan.commands = vec!["git status --short".to_string()];
+                        crate::cli::verification_record::save_plan(repo.path(), &plan).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+
+                let mut env = TestEnv::new(repo.path().to_path_buf());
+                env.stdin = r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#
+                    .to_string();
+                let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&env.stdout).expect("parse JSON response");
+
+                assert_eq!(code, 2, "{case}: {payload}");
+                assert_eq!(payload["refusal"]["reason_code"], expected_reason);
+                assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+                assert_eq!(payload["refusal"]["recovery_action"], "verify.run");
+                assert!(
+                    gwt_core::coordination::load_open_escalations(repo.path())
+                        .unwrap()
+                        .is_empty(),
+                    "{case} is self-recoverable"
+                );
+                assert_eq!(
+                    load(repo.path()).unwrap().unwrap().status,
+                    ExecutionControlStatus::Active,
+                    "{case} refusal must not mutate terminal state"
+                );
+            }
+        }
+
+        #[test]
+        fn continuation_bridge_failure_reasons_keep_typed_dispositions() {
+            use crate::daemon_runtime::AgentBridgeFailureReason;
+            use gwt_core::board_escalation::OperationRefusalKind;
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+
+            for (reason, recoverable, cause, kind, action) in [
+                (
+                    AgentBridgeFailureReason::TransportFailure,
+                    true,
+                    crate::cli::governance::GovernanceCause::TransientGovernance,
+                    None,
+                    Some("execution.continue"),
+                ),
+                (
+                    AgentBridgeFailureReason::WorkspaceEnsureRequired,
+                    true,
+                    crate::cli::governance::GovernanceCause::NotReady,
+                    None,
+                    Some("workspace.ensure"),
+                ),
+                (
+                    AgentBridgeFailureReason::AuthorityMismatch,
+                    false,
+                    crate::cli::governance::GovernanceCause::Authority,
+                    Some(OperationRefusalKind::Authority),
+                    None,
+                ),
+                (
+                    AgentBridgeFailureReason::ReceiptMismatch,
+                    false,
+                    crate::cli::governance::GovernanceCause::Integrity,
+                    Some(OperationRefusalKind::Integrity),
+                    None,
+                ),
+                (
+                    AgentBridgeFailureReason::OperationRejected,
+                    false,
+                    crate::cli::governance::GovernanceCause::StructuralGovernance,
+                    Some(OperationRefusalKind::Permission),
+                    None,
+                ),
+            ] {
+                let refusal = continuation_bridge_failure_refusal(reason);
+                assert_eq!(
+                    refusal.recoverability
+                        == crate::cli::governance::RefusalRecoverability::AgentRecoverable,
+                    recoverable
+                );
+                assert_eq!(refusal.governance.cause, Some(cause));
+                assert_eq!(refusal.escalation_kind(), kind);
+                assert_eq!(refusal.recovery_action.as_deref(), action);
+                let repo = tempfile::tempdir().unwrap();
+                let mut env = TestEnv::new(repo.path().to_path_buf());
+                crate::cli::board::auto_file_structured_operation_refusal(
+                    &mut env,
+                    "execution.continue",
+                    "wording-independent continuation refusal",
+                    &refusal,
+                );
+                assert_eq!(
+                    gwt_core::coordination::load_open_escalations(repo.path())
+                        .unwrap()
+                        .len(),
+                    usize::from(kind.is_some()),
+                );
+            }
+        }
+
+        #[test]
+        fn repair_of_healthy_authority_is_non_escalating_not_applicable() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-healthy-repair";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.repair","params":{"reason":"confirm healthy state"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("repair JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_repair_not_required"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "execution.status");
+            assert!(gwt_core::coordination::load_open_escalations(repo.path())
+                .unwrap()
+                .is_empty());
+        }
+
+        #[test]
+        fn execution_human_required_producers_keep_typed_positive_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-positive";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+
+            let terminal = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(terminal.path());
+            save(terminal.path(), &active_record(session_id)).unwrap();
+            settle(terminal.path(), session_id, ExecutionSettlement::Completed).unwrap();
+            persist_recovery_session_snapshot(
+                terminal.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let mut env = TestEnv::new(terminal.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.reopen","params":{"reason":"new work"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("terminal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_reopen_record_terminal"
+            );
+            assert_eq!(payload["refusal"]["governance"]["cause"], "domain_invalid");
+            assert_eq!(payload["refusal"]["escalation_kind"], "immutability");
+            assert_eq!(
+                gwt_core::coordination::load_open_escalations(terminal.path())
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            let integrity = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(integrity.path());
+            save(integrity.path(), &active_record(session_id)).unwrap();
+            let trusted_path =
+                crate::cli::trusted_store::trusted_dir_for_worktree(integrity.path())
+                    .unwrap()
+                    .join("execution-control.json");
+            let tampered = fs::read_to_string(&trusted_path)
+                .unwrap()
+                .replace("$gwt-execute", "$gwt-forged");
+            fs::write(&trusted_path, tampered).unwrap();
+            let mut env = TestEnv::new(integrity.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.blocked","params":{"reason":"environment unavailable"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("integrity JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_record_integrity_failed"
+            );
+            assert_eq!(payload["refusal"]["governance"]["cause"], "integrity");
+            assert_eq!(payload["refusal"]["escalation_kind"], "integrity");
+            assert_eq!(
+                gwt_core::coordination::load_open_escalations(integrity.path())
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        #[test]
+        fn every_repairable_evidence_status_keeps_verify_run_as_the_typed_next_action() {
+            use crate::cli::governance::{GovernanceCause, RefusalRecoverability};
+            use crate::cli::verification_record::EvidenceStatus;
+
+            for (status, reason_code) in [
+                (EvidenceStatus::MissingRecord, "verification_missing_record"),
+                (EvidenceStatus::WrongSession, "verification_wrong_session"),
+                (EvidenceStatus::WrongOwner, "verification_wrong_owner"),
+                (
+                    EvidenceStatus::WrongGeneration,
+                    "verification_wrong_generation",
+                ),
+                (
+                    EvidenceStatus::StaleFingerprint,
+                    "verification_stale_fingerprint",
+                ),
+                (EvidenceStatus::Failing, "verification_failing"),
+                (EvidenceStatus::Unreadable, "verification_unreadable"),
+                (EvidenceStatus::Tampered, "verification_tampered"),
+                (
+                    EvidenceStatus::PlanNotCovered,
+                    "verification_plan_not_covered",
+                ),
+                (EvidenceStatus::PlanChanged, "verification_plan_changed"),
+            ] {
+                let refusal = verification_evidence_refusal(&status);
+                assert_eq!(refusal.reason_code, reason_code);
+                assert_eq!(
+                    refusal.recoverability,
+                    RefusalRecoverability::AgentRecoverable
+                );
+                assert_eq!(refusal.recovery_action.as_deref(), Some("verify.run"));
+                assert_eq!(refusal.governance.cause, Some(GovernanceCause::NotReady));
+                assert_eq!(refusal.governance.retryable, Some(true));
+                assert_eq!(refusal.escalation_kind(), None);
+            }
+        }
+
+        #[test]
         fn complete_op_refuses_dirty_work_event_before_terminal_mutation() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -28400,18 +30331,313 @@ exit 1
             save_covering_evidence(&fixture.repo, "sess-op", false);
             fixture.append_event("terminal-update-awaiting-delivery");
 
-            let (code, out) =
-                run_cmd(&fixture.repo, ExecutionCommand::Complete).expect("run completion gate");
-
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
-            assert!(out.contains("commit"), "{out}");
-            assert!(out.contains("push"), "{out}");
+            let mut env = TestEnv::new(fixture.repo.clone());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+            assert_eq!(code, 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("parse JSON response");
+            let output = payload["output"].as_str().expect("completion output");
+            assert!(output.contains(".gwt/work/events.jsonl"), "{payload}");
+            assert!(output.contains("commit"), "{payload}");
+            assert!(output.contains("push"), "{payload}");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "work_event_delivery_unsettled"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(
+                payload["refusal"]["recovery_action"],
+                "commit_and_push_work_events"
+            );
+            assert!(
+                gwt_core::coordination::load_open_escalations(&fixture.repo)
+                    .unwrap()
+                    .is_empty(),
+                "dirty Work delivery is resolved by commit/push/retry"
+            );
             assert_eq!(
                 load(&fixture.repo).unwrap().unwrap().status,
                 ExecutionControlStatus::Active,
                 "the execution record must stay active when Work delivery is unsettled"
             );
+        }
+
+        #[test]
+        fn dirty_work_refusal_stays_local_then_commit_push_retry_completes() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+            save(&fixture.repo, &active_record("sess-op")).unwrap();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+            fixture.append_event("terminal-update-awaiting-delivery");
+
+            let mut refused = TestEnv::new(fixture.repo.clone());
+            refused.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut refused, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&refused.stdout).expect("dirty refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "work_event_delivery_unsettled"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(
+                payload["refusal"]["recovery_action"],
+                "commit_and_push_work_events"
+            );
+            assert!(
+                gwt_core::coordination::load_open_escalations(&fixture.repo)
+                    .unwrap()
+                    .is_empty(),
+                "a dirty Work event is the current agent's next action"
+            );
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Active
+            );
+
+            fixture.stage_events();
+            fixture.commit("chore(work): settle terminal Work event");
+            fixture.push();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+
+            let mut retried = TestEnv::new(fixture.repo.clone());
+            retried.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut retried, "gwtd"), 0);
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Completed,
+                "the advertised commit/push/retry recovery must really complete"
+            );
+        }
+
+        #[test]
+        fn stale_verification_refusal_is_typed_and_never_escalated() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record("sess-op")).unwrap();
+            save_covering_evidence(repo.path(), "sess-op", false);
+            fs::write(
+                repo.path().join("changed-after-verification.rs"),
+                "fn changed() {}\n",
+            )
+            .unwrap();
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("stale refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "verification_stale_fingerprint"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "verify.run");
+            assert!(
+                gwt_core::coordination::load_open_escalations(repo.path())
+                    .unwrap()
+                    .is_empty(),
+                "stale verification must stay on the caller's verify.run path"
+            );
+        }
+
+        /// Integrity is the one refusal that names the agent's own next step
+        /// and still escalates (Issue #3696 AC-2).
+        ///
+        /// Every other refusal that advertises a reachable recovery —
+        /// `verify.run`, commit-and-push, `execution.blocked` — stays local,
+        /// because filing it was the misfire this Issue records. Integrity does
+        /// not: `execution.repair` quarantines trusted state that was written
+        /// outside the canonical operations and mints a replacement, and the
+        /// owner has to learn that happened. The escalation therefore carries
+        /// the repair route instead of standing in for it.
+        #[test]
+        fn repairable_integrity_refusal_advertises_repair_and_still_escalates() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-repairable";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let trusted_path = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+                .unwrap()
+                .join("execution-control.json");
+            let tampered = fs::read_to_string(&trusted_path)
+                .unwrap()
+                .replace("$gwt-execute", "$gwt-forged");
+            fs::write(&trusted_path, tampered).unwrap();
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.blocked","params":{"reason":"environment unavailable"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("integrity refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_record_integrity_failed"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["recovery_action"], "execution.repair");
+            assert_eq!(payload["refusal"]["escalation_kind"], "integrity");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(
+                open.len(),
+                1,
+                "tampered trusted state must reach the owner even though repair is reachable"
+            );
+            assert!(
+                open[0].body.contains("execution.repair"),
+                "the escalation must still hand the agent the repair route: {:?}",
+                open[0]
+            );
+        }
+
+        #[test]
+        fn missing_session_identity_uses_execution_owner_for_human_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record("sess-owner")).unwrap();
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.client.seed(gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(3248),
+                title: "execution authority".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-29T00:00:00Z".to_string()),
+                comments: Vec::new(),
+            });
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 1);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("authority refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_session_identity_unavailable"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            assert_eq!(payload["refusal"]["escalation_kind"], "authority");
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(open.len(), 1);
+            assert_eq!(open[0].owners, vec!["3248".to_string()]);
+            assert_eq!(
+                env.client.comments(gwt_github::IssueNumber(3248)).len(),
+                1,
+                "the typed refusal must mirror to its owning Issue"
+            );
+
+            let mut status = String::new();
+            crate::cli::issue::run(
+                &mut env,
+                crate::cli::IssueCommand::MonitorStatus { project_root: None },
+                &mut status,
+            )
+            .unwrap();
+            let status: serde_json::Value = serde_json::from_str(status.trim()).unwrap();
+            assert_eq!(status["needs_human"], serde_json::json!([3248]));
+        }
+
+        #[test]
+        fn terminal_reopen_refusal_reaches_owner_comment_and_needs_human() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-terminal";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            settle(repo.path(), session_id, ExecutionSettlement::Completed).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.client.seed(gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(3248),
+                title: "terminal execution".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-29T00:00:00Z".to_string()),
+                comments: Vec::new(),
+            });
+            env.stdin = r#"{"schema_version":1,"operation":"execution.reopen","params":{"reason":"new work"}}"#
+                .to_string();
+
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("terminal refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_reopen_record_terminal"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            assert_eq!(payload["refusal"]["escalation_kind"], "immutability");
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(open.len(), 1);
+            assert_eq!(open[0].owners, vec!["3248".to_string()]);
+            assert_eq!(env.client.comments(gwt_github::IssueNumber(3248)).len(), 1);
+            let mut status = String::new();
+            crate::cli::issue::run(
+                &mut env,
+                crate::cli::IssueCommand::MonitorStatus { project_root: None },
+                &mut status,
+            )
+            .unwrap();
+            let status: serde_json::Value = serde_json::from_str(status.trim()).unwrap();
+            assert_eq!(status["needs_human"], serde_json::json!([3248]));
         }
 
         // T-111: a failing verification run never unlocks completion, while
@@ -28491,10 +30717,21 @@ exit 1
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
             let dir = tempfile::tempdir().unwrap();
             save(dir.path(), &active_record("sess-owner")).unwrap();
+            save_covering_evidence(dir.path(), "sess-op", false);
 
-            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains("refused"), "{out}");
+            let result = run_governed_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(result.exit_code, 2, "{}", result.output);
+            assert!(result.output.contains("refused"), "{}", result.output);
+            let refusal = result.refusal.expect("authority typed refusal");
+            assert_eq!(refusal.reason_code, "execution_owner_mismatch");
+            assert_eq!(
+                refusal.recoverability,
+                crate::cli::governance::RefusalRecoverability::HumanRequired
+            );
+            assert_eq!(
+                refusal.escalation_kind,
+                Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
+            );
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
                 ExecutionControlStatus::Active
@@ -28793,6 +31030,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
             let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
@@ -28824,6 +31062,35 @@ exit 1
             .unwrap();
             assert_eq!(adopt_code, 0, "{adopt_out}");
 
+            let adopted = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-handoff.toml"),
+            )
+            .unwrap();
+            let now = chrono::Utc::now();
+            let mut work = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Start,
+                "adopted-delivery-work",
+                now,
+            );
+            work.owner = Some("SPEC-3248".to_string());
+            work.agent_session_id = Some(adopted.id);
+            work.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some(adopted.branch),
+                    worktree_path: Some(adopted.worktree_path),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let mut works = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+            works.apply_event(work);
+            gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path()),
+                &works,
+            )
+            .unwrap();
+
             let commands = vec!["git --version".to_string()];
             let (plan_code, plan_out) = run_collect(
                 &mut env,
@@ -28839,6 +31106,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 }),
             )
@@ -28846,9 +31114,10 @@ exit 1
             assert_eq!(run_code, 0, "{run_out}");
 
             env.seed_created_pr(gwt_git::PrStatus {
+                head_ref_name: String::new(),
+                check_counts: None,
                 number: 7,
                 title: "Adopted execution handoff".to_string(),
-                head_ref_name: String::new(),
                 state: gwt_git::pr_status::PrState::Open,
                 url: "https://example.invalid/pr/7".to_string(),
                 created_at: None,
@@ -28863,7 +31132,7 @@ exit 1
                     base: "develop".to_string(),
                     head: None,
                     title: "fix: restore adopted authority".to_string(),
-                    body: "production-path authority acceptance".to_string(),
+                    body: "production-path authority acceptance\nUser Verification Result: confirmed\n".to_string(),
                     labels: Vec::new(),
                     draft: false,
                 }),
@@ -28935,6 +31204,97 @@ exit 1
             }
         }
 
+        /// Issue #4029 AC-2: the Host refuses `workspace.update` unless the
+        /// caller's Session still holds the *current Active* execution binding
+        /// — `active_execution_binding()` is `None` for a `Prepared` or
+        /// `Inspection` authority, and
+        /// `validate_current_execution_binding_authority` rejects a superseded
+        /// one, both answering `ExecutionBindingMismatch` / `authority_mismatch`
+        /// at HTTP 409. The Work-mutation probe only validates Session identity,
+        /// cwd, repo and Work resolution, so `execution.status` advertised the
+        /// operation to a caller the Host would refuse. Advertisement must track
+        /// the binding predicate the Host enforces, in both directions.
+        #[test]
+        fn status_advertises_workspace_update_only_while_the_caller_holds_the_active_binding() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+
+            crate::cli::trusted_store::init_git_repo_with_origin(repo);
+            save(repo, &active_record("sess-bound")).unwrap();
+            ensure_generation_ledger(repo, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo, owner).unwrap().unwrap();
+            persist_generation_session_binding(repo, owner, "sess-bound", binding);
+            // Only `workspace.ensure` materializes the Work projection the
+            // mutation probe resolves, and it must run while the Session is
+            // still the current binding holder.
+            crate::cli::workspace::ensure_workspace_for_agent(
+                repo,
+                crate::cli::workspace::workspace_ensure_status_candidate("sess-bound"),
+            )
+            .expect("ensure the Work projection for the bound Session");
+
+            let advertised = |status: &serde_json::Value| -> bool {
+                status["available_recoveries"]
+                    .as_array()
+                    .expect("available_recoveries")
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|operation| operation == "workspace.update")
+            };
+
+            let bound = status_snapshot(repo, "sess-bound");
+            assert_eq!(bound["ecr_status"], "active", "{bound:?}");
+            assert!(
+                advertised(&bound),
+                "the Session holding the current Active binding executes \
+                 `workspace.update`, so it must stay advertised: {bound:?}"
+            );
+
+            // A foreign generation takes over the Active authority; the caller's
+            // Session file, branch and Work projection are all untouched, so
+            // every Work-mutation precondition still holds while the Host would
+            // now refuse the call.
+            replace_current_generation_authority(
+                repo,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3249,
+                },
+            );
+
+            let superseded = status_snapshot(repo, "sess-bound");
+            assert_eq!(superseded["ecr_status"], "active", "{superseded:?}");
+            assert!(
+                !advertised(&superseded),
+                "`workspace.update` is refused with `authority_mismatch` once the \
+                 caller no longer holds the Active binding, so it must not be \
+                 advertised: {superseded:?}"
+            );
+            let probe = superseded["recovery_probes"]
+                .as_array()
+                .expect("recovery_probes")
+                .iter()
+                .find(|probe| probe["operation"] == "workspace.update")
+                .expect("workspace.update probe")
+                .clone();
+            assert_eq!(probe["state"], "unavailable", "{probe:?}");
+            assert_eq!(
+                probe["governance"]["cause"], "authority",
+                "the refusal the Host answers is an authority mismatch: {probe:?}"
+            );
+        }
+
         /// Issue #4154 AC-1 / AC-2: `execution.adopt` transfers a settled
         /// Blocked record to the relaunched Session without changing its
         /// lifecycle state, which reconnects the ordinary same-session recovery
@@ -28944,6 +31304,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
             let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             let home = tempfile::tempdir().unwrap();
@@ -28990,6 +31351,7 @@ exit 1
                 CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                     commands,
                     max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
                     user_verification_result: None,
                 }),
             )
@@ -29014,9 +31376,10 @@ exit 1
             env.seed_pr(
                 4122,
                 gwt_git::PrStatus {
+                    head_ref_name: String::new(),
+                    check_counts: None,
                     number: 4122,
                     title: "Inherited terminal recovery".to_string(),
-                    head_ref_name: String::new(),
                     state: gwt_git::pr_status::PrState::Open,
                     url: "https://example.invalid/pr/4122".to_string(),
                     created_at: None,

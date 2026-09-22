@@ -36,7 +36,7 @@ libc = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
-fsevent-sys = "4.1"
+fsevent-sys = "5.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -52,6 +52,11 @@ windows = { version = "0.62", features = [
 serde_yaml = { workspace = true }
 
 [dev-dependencies]
+# Issue #4296: gwt-core's own integration tests live outside the lib, so
+# `cfg(test)` does not reach them. Depending on self with `test-support` makes
+# `gwt_core::test_support` (env lock, `ScopedEnvVar`, `ScopedGwtHome`)
+# available to `crates/gwt-core/tests/` without `--all-features`.
+gwt-core = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
 fs2 = { workspace = true }
 serde_json = { workspace = true }

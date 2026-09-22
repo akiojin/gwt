@@ -49,6 +49,9 @@ pub struct PmStopReport {
     /// this is not the caller's store, which is the whole point.
     pub project_dir: String,
     pub stopped_self: bool,
+    /// `false` when the target held no registration — a PM-worktree Session
+    /// that restore brought back (Issue #4394). Only its Session is retired.
+    pub registration_cleared: bool,
     /// Whether the durable Session record was marked terminal. `false` means
     /// the record was already gone; the registration is cleared either way.
     pub session_record_updated: bool,
@@ -163,14 +166,31 @@ fn stop_pm(
     }
 
     let target_session = requested_session.unwrap_or(caller_session.as_str());
-    let Some(stopped) =
-        pm_registry::stop_pm_registration_in_repository(&repository_key, target_session)
-    else {
-        return Err(refusal(format!(
-            "pm.stop found no PM registered as Session {target_session} in this repository; run \
-             JSON operation `pm.status` and use a `session_id` from its \
-             `repository_registrations`"
-        )));
+    let (project_dir, registration_cleared) = match pm_registry::stop_pm_registration_in_repository(
+        &repository_key,
+        target_session,
+    ) {
+        Some(stopped) => (stopped.project_dir, true),
+        // Issue #4394 AC-4: an unregistered PM-worktree Session is a
+        // `registered: false` row of `pm.status`, so it must be retirable
+        // too. A registered Session never takes this path.
+        None => {
+            let Some(project_dir) = pm_registry::unregistered_pm_worktree_sessions(
+                &repository_key,
+                &registrations,
+                &gwt_sessions_dir(),
+            )
+            .into_iter()
+            .find(|session| session.id == target_session)
+            .and_then(|session| pm_registry::pm_worktree_store_dir(&session.worktree_path)) else {
+                return Err(refusal(format!(
+                    "pm.stop found no PM registered as Session {target_session} in this \
+                         repository; run JSON operation `pm.status` and use a `session_id` from \
+                         its `repository_registrations`"
+                )));
+            };
+            (project_dir, false)
+        }
     };
 
     // Clearing the registration ends PM authority, but restore resolves a
@@ -187,8 +207,9 @@ fn stop_pm(
     Ok(PmStopReport {
         schema_version: 1,
         stopped_session_id: target_session.to_string(),
-        project_dir: stopped.project_dir.display().to_string(),
+        project_dir: project_dir.display().to_string(),
         stopped_self: target_session == caller_session,
+        registration_cleared,
         session_record_updated,
     })
 }
@@ -289,7 +310,7 @@ mod tests {
         }
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_lock() -> gwt_core::test_support::EnvLockGuard {
         crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -437,5 +458,71 @@ mod tests {
             views.iter().any(|view| !view.is_current_store),
             "the orphan's store must be flagged as a different store: {views:?}"
         );
+    }
+
+    /// Issue #4394 AC-4: a PM-worktree Session that restore brought back
+    /// without a registration must be visible to the PM, not only to
+    /// `pane.list`.
+    #[test]
+    fn status_lists_a_pm_worktree_session_that_holds_no_registration() {
+        let _lock = env_lock();
+        let fixture = Fixture::new(&["store-a"]);
+        fixture.register(0, "the-pm");
+        fixture.save_session(0, "the-pm");
+        fixture.save_session(0, "restored-orphan-pm");
+
+        let views = pm_registry::pm_repository_registration_views(&fixture.repo);
+
+        let orphan = views
+            .iter()
+            .find(|view| view.session_id == "restored-orphan-pm")
+            .unwrap_or_else(|| panic!("the unregistered PM must be listed: {views:?}"));
+        assert!(!orphan.registered, "{orphan:?}");
+        let registered: Vec<_> = views
+            .iter()
+            .filter(|view| view.session_id == "the-pm")
+            .collect();
+        assert_eq!(registered.len(), 1, "{views:?}");
+        assert!(registered[0].registered);
+        assert_eq!(
+            orphan.project_dir, registered[0].project_dir,
+            "the orphan must be attributed to the store whose PM worktree it runs in"
+        );
+        assert_eq!(orphan.is_current_store, registered[0].is_current_store);
+    }
+
+    /// Issue #4394 AC-4: the row is actionable — `pm.stop` retires an
+    /// unregistered PM-worktree Session so it neither runs on nor restores.
+    #[test]
+    fn stop_retires_an_unregistered_pm_worktree_session() {
+        let _lock = env_lock();
+        let fixture = Fixture::new(&["store-a"]);
+        let prefs = fixture.register(0, "the-pm");
+        fixture.save_session(0, "restored-orphan-pm");
+        let _caller = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "the-pm");
+
+        let report = stop_pm(&fixture.repo, Some("restored-orphan-pm")).expect("retire the orphan");
+
+        assert_eq!(report.stopped_session_id, "restored-orphan-pm");
+        assert!(!report.stopped_self);
+        assert!(!report.registration_cleared);
+        assert!(report.session_record_updated);
+        let retired = gwt_agent::Session::load_and_migrate(
+            &gwt_sessions_dir().join("restored-orphan-pm.toml"),
+        )
+        .expect("load retired session");
+        assert!(!retired.restore_window_on_startup);
+        assert_eq!(retired.status, gwt_agent::AgentStatus::Stopped);
+        assert_eq!(
+            pm_registry::load_pm_prefs(&prefs)
+                .expect("prefs")
+                .registration
+                .map(|registration| registration.session_id),
+            Some("the-pm".to_string()),
+            "retiring an orphan must not touch the real registration"
+        );
+        assert!(pm_registry::pm_repository_registration_views(&fixture.repo)
+            .iter()
+            .all(|view| view.session_id != "restored-orphan-pm"));
     }
 }

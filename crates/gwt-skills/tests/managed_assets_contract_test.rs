@@ -79,15 +79,28 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let report = distribute_to_worktree(dir.path()).expect("distribute bundle");
 
     assert!(report.files_written > 0, "bundle must write files");
-    for skill_md in [
-        dir.path().join(".claude/skills/gwt-verify/SKILL.md"),
-        dir.path().join(".codex/skills/gwt-verify/SKILL.md"),
+    for skill in [
+        "gwt-execute",
+        "gwt-verify",
+        "gwt-manage-pr",
+        "gwt-build-spec",
+        "gwt-fix-issue",
     ] {
-        assert!(
-            skill_md.is_file(),
-            "expected bundled skill at {}",
-            skill_md.display()
+        let relative = format!("skills/{skill}/SKILL.md");
+        let claude = fs::read_to_string(dir.path().join(".claude").join(&relative))
+            .expect("read materialized Claude skill");
+        let codex = fs::read_to_string(dir.path().join(".codex").join(&relative))
+            .expect("read materialized Codex skill");
+        assert_eq!(
+            claude, codex,
+            "{skill} must have identical delivered contracts"
         );
+        for required in ["n/a (autonomous)", "CI auto-merge", "Agent Visual Check"] {
+            assert!(
+                claude.contains(required),
+                "materialized {skill} must contain {required}"
+            );
+        }
     }
 
     let has_gwt_command = fs::read_dir(dir.path().join(".claude/commands"))
@@ -124,6 +137,38 @@ fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
             "managed gwt-* skill asset must be byte-identical between .claude and .codex: {relative:?}"
         );
     }
+}
+
+#[test]
+fn browser_check_embedded_seed_disables_automatic_agents() {
+    let embedded = gwt_skills::assets::CLAUDE_SKILLS
+        .get_file("browser-check/SKILL.md")
+        .expect("embedded browser-check")
+        .contents_utf8()
+        .expect("UTF-8 skill");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for provider in [".claude", ".codex"] {
+        let source = fs::read_to_string(
+            workspace_root.join(format!("{provider}/skills/browser-check/SKILL.md")),
+        )
+        .expect("skill mirror");
+        assert_eq!(source, embedded, "{provider} must match the embedded skill");
+    }
+    let seed = markdown_block(
+        embedded,
+        "# browser-check-agent-seed-begin",
+        Some("# browser-check-agent-seed-end"),
+    );
+    let prefs: Vec<serde_json::Value> = seed
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line.trim()).expect("valid seed JSON"))
+        .collect();
+    assert_eq!(prefs.len(), 2, "seed both PM and Issue Monitor preferences");
+    assert_eq!(prefs[0]["settings"]["auto_start"], false);
+    assert_eq!(prefs[1]["enabled"], false);
+    assert!(prefs[1]["max_active_agents"].as_u64().unwrap() > 0);
+    assert_eq!(prefs[1]["priority_order"], serde_json::json!([]));
 }
 
 #[cfg(unix)]
@@ -564,10 +609,8 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
             }
         }
 
-        // Issue #4001 AC-A1: the autonomous values are distinct from the agent
-        // judging a skip. Issue #4217 AC-3: a postponed check needs a value of
-        // its own — `deferred (autonomous execution)` is neither `confirmed`
-        // (nobody looked) nor `n/a` (something was there to look at).
+        // Issue #4326: the autonomous waiver and legacy deferred value remain
+        // distinct from a human confirmation or an agent-judged skip.
         assert_eq!(
             line_starting_with(&skill, "User Verification Result:"),
             "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous) | deferred (autonomous execution)",
@@ -833,6 +876,20 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
         let content = fs::read_to_string(&skill_md)
             .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
         assert!(content.contains("gwt-coordination"));
+        for required in [
+            "launch_route: autonomous",
+            "Ready PR",
+            "CI auto-merge",
+            "User Verification Result: n/a (autonomous)",
+            "Agent Visual Check",
+            "headed_e2e_commands",
+            "manual",
+        ] {
+            assert!(
+                content.contains(required),
+                "generated guidance must contain {required}"
+            );
+        }
         assert!(
             content.contains("Read-only `gh` commands are allowed")
                 && content.contains("Mutations must use gwtd JSON-envelope operations"),
@@ -841,6 +898,16 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
         assert!(
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
+        );
+        // Issue #4396: the guidance told agents to disable auto-merge without
+        // naming a way to do it, and the `pr.merge` it named did not exist. An
+        // agent that followed the text stopped and escalated to a PM who had no
+        // such operation either. Name the hold route, not just the requirement.
+        assert!(
+            content.contains("gwtd has no merge operation")
+                && content.contains("An explicit owner-requested hold uses `pr.draft`")
+                && content.contains("Resume with `pr.ready`"),
+            "generated guidance must name `pr.draft` as the route that holds a merge"
         );
         assert!(
             content.contains(".gwt/work/events/<digest-prefix>/*.jsonl")

@@ -48,10 +48,72 @@ pub enum DetachedRepointSafety {
     DetachedOnlyCommit,
 }
 
+/// Safety verdict for advancing a resident-branch worktree to a target commit
+/// without discarding anything the worktree holds (Issue #4448).
+///
+/// A detached worktree can only be protected by proving its HEAD commit is
+/// unreachable from every ref, which stops being true the moment the commit is
+/// pushed — so a pushed-but-unmerged commit was silently dropped by the next
+/// repoint. A resident branch replaces that reachability guess with plain
+/// containment in the advance target, which a push cannot change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResidentBranchAdvanceSafety {
+    /// HEAD is the resident branch, the tree is clean, and the target already
+    /// contains every commit the branch holds: fast-forwarding loses nothing.
+    Ready,
+    /// The worktree still runs detached and must be adopted onto the branch
+    /// before it can be advanced.
+    DetachedHead,
+    /// HEAD is some other branch, which this manager does not own or move.
+    ForeignBranch {
+        branch: String,
+    },
+    TrackedOrIndexChanges,
+    /// The branch holds commits the target does not contain. They are the
+    /// resident agent's own work, pushed or not, and must never be rewound.
+    LocalCommits {
+        head: String,
+    },
+}
+
+/// Outcome of adopting a detached worktree onto its resident branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResidentBranchAdoption {
+    Adopted,
+    /// The branch already holds commits the detached HEAD does not contain, so
+    /// moving it onto HEAD would discard them.
+    RefusedBranchAhead {
+        branch_head: String,
+    },
+}
+
+/// Outcome of materializing a resident-branch worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResidentBranchMaterialization {
+    /// The branch was absent, or the base ref already contained it, so the new
+    /// worktree starts exactly at the base ref.
+    AtBase,
+    /// The branch already held commits the base ref does not contain; the
+    /// worktree adopted the branch where it stands instead of rewinding it.
+    RetainedBranchHead { head: String },
+}
+
 struct GitOutput {
     success: bool,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+/// Issue #4378 AC-4: told about every `git worktree list` run so the host can
+/// count them (gwt's startup telemetry). gwt-git keeps no telemetry itself.
+static WORKTREE_LIST_OBSERVER: std::sync::OnceLock<fn(std::time::Instant)> =
+    std::sync::OnceLock::new();
+
+/// Install the process-wide observer for `git worktree list` runs. It is
+/// called after each run with the instant the run started. Only the first
+/// installation takes effect.
+pub fn set_worktree_list_observer(observer: fn(std::time::Instant)) {
+    let _ = WORKTREE_LIST_OBSERVER.set(observer);
 }
 
 fn run_git_observing_operation_deadline(
@@ -180,11 +242,15 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
+        let started = std::time::Instant::now();
         let output = run_git_observing_operation_deadline(
             &["worktree", "list", "--porcelain"],
             &self.repo_path,
-        )
-        .map_err(|e| GwtError::Git(format!("worktree list: {e}")))?;
+        );
+        if let Some(observer) = WORKTREE_LIST_OBSERVER.get() {
+            observer(started);
+        }
+        let output = output.map_err(|e| GwtError::Git(format!("worktree list: {e}")))?;
 
         if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -385,6 +451,12 @@ impl WorktreeManager {
     /// commits are rejected. The mutation uses an ordinary detached checkout,
     /// so Git also rejects an untracked file that would be overwritten while
     /// leaving ignored build output alone.
+    ///
+    /// Only for worktrees whose commits are disposable, such as ephemeral
+    /// intake worktrees. The detached-only guard protects a commit by proving
+    /// no ref reaches it, which stops being true the moment it is pushed, so a
+    /// worktree whose commits must survive belongs on a resident branch —
+    /// see [`Self::resident_branch_advance_safety`] (Issue #4448).
     pub fn repoint_detached(&self, path: &Path, target: &str) -> Result<()> {
         if target.trim().is_empty() || target.starts_with('-') {
             return Err(GwtError::Git(format!(
@@ -552,6 +624,257 @@ impl WorktreeManager {
         }
 
         Ok(DetachedRepointSafety::Ready)
+    }
+
+    /// Create a worktree at `path` checked out on the resident `branch`
+    /// (Issue #4448).
+    ///
+    /// An existing branch is never rewound: when `base_ref` does not already
+    /// contain it, the worktree adopts the branch where it stands and the
+    /// caller is told so, because those commits are the resident agent's work.
+    pub fn create_on_resident_branch(
+        &self,
+        branch: &str,
+        base_ref: &str,
+        path: &Path,
+    ) -> Result<ResidentBranchMaterialization> {
+        if path.exists() {
+            return Err(GwtError::Git(format!(
+                "worktree path already exists: {}",
+                path.display()
+            )));
+        }
+        let path_arg = path_arg_for_git(path);
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_head = self.resolve_optional_commit(&self.repo_path, &branch_ref)?;
+        let (args, materialization) = match &branch_head {
+            None => (
+                vec!["worktree", "add", "-b", branch, path_arg.as_str(), base_ref],
+                ResidentBranchMaterialization::AtBase,
+            ),
+            Some(head) if self.is_ancestor(&self.repo_path, head, base_ref)? => (
+                vec!["worktree", "add", "-B", branch, path_arg.as_str(), base_ref],
+                ResidentBranchMaterialization::AtBase,
+            ),
+            Some(head) => (
+                vec!["worktree", "add", path_arg.as_str(), branch],
+                ResidentBranchMaterialization::RetainedBranchHead { head: head.clone() },
+            ),
+        };
+        let output = gwt_core::process::run_git_logged(&args, Some(&self.repo_path))
+            .map_err(|e| GwtError::Git(format!("worktree add {branch}: {e}")))?;
+        if !output.status.success() {
+            return Err(GwtError::Git(command_stderr(&output)));
+        }
+        Ok(materialization)
+    }
+
+    /// Move a still-detached worktree at `path` onto its resident `branch`
+    /// while keeping the commit its HEAD holds (Issue #4448 migration path).
+    pub fn adopt_resident_branch(
+        &self,
+        path: &Path,
+        branch: &str,
+    ) -> Result<ResidentBranchAdoption> {
+        let branch_ref = format!("refs/heads/{branch}");
+        if let Some(branch_head) = self.resolve_optional_commit(path, &branch_ref)? {
+            // Moving the branch onto HEAD is only safe once HEAD contains it.
+            if !self.is_ancestor(path, &branch_head, "HEAD")? {
+                return Ok(ResidentBranchAdoption::RefusedBranchAhead { branch_head });
+            }
+        }
+        let output =
+            gwt_core::process::run_git_logged(&["checkout", "-B", branch, "HEAD"], Some(path))
+                .map_err(|error| {
+                    GwtError::Git(format!(
+                        "adopt resident branch {branch} at {}: {error}",
+                        path.display()
+                    ))
+                })?;
+        if !output.status.success() {
+            return Err(GwtError::Git(format!(
+                "adopt resident branch {branch} at {}: {}",
+                path.display(),
+                command_stderr(&output)
+            )));
+        }
+        Ok(ResidentBranchAdoption::Adopted)
+    }
+
+    /// Inspect whether the resident-branch worktree at `path` can be
+    /// fast-forwarded to `target` without discarding anything (Issue #4448).
+    pub fn resident_branch_advance_safety(
+        &self,
+        path: &Path,
+        branch: &str,
+        target: &str,
+    ) -> Result<ResidentBranchAdvanceSafety> {
+        let symbolic_head =
+            gwt_core::process::run_git_logged(&["symbolic-ref", "--quiet", "HEAD"], Some(path))
+                .map_err(|error| {
+                    GwtError::Git(format!(
+                        "inspect worktree HEAD at {}: {error}",
+                        path.display()
+                    ))
+                })?;
+        match symbolic_head.status.code() {
+            Some(0) => {
+                let head_ref = String::from_utf8_lossy(&symbolic_head.stdout)
+                    .trim()
+                    .to_owned();
+                if head_ref != format!("refs/heads/{branch}") {
+                    return Ok(ResidentBranchAdvanceSafety::ForeignBranch { branch: head_ref });
+                }
+            }
+            Some(1) => return Ok(ResidentBranchAdvanceSafety::DetachedHead),
+            _ => {
+                return Err(GwtError::Git(format!(
+                    "inspect worktree HEAD at {}: {}",
+                    path.display(),
+                    command_stderr(&symbolic_head)
+                )));
+            }
+        }
+
+        for args in [
+            &["diff", "--quiet", "--"] as &[&str],
+            &["diff", "--cached", "--quiet", "--"],
+        ] {
+            let diff = gwt_core::process::run_git_logged(args, Some(path)).map_err(|error| {
+                GwtError::Git(format!(
+                    "inspect worktree changes at {}: {error}",
+                    path.display()
+                ))
+            })?;
+            match diff.status.code() {
+                Some(0) => {}
+                Some(1) => return Ok(ResidentBranchAdvanceSafety::TrackedOrIndexChanges),
+                _ => {
+                    return Err(GwtError::Git(format!(
+                        "inspect worktree changes at {}: {}",
+                        path.display(),
+                        command_stderr(&diff)
+                    )));
+                }
+            }
+        }
+
+        // Containment in the target, not reachability from some ref: pushing a
+        // commit to its own remote branch must not make it discardable.
+        if !self.is_ancestor(path, "HEAD", target)? {
+            let head = self.resolve_commit(path, "HEAD")?;
+            return Ok(ResidentBranchAdvanceSafety::LocalCommits { head });
+        }
+        Ok(ResidentBranchAdvanceSafety::Ready)
+    }
+
+    /// Fast-forward the resident branch checked out at `path` to `target`.
+    /// Refuses anything that is not a fast-forward, so the branch can only
+    /// gain commits (Issue #4448).
+    pub fn fast_forward_resident_branch(&self, path: &Path, target: &str) -> Result<()> {
+        if target.trim().is_empty() || target.starts_with('-') {
+            return Err(GwtError::Git(format!(
+                "refusing to advance worktree at {} to invalid target {target:?}",
+                path.display()
+            )));
+        }
+        let resolved = self.resolve_commit(path, target)?;
+        let output = gwt_core::process::run_git_logged(
+            &["merge", "--ff-only", "--quiet", &resolved],
+            Some(path),
+        )
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "fast-forward worktree at {} to {resolved}: {error}",
+                path.display()
+            ))
+        })?;
+        if !output.status.success() {
+            return Err(GwtError::Git(format!(
+                "fast-forward worktree at {} to {resolved}: {}",
+                path.display(),
+                command_stderr(&output)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Return the resident branch checked out at `path` to `target`, used to
+    /// roll a half-applied refresh back to the commit it started from.
+    pub fn reset_resident_branch(&self, path: &Path, target: &str) -> Result<()> {
+        let resolved = self.resolve_commit(path, target)?;
+        let output = gwt_core::process::run_git_logged(
+            &["reset", "--hard", "--quiet", &resolved],
+            Some(path),
+        )
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "reset worktree at {} to {resolved}: {error}",
+                path.display()
+            ))
+        })?;
+        if !output.status.success() {
+            return Err(GwtError::Git(format!(
+                "reset worktree at {} to {resolved}: {}",
+                path.display(),
+                command_stderr(&output)
+            )));
+        }
+        Ok(())
+    }
+
+    fn resolve_commit(&self, cwd: &Path, revision: &str) -> Result<String> {
+        self.resolve_optional_commit(cwd, revision)?.ok_or_else(|| {
+            GwtError::Git(format!(
+                "resolve {revision:?} in {}: no such commit",
+                cwd.display()
+            ))
+        })
+    }
+
+    fn resolve_optional_commit(&self, cwd: &Path, revision: &str) -> Result<Option<String>> {
+        let output = gwt_core::process::run_git_logged(
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{revision}^{{commit}}"),
+            ],
+            Some(cwd),
+        )
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "resolve {revision:?} in {}: {error}",
+                cwd.display()
+            ))
+        })?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        Ok((!sha.is_empty()).then_some(sha))
+    }
+
+    fn is_ancestor(&self, cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+        let output = gwt_core::process::run_git_logged(
+            &["merge-base", "--is-ancestor", ancestor, descendant],
+            Some(cwd),
+        )
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "compare {ancestor:?} against {descendant:?} in {}: {error}",
+                cwd.display()
+            ))
+        })?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GwtError::Git(format!(
+                "compare {ancestor:?} against {descendant:?} in {}: {}",
+                cwd.display(),
+                command_stderr(&output)
+            ))),
+        }
     }
 
     /// Whether the worktree at `path` has uncommitted changes (tracked or
@@ -1400,16 +1723,44 @@ fn is_disposable_worktree_entry(status: &str, entry: &str) -> bool {
         return true;
     }
 
-    // gwt-managed skill / command dirs are prefixed `gwt-`; git may report the
-    // collapsed dir (`.claude/skills/gwt-coordination/`) or individual files.
-    if entry.starts_with(".claude/skills/gwt-")
-        || entry.starts_with(".claude/commands/gwt-")
-        || entry.starts_with(".codex/skills/gwt-")
-    {
+    if is_gwt_materialized_asset_entry(entry) {
         return true;
     }
 
     entry == ".DS_Store" || entry.ends_with("/.DS_Store")
+}
+
+/// gwt-managed skill / command dirs are prefixed `gwt-`; git may report the
+/// collapsed dir (`.claude/skills/gwt-coordination/`) or individual files.
+fn is_gwt_materialized_asset_entry(entry: &str) -> bool {
+    entry.starts_with(".claude/skills/gwt-")
+        || entry.starts_with(".claude/commands/gwt-")
+        || entry.starts_with(".codex/skills/gwt-")
+}
+
+/// Whether a `git status --porcelain` entry names something gwt itself wrote
+/// into the worktree: its own `.gwt/` namespace, or a materialized managed
+/// asset. Issue #4009.
+///
+/// Deliberately broader than `is_disposable_worktree_entry`, which fails
+/// closed on durable Work shards because the ephemeral-intake reaper
+/// force-removes a worktree the moment it decides and a just-written shard may
+/// not be ingested yet. This predicate serves the Workspace cleanup-readiness
+/// scan, which only ever looks at branches already merged or change-free; by
+/// then the 30-second Work events ingest has long folded those appends into
+/// the home projection. Counting them as user work is what made
+/// `CLEAN UP READY` report 0 on a host where 92 of 129 worktrees differed from
+/// HEAD only by gwt's own writes.
+///
+/// The merged hook configs (`.codex/hooks.json`,
+/// `.claude/settings.local.json`) are *not* covered here: whether they hold
+/// user content needs `gwt-skills`, which this crate cannot depend on
+/// (codex #3237), so callers layer that check on top.
+pub fn status_entry_is_gwt_runtime_write(entry: &str) -> bool {
+    let entry = entry.trim().trim_matches('"');
+    let entry = entry.strip_prefix("./").unwrap_or(entry);
+
+    entry == ".gwt" || entry.starts_with(".gwt/") || is_gwt_materialized_asset_entry(entry)
 }
 
 fn is_durable_gwt_work_entry(entry: &str) -> bool {

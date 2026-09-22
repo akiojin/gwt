@@ -112,60 +112,84 @@ pub struct IssueValidationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheGeneration(pub String);
 
+/// Why a validation-receipt renewal did or did not publish a receipt.
+///
+/// Issue #4436 AC-4: the renewal used to answer with a bare `bool`, and every
+/// caller reported `false` as "the cache changed under this read; retry". Only
+/// one of the four ways it can decline is a concurrent cache writer. The other
+/// three are properties of the persisted entry itself, so they never clear on a
+/// retry — an operator trying to repair a broken Issue got the same "retry"
+/// advice five times in a row while `meta.json` never moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationReceiptRenewal {
+    /// A receipt now binds the caller's snapshot to the persisted entry.
+    Renewed,
+    /// Another cache writer replaced the Issue since the caller read it. This
+    /// is the only outcome a retry can resolve.
+    GenerationChanged,
+    /// The caller held no generation, so there is nothing to bind a receipt to.
+    GenerationMissing,
+    /// The persisted entry could not be read back at all.
+    EntryUnreadable,
+    /// The persisted entry still carries the caller's generation but does not
+    /// round-trip to the snapshot that was validated.
+    SnapshotMismatch,
+}
+
+impl ValidationReceiptRenewal {
+    /// Whether a receipt was published.
+    #[must_use]
+    pub fn renewed(self) -> bool {
+        matches!(self, Self::Renewed)
+    }
+
+    /// Whether a concurrent cache writer explains the refusal. False for every
+    /// outcome a retry cannot change.
+    #[must_use]
+    pub fn cache_changed(self) -> bool {
+        matches!(self, Self::GenerationChanged)
+    }
+
+    /// The operator-facing reason, without any retry advice.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Renewed => "the validation receipt was published",
+            Self::GenerationChanged => {
+                "another cache writer replaced the snapshot during this read"
+            }
+            Self::GenerationMissing => "the read held no cache generation to bind a receipt to",
+            Self::EntryUnreadable => "the persisted cache entry could not be read back",
+            Self::SnapshotMismatch => {
+                "the persisted cache entry does not match the validated snapshot"
+            }
+        }
+    }
+
+    /// The operation that recovers this state.
+    ///
+    /// Issue #4392 AC-4: [`Self::reason`] says what went wrong, which is not
+    /// the same as saying what to do. An operator who reached an outcome a
+    /// retry cannot clear was told only that a retry cannot clear it, and the
+    /// Issue stayed unreadable. Empty for [`Self::Renewed`], which is not a
+    /// refusal.
+    #[must_use]
+    pub fn remedy(self) -> &'static str {
+        match self {
+            Self::Renewed => "",
+            Self::GenerationChanged => "retry the operation",
+            Self::GenerationMissing | Self::EntryUnreadable | Self::SnapshotMismatch => {
+                "run issue.cache.repair for this Issue to rewrite the cache entry and republish \
+                 its receipt"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedCacheEntry {
     pub entry: CacheEntry,
     pub generation: Option<CacheGeneration>,
-}
-
-/// Why a validation receipt was or was not published.
-///
-/// Issue #4392 AC-4: the renewal used to collapse four different
-/// preconditions into a bare `false`, so every caller printed the same
-/// "cache changed" refusal and advised a retry — including for the one
-/// reason (a cache entry with no generation) that a retry can never clear.
-/// Carrying the reason lets a caller name the operation that recovers it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReceiptRenewal {
-    /// The receipt now proves the snapshot that was just validated.
-    Published,
-    /// Another writer committed a new cache generation during the read.
-    GenerationChanged,
-    /// The cache entry disappeared before the receipt could be written.
-    EntryMissing,
-    /// The persisted snapshot no longer matches the validated one.
-    SnapshotMismatch,
-    /// The cache entry carries no generation, so nothing can bind a receipt
-    /// to it. Only an unconditional rewrite recovers this.
-    GenerationMissing,
-}
-
-impl ReceiptRenewal {
-    pub fn published(&self) -> bool {
-        matches!(self, ReceiptRenewal::Published)
-    }
-
-    /// The operation that recovers this state, phrased for a refusal message.
-    /// Empty for [`ReceiptRenewal::Published`], which is not a refusal.
-    pub fn next_action(&self) -> &'static str {
-        match self {
-            ReceiptRenewal::Published => "",
-            ReceiptRenewal::GenerationChanged => {
-                "another cache writer replaced the snapshot during this read; retry the operation"
-            }
-            ReceiptRenewal::EntryMissing => {
-                "the cache entry was removed during this read; retry the operation to refetch it"
-            }
-            ReceiptRenewal::SnapshotMismatch => {
-                "the persisted snapshot no longer matches the one just validated; retry the \
-                 operation, and run issue.cache.repair for this Issue if it keeps refusing"
-            }
-            ReceiptRenewal::GenerationMissing => {
-                "the cache entry carries no generation, so no receipt can bind to it; run \
-                 issue.cache.repair for this Issue"
-            }
-        }
-    }
 }
 
 /// Result of loading an Issue cache entry together with a stable validation
@@ -315,7 +339,7 @@ impl Cache {
     pub fn renew_validation_receipt_if_current(
         &self,
         expected: &IssueSnapshot,
-    ) -> Result<ReceiptRenewal, CacheError> {
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
         self.with_issue_lock(expected.number, || {
             let generation = self.current_generation_unlocked(expected.number)?;
             self.renew_validation_receipt_unlocked(expected, generation.as_ref())
@@ -326,7 +350,7 @@ impl Cache {
         &self,
         expected: &IssueSnapshot,
         generation: Option<&CacheGeneration>,
-    ) -> Result<ReceiptRenewal, CacheError> {
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
         self.with_issue_lock(expected.number, || {
             self.renew_validation_receipt_unlocked(expected, generation)
         })
@@ -342,7 +366,7 @@ impl Cache {
     pub fn write_snapshot_with_receipt(
         &self,
         snapshot: &IssueSnapshot,
-    ) -> Result<ReceiptRenewal, CacheError> {
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
         self.with_issue_lock(snapshot.number, || {
             let generation = CacheGeneration(Uuid::new_v4().to_string());
             self.mutate_without_validation_unlocked(snapshot.number, || {
@@ -356,18 +380,18 @@ impl Cache {
         &self,
         expected: &IssueSnapshot,
         generation: Option<&CacheGeneration>,
-    ) -> Result<ReceiptRenewal, CacheError> {
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
         if self.current_generation_unlocked(expected.number)?.as_ref() != generation {
-            return Ok(ReceiptRenewal::GenerationChanged);
+            return Ok(ValidationReceiptRenewal::GenerationChanged);
         }
         let Some(current) = self.load_entry(expected.number) else {
-            return Ok(ReceiptRenewal::EntryMissing);
+            return Ok(ValidationReceiptRenewal::EntryUnreadable);
         };
         if !persisted_snapshots_match(&current.snapshot, expected) {
-            return Ok(ReceiptRenewal::SnapshotMismatch);
+            return Ok(ValidationReceiptRenewal::SnapshotMismatch);
         }
         let Some(generation) = generation else {
-            return Ok(ReceiptRenewal::GenerationMissing);
+            return Ok(ValidationReceiptRenewal::GenerationMissing);
         };
         let receipt = IssueValidationReceipt {
             version: ISSUE_VALIDATION_RECEIPT_VERSION,
@@ -379,7 +403,7 @@ impl Cache {
             &self.validation_receipt_path(expected.number),
             &serde_json::to_vec_pretty(&receipt)?,
         )?;
-        Ok(ReceiptRenewal::Published)
+        Ok(ValidationReceiptRenewal::Renewed)
     }
 
     pub fn current_generation(
@@ -709,6 +733,33 @@ fn persisted_snapshots_match(left: &IssueSnapshot, right: &IssueSnapshot) -> boo
 /// generated docs but `pub` is required so the hook code can link against it.
 #[doc(hidden)]
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_durability(path, bytes, Durability::FlushToDevice)
+}
+
+/// Whether an atomic write waits for the storage device before returning.
+///
+/// Issue #3777: `sync_all` is the only call in this helper that blocks on the
+/// device, and on a contended Windows runner it measured 522ms for a
+/// half-kilobyte file. A UserPromptSubmit hook performs several such writes
+/// under a 200ms budget, so state that the next hook event rewrites anyway
+/// asks for [`Durability::RenameOnly`]: the rename still publishes the file
+/// whole, only the "survives an OS crash" guarantee is dropped.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Wait for the device. For data that must survive an OS crash.
+    FlushToDevice,
+    /// Publish atomically without waiting for the device. For transient state
+    /// that is rewritten on the next event.
+    RenameOnly,
+}
+
+#[doc(hidden)]
+pub fn write_atomic_with_durability(
+    path: &Path,
+    bytes: &[u8],
+    durability: Durability,
+) -> std::io::Result<()> {
     let parent = path.parent().expect("path must have a parent");
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(
@@ -723,7 +774,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        if durability == Durability::FlushToDevice {
+            f.sync_all()?;
+        }
     }
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),

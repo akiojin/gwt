@@ -14,6 +14,7 @@ mod build;
 mod commands;
 mod concern;
 pub mod daemon;
+pub mod delivered_owner;
 mod diagnostics;
 mod discuss;
 pub(crate) mod discussion;
@@ -24,6 +25,7 @@ pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
 pub(crate) mod index;
+pub(crate) mod intake_inspection;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
 mod issue_spec;
@@ -31,6 +33,7 @@ mod json_envelope;
 pub mod launch_packet;
 pub(crate) mod memory;
 pub mod open;
+pub mod operation_catalog;
 mod pane;
 pub(crate) mod perf;
 mod plan;
@@ -40,6 +43,7 @@ pub(crate) mod register;
 mod release;
 pub(crate) mod search;
 mod skill_state_runtime;
+pub(crate) mod spec_artifact_lint;
 #[cfg(test)]
 mod test_support;
 mod title_summary_guard;
@@ -57,7 +61,7 @@ use std::{io, path::PathBuf};
 
 pub use actions::{ActionsCommand, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
-pub use commands::{IssueCommand, IssueMonitorPriorityPosition, PrCommand};
+pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;
@@ -284,6 +288,12 @@ pub enum PaneCommand {
     Read { id: String, lines: usize },
     /// `pane.close` / `pane.stop`.
     Close { id: String },
+    /// Preview or recover automatic restores in an explicit start-time interval.
+    Recover {
+        started_after: String,
+        started_before: String,
+        apply: bool,
+    },
     /// `pane.send` (SPEC-3050: self-only injection
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },
@@ -333,7 +343,15 @@ impl std::fmt::Display for CliParseError {
             CliParseError::InvalidValue { flag, reason } => {
                 write!(f, "invalid value for {flag}: {reason}")
             }
-            CliParseError::UnknownSubcommand(s) => write!(f, "unknown subcommand: {s}"),
+            // Issue #4449 AC-4: a mistyped operation answers with the names it
+            // could have meant. The bare wording stays the first line, so log
+            // greps still match; the candidates follow it. `workspace.prune`
+            // is a real refusal message's recommendation that does not exist,
+            // and three agents lost over an hour to it before anyone found
+            // `workspace.projection_prune` by reading the dispatch source.
+            CliParseError::UnknownSubcommand(s) => {
+                write!(f, "{}", operation_catalog::unknown_subcommand_message(s))
+            }
         }
     }
 }

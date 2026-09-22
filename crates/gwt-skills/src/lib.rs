@@ -9,6 +9,7 @@ pub mod distribute;
 pub mod git_exclude;
 pub mod git_hooks;
 pub mod hooks;
+pub mod inspection_guidance;
 pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
@@ -940,6 +941,13 @@ mod tests {
                 "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
+                // SPEC #3248 FR-243 (Issue #4545 AC-4): the guidance has to
+                // separate a trusted No Action from both terminal outcomes,
+                // or a delivered owner keeps getting filed as Blocked.
+                "execution.no_action",
+                "delivered owner",
+                "neither Completed nor Blocked",
+                "A delivered owner is not a blocker",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -1499,8 +1507,10 @@ mod tests {
     }
 
     #[test]
-    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+    fn gwt_execute_documents_issue_bound_build_lifecycle() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().expect("materialization target");
+        distribute_to_worktree(materialized.path()).expect("materialize managed skills");
         let claude =
             std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
                 .expect("read Claude gwt-execute skill");
@@ -1516,6 +1526,27 @@ mod tests {
             (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
             (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
         ] {
+            assert_eq!(
+                std::fs::read_to_string(materialized.path().join(relative)).unwrap(),
+                guidance,
+                "{relative} must distribute the current lifecycle contract"
+            );
+            for required in [
+                "`build.start` with `params.spec:<n>` for every Issue owner",
+                "`build.phase` with the same `params.spec:<n>`",
+                "`build.complete` with the same `params.spec:<n>`",
+                "`build.abort` with the same `params.spec:<n>`",
+                "Without an owner Issue, do not call `build.*`",
+            ] {
+                assert!(
+                    guidance.contains(required),
+                    "{relative} must document the accepted lifecycle params: {required}"
+                );
+            }
+            assert!(
+                !guidance.contains("params.task"),
+                "{relative} must not recommend the unsupported task parameter"
+            );
             assert!(
                 guidance.contains(
                     "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
@@ -2422,8 +2453,8 @@ mod tests {
             let content = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
-                // Launch mode is detected from the launcher's own environment,
-                // not from the agent's judgement.
+                // The environment is a legacy signal; execution.status owns
+                // the launch route, not the agent's judgement.
                 "GWT_AUTONOMOUS_EXECUTION",
                 "Launch mode",
                 // The recorded value for an autonomous run.
@@ -2523,12 +2554,10 @@ mod tests {
         }
     }
 
-    /// AC-3: a postponed visual check needs a value of its own. `confirmed`
-    /// would be a lie and `n/a` would claim there was nothing to look at, so
-    /// every skill that records or gates on the result must know the third
-    /// value.
+    /// Issue #4326: existing deferred results remain readable as migration
+    /// compatibility, without falsely claiming a human confirmed the check.
     #[test]
-    fn a_deferred_user_verification_has_its_own_recorded_value() {
+    fn legacy_deferred_user_verification_remains_documented() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
@@ -2552,44 +2581,49 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("deferred (autonomous execution)"),
-                "{relative} must know the deferred User Verification Result (Issue #4217 AC-3)"
+                "{relative} must document the legacy deferred User Verification Result"
             );
         }
     }
 
-    /// AC-1 / AC-4 / AC-6: what an autonomous launch does instead of waiting.
-    /// It creates a Draft PR, it does not settle itself as blocked over an
-    /// absent reviewer, and the Draft is where the automation stops.
+    /// Issue #4326: verified autonomous work proceeds through Ready and the
+    /// existing CI auto-merge path, without waiting for a human visual check.
     #[test]
-    fn an_autonomous_launch_hands_off_a_draft_pr_instead_of_stalling() {
+    fn an_autonomous_launch_delivers_through_ci_auto_merge() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
             ".claude/skills/gwt-execute/SKILL.md",
             ".codex/skills/gwt-execute/SKILL.md",
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
             let content = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
-            assert!(
-                content.contains("execution.blocked"),
-                "{relative} must address the terminal settlement the stall used to take"
-            );
-            assert!(
-                content.contains("Draft PR"),
-                "{relative} must name the Draft PR handoff as the way out"
-            );
-            assert!(
-                content.contains("pr.ready"),
-                "{relative} must say that a deferred result stops at the Ready door"
-            );
+            for required in ["Ready PR", "CI auto-merge", "fresh", "legacy"] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document {required}"
+                );
+            }
+            for obsolete in [
+                "Automation ends at PR creation",
+                "authorizes a **Draft** PR only",
+                "reaches a **Draft** PR only",
+                "**stays Draft**",
+            ] {
+                assert!(
+                    !content.contains(obsolete),
+                    "{relative} must retire {obsolete}"
+                );
+            }
         }
     }
 
-    /// AC-5: the owner reviews the postponed checks in one pass, not by
-    /// walking back through the Board.
+    /// The list field remains available for inspecting legacy deferred PRs.
     #[test]
-    fn deferred_prs_are_listable_for_the_owner() {
+    fn legacy_deferred_prs_remain_listable() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
             ".claude/skills/gwt-verify/SKILL.md",
@@ -2599,7 +2633,7 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("deferred_user_verification"),
-                "{relative} must name the pr.list field the owner sweeps"
+                "{relative} must name the legacy pr.list field"
             );
         }
     }
@@ -2616,6 +2650,8 @@ mod tests {
             "deferred (autonomous execution)",
             "deferred_user_verification",
             "execution.blocked",
+            "CI 自動マージ",
+            "headed_e2e_commands",
         ] {
             assert!(
                 agents.contains(required),
@@ -2771,11 +2807,16 @@ mod tests {
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        // `Ready PR 禁止` used to be required here. That phrase encoded the
+        // retired rule "incomplete work may only be a Draft PR"; keeping it
+        // would pin AGENTS.md to a policy this repository no longer has.
+        // The gate still exists — it moved from "Ready vs Draft" to
+        // "PR vs no PR" — so assert the phrase that carries it now.
         for required in [
             "Ready PR Gate",
             "Draft PR",
             "単独で配信可能",
-            "Ready PR 禁止",
+            "Draft PR を作成しない",
         ] {
             assert!(
                 agents.contains(required),
@@ -2823,10 +2864,12 @@ mod tests {
         // SPEC #3197: gwt-manage-pr must document the drive-to-merge delivery
         // loop (auto-merge + CI/review fix loop + watch until merged), gated by
         // the Ready PR Gate.
+        // Issue #4396: gwtd has no merge operation, so the skill must say who
+        // merges instead of naming one.
         for required in [
             "Deliver",
             "drive to merge",
-            "JSON operation `pr.merge`",
+            "gwtd has no merge operation",
             "merged_at",
             "Ready PR Gate",
             "Loop Safety Guard",
@@ -2926,24 +2969,25 @@ mod tests {
 
             for required in [
                 "drive-to-merge",
-                "JSON operation `pr.merge`",
+                "gwtd has no merge operation",
+                "JSON\noperation `pr.ready`",
                 "merged_at",
                 "Loop Safety Guard",
-                // Re-gate invariant: never keep auto-merge armed across a
-                // code-changing push.
-                "disable auto-merge through `pr.merge`",
-                "re-arm",
+                // Keep the repository's existing auto-merge delivery policy.
+                "Keep auto-merge enabled",
+                "pr.update_branch",
+                "pr.draft",
             ] {
                 assert!(
                     deliver.contains(required),
                     "{relative} Mode: Deliver section must document: {required}"
                 );
             }
-            // Deliver is opt-in only — auto-detection must never enable
-            // auto-merge on its own.
+            // Manual Deliver remains opt-in; autonomous delivery is covered
+            // by the launch-route contract above.
             assert!(
                 deliver.contains("opt-in") && deliver.contains("never auto-routed"),
-                "{relative} Mode: Deliver must state it is opt-in only and never auto-routed"
+                "{relative} Mode: Deliver must preserve the manual opt-in contract"
             );
             // Hard gate: pending verification must not enable auto-merge.
             assert!(
@@ -2963,13 +3007,14 @@ mod tests {
             for required in [
                 // Composes the existing Fix flow rather than reimplementing it.
                 "fix-flow.md",
-                // Hard PR gate before enabling auto-merge.
+                // Hard PR gate before handing the PR to merge automation.
                 "Ready PR Gate",
                 "pending",
-                // Auto-merge enablement via the canonical JSON operation.
-                "JSON operation `pr.merge`",
-                // Project-agnostic merge-method selection (no hardcoded method).
-                "viewerDefaultMergeMethod",
+                // Issue #4396: gwtd cannot merge; `pr.ready` hands the PR to
+                // the repository's merge automation, which must exist.
+                "gwtd has no merge operation",
+                "`pr.ready` hands the PR to that automation",
+                "Confirm the PR has merge automation",
                 // Merged-state watch surface and completion signal.
                 "pr.view",
                 "merged_at",
@@ -2978,11 +3023,10 @@ mod tests {
                 "`actions.rerun`",
                 // Bounded drive loop.
                 "Loop Safety Guard",
-                // Safety invariant: auto-merge must never stay armed across a
-                // code-changing push. Disable, re-gate, and re-arm per push so
-                // GitHub only ever merges a verified, gated snapshot.
-                "**disable auto-merge** through JSON operation",
-                "re-arm",
+                // Routine pushes and base updates do not suspend auto-merge.
+                "Keep auto-merge enabled",
+                "pr.update_branch",
+                "pr.draft",
             ] {
                 assert!(
                     content.contains(required),

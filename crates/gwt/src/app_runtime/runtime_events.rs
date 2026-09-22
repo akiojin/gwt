@@ -51,6 +51,209 @@ const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
 const CODEX_DIRECTORY_TRUST_PROMPT_REASON: &str =
     "Codex requires directory trust confirmation for the managed worktree";
 
+fn runtime_hook_source_event_profile_label(source_event: Option<&str>) -> &'static str {
+    match source_event {
+        Some("SessionStart") => "session_start",
+        Some("UserPromptSubmit") => "user_prompt_submit",
+        Some("PreToolUse") => "pre_tool_use",
+        Some("PostToolUse") => "post_tool_use",
+        Some("Stop") => "stop",
+        Some("SubagentStart") => "subagent_start",
+        Some("SubagentStop") => "subagent_stop",
+        Some("Notification") => "notification",
+        Some("PermissionRequest") => "permission_request",
+        Some(_) => "other",
+        None => "none",
+    }
+}
+
+fn runtime_hook_composed_state_profile_label(state: WindowProcessStatus) -> &'static str {
+    match state {
+        WindowProcessStatus::Running => "running",
+        WindowProcessStatus::Waiting => "waiting",
+        WindowProcessStatus::Stopped => "stopped",
+        WindowProcessStatus::Error => "error",
+        _ => "other",
+    }
+}
+
+/// Issue #4406 AC-4: the per-stage cost of one `RuntimeHook` dispatch.
+///
+/// The dispatch timer in `main.rs` reports that `RuntimeHook` held the GUI
+/// thread — in production for as long as 257,075ms — but not which of the
+/// dispatch's synchronous stages spent it. Every stage below can reach disk,
+/// the Host bridge or GitHub, so naming the dominant one is what turns a stall
+/// report into a place to look.
+#[derive(Default)]
+struct RuntimeHookStageTimings {
+    stages: Vec<(&'static str, u64)>,
+}
+
+impl RuntimeHookStageTimings {
+    fn record_millis(&mut self, stage: &'static str, elapsed_ms: u64) {
+        self.stages.push((stage, elapsed_ms));
+    }
+
+    /// Time `run` and attribute it to `stage`. Returns whatever `run` returns
+    /// so a measured call keeps the shape of the unmeasured one.
+    fn measure<T>(&mut self, stage: &'static str, run: impl FnOnce() -> T) -> T {
+        let started = std::time::Instant::now();
+        let value = run();
+        self.record_millis(stage, started.elapsed().as_millis() as u64);
+        value
+    }
+
+    /// The stage that held the loop longest, or `None` when the dispatch
+    /// returned before reaching any measured stage.
+    ///
+    /// Ties resolve to the stage that ran first so repeated specimens of one
+    /// stall keep naming one stage instead of alternating between two.
+    fn dominant(&self) -> Option<(&'static str, u64)> {
+        self.stages.iter().copied().reduce(|dominant, candidate| {
+            if candidate.1 > dominant.1 {
+                candidate
+            } else {
+                dominant
+            }
+        })
+    }
+}
+
+/// Issue #4406 AC-4: report one `RuntimeHook` dispatch against the same budget
+/// the event-loop dispatch timer uses, naming the stage that dominated it.
+///
+/// `stage` is `unattributed` when the dispatch went over budget without any
+/// measured stage doing so — the time is then spread across the unmeasured
+/// body, and claiming a stage would send the next reader after the wrong code.
+fn log_runtime_hook_stage_timing(
+    elapsed_ms: u64,
+    source_event: &'static str,
+    stages: &RuntimeHookStageTimings,
+) {
+    let (stage, stage_elapsed_ms) = stages.dominant().unwrap_or(("unattributed", 0));
+    if elapsed_ms >= crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+        tracing::warn!(
+            target: "gwt.frontend.timing",
+            stage,
+            stage_elapsed_ms,
+            elapsed_ms,
+            source_event,
+            "RuntimeHook dispatch exceeded the GUI event loop budget"
+        );
+    } else {
+        tracing::debug!(
+            target: "gwt.frontend.timing",
+            stage,
+            stage_elapsed_ms,
+            elapsed_ms,
+            source_event,
+            "RuntimeHook dispatch handled"
+        );
+    }
+}
+
+#[cfg(test)]
+mod runtime_hook_stage_timing_tests {
+    use super::{log_runtime_hook_stage_timing, RuntimeHookStageTimings};
+
+    fn timings(stages: &[(&'static str, u64)]) -> RuntimeHookStageTimings {
+        let mut recorded = RuntimeHookStageTimings::default();
+        for (stage, elapsed_ms) in stages {
+            recorded.record_millis(stage, *elapsed_ms);
+        }
+        recorded
+    }
+
+    /// Issue #4406 AC-4: "RuntimeHook blocked the GUI event loop for 257075ms"
+    /// names the dispatch but not the stage inside it, so the production stall
+    /// cannot be assigned to a cause. The over-budget warning must name the
+    /// stage that held the loop and how long it held it.
+    #[test]
+    fn an_over_budget_runtime_hook_dispatch_names_its_dominant_stage() {
+        let recorded = timings(&[
+            ("issue_monitor_heartbeat", 3),
+            ("fresh_execution_launch_finalization", 25_000),
+            ("window_state_recompute", 4),
+            ("persist", 11),
+        ]);
+        let output = crate::tests::capture_timing_warnings(|| {
+            log_runtime_hook_stage_timing(28_160, "session_start", &recorded);
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("runtime hook stage timing JSON"))
+            .collect();
+        assert_eq!(
+            logs.len(),
+            1,
+            "an over-budget dispatch must warn exactly once"
+        );
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["stage"], "fresh_execution_launch_finalization");
+        assert_eq!(fields["stage_elapsed_ms"], 25_000);
+        assert_eq!(fields["elapsed_ms"], 28_160);
+        assert_eq!(fields["source_event"], "session_start");
+    }
+
+    /// The threshold is the same one the dispatch timer uses, so an attributed
+    /// warning never appears for a dispatch the event loop never noticed.
+    #[test]
+    fn a_within_budget_runtime_hook_dispatch_does_not_warn() {
+        let recorded = timings(&[("persist", 12)]);
+        let output = crate::tests::capture_timing_warnings(|| {
+            log_runtime_hook_stage_timing(
+                crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS - 1,
+                "stop",
+                &recorded,
+            );
+            log_runtime_hook_stage_timing(
+                crate::GUI_EVENT_LOOP_SLOW_DISPATCH_MS,
+                "stop",
+                &recorded,
+            );
+        });
+        assert_eq!(
+            output.lines().count(),
+            1,
+            "only the dispatch at or over budget may warn"
+        );
+    }
+
+    /// A dispatch can exceed the budget without any single measured stage doing
+    /// so — the time is then spread across the unmeasured body. Reporting a
+    /// stage anyway would send the next reader after the wrong code.
+    #[test]
+    fn a_dispatch_with_no_measured_stages_reports_no_stage() {
+        let output = crate::tests::capture_timing_warnings(|| {
+            log_runtime_hook_stage_timing(500, "pre_tool_use", &RuntimeHookStageTimings::default());
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("runtime hook stage timing JSON"))
+            .collect();
+        assert_eq!(logs.len(), 1);
+        let fields = &logs[0]["fields"];
+        assert_eq!(fields["stage"], "unattributed");
+        assert_eq!(fields["stage_elapsed_ms"], 0);
+        assert_eq!(fields["elapsed_ms"], 500);
+    }
+
+    /// Ties go to the stage that ran first, so repeated specimens of the same
+    /// stall name the same stage instead of alternating between two.
+    #[test]
+    fn equal_stage_times_resolve_to_the_earlier_stage() {
+        let recorded = timings(&[("issue_monitor_heartbeat", 900), ("persist", 900)]);
+        let output = crate::tests::capture_timing_warnings(|| {
+            log_runtime_hook_stage_timing(1_900, "notification", &recorded);
+        });
+        let logs: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("runtime hook stage timing JSON"))
+            .collect();
+        assert_eq!(logs[0]["fields"]["stage"], "issue_monitor_heartbeat");
+    }
+}
+
 fn marker_is_inside_double_quotes(line: &str, marker_offset: usize) -> bool {
     let mut quoted = false;
     let mut escaped = false;
@@ -133,7 +336,7 @@ pub(super) fn provider_usage_limit_failure(
         resets_at: notice
             .resets_at
             .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        evidence,
+        evidence: evidence.map(Box::new),
     }
 }
 
@@ -206,6 +409,13 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
     // attempt on host contention.
     if gwt_agent::is_codex_shared_state_lock_failure(tail) {
         return Some(gwt_agent::codex_shared_state_lock_detail());
+    }
+    // Issue #4445: an npm shim whose target executable was renamed away by the
+    // provider's auto-update reports a localized shell message and a bare exit
+    // status. The path it could not find is the whole diagnosis, and it is at
+    // the head of the tail, so it is named before truncation can drop it.
+    if let Some(named) = gwt_agent::missing_launcher_binary_detail(tail) {
+        return Some(named);
     }
     let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
         let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
@@ -794,6 +1004,7 @@ impl AppRuntime {
         // some other reason and the text is stale.
         let quota_notice = self
             .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
+            .filter(|notice| self.released_provider_quota_notices.get(&id) != Some(notice))
             .filter(|_| !self.provider_reports_healthy_for_pane(quota_agent_id.as_deref(), &id));
         match quota_notice.as_ref() {
             Some(notice) => {
@@ -1122,8 +1333,13 @@ impl AppRuntime {
         });
         let Some(notice) = notice else {
             self.provider_quota_candidates.remove(window_id);
+            self.released_provider_quota_notices.remove(window_id);
             return Vec::new();
         };
+        if self.released_provider_quota_notices.get(window_id) == Some(&notice) {
+            return Vec::new();
+        }
+        self.released_provider_quota_notices.remove(window_id);
         let agent_id = self.pane_agent_id(window_id);
         let first_seen = self
             .provider_quota_candidates
@@ -1274,7 +1490,7 @@ impl AppRuntime {
     /// PTY teardown removes the active session before the failure is published,
     /// so the persisted fallback is what keeps the account attributable at the
     /// moment it matters — the same ordering `approval_prompt_provider` uses.
-    fn pane_agent_id(&self, window_id: &str) -> Option<String> {
+    pub(crate) fn pane_agent_id(&self, window_id: &str) -> Option<String> {
         self.active_agent_sessions
             .get(window_id)
             .map(|session| session.agent_id.clone())
@@ -1341,14 +1557,35 @@ impl AppRuntime {
         self.handle_runtime_hook_event_inner(event, false)
     }
 
+    /// Issue #4406 AC-4: time the dispatch and attribute it to a stage.
+    ///
+    /// The body keeps its own early returns, so the measurement is taken here
+    /// rather than inside it — a dispatch that bails out early is exactly the
+    /// one worth recording.
     fn handle_runtime_hook_event_inner(
         &mut self,
         event: gwt::RuntimeHookEvent,
         publish_to_daemon: bool,
     ) -> Vec<OutboundEvent> {
+        let started = std::time::Instant::now();
+        let source_event = runtime_hook_source_event_profile_label(event.source_event.as_deref());
+        let mut stages = RuntimeHookStageTimings::default();
+        let events = self.handle_runtime_hook_event_stages(event, publish_to_daemon, &mut stages);
+        log_runtime_hook_stage_timing(started.elapsed().as_millis() as u64, source_event, &stages);
+        events
+    }
+
+    fn handle_runtime_hook_event_stages(
+        &mut self,
+        event: gwt::RuntimeHookEvent,
+        publish_to_daemon: bool,
+        stages: &mut RuntimeHookStageTimings,
+    ) -> Vec<OutboundEvent> {
         if publish_to_daemon {
             if let Some(project_root) = event.project_root.as_deref().map(PathBuf::from) {
-                publish_runtime_hook_change(&project_root, &event);
+                stages.measure("daemon_publish", || {
+                    publish_runtime_hook_change(&project_root, &event)
+                });
             }
         }
         let mut events = Vec::new();
@@ -1376,10 +1613,15 @@ impl AppRuntime {
         // and a rate-limited or hung agent was indistinguishable from a busy
         // one. Throttled inside `issue_monitor_heartbeat`.
         if let Some(project_root) = issue_monitor_project_root.clone() {
-            self.issue_monitor_heartbeat(&project_root, &window_id);
+            stages.measure("issue_monitor_heartbeat", || {
+                self.issue_monitor_heartbeat(&project_root, &window_id)
+            });
         }
         if event.source_event.as_deref() == Some("SessionStart") {
-            if let Err(error) = self.finalize_tool_runtime_migration_session_start(&window_id) {
+            let migration = stages.measure("tool_runtime_migration", || {
+                self.finalize_tool_runtime_migration_session_start(&window_id)
+            });
+            if let Err(error) = migration {
                 self.pending_tool_runtime_migrations.remove(&window_id);
                 self.stop_window_runtime_without_session_projection(&window_id);
                 if let Some(active) = self.active_agent_sessions.remove(&window_id) {
@@ -1399,19 +1641,25 @@ impl AppRuntime {
                 ));
                 return events;
             }
-            events.extend(self.finalize_fresh_execution_launch_session_start(
-                &window_id,
-                event.continuation_readiness_nonce.as_deref(),
-            ));
-            events.extend(self.finalize_continue_work_session_start(
-                &window_id,
-                event.continuation_readiness_nonce.as_deref(),
-            ));
+            events.extend(stages.measure("fresh_execution_launch_finalization", || {
+                self.finalize_fresh_execution_launch_session_start(
+                    &window_id,
+                    event.continuation_readiness_nonce.as_deref(),
+                )
+            }));
+            events.extend(stages.measure("continue_work_finalization", || {
+                self.finalize_continue_work_session_start(
+                    &window_id,
+                    event.continuation_readiness_nonce.as_deref(),
+                )
+            }));
         }
         let is_agent_window = self.window_preset(&window_id) == Some(WindowPreset::Agent);
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             if approval_wait_cleared {
-                if let Some(composed) = self.recompute_window_state(&window_id) {
+                if let Some(composed) = stages.measure("window_state_recompute", || {
+                    self.recompute_window_state(&window_id)
+                }) {
                     if effective_before != Some(composed) {
                         events.extend(Self::status_events(window_id, composed, None));
                     }
@@ -1427,6 +1675,7 @@ impl AppRuntime {
         // fires a hook well inside the settle window.
         self.provider_quota_holds.remove(&window_id);
         self.provider_quota_candidates.remove(&window_id);
+        self.released_provider_quota_notices.remove(&window_id);
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
         if !hook_state_changed && !approval_wait_cleared {
@@ -1434,7 +1683,9 @@ impl AppRuntime {
         }
         self.window_hook_states
             .insert(window_id.clone(), hook_state);
-        let Some(composed_state) = self.recompute_window_state(&window_id) else {
+        let Some(composed_state) = stages.measure("window_state_recompute", || {
+            self.recompute_window_state(&window_id)
+        }) else {
             return events;
         };
         let hook_detail = event
@@ -1455,28 +1706,53 @@ impl AppRuntime {
                 .insert(window_id.clone(), detail.clone());
         }
         let detail = hook_detail.or_else(|| self.window_details.get(&window_id).cloned());
-        let _ = self.persist();
+        stages.measure("persist", || {
+            let _ = self.persist();
+        });
         if is_agent_window && composed_state == WindowProcessStatus::Error {
             let message = detail
                 .as_deref()
                 .unwrap_or("Agent entered error state")
                 .to_string();
             if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                events.extend(self.issue_monitor_agent_failed_events_with_mode(
-                    project_root,
-                    &window_id,
-                    &message,
-                    issue_monitor_session_mode,
-                ));
+                events.extend(stages.measure("issue_monitor_agent_failed", || {
+                    self.issue_monitor_agent_failed_events_with_mode(
+                        project_root,
+                        &window_id,
+                        &message,
+                        issue_monitor_session_mode,
+                    )
+                }));
             }
         }
         if matches!(
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
         ) {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                events.push(event);
-            }
+            // Issue #4406 AC-4: acknowledge the ended pane from the cached
+            // projection and rebuild off the event loop. Rebuilding here read
+            // the home works.json, every session ledger TOML and one execution
+            // diagnosis per Work row, holding the GUI thread for up to 35,982ms.
+            // Issue #4406 AC-4: measured so a regression back onto the loop
+            // here is reported by name rather than as an unexplained
+            // `RuntimeHook` stall.
+            stages.measure("active_work_projection_dispatch", || {
+                if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
+                    events.push(event);
+                }
+                // Issue #3777 AC-2: the rebuild itself is scheduled off the event
+                // loop, carrying the content-free RuntimeHook profile labels.
+                if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+                    self.schedule_runtime_hook_active_work_projection_refresh(
+                        &project_root,
+                        runtime_hook_source_event_profile_label(event.source_event.as_deref()),
+                        runtime_hook_composed_state_profile_label(composed_state),
+                    );
+                }
+                if let Some(project_root) = issue_monitor_project_root.as_deref() {
+                    self.request_active_work_projection_refresh(project_root);
+                }
+            });
         }
         if hook_state_changed || effective_before != Some(composed_state) {
             events.extend(Self::status_events(window_id, composed_state, detail));
@@ -1783,6 +2059,35 @@ mod tests {
     use std::sync::{mpsc, Mutex};
 
     /// Issue #3490 AC-2/AC-3: a Codex pane that died on the shared `~/.codex`
+    /// Issue #4445 AC-2: when the npm shim's target executable is gone the
+    /// operator gets `Process exited with status 1` plus a localized shell
+    /// message, and the path that was missing is only readable by inspecting
+    /// the cache directory. Name it in the detail instead.
+    #[test]
+    fn a_missing_launcher_binary_is_named_in_the_pane_detail() {
+        let missing = r"C:\Users\dev\AppData\Local\npm-cache\_npx\2842f47953679de1\node_modules\.bin\..\@anthropic-ai\claude-code\bin\claude.exe";
+
+        // The shim prints the path first, so a raw tail loses it to truncation
+        // exactly when the screen carries anything else.
+        let scrollback = "x".repeat(super::AGENT_ERROR_TAIL_MAX_CHARS);
+        let detail = super::compose_agent_error_detail(
+            Some("Process exited with status 1".to_string()),
+            Some(&format!(
+                "'\"{missing}\"' \u{306f}\u{3001}\u{5185}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{307e}\u{305f}\u{306f}\u{5916}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{3068}\u{3057}\u{3066}\u{8a8d}\u{8b58}\u{3055}\u{308c}\u{3066}\u{3044}\u{307e}\u{305b}\u{3093}\u{3002}\n{scrollback}"
+            )),
+        )
+        .expect("an errored agent pane always carries a detail");
+
+        assert!(
+            detail.contains(missing),
+            "the pane must name the executable that was not found: {detail}"
+        );
+        assert!(
+            !detail.starts_with("Process exited with status 1"),
+            "a bare exit status is what the operator could not diagnose: {detail}"
+        );
+    }
+
     /// SQLite race must not show the raw provider stack. The same string is the
     /// message the Issue Monitor receives, so it also has to classify as a
     /// transient launch failure — the contention is about the host, not the

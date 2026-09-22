@@ -863,8 +863,14 @@ fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
         gwt_skills::pm_guidance::generate_pm_guidance(worktree).expect("pre-write guidance");
     });
 
-    let skill = std::fs::read_to_string(worktree.join(".claude/skills/gwt-pm/SKILL.md"))
-        .expect("gwt-pm skill must survive distribution");
+    let skill = std::fs::read_to_string(
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md"),
+    )
+    .expect("gwt-pm skill must survive distribution");
     assert_eq!(skill, gwt_skills::pm_guidance::render_skill_md());
 }
 
@@ -875,7 +881,11 @@ fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
 fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
     let home = tempdir().expect("tempdir");
     let worktree = materialize_into_pm_worktree(home.path(), &AgentId::ClaudeCode, |_| {});
-    let path = worktree.join(".claude/skills/gwt-pm/SKILL.md");
+    let path = worktree
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join(".claude/skills/gwt-pm/SKILL.md");
     assert_eq!(
         std::fs::read_to_string(&path).expect("guidance generated without a pre-write"),
         gwt_skills::pm_guidance::render_skill_md()
@@ -913,8 +923,9 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
     ] {
         let home = tempdir().expect("tempdir");
         let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
-        let rendered = std::fs::read_to_string(worktree.join(mirror))
-            .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
+        let rendered =
+            std::fs::read_to_string(worktree.parent().unwrap().join("runtime").join(mirror))
+                .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
         assert_eq!(
             rendered, canonical,
             "{mirror} must be the canonical pm_guidance source verbatim"
@@ -943,9 +954,19 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
 fn pm_worktree_codex_only_target_writes_only_the_codex_mirror() {
     let home = tempdir().expect("tempdir");
     let worktree = materialize_into_pm_worktree(home.path(), &AgentId::Codex, |_| {});
-    assert!(worktree.join(".codex/skills/gwt-pm/SKILL.md").exists());
+    assert!(worktree
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join(".codex/skills/gwt-pm/SKILL.md")
+        .exists());
     assert!(
-        !worktree.join(".claude/skills/gwt-pm/SKILL.md").exists(),
+        !worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md")
+            .exists(),
         "a Codex-only target must not write the Claude mirror"
     );
 }
@@ -969,17 +990,30 @@ fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror(
     });
 
     assert!(
-        worktree.join(".claude/skills/gwt-pm/SKILL.md").is_file(),
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md")
+            .is_file(),
         "Grok PM must receive the canonical Claude-compatible gwt-pm skill"
     );
     assert!(
         worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
             .join(".claude/skills/gwt-coordination/SKILL.md")
             .is_file(),
         "Grok PM must receive Claude-compatible coordination guidance"
     );
     assert!(
-        worktree.join(".claude/settings.local.json").is_file(),
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/settings.local.json")
+            .is_file(),
         "Grok PM must receive Claude-compatible managed hook settings"
     );
     assert_eq!(
@@ -989,7 +1023,12 @@ fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror(
         "persistent PM materialization must preserve tracked project assets"
     );
     assert!(
-        !worktree.join(".grok").exists(),
+        !worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".grok")
+            .exists(),
         "Claude compatibility must not create a duplicate .grok managed tree"
     );
 }
@@ -1162,4 +1201,81 @@ fn json_commands(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     collect(&value, &mut out);
     out
+}
+
+/// Issue #4283 AC-6: pane creation must not queue behind the managed-asset
+/// materialization of an unrelated worktree.
+///
+/// The lock used to be keyed on the repository's main worktree root, so one
+/// exclusive file lock covered every worktree of the repository. Every pane
+/// launch, every fresh-worktree SessionStart self-heal and every startup
+/// hook-config self-heal took it around the full ~350 ms materialization, and
+/// the fleet serialized: `phase:pane.create.managed_assets` measured a p50 of
+/// 34,001 ms against a 330–660 ms uncontended cost.
+///
+/// The bound is expressed as a deadline rather than as a wall-clock assertion:
+/// with a sibling worktree's lock held for the whole test, materialization here
+/// must still finish inside the operation deadline. Under the old key it waited
+/// for the holder and failed the deadline instead.
+#[test]
+fn materializing_one_worktree_does_not_wait_on_a_sibling_worktrees_asset_lock() {
+    use std::time::{Duration, Instant};
+
+    let _env_guard = env_lock();
+    let home = tempdir().expect("tempdir");
+    let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    run_git(&repo, &["init", "-q", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "test"]);
+    std::fs::write(repo.join("README.md"), "seed\n").expect("seed file");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-qm", "seed"]);
+
+    let sibling = home.path().join("sibling");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "sibling",
+            sibling.to_str().expect("sibling path"),
+        ],
+    );
+    for worktree in [&repo, &sibling] {
+        std::fs::create_dir_all(worktree.join(".claude/skills")).expect("claude surface");
+        std::fs::create_dir_all(worktree.join(".codex/skills")).expect("codex surface");
+    }
+
+    let cli_bin = home.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+
+    let held_path = gwt::managed_asset_lock_path(&repo);
+    std::fs::create_dir_all(held_path.parent().expect("lock dir")).expect("create lock dir");
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&held_path)
+        .expect("open sibling lock");
+    fs2::FileExt::lock_exclusive(&held).expect("hold sibling lock");
+
+    let deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + Duration::from_secs(20),
+    );
+    let outcome = refresh_managed_gwt_assets_for_agent(&sibling, &AgentId::ClaudeCode);
+    drop(deadline);
+    fs2::FileExt::unlock(&held).expect("release sibling lock");
+
+    outcome.expect(
+        "a sibling worktree's held managed-asset lock must not block this worktree's \
+         materialization",
+    );
 }
