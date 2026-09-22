@@ -522,6 +522,40 @@ impl AppRuntime {
         self.pane_send_input_to_window_events(client_id, &window_id, text)
     }
 
+    /// Browser sessions can resolve a pane only inside their immutable project.
+    pub(crate) fn pane_send_input_for_project_events(
+        &mut self,
+        client_id: ClientId,
+        project_key: &gwt_core::repo_hash::ProjectKey,
+        session_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let target = self.tabs.iter().find_map(|tab| {
+            if self.project_key_for_tab(&tab.id) != Some(project_key) {
+                return None;
+            }
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| window.session_id.as_deref() == Some(session_id))
+                .map(|window| combined_window_id(&tab.id, &window.id))
+        });
+        let Some(window_id) = target else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some(
+                        "no pane bound to this session in the connected project".to_string(),
+                    ),
+                },
+            )];
+        };
+        self.pane_send_input_to_window_events(client_id, &window_id, text)
+    }
+
     /// Inject input into one already-authorized pane identity. Capability
     /// callers resolve this exact combined window id inside their authenticated
     /// project before reaching the PTY; this helper never performs a
@@ -636,6 +670,15 @@ impl AppRuntime {
     }
 
     pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+        let Some(project_key) = self
+            .window_lookup
+            .get(id)
+            .and_then(|address| self.project_tab_incarnations.get(&address.tab_id))
+            .map(|incarnation| incarnation.project_key.clone())
+        else {
+            tracing::warn!(window_id = %id, "refusing PTY writer without project ownership");
+            return;
+        };
         let Ok(pane_guard) = pane.lock() else {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -649,10 +692,19 @@ impl AppRuntime {
         drop(pane_guard);
         match self.pty_writers.write() {
             Ok(mut guard) => {
-                let previous = guard.insert(id.to_string(), Arc::clone(&pty));
+                let previous = guard.insert(
+                    id.to_string(),
+                    Arc::new(crate::PtyWriterEntry {
+                        project_key,
+                        handle: Arc::clone(&pty),
+                    }),
+                );
                 drop(guard);
                 gwt::perf::startup::pty_ready(id);
-                if let Some(previous) = previous.filter(|previous| !Arc::ptr_eq(previous, &pty)) {
+                if let Some(previous) = previous
+                    .map(|entry| Arc::clone(&entry.handle))
+                    .filter(|previous| !Arc::ptr_eq(previous, &pty))
+                {
                     previous.revoke_input_generation();
                     let window_id = id.to_string();
                     if let Err(_error) = thread::Builder::new()
@@ -688,7 +740,7 @@ impl AppRuntime {
                 let previous = guard.remove(id);
                 drop(guard);
                 if let Some(previous) = previous {
-                    previous.invalidate_input_generation();
+                    previous.handle.invalidate_input_generation();
                 }
             }
             Err(_error) => {
@@ -899,8 +951,8 @@ impl AppRuntime {
                     let writer = closing_pty.as_ref().and_then(|closing_pty| {
                         writers
                             .get(&window_id)
-                            .filter(|current| Arc::ptr_eq(current, closing_pty))
-                            .cloned()
+                            .filter(|current| Arc::ptr_eq(&current.handle, closing_pty))
+                            .map(|entry| Arc::clone(&entry.handle))
                     });
                     if writer.is_some() {
                         writers.remove(&window_id);

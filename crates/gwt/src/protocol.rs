@@ -1273,6 +1273,8 @@ pub enum LogScopeSelection {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectTabView {
     pub id: String,
+    /// Canonical repository identity used to bind a browser connection.
+    pub project_key: String,
     pub title: String,
     pub project_root: String,
     pub project_scope: String,

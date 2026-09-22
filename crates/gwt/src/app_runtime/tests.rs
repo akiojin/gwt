@@ -811,10 +811,106 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
 }
 
 #[test]
-fn deregistering_pty_writer_invalidates_the_removed_generation() {
+fn browser_pane_send_input_requires_the_session_owning_project() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut tab = sample_project_tab_with_window_at(
+        "b",
+        "agent",
+        temp.path().join("b"),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent", Some("session-b".to_string())));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("b"));
+    let window_id = "b::agent";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let b = runtime.project_tab_incarnations["b"].project_key.clone();
+    let a = gwt_core::paths::resolve_project_scope(&temp.path().join("a")).hash;
+    let refused =
+        runtime.pane_send_input_for_project_events("client-a".into(), &a, "session-b", "foreign");
+    assert!(matches!(
+        &refused[0].event,
+        BackendEvent::PaneSendResult { ok: false, .. }
+    ));
+    let accepted =
+        runtime.pane_send_input_for_project_events("client-b".into(), &b, "session-b", "own");
+    assert!(matches!(
+        &accepted[0].event,
+        BackendEvent::PaneSendResult { ok: true, .. }
+    ));
+}
+
+#[test]
+fn pty_writer_registration_preserves_inactive_project_ownership() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tabs = ["a", "b"]
+        .into_iter()
+        .map(|id| {
+            sample_project_tab_with_window_at(
+                id,
+                "agent",
+                temp.path().join(id),
+                WindowPreset::Agent,
+                WindowProcessStatus::Running,
+            )
+        })
+        .collect();
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("b"));
+    let window_id = "a::agent";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let pane = runtime.runtimes[window_id].pane.clone();
+
+    runtime.register_pty_writer(window_id, &pane);
+
+    let writers = runtime.pty_writers.read().expect("registry");
+    assert_eq!(
+        writers[window_id].project_key,
+        runtime.project_tab_incarnations["a"].project_key
+    );
+    assert_ne!(
+        writers[window_id].project_key,
+        runtime.project_tab_incarnations["b"].project_key
+    );
+    assert!(Arc::ptr_eq(
+        &writers[window_id].handle,
+        &pane.lock().expect("pane").shared_pty()
+    ));
+}
+
+#[test]
+fn pty_writer_registration_rejects_a_window_without_project_ownership() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let window_id = "unknown::agent";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let pane = runtime.runtimes[window_id].pane.clone();
+
+    runtime.register_pty_writer(window_id, &pane);
+
+    assert!(!runtime
+        .pty_writers
+        .read()
+        .expect("registry")
+        .contains_key(window_id));
+}
+
+#[test]
+fn deregistering_pty_writer_invalidates_the_removed_generation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().join("repo"),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
     let pane = runtime
@@ -829,7 +925,7 @@ fn deregistering_pty_writer_invalidates_the_removed_generation() {
         .read()
         .expect("PTY writer registry")
         .get(window_id)
-        .cloned()
+        .map(|entry| Arc::clone(&entry.handle))
         .expect("registered writer");
 
     runtime.deregister_pty_writer(window_id);
@@ -844,7 +940,14 @@ fn deregistering_pty_writer_invalidates_the_removed_generation() {
 fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().join("repo"),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1";
     insert_test_pane_runtime(&mut runtime, window_id);
     let pane = runtime
@@ -859,7 +962,7 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
         .read()
         .expect("PTY writer registry")
         .get(window_id)
-        .cloned()
+        .map(|entry| Arc::clone(&entry.handle))
         .expect("registered writer");
     let _reservation = Arc::clone(&old_generation)
         .reserve_input_transaction()
@@ -911,7 +1014,7 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         .read()
         .expect("PTY writer registry")
         .get(&window_id)
-        .cloned()
+        .map(|entry| Arc::clone(&entry.handle))
         .expect("registered generation");
     let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
         "Idle",
@@ -5105,7 +5208,7 @@ fn queued_close_finalizer_preserves_same_window_successor_writer_generation() {
         .get(&window_id)
         .cloned()
         .expect("successor writer remains registered");
-    assert!(Arc::ptr_eq(&registered, &successor));
+    assert!(Arc::ptr_eq(&registered.handle, &successor));
     assert!(
         successor.reserve_input_transaction().is_ok(),
         "the predecessor finalizer must not revoke successor input"
@@ -11994,19 +12097,19 @@ fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() 
     let events = runtime.select_project_tab_events("tab-2");
 
     assert_eq!(events.len(), 4);
-    assert!(matches!(events[0].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[0].target, DispatchTarget::All));
     assert!(matches!(
         events[0].event,
         BackendEvent::WindowCanvasState { .. }
     ));
-    assert!(matches!(events[1].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[1].target, DispatchTarget::All));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
     ));
-    assert!(matches!(events[2].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[2].target, DispatchTarget::All));
     assert!(matches!(events[2].event, BackendEvent::PmStatus { .. }));
-    assert!(matches!(events[3].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[3].target, DispatchTarget::All));
     assert!(matches!(
         events[3].event,
         BackendEvent::LaunchWizardState { wizard: None }
@@ -12613,7 +12716,7 @@ fn app_runtime_select_project_tab_broadcasts_fresh_project_pm_status() {
         .iter()
         .find_map(|outbound| match (&outbound.target, &outbound.event) {
             (
-                DispatchTarget::Broadcast,
+                DispatchTarget::All,
                 BackendEvent::PmStatus {
                     loop_interval_secs, ..
                 },
@@ -12655,7 +12758,7 @@ fn app_runtime_close_active_tab_broadcasts_fallback_project_pm_status() {
     assert!(events.iter().any(|outbound| matches!(
         outbound,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::PmStatus {
                 available: true,
                 loop_interval_secs: 23,
@@ -12680,7 +12783,7 @@ fn app_runtime_close_last_tab_clears_pm_status_as_unavailable() {
     assert!(events.iter().any(|outbound| matches!(
         outbound,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::PmStatus {
                 available: false,
                 configured_agent_id,
@@ -12906,13 +13009,13 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
             .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
         "non-structural runtime status changes must not force a full workspace_state"
     );
-    assert!(matches!(events[0].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[0].target, DispatchTarget::All));
     assert!(matches!(
         &events[0].event,
         BackendEvent::WindowState { window_id: id, state }
             if id == &window_id && *state == WindowProcessStatus::Error
     ));
-    assert!(matches!(events[1].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[1].target, DispatchTarget::All));
     assert!(matches!(
         &events[1].event,
         BackendEvent::TerminalStatus { id, status, detail }
@@ -29070,7 +29173,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
     assert!(refreshed.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::ActiveWorkProjection { projection },
             ..
         } if projection.active_agents == 2
@@ -31624,7 +31727,7 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::WindowCanvasState { .. },
             ..
         }
@@ -40671,7 +40774,7 @@ fn process_line_events_broadcast_while_console_window_open_on_inactive_tab() {
     ));
 
     assert_eq!(events.len(), 1);
-    assert!(matches!(events[0].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[0].target, DispatchTarget::All));
     assert!(matches!(
         &events[0].event,
         BackendEvent::ProcessLine { line } if line.message == "gh api rate limit"
@@ -40740,7 +40843,7 @@ fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
     ));
 
     assert_eq!(events.len(), 1);
-    assert!(matches!(events[0].target, DispatchTarget::Broadcast));
+    assert!(matches!(events[0].target, DispatchTarget::All));
     assert!(matches!(
         &events[0].event,
         BackendEvent::LogEntryAppended { entry } if entry.message == "reader stalled"
@@ -43741,7 +43844,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::ProfileSnapshot { id, snapshot },
             ..
         } if id == &current_window_id
@@ -43757,7 +43860,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::ProfileSnapshot { id, snapshot },
             ..
         } if id == &sibling_window_id
@@ -55755,7 +55858,7 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
         assert!(events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::Broadcast,
+                target: DispatchTarget::All,
                 event: BackendEvent::BoardEntries { id, entries, .. },
                 ..
             } if *id == expected_id
@@ -56220,7 +56323,7 @@ fn migration_detected_broadcasts_only_for_pending_tabs() {
     assert!(matches!(
         &events[0],
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::MigrationDetected { tab_id, .. },
             ..
         } if tab_id == "tab-1"
@@ -56252,7 +56355,7 @@ fn handle_migration_done_repoints_tab_and_emits_broadcast() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::MigrationDone { tab_id, .. },
             ..
         } if tab_id == "tab-1"
@@ -56288,7 +56391,7 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::MigrationError { tab_id, recovery, phase, .. },
             ..
         } if tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
@@ -56367,7 +56470,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::CloneProjectDone {
                 workspace_home: emitted_workspace_home,
             },
@@ -56377,7 +56480,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::WindowCanvasState { .. },
             ..
         }
@@ -56385,7 +56488,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::PmStatus {
                 available: true,
                 ..
@@ -56596,7 +56699,7 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
     assert!(open_events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event: BackendEvent::MigrationDetected { .. },
             ..
         }
@@ -56627,7 +56730,7 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
         next_events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::Broadcast,
+                target: DispatchTarget::All,
                 event: BackendEvent::MigrationDetected { .. },
                 ..
             }
@@ -56687,7 +56790,7 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
         events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::Broadcast,
+                target: DispatchTarget::All,
                 event: BackendEvent::MigrationDetected { .. },
                 ..
             }
@@ -56698,7 +56801,7 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
         events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::Broadcast,
+                target: DispatchTarget::All,
                 event: BackendEvent::MigrationError {
                     phase,
                     recovery,
@@ -68241,7 +68344,7 @@ fn set_pm_loop_interval_accepts_minimum_and_preserves_live_pm() {
         .iter()
         .find_map(|outbound| match (&outbound.target, &outbound.event) {
             (
-                DispatchTarget::Broadcast,
+                DispatchTarget::All,
                 BackendEvent::PmStatus {
                     loop_interval_secs,
                     is_running,
@@ -72212,7 +72315,9 @@ fn issue_3777_tab_change_reuses_background_serialized_projection() {
         panic!("expected PreparedActiveWorkDispatch");
     };
     assert_eq!(tab_id, "tab-1");
-    assert!(matches!(target, DispatchTarget::Broadcast));
+    assert!(
+        matches!(target, DispatchTarget::Project(key) if Some(&key) == runtime.project_key_for_tab("tab-1"))
+    );
     assert!(Arc::ptr_eq(&payload, &dispatched));
 }
 
