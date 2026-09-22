@@ -358,11 +358,11 @@ impl Cache {
 
     /// Commit a snapshot and publish its validation receipt under one lock.
     ///
-    /// Issue #4392 AC-3: `write_snapshot` routes through
-    /// [`Cache::mutate_without_validation`], which deletes the receipt, so
-    /// every writer that used it left the entry unproven. Without a primitive
-    /// that does both, the only way to obtain a receipt was a full read path,
-    /// and an entry that path refused could not be repaired at all.
+    /// Issue #4392 AC-3: `write_snapshot` routes through the private
+    /// `mutate_without_validation` helper, which deletes the receipt, so every
+    /// writer that used it left the entry unproven. Without a primitive that
+    /// does both, the only way to obtain a receipt was a full read path, and an
+    /// entry that path refused could not be repaired at all.
     pub fn write_snapshot_with_receipt(
         &self,
         snapshot: &IssueSnapshot,
