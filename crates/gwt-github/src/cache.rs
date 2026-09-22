@@ -165,6 +165,25 @@ impl ValidationReceiptRenewal {
             }
         }
     }
+
+    /// The operation that recovers this state.
+    ///
+    /// Issue #4392 AC-4: [`Self::reason`] says what went wrong, which is not
+    /// the same as saying what to do. An operator who reached an outcome a
+    /// retry cannot clear was told only that a retry cannot clear it, and the
+    /// Issue stayed unreadable. Empty for [`Self::Renewed`], which is not a
+    /// refusal.
+    #[must_use]
+    pub fn remedy(self) -> &'static str {
+        match self {
+            Self::Renewed => "",
+            Self::GenerationChanged => "retry the operation",
+            Self::GenerationMissing | Self::EntryUnreadable | Self::SnapshotMismatch => {
+                "run issue.cache.repair for this Issue to rewrite the cache entry and republish \
+                 its receipt"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,6 +353,26 @@ impl Cache {
     ) -> Result<ValidationReceiptRenewal, CacheError> {
         self.with_issue_lock(expected.number, || {
             self.renew_validation_receipt_unlocked(expected, generation)
+        })
+    }
+
+    /// Commit a snapshot and publish its validation receipt under one lock.
+    ///
+    /// Issue #4392 AC-3: `write_snapshot` routes through the private
+    /// `mutate_without_validation` helper, which deletes the receipt, so every
+    /// writer that used it left the entry unproven. Without a primitive that
+    /// does both, the only way to obtain a receipt was a full read path, and an
+    /// entry that path refused could not be repaired at all.
+    pub fn write_snapshot_with_receipt(
+        &self,
+        snapshot: &IssueSnapshot,
+    ) -> Result<ValidationReceiptRenewal, CacheError> {
+        self.with_issue_lock(snapshot.number, || {
+            let generation = CacheGeneration(Uuid::new_v4().to_string());
+            self.mutate_without_validation_unlocked(snapshot.number, || {
+                self.write_snapshot_files_unlocked(snapshot, generation.clone())
+            })?;
+            self.renew_validation_receipt_unlocked(snapshot, Some(&generation))
         })
     }
 
