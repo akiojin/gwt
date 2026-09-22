@@ -105,6 +105,7 @@ windows-result = "0.100"
 test-gh-guard = ["dep:ctor"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 serde_yaml.workspace = true
 tracing-subscriber.workspace = true
 # SPEC-3016 FR-003: shared test helpers live in gwt-core::test_support; the
