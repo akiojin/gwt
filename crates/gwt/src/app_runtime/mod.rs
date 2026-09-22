@@ -1475,6 +1475,17 @@ pub struct AppRuntime {
     pub(crate) provider_quota_candidates: HashMap<String, ProviderQuotaCandidate>,
     pub(crate) released_provider_quota_notices:
         HashMap<String, gwt_core::usage::ProviderLimitNotice>,
+    /// Issue #4584: panes whose turn ended on a provider API error, keyed by
+    /// combined window id.
+    ///
+    /// No candidate stage and no settle window, unlike the quota maps above.
+    /// A quota hold releases the Monitor's launch slot, so it has to be sure
+    /// before it acts; this only changes what the pane reports. The detector
+    /// re-runs on every output chunk, so a pane that is still working clears
+    /// its own entry on the next write, and an entry can only survive while
+    /// output has genuinely stopped — which is exactly the state being
+    /// reported.
+    pub(crate) provider_api_error_holds: HashMap<String, gwt_core::usage::ProviderApiError>,
     /// Issue #3616: the newest account-level usage snapshot, used only to
     /// corroborate a screen notice. Never a trigger on its own: the poller is
     /// silent while no client is connected and Claude's account read is opt-in.
@@ -3005,6 +3016,7 @@ impl AppRuntime {
             recoverable_agent_error_windows: HashSet::new(),
             provider_quota_holds: HashMap::new(),
             provider_quota_candidates: HashMap::new(),
+            provider_api_error_holds: HashMap::new(),
             released_provider_quota_notices: HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
@@ -6336,6 +6348,21 @@ impl AppRuntime {
         }
     }
 
+    /// Issue #4584: why this window is held, when something is holding it.
+    ///
+    /// The two causes that mean a pane stopped but its process did not: the
+    /// provider's account ran out (Issue #3616) or a provider API error ended
+    /// the turn. Both already store a rendered detail; this is where they are
+    /// handed to a reader who cannot see the pane.
+    pub(crate) fn pane_hold_reason(&self, window_id: &str) -> Option<String> {
+        if !self.provider_quota_holds.contains_key(window_id)
+            && !self.provider_api_error_holds.contains_key(window_id)
+        {
+            return None;
+        }
+        self.window_details.get(window_id).cloned()
+    }
+
     /// Issue #4084 AC-1: the complete agent-window canvas of one project tab.
     ///
     /// Absence from this snapshot is what makes a launch binding dead, so it
@@ -6364,9 +6391,15 @@ impl AppRuntime {
                     review_dispatch: self
                         .issue_monitor_review_dispatch_windows
                         .contains(&window_id),
-                    window_id,
+                    // Issue #4584: only a real hold explains itself here.
+                    // `window_details` also carries ordinary launch chatter,
+                    // and a row that always says something is a row nobody
+                    // reads, so the reason is taken from the two maps that
+                    // mean the pane actually stopped.
+                    hold_reason: self.pane_hold_reason(&window_id),
                     issue_number,
                     status: window.status,
+                    window_id,
                 }
             })
             .collect();
@@ -9138,9 +9171,14 @@ impl AppRuntime {
         );
         // Issue #3616: applied on the shared base so every reader of a window's
         // status agrees with the state `recompute_window_state` persisted.
-        Some(gwt::window_state::apply_provider_quota_block(
+        let composed = gwt::window_state::apply_provider_quota_block(
             composed,
             self.provider_quota_holds.contains_key(window_id),
+        );
+        // Issue #4584: the same shared base, for the same reason.
+        Some(gwt::window_state::apply_provider_api_error_block(
+            composed,
+            self.provider_api_error_holds.contains_key(window_id),
         ))
     }
 
@@ -9326,6 +9364,10 @@ impl AppRuntime {
             composed,
             self.provider_quota_holds.contains_key(window_id),
         );
+        let composed = gwt::window_state::apply_provider_api_error_block(
+            composed,
+            self.provider_api_error_holds.contains_key(window_id),
+        );
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -9341,6 +9383,7 @@ impl AppRuntime {
         self.recoverable_agent_error_windows.remove(window_id);
         self.provider_quota_holds.remove(window_id);
         self.provider_quota_candidates.remove(window_id);
+        self.provider_api_error_holds.remove(window_id);
         self.released_provider_quota_notices.remove(window_id);
         self.board_all_view_windows.remove(window_id);
     }
