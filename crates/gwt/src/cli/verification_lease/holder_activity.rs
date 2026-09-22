@@ -7,7 +7,7 @@
 //! Issue #4561 corrects what this module used to assume — that the workload
 //! *is* the holder's process tree. A `spawn_host: daemon` holder launches its
 //! commands from the daemon instead, so its own tree is a socket wait however
-//! hard the verification works. [`HolderWorkload`] names where to look, and a
+//! hard the verification works. `HolderWorkload` names where to look, and a
 //! reading that could not find the work says `unknown` rather than `stalled`.
 //!
 //! Issue #4409 AC-8/9/10 settles *how* that question is asked. A single
