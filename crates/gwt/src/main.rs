@@ -57,7 +57,7 @@ mod work_events_ingest;
 mod workspace_session_registry;
 
 #[cfg(test)]
-pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+pub(crate) fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
     gwt_core::test_support::env_lock()
 }
 

@@ -4196,7 +4196,7 @@ pub(crate) mod tests {
         _runtime_path: gwt_core::test_support::ScopedEnvVar,
         // Declared last so environment guards restore their values before the
         // process-global environment lock is released.
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: gwt_core::test_support::EnvLockGuard,
     }
 
     fn env_guard() -> WorkspaceTestEnvGuard {

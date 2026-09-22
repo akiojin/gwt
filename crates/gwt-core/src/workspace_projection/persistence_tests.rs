@@ -7519,7 +7519,7 @@ fn unassigned_agent(session_id: &str, agent_id: &str) -> WorkspaceAgentSummary {
     a
 }
 
-fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+fn lock_test_env() -> crate::test_support::EnvLockGuard {
     crate::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

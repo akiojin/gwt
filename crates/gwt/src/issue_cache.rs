@@ -1820,7 +1820,7 @@ exit 1
     /// tests (and the fake-gh one) so neither family sees this test's fake
     /// disappear from under it.
     fn gh_env_locks() -> (
-        std::sync::MutexGuard<'static, ()>,
+        gwt_core::test_support::EnvLockGuard,
         std::sync::MutexGuard<'static, ()>,
     ) {
         let env = crate::env_test_lock()

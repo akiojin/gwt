@@ -1130,7 +1130,7 @@ impl Drop for ScopedEnvVar {
     }
 }
 
-fn env_test_lock() -> &'static Mutex<()> {
+fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
     crate::env_test_lock()
 }
 

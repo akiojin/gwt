@@ -10,10 +10,11 @@
 //! `crates/gwt/src/cli/test_support.rs`.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::OsString,
+    marker::PhantomData,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{LockResult, Mutex, MutexGuard, OnceLock, PoisonError},
 };
 #[cfg(windows)]
 use std::{
@@ -31,9 +32,83 @@ use std::{
 
 /// Process-wide lock serializing tests that read or mutate environment
 /// variables. Lock this before constructing a [`ScopedEnvVar`].
-pub fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+///
+/// The lock is reentrant (Issue #4580): a test body may hold it and still call
+/// a helper that takes it again on the same thread. `std::sync::Mutex` is not
+/// reentrant, so the plain mutex this used to return deadlocked in that shape.
+pub fn env_lock() -> &'static EnvLock {
+    static LOCK: OnceLock<EnvLock> = OnceLock::new();
+    LOCK.get_or_init(|| EnvLock {
+        inner: Mutex::new(()),
+    })
+}
+
+thread_local! {
+    /// How many [`EnvLockGuard`]s the current thread holds. Only the
+    /// outermost one owns the underlying mutex guard.
+    static ENV_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+    /// The underlying guard, parked here for the whole reentrant hold.
+    static ENV_LOCK_HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+}
+
+/// Reentrant counterpart of `Mutex<()>` backing [`env_lock`].
+///
+/// [`EnvLock::lock`] keeps the `LockResult` shape of `Mutex::lock`, so
+/// `.lock().unwrap()` and `.lock().unwrap_or_else(PoisonError::into_inner)`
+/// keep compiling unchanged at every call site.
+pub struct EnvLock {
+    inner: Mutex<()>,
+}
+
+impl EnvLock {
+    /// Acquires the lock, blocking only when another *thread* holds it.
+    ///
+    /// Mirrors `Mutex::lock`: `Err` carries a usable guard and means a thread
+    /// panicked while holding the lock. Nested acquisitions report the same
+    /// poison state as the outermost one, since the mutex cannot become
+    /// poisoned while this thread holds it.
+    pub fn lock(&'static self) -> LockResult<EnvLockGuard> {
+        let depth = ENV_LOCK_DEPTH.with(Cell::get);
+        if depth == 0 {
+            let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            ENV_LOCK_HELD.with(|held| *held.borrow_mut() = Some(guard));
+        }
+        ENV_LOCK_DEPTH.with(|d| d.set(depth + 1));
+
+        let guard = EnvLockGuard {
+            _not_send: PhantomData,
+        };
+        if self.inner.is_poisoned() {
+            Err(PoisonError::new(guard))
+        } else {
+            Ok(guard)
+        }
+    }
+
+    /// Mirrors `Mutex::is_poisoned`.
+    pub fn is_poisoned(&self) -> bool {
+        self.inner.is_poisoned()
+    }
+}
+
+/// Guard returned by [`EnvLock::lock`]. Releasing the outermost one releases
+/// the underlying mutex; inner ones only unwind the reentrancy depth.
+pub struct EnvLockGuard {
+    // The underlying `MutexGuard` lives in thread-local storage, so this guard
+    // must not travel to another thread.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for EnvLockGuard {
+    fn drop(&mut self) {
+        let depth = ENV_LOCK_DEPTH.with(Cell::get);
+        debug_assert!(depth > 0, "EnvLockGuard dropped without a matching lock()");
+        ENV_LOCK_DEPTH.with(|d| d.set(depth.saturating_sub(1)));
+        if depth <= 1 {
+            let released = ENV_LOCK_HELD.with(|held| held.borrow_mut().take());
+            drop(released);
+        }
+    }
 }
 
 thread_local! {
