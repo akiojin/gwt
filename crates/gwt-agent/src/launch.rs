@@ -1160,6 +1160,17 @@ pub struct LaunchConfig {
     /// feedback wiring but must not take over (or be gated by) the
     /// implementing session's execution lifecycle.
     pub suppress_execution_control: bool,
+    /// SPEC-3248 FR-240: this launch explicitly asks to start follow-up work
+    /// on its linked owner.
+    ///
+    /// It is the only thing that creates a fresh producing generation for a
+    /// *delivered* owner — one that is closed and whose source state the
+    /// configured base already contains. Without it such an owner opens for
+    /// Inspection: readable, but materializing no execution, Work, or
+    /// obligation, so an already shipped Issue cannot become terminally
+    /// Blocked merely because it has no new PR to show. It never reopens the
+    /// GitHub Issue; materially different scope belongs to a new owner.
+    pub explicit_follow_up: bool,
     pub execution_intent: ExecutionLaunchIntent,
     /// Issue #4217 FR-002: who started this launch. Only the launcher knows,
     /// so it is stamped here and persisted onto the Session rather than being
@@ -1227,6 +1238,7 @@ pub struct AgentLaunchBuilder {
     is_ephemeral: bool,
     ephemeral_base_ref: Option<String>,
     suppress_execution_control: bool,
+    explicit_follow_up: bool,
     execution_intent: ExecutionLaunchIntent,
     launch_route: LaunchRoute,
 }
@@ -1268,6 +1280,7 @@ impl AgentLaunchBuilder {
             is_ephemeral: false,
             ephemeral_base_ref: None,
             suppress_execution_control: false,
+            explicit_follow_up: false,
             execution_intent: ExecutionLaunchIntent::Automatic,
             launch_route: LaunchRoute::Manual,
         }
@@ -1286,6 +1299,13 @@ impl AgentLaunchBuilder {
     /// Execution Control Record is materialized for it.
     pub fn suppress_execution_control(mut self) -> Self {
         self.suppress_execution_control = true;
+        self
+    }
+
+    /// SPEC-3248 FR-240: ask this launch to start follow-up work on its linked
+    /// owner even when that owner is already delivered.
+    pub fn explicit_follow_up(mut self) -> Self {
+        self.explicit_follow_up = true;
         self
     }
 
@@ -1664,6 +1684,7 @@ impl AgentLaunchBuilder {
             is_ephemeral: self.is_ephemeral,
             ephemeral_base_ref: self.ephemeral_base_ref,
             suppress_execution_control: self.suppress_execution_control,
+            explicit_follow_up: self.explicit_follow_up,
             execution_intent: self.execution_intent,
             launch_route: self.launch_route,
         }

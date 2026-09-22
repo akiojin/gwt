@@ -1943,6 +1943,62 @@ mod tests {
         assert_eq!(env.pr_ready_call_log, vec![7]);
     }
 
+    /// SPEC #3248 FR-243 (Issue #4545 AC-4): a trusted No Action is a
+    /// successful *non*-delivery, so it must not open the Ready PR gate.
+    ///
+    /// The distinction matters because No Action releases Stop, exactly like
+    /// `execution.complete` does. If it also released the PR gate, a session
+    /// that proved it had nothing to deliver could ready a PR with no
+    /// verification evidence behind it at all.
+    #[test]
+    fn a_no_action_never_opens_the_ready_pr_gate() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated gwt home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().expect("no-action PR authority repository");
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+            .current_dir(worktree.path())
+            .status()
+            .unwrap()
+            .success());
+        let identity = initialize_pr_generation_authority(worktree.path(), "session-no-action");
+        persist_pr_generation_session(worktree.path(), "session-no-action", identity);
+        seed_pr_generation_work(worktree.path(), "session-no-action");
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "session-no-action",
+        );
+
+        assert!(matches!(
+            crate::cli::delivered_owner::record_no_action(
+                worktree.path(),
+                "session-no-action",
+                "issue #42 was already delivered before this launch",
+            )
+            .expect("record No Action for a delivered owner"),
+            crate::cli::delivered_owner::NoActionOutcome::Recorded(_)
+        ));
+
+        let refusal = crate::cli::execution_state::pr_handoff_refusal(worktree.path(), true)
+            .expect("a No Action must not satisfy the Ready PR gate");
+        assert!(
+            refusal.contains("PR handoff refused"),
+            "the Ready gate still refuses for want of verification evidence: {refusal}"
+        );
+        // A draft handoff stays available mid-work, exactly as before: No
+        // Action changed no PR authority, only the Stop and obligation state.
+        assert_eq!(
+            crate::cli::execution_state::pr_handoff_refusal(worktree.path(), false),
+            None,
+            "No Action must not tighten the unrelated draft path either"
+        );
+    }
+
     #[test]
     fn pr_mutations_allow_the_exact_completed_generation_session() {
         let _env_lock = crate::env_test_lock()
