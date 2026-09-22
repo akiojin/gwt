@@ -220,6 +220,45 @@ pub(crate) fn locate(worktree: &Path) -> (DaemonAvailability, Option<DaemonEndpo
     }
 }
 
+/// Every live daemon in this project, by pid (Issue #4561).
+///
+/// A holder whose lease records `spawn_host: daemon` launched its commands
+/// from one of these instead of from its own process tree, so this is where a
+/// waiter has to look for the work the lease is protecting. Liveness is the
+/// only filter: the protocol version decides whether a daemon can *accept* a
+/// new workload, not whether it is already running one.
+pub(crate) fn live_daemon_pids(worktree: &Path) -> Vec<u32> {
+    let Ok(scope) = RuntimeScope::from_project_root(worktree, RuntimeTarget::Host) else {
+        return Vec::new();
+    };
+    let gwt_home = gwt_core::paths::gwt_home();
+    let Ok(entries) = std::fs::read_dir(scope.daemon_dir(&gwt_home)) else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(payload) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(endpoint) = serde_json::from_slice::<DaemonEndpoint>(&payload) else {
+            continue;
+        };
+        if endpoint.scope.repo_hash != scope.repo_hash
+            || endpoint.scope.target != scope.target
+            || !endpoint.has_live_owner(crate::process::is_process_alive)
+            || pids.contains(&endpoint.pid)
+        {
+            continue;
+        }
+        pids.push(endpoint.pid);
+    }
+    pids
+}
+
 /// Run one verification command on the daemon and wait for it to finish.
 pub(crate) fn run(
     endpoint: &DaemonEndpoint,
