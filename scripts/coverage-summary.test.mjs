@@ -151,7 +151,10 @@ test("(a) healthy profiles aggregate with the strict merge", () => {
   assert.equal(reports.length, 1);
   assert.ok(!reports[0].includes("--failure-mode"), reports[0].join(" "));
   assert.ok(!reports[0].includes("--workspace"), "report does not accept --workspace");
-  assert.ok(reports[0].includes("--all-features"), "report keeps the run's feature scope");
+  assert.ok(
+    !reports[0].includes("--all-features"),
+    "report rejects feature flags: invalid option '--all-features' for subcommand 'report'",
+  );
   assert.ok(fs.existsSync(box.output));
   assert.match(result.text, /coverage-summary: PASS/);
 });
@@ -167,7 +170,11 @@ test("(b) a truncated profile is reported apart from tests and re-aggregated onc
   const reports = reportCalls(result.calls);
   assert.equal(reports.length, 1, "exactly one aggregation, the conservative one");
   assert.deepEqual(reports[0].slice(reports[0].indexOf("--failure-mode"), reports[0].indexOf("--failure-mode") + 2), ["--failure-mode", "all"]);
-  assert.ok(reports[0].includes("gwt-core"), "report keeps the run's package scope");
+  assert.deepEqual(
+    reports[0].slice(0, 6),
+    ["llvm-cov", "report", "-p", "gwt-core", "-p", "gwt"],
+    "report keeps the run's package scope",
+  );
   assert.match(result.text, /RECOVERED \[profile-truncated\]/);
   assert.match(result.text, /tests passed/);
   assert.match(result.text, /gwt-2-111_0\.profraw/);

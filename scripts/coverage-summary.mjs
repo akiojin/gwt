@@ -162,8 +162,12 @@ function resolveProfileDir(cargo) {
   return path.join(JSON.parse(metadata.stdout).target_directory, "llvm-cov-target");
 }
 
-// `cargo llvm-cov report` takes the run's package and feature scope but not
-// workspace-wide selection, which it already implies.
+// `cargo llvm-cov report` must see the run's package scope and build profile,
+// but refuses the test run's other selectors (`--workspace`, feature and
+// target flags: "invalid option '--all-features' for subcommand 'report'").
+const REPORT_FLAGS = new Set(["-r", "--release"]);
+const REPORT_OPTIONS = new Set(["-p", "--package", "--profile", "--manifest-path"]);
+
 function reportScope(args) {
   const scope = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -171,14 +175,13 @@ function reportScope(args) {
     if (arg === "--") {
       break;
     }
-    if (arg === "--workspace" || arg === "--all" || arg.startsWith("--exclude=")) {
-      continue;
-    }
-    if (arg === "--exclude") {
+    const option = arg.split("=", 1)[0];
+    if (REPORT_FLAGS.has(arg) || (arg.includes("=") && REPORT_OPTIONS.has(option))) {
+      scope.push(arg);
+    } else if (REPORT_OPTIONS.has(arg) && i + 1 < args.length) {
+      scope.push(arg, args[i + 1]);
       i += 1;
-      continue;
     }
-    scope.push(arg);
   }
   return scope;
 }
