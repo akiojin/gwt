@@ -1894,7 +1894,24 @@ fn advance_one_autonomous_issue(
             else {
                 return Ok(()); // verdict not back yet → wait
             };
-            match crate::issue_monitor_gate::route_autonomous_gate(&inputs) {
+            // Issue #4544 AC-3: a launch that stopped at a provider permission
+            // prompt must not reach Deliver or merge. The PR gates already
+            // refuse Ready for such an execution, so this closes the one
+            // remaining order — a PR readied before the pane prompted.
+            //
+            // Held rather than remediated: a prompt regression is an
+            // environment fact about the launch, and Issue #3944 AC-1 reserves
+            // the retry counter for the agent's own failures.
+            let mut routed = crate::issue_monitor_gate::route_autonomous_gate(&inputs);
+            if matches!(routed, crate::issue_monitor_gate::GateAction::Deliver) {
+                if let Some(reason) = crate::cli::permission_readiness::owner_settlement_refusal(
+                    repo_path,
+                    issue_number,
+                ) {
+                    routed = crate::issue_monitor_gate::GateAction::Hold(reason);
+                }
+            }
+            match routed {
                 crate::issue_monitor_gate::GateAction::Deliver => {
                     // Audit: a daemon-signed authorization record bound to the
                     // reviewed SHA (control-plane proof the gate authorized it).
@@ -2984,6 +3001,119 @@ mod tests {
             "Issue Monitor scan stalled; last scan at 2000-01-01T00:00:00Z"
         );
         assert_eq!(status.payload["last_scan_at"], "2000-01-01T00:00:00Z");
+    }
+
+    /// Issue #4544 AC-2: a provider that cannot run without permission prompts
+    /// is stopped above the claim, so nothing the AC forbids is created — no
+    /// GitHub claim comment, no launch request, no active slot — and the inbox
+    /// says why in a form an operator can act on.
+    #[test]
+    fn permission_readiness_blocks_an_unsupported_provider_before_anything_is_created() {
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        // OpenClaw exposes neither a skip flag nor a permission overlay.
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+
+        let launches = monitor.claim_next_launch_requests_with_probe(
+            &client,
+            "host:1",
+            "2026-07-02T00:00:10Z",
+            1,
+            |_| false,
+        );
+
+        assert!(
+            launches.is_empty(),
+            "an unsupported provider must produce no launch request"
+        );
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "a blocked launch must not consume an active slot"
+        );
+        assert!(
+            monitor.take_pending_launch_requests().is_empty(),
+            "nothing may be queued for the GUI to materialize either"
+        );
+        assert!(
+            client.comments(gwt_github::IssueNumber(42)).is_empty(),
+            "no GitHub claim comment may be written for a blocked launch"
+        );
+
+        let item = monitor.inbox_item(42).expect("inbox item");
+        assert_eq!(
+            item.state,
+            MonitorInboxState::NotReady,
+            "the block is non-terminal and re-evaluated on every scan"
+        );
+        let reason = item
+            .exclusion_reason
+            .as_deref()
+            .expect("the inbox says why it was excluded");
+        assert!(reason.contains("pre_launch_block"), "{reason}");
+        assert!(reason.contains("openclaw"), "{reason}");
+        assert!(reason.contains("Recovery:"), "{reason}");
+        for misleading in ["implementation started", "tests ran"] {
+            assert!(
+                !reason.to_ascii_lowercase().contains(misleading),
+                "the inbox reason must not imply {misleading}: {reason}"
+            );
+        }
+    }
+
+    /// The same scan with a supported provider still launches — the gate must
+    /// refuse a specific fault, not the mechanism.
+    #[test]
+    fn permission_readiness_leaves_a_supported_provider_launching() {
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+
+        let launches = monitor.claim_next_launch_requests_with_probe(
+            &client,
+            "host:1",
+            "2026-07-02T00:00:10Z",
+            1,
+            |_| false,
+        );
+
+        assert_eq!(
+            launches.iter().map(|l| l.issue_number).collect::<Vec<_>>(),
+            vec![42]
+        );
+    }
+
+    /// A launch profile naming `agent_id`, with every other field at the value
+    /// a freshly saved profile carries.
+    fn unsupported_launch_profile(agent_id: &str) -> crate::IssueMonitorLaunchProfile {
+        crate::IssueMonitorLaunchProfile {
+            agent_id: agent_id.to_string(),
+            model: None,
+            reasoning: None,
+            version: None,
+            session_mode: gwt_agent::SessionMode::default(),
+            skip_permissions: false,
+            fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::default(),
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),
+            windows_shell: None,
+            prefer_for: Vec::new(),
+        }
     }
 
     #[test]
