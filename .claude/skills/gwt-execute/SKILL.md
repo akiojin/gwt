@@ -67,9 +67,12 @@ included):
   `params.missing_verification`. Blocked is not done — report the blocker.
 - already delivered with nothing to produce: JSON operation
   `execution.no_action` with a non-empty `params.reason`. No Action is a
-  successful *non-delivery*: it is neither Completed nor Blocked, so it never
-  claims the work shipped and it never files a blocker against an owner that
-  has nothing wrong with it.
+  successful *non-delivery*: as an outcome it is neither Completed nor Blocked,
+  so it never claims the work shipped and it never files a blocker against an
+  owner that has nothing wrong with it. The trusted audit is what records that
+  outcome; the execution record itself settles terminally, because a gwtd that
+  predates `execution.no_action` knows only the record's statuses and would
+  otherwise keep blocking Stop on a correctly settled execution.
 
 `execution.no_action` exists for exactly one situation: a producing generation
 was materialized for a **delivered owner** — a closed owner whose whole source
@@ -83,10 +86,12 @@ itself and refuses otherwise, so it cannot be used to skip real work:
   source surface cannot be proven at all;
 - every refusal changes nothing — no execution record, Work, Session, Git, or
   obligation byte moves;
-- on success it writes one machine-local integrity-hashed audit, settles this
-  action's own obligations, and leaves the predecessor record byte-identical.
-  It commits nothing, pushes nothing, requires no verification record, and
-  creates or mutates no PR.
+- on success it writes one machine-local integrity-hashed audit that preserves
+  the predecessor record byte-identically, settles this action's own
+  obligations, and settles the execution so that every reader — including a
+  gwtd that predates `execution.no_action` — sees a settled execution rather
+  than an Active one. It commits nothing, pushes nothing, requires no
+  verification record, and creates or mutates no PR.
 
 A delivered owner is not a blocker: never reach for `execution.blocked` because
 an owner turned out to be already shipped. Conversely, never reach for
