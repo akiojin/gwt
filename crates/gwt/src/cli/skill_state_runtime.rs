@@ -31,10 +31,23 @@ pub fn run<E: CliEnv>(
     verb: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    run_with_start_evidence(env, action, skill_name, skill_display, verb, out, None)
+}
+
+pub(super) fn run_with_start_evidence<E: CliEnv>(
+    env: &mut E,
+    action: SkillStateAction,
+    skill_name: &str,
+    skill_display: &str,
+    verb: &str,
+    out: &mut String,
+    start_evidence: Option<gwt_core::skill_state::SkillStartEvidence>,
+) -> Result<i32, SpecOpsError> {
     let worktree = env.repo_path().to_path_buf();
     match action {
         SkillStateAction::Start { spec } => {
             let state = SkillState {
+                start_evidence,
                 active: true,
                 owner_spec: Some(spec),
                 started_at: Utc::now(),

@@ -18,9 +18,19 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     if let SkillStateAction::Start { spec } = &action {
-        if !managed_build_start_preflight(env, *spec, out) {
+        let mut start_evidence = None;
+        if !managed_build_start_preflight(env, *spec, out, &mut start_evidence) {
             return Ok(2);
         }
+        return skill_state_runtime::run_with_start_evidence(
+            env,
+            action,
+            SKILL_NAME,
+            SKILL_DISPLAY,
+            VERB,
+            out,
+            start_evidence,
+        );
     }
     let mut completion_verification_hash = None;
     let mut completion_session_id = None;
@@ -152,7 +162,12 @@ pub(super) fn run<E: CliEnv>(
     run_after_quarantine_precheck(env, action, out, None, None)
 }
 
-fn managed_build_start_preflight<E: CliEnv>(env: &E, spec: u64, out: &mut String) -> bool {
+fn managed_build_start_preflight<E: CliEnv>(
+    env: &E,
+    spec: u64,
+    out: &mut String,
+    start_evidence: &mut Option<gwt_core::skill_state::SkillStartEvidence>,
+) -> bool {
     let current_session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .unwrap_or_default()
         .trim()
@@ -180,6 +195,11 @@ fn managed_build_start_preflight<E: CliEnv>(env: &E, spec: u64, out: &mut String
                 "build.abort",
             );
             return false;
+        }
+        Ok(Some(state)) if state.active => {
+            // An idempotent restart of the same lifecycle must not erase a
+            // previously recorded compatibility path after the Host upgrades.
+            *start_evidence = state.start_evidence;
         }
         Ok(Some(_)) | Ok(None) => {}
         Err(_) => {
@@ -280,6 +300,47 @@ fn managed_build_start_preflight<E: CliEnv>(env: &E, spec: u64, out: &mut String
     match crate::daemon_runtime::send_work_materialization_probe_via_agent_bridge(&target, &request)
     {
         Ok(_) => true,
+        Err(crate::daemon_runtime::AgentBridgeRequestError::OperationUnavailable) => {
+            // Only a Host runtime can read the same durable authority as its
+            // older Host. Docker must not infer authority from container files.
+            let recovery = crate::agent_project_state::validated_workspace_recovery_session(
+                env.repo_path(),
+                &request.claimed_session_id,
+            );
+            let receipt = match recovery {
+                Ok(Some(crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(
+                    recovery,
+                ))) if recovery.session.docker_runtime_binding.is_none() => recovery
+                    .session
+                    .execution_binding
+                    .as_ref()
+                    .and_then(|binding| {
+                        crate::probe_bound_authenticated_work_materialization(
+                            &recovery.project_state_root,
+                            &request.claimed_session_id,
+                            binding,
+                            request.clone(),
+                        )
+                        .ok()
+                    }),
+                _ => None,
+            };
+            let Some(receipt) = receipt else {
+                push_start_preflight_refusal(
+                    out,
+                    "host_probe_unavailable_unverified_work",
+                    "Host probe returned HTTP 404 and exact local Host Work authority could not be verified; inspect execution.status for workspace.ensure or Host update/relaunch recovery",
+                    "execution.status",
+                );
+                return false;
+            };
+            *start_evidence = Some(gwt_core::skill_state::SkillStartEvidence {
+                reason: "host_probe_unavailable_404".to_string(),
+                work_id: receipt.work_id,
+            });
+            out.push_str("build: host_probe_unavailable_404; Host probe was not used; exact local Host Work verified\n");
+            true
+        }
         Err(crate::daemon_runtime::AgentBridgeRequestError::Rejected(error)) => {
             push_start_preflight_refusal(
                 out,
@@ -1184,6 +1245,7 @@ mod tests {
             &fixture.repo,
             SKILL_NAME,
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: Some(3327),
                 started_at: chrono::Utc::now(),
@@ -1358,6 +1420,7 @@ mod tests {
                 &git.repo,
                 SKILL_NAME,
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(OWNER_NUMBER),
                     started_at: now,
@@ -1616,6 +1679,7 @@ mod tests {
                 &worktree,
                 SKILL_NAME,
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(OWNER_NUMBER),
                     started_at: now,
@@ -1899,6 +1963,7 @@ mod tests {
             repo.path(),
             SKILL_NAME,
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: Some(3248),
                 started_at: chrono::Utc::now(),
@@ -2084,6 +2149,7 @@ mod tests {
             &git.repo,
             SKILL_NAME,
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: Some(3431),
                 started_at: chrono::Utc::now(),
@@ -3277,6 +3343,7 @@ mod tests {
             &fixture.repo,
             SKILL_NAME,
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec,
                 started_at: chrono::Utc::now(),
@@ -3309,6 +3376,157 @@ mod tests {
         let mut output = String::new();
         let code = run(&mut env, action, &mut output).expect("run build action");
         (code, output, fixture)
+    }
+
+    #[test]
+    fn managed_build_start_old_host_records_verified_local_probe() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        let state_path = gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME);
+        std::fs::remove_file(&state_path).unwrap();
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        let before = std::fs::read(&works_path).unwrap();
+        let server = TerminalBridgeServer::start(StatusCode::NOT_FOUND, serde_json::Value::Null);
+        with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut output = String::new();
+            assert_eq!(
+                run(
+                    &mut env,
+                    SkillStateAction::Start { spec: 3327 },
+                    &mut output
+                )
+                .unwrap(),
+                0,
+                "{output}"
+            );
+            assert!(output.contains("host_probe_unavailable_404"), "{output}");
+            let upgraded = TerminalBridgeServer::start(
+                StatusCode::OK,
+                serde_json::json!({
+                    "schema_version": 1, "owner_number": 3327, "work_id": fixture.work_id,
+                }),
+            );
+            {
+                let _url =
+                    ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, &upgraded.forward_url);
+                assert_eq!(
+                    run(
+                        &mut env,
+                        SkillStateAction::Start { spec: 3327 },
+                        &mut output
+                    )
+                    .unwrap(),
+                    0
+                );
+            }
+            upgraded.receive();
+            assert_eq!(
+                run(
+                    &mut env,
+                    SkillStateAction::Phase {
+                        spec: 3327,
+                        label: "green".into()
+                    },
+                    &mut output
+                )
+                .unwrap(),
+                0
+            );
+            // Shared finalization must retain the start evidence as well.
+            assert_eq!(
+                skill_state_runtime::run(
+                    &mut env,
+                    SkillStateAction::Complete { spec: 3327 },
+                    SKILL_NAME,
+                    SKILL_DISPLAY,
+                    VERB,
+                    &mut output,
+                )
+                .unwrap(),
+                0
+            );
+        });
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
+        assert_eq!(
+            state["start_evidence"]["reason"],
+            "host_probe_unavailable_404"
+        );
+        assert_eq!(state["start_evidence"]["work_id"], fixture.work_id);
+        assert_eq!(std::fs::read(works_path).unwrap(), before);
+        server.receive();
+    }
+
+    #[test]
+    fn managed_build_start_old_host_never_bypasses_invalid_work_or_other_http_errors() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        for (status, invalid) in [
+            (StatusCode::NOT_FOUND, "missing"),
+            (StatusCode::NOT_FOUND, "terminal"),
+            (StatusCode::NOT_FOUND, "stale"),
+            (StatusCode::NOT_FOUND, "docker"),
+            (StatusCode::INTERNAL_SERVER_ERROR, ""),
+            (StatusCode::UNAUTHORIZED, ""),
+        ] {
+            let fixture = BoundTerminalFixture::new();
+            let state_path = gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME);
+            std::fs::remove_file(&state_path).unwrap();
+            let works_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+            match invalid {
+                "missing" => std::fs::remove_file(&works_path).unwrap(),
+                "terminal" => fixture.terminalize_canonical_done(),
+                "stale" | "docker" => {
+                    let mut session = fixture.session.clone();
+                    if invalid == "docker" {
+                        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+                    } else {
+                        session
+                            .execution_binding
+                            .as_mut()
+                            .unwrap()
+                            .identity
+                            .generation_id = "stale-generation".into();
+                    }
+                    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+                }
+                _ => {}
+            }
+            let before = std::fs::read(&works_path).ok();
+            let server = TerminalBridgeServer::start(status, serde_json::Value::Null);
+            with_terminal_bridge_env(&fixture, &server, |_| {
+                let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+                let mut output = String::new();
+                assert_ne!(
+                    run(
+                        &mut env,
+                        SkillStateAction::Start { spec: 3327 },
+                        &mut output
+                    )
+                    .unwrap(),
+                    0,
+                    "{status}: {output}"
+                );
+                assert!(
+                    !state_path.exists(),
+                    "{status}: no orphan build may be created"
+                );
+            });
+            assert_eq!(std::fs::read(&works_path).ok(), before);
+            server.receive();
+        }
     }
 
     fn run_start_action(
@@ -3810,6 +4028,7 @@ mod tests {
             &git.repo,
             SKILL_NAME,
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: None,
                 started_at: chrono::Utc::now(),

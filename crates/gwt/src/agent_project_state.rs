@@ -5658,6 +5658,7 @@ mod tests {
                 repo,
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
                     started_at: Utc::now(),
@@ -8291,6 +8292,7 @@ mod tests {
                         repo,
                         "build-spec",
                         &gwt_core::skill_state::SkillState {
+                            start_evidence: None,
                             active: true,
                             owner_spec: Some(terminal_binding.owner_number),
                             started_at: Utc::now(),
@@ -8356,6 +8358,7 @@ mod tests {
                 repo,
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
                     started_at: Utc::now(),
@@ -8435,6 +8438,7 @@ mod tests {
                         repo,
                         "build-spec",
                         &gwt_core::skill_state::SkillState {
+                            start_evidence: None,
                             active: true,
                             owner_spec: Some(if case == "owner-mismatch" {
                                 binding.owner_number + 1
