@@ -93,6 +93,7 @@ impl LaunchWizardState {
             hydration_error: None,
             linked_issue_number: context.linked_issue_number,
             start_method_selected: false,
+            permission_launch_source: gwt_agent::PermissionLaunchSource::StartWork,
             manual_setup_initialized: false,
             runtime_confirmed: false,
             settings_revisited: false,
@@ -892,6 +893,10 @@ impl LaunchWizardState {
                 self.apply_latest_start_settings();
                 self.launch_path = LaunchWizardLaunchPath::ManualSetup;
                 self.start_method_selected = true;
+                // Issue #4543 AC-3: this launch's permission preference came
+                // from the stored last settings, so a forced skip can say so.
+                self.permission_launch_source =
+                    gwt_agent::PermissionLaunchSource::LaunchWizardLastSettings;
                 self.finish_launch_request();
             }
             LaunchWizardStartMethodKind::ContinueLastSession => {

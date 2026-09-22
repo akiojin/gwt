@@ -1168,6 +1168,11 @@ struct FinalizedAgentCapabilityLaunch<'a> {
     execution_entrypoint: &'a str,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     container_runtime: Option<&'a gwt_docker::detect::ResolvedContainerRuntime>,
+    /// Issue #4543 AC-5: the Permission Mode Decision this launch was
+    /// materialized under, recorded onto the Execution Control Record this
+    /// install creates. `None` for the test installs that stand a record up
+    /// without a `LaunchConfig`.
+    permission_decision: Option<&'a gwt_agent::PermissionModeDecision>,
 }
 
 impl FinalizedAgentCapabilityLaunch<'_> {
@@ -1196,6 +1201,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             execution_entrypoint,
             runtime_target,
             container_runtime,
+            permission_decision,
         } = self;
         if let Some(binding) = prepared_continuation {
             if producing_owner.is_some() {
@@ -1770,13 +1776,14 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             None,
             None,
         )?;
-        gwt::cli::execution_state::materialize_at_launch(
+        gwt::cli::execution_state::materialize_at_launch_with_permission_decision(
             worktree,
             owner.kind,
             owner.number,
             &session.id,
             execution_entrypoint,
             false,
+            permission_decision,
         )
         .map_err(|error| error.to_string())?;
         gwt::cli::execution_state::ensure_generation_ledger(
@@ -5886,6 +5893,9 @@ impl AppRuntime {
                 producing_owner,
                 config.explicit_follow_up,
             );
+            // Issue #4543 AC-5: cloned out of `config` so the record write can
+            // borrow it while the install still holds `&mut config.env_vars`.
+            let permission_decision = config.permission_decision.clone();
             let capability_install = FinalizedAgentCapabilityLaunch {
                 issuer: agent_capability_issuer.as_ref(),
                 sessions_dir: &sessions_dir,
@@ -5900,6 +5910,7 @@ impl AppRuntime {
                 container_runtime: docker_launch_binding
                     .as_ref()
                     .map(DockerLaunchBinding::runtime),
+                permission_decision: Some(&permission_decision),
             }
             .install_with_prepared_claim(
                 &mut config.env_vars,
@@ -7097,6 +7108,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("install exact bound launch authority");
@@ -7153,6 +7165,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("materialize predecessor generation");
@@ -7225,6 +7238,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7259,6 +7273,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a concurrent launch must start beside a live holder");
@@ -7320,6 +7335,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect("prepare another concurrent candidate");
@@ -7411,6 +7427,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7446,6 +7463,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a concurrent launch must start beside a live holder");
@@ -7552,6 +7570,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7587,6 +7606,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must supersede an unreachable holder");
@@ -7648,6 +7668,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7709,6 +7730,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must self-heal a lost pointer instead of failing before the PTY");
@@ -7778,6 +7800,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7840,6 +7863,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must start a successor over a Completed generation");
@@ -7935,6 +7959,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut genesis_env)
         .expect("materialize the first producing generation");
@@ -7990,6 +8015,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a fresh launch must supersede a holder with exact terminal proof");
@@ -8096,6 +8122,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("install rebound continuation authority");
@@ -8147,6 +8174,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("materialize predecessor generation");
@@ -8273,6 +8301,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("a SuccessorCreated resume must install its already-active authority");
@@ -8327,6 +8356,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("a stale rebound binding must fail closed");
@@ -8373,6 +8403,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("rebound continuation must not mint genesis authority");
@@ -8409,6 +8440,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut predecessor_env)
         .expect("materialize predecessor generation");
@@ -8489,6 +8521,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "resume",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("issue exact Prepared capability");
@@ -8551,6 +8584,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect("materialize predecessor generation");
@@ -8633,6 +8667,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "resume",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("capability issuance must reject a same-id replacement");
@@ -8727,6 +8762,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #1974",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("prepare a fresh lifetime from the generation-less Blocked predecessor");
@@ -8817,6 +8853,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect("materialize predecessor generation");
@@ -8869,6 +8906,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect("explicit fresh launch must prepare a new lifetime from legacy Blocked");
@@ -8934,6 +8972,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
             container_runtime: Some(&runtime),
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("invalid Docker hook endpoint must fail");
@@ -8990,6 +9029,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("producing launch requires its Host capability issuer");
@@ -9050,6 +9090,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env)
         .expect_err("closing Host issuer must refuse producing launch");
@@ -9107,6 +9148,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut env);
         std::fs::remove_dir(&session_path).expect("remove injected Session path blocker");
@@ -9171,6 +9213,7 @@ mod agent_endpoint_env_tests {
             execution_entrypoint: "$gwt-execute #2359",
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             container_runtime: None,
+            permission_decision: None,
         }
         .install(&mut HashMap::new())
         .expect_err("unreconciled Active authority must reject a blind retry");
