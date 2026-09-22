@@ -915,8 +915,14 @@ JSON
 
 ## Logs
 
+Open the Logs surface and select **Project** for that project’s events, or
+**Global** for startup and diagnostics without a project. Background events
+remain with their originating project when you switch projects.
+
 - App logs:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
+- Startup and global diagnostics:
+  `~/.gwt/logs/gwt.log.YYYY-MM-DD`
 - Session state:
   `~/.gwt/session.json`
 - Project workspace state:

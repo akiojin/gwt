@@ -4744,6 +4744,7 @@
         activeProjectTab,
         visibleBounds,
         getActiveWorkProjection: () => activeWorkProjection,
+        projectWindowContextById,
       });
 
       recoveryCenterController = createRecoveryCenterController({
