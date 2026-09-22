@@ -491,6 +491,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.spec.repair" => CliCommand::Issue(IssueCommand::SpecRepair {
             number: required_u64(params, "number")?,
         }),
+        "issue.cache.repair" => CliCommand::Issue(IssueCommand::CacheRepair {
+            number: required_u64(params, "number")?,
+        }),
         "issue.spec.lint" => CliCommand::Issue(IssueCommand::SpecLint {
             number: required_u64(params, "number")?,
             sections: optional_string_vec(params, "sections")?,
@@ -4565,6 +4568,7 @@ mod tests {
             "issue.linked-prs",
             "issue.spec.read",
             "issue.spec.repair",
+            "issue.cache.repair",
         ] {
             assert!(matches!(
                 ok(op, json!({"number": 12})),
