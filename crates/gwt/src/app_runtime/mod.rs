@@ -422,9 +422,19 @@ pub(crate) struct PendingStartupAutoResumeSession {
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientScope {
+    Hub,
+    Project(gwt_core::repo_hash::ProjectKey),
+}
+
 #[derive(Debug, Clone)]
 pub enum DispatchTarget {
-    Broadcast,
+    All,
+    // Explicit Hub recipients are part of the routing contract; producers migrate separately.
+    #[allow(dead_code)]
+    Hub,
+    Project(gwt_core::repo_hash::ProjectKey),
     Client(ClientId),
 }
 
@@ -507,9 +517,21 @@ fn run_agent_dispatch_test_hook(slot: &'static std::thread::LocalKey<AgentDispat
 }
 
 impl OutboundEvent {
+    pub(crate) fn project(
+        project_key: gwt_core::repo_hash::ProjectKey,
+        event: BackendEvent,
+    ) -> Self {
+        Self {
+            target: DispatchTarget::Project(project_key),
+            event,
+            knowledge_wire_metadata: None,
+            terminal_stream_seq: None,
+        }
+    }
+
     pub(crate) fn broadcast(event: BackendEvent) -> Self {
         Self {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event,
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
@@ -2707,7 +2729,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         .map(|_| {
             gwt::issue_monitor_worker::read_execution_settlements(
                 project_root,
-                &monitor.active_issue_numbers(),
+                &monitor.execution_settlement_issue_numbers(),
             )
         })
         .unwrap_or_default();
@@ -2877,6 +2899,23 @@ fn issue_monitor_issue_from_snapshot(
 }
 
 impl AppRuntime {
+    pub(crate) fn project_key_for_tab(
+        &self,
+        tab_id: &str,
+    ) -> Option<&gwt_core::repo_hash::ProjectKey> {
+        self.project_tab_incarnations
+            .get(tab_id)
+            .map(|incarnation| &incarnation.project_key)
+    }
+
+    pub(crate) fn project_key_for_window(
+        &self,
+        window_id: &str,
+    ) -> Option<&gwt_core::repo_hash::ProjectKey> {
+        let address = self.window_lookup.get(window_id)?;
+        self.project_key_for_tab(&address.tab_id)
+    }
+
     pub(crate) fn new(
         proxy: EventLoopProxy<UserEvent>,
         pty_writers: PtyWriterRegistry,
@@ -2898,15 +2937,22 @@ impl AppRuntime {
             legacy_target.kind,
         )?;
         let persisted = load_session_state(&session_state_path)?;
-        let tabs = persisted
-            .tabs
-            .into_iter()
-            .map(|tab| {
-                let workspace = load_restored_workspace_state(&tab.project_root)?;
-                Ok(ProjectTabRuntime::from_persisted(tab, workspace))
-            })
-            .collect::<std::io::Result<Vec<_>>>()?;
-        let active_tab_id = normalize_active_tab_id(&tabs, persisted.active_tab_id);
+        // Issue #4535 AC-2 / AC-5: one tab per ProjectKey, so every unique
+        // project workspace is restored and no two tabs write back the same
+        // `~/.gwt/projects/<key>/workspace.json`.
+        let legacy_active_tab_id = persisted.legacy_active_tab_id;
+        let tabs = collapse_duplicate_session_tabs(
+            persisted.tabs,
+            legacy_active_tab_id.as_deref(),
+            gwt_core::paths::project_scope_hash,
+        )
+        .into_iter()
+        .map(|tab| {
+            let workspace = load_restored_workspace_state(&tab.project_root)?;
+            Ok(ProjectTabRuntime::from_persisted(tab, workspace))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+        let active_tab_id = normalize_active_tab_id(&tabs, legacy_active_tab_id);
         let (project_tab_incarnations, next_project_incarnation) =
             initial_project_tab_incarnations(&tabs);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -6388,6 +6434,11 @@ impl AppRuntime {
                         .and_then(|session| session.linked_issue_number)
                 });
                 gwt::IssueMonitorWindowObservation {
+                    // Use the canonical route resolver: it also recognizes
+                    // legacy Monitor launches stamped Manual (Issue #4510).
+                    monitor_owned: gwt::cli::execution_state::session_launch_route(
+                        window.session_id.as_deref(),
+                    ) == Some(gwt_agent::LaunchRoute::Autonomous),
                     review_dispatch: self
                         .issue_monitor_review_dispatch_windows
                         .contains(&window_id),
@@ -9008,6 +9059,9 @@ impl AppRuntime {
         let running_agents = crate::runtime_support::collect_running_agents(&workspace.windows);
         gwt::ProjectTabView {
             id: tab.id.clone(),
+            project_key: self.project_tab_incarnations[&tab.id]
+                .project_key
+                .to_string(),
             title: tab.title.clone(),
             project_root: tab.project_root.display().to_string(),
             kind: tab.kind,
@@ -9637,7 +9691,9 @@ impl AppRuntime {
                         kind: tab.kind,
                     })
                     .collect(),
-                active_tab_id: normalize_active_tab_id(&self.tabs, self.active_tab_id.clone()),
+                // Issue #4535 AC-4: read-only legacy field — never written
+                // back, so the key leaves `session-state.json` on first save.
+                legacy_active_tab_id: None,
                 recent_projects: self.recent_projects.clone(),
             },
             workspaces: self

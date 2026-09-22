@@ -5896,6 +5896,24 @@ impl AppRuntime {
             // Issue #4543 AC-5: cloned out of `config` so the record write can
             // borrow it while the install still holds `&mut config.env_vars`.
             let permission_decision = config.permission_decision.clone();
+            // Issue #4544 AC-1: refuse a producing-work launch whose permission
+            // mode cannot be honored, before anything observable exists.
+            //
+            // This sits above the capability install on purpose: everything the
+            // AC names — the prompt the agent would be handed, the agent window,
+            // the Execution Control Record that pass evidence hangs off, and any
+            // PR or verification the session could then attempt — is downstream
+            // of `install_with_prepared_claim`. Blocking here means an
+            // unsupported launch produces a gate decision and nothing else.
+            if let Some(owner) = producing_owner {
+                gwt::cli::permission_readiness::block_launch_if_unready(
+                    &worktree_path,
+                    owner.kind.as_str(),
+                    owner.number,
+                    &session_id,
+                    &permission_decision,
+                )?;
+            }
             let capability_install = FinalizedAgentCapabilityLaunch {
                 issuer: agent_capability_issuer.as_ref(),
                 sessions_dir: &sessions_dir,

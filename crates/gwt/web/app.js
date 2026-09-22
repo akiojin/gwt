@@ -170,6 +170,7 @@
         presetSupportsWaitingStatus,
         selectNextAgentFocusWindowId,
         windowRuntimeLabel,
+        windowRuntimeDescription,
       } from "/window-runtime-state.js";
       import {
         applyWindowWorktreeData,
@@ -434,6 +435,7 @@
       let inputTraceSeq = 0;
 
       let socket = null;
+      let socketProjectKey = null;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
       // (replaying stale terminal_output / workspace_state). `generation`
@@ -915,11 +917,18 @@
       }
 
       function send(message) {
-        if (socket && socket.readyState === WebSocket.OPEN) {
+        if ((message.kind === "terminal_input" || message.kind === "pane_send_input")
+          && !activeProjectKey()) {
+          return "unavailable";
+        }
+        if (socket && socket.readyState === WebSocket.OPEN
+          && socketProjectKey === activeProjectKey()) {
           socket.send(JSON.stringify(message));
           return "sent";
         }
-        pendingMessages.push(message);
+        // Retain the origin across reconnects: switching projects must never
+        // replay input or actions through another project's connection.
+        pendingMessages.push({ projectKey: activeProjectKey(), message });
         return "queued";
       }
 
@@ -928,7 +937,8 @@
         // generic reconnect queue. Keep the OPEN check and direct send in one
         // synchronous operation; a close race is reported as false.
         const activeSocket = socket;
-        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN
+          || socketProjectKey !== activeProjectKey()) {
           return false;
         }
         try {
@@ -1025,8 +1035,7 @@
         if (!session || line.length === 0) {
           return false;
         }
-        send({ kind: "pane_send_input", session_id: session, text: line });
-        return true;
+        return send({ kind: "pane_send_input", session_id: session, text: line }) !== "unavailable";
       }
 
       function sendFocusedPaneInput(text) {
@@ -1213,11 +1222,18 @@
         }
       }
 
+      function activeProjectKey() {
+        const key = activeProjectTab()?.project_key;
+        return typeof key === "string" && /^[0-9a-f]{16}$/.test(key) ? key : null;
+      }
+
       function websocketUrl() {
         const url = new URL(window.location.href);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
         url.pathname = "/ws";
         url.search = "";
+        const projectKey = activeProjectKey();
+        if (projectKey) url.searchParams.set("repo_hash", projectKey);
         url.hash = "";
         return url.toString();
       }
@@ -1248,8 +1264,14 @@
         setConnectionState(true);
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
-        while (pendingMessages.length > 0) {
-          socket.send(JSON.stringify(pendingMessages.shift()));
+        for (let index = 0; index < pendingMessages.length;) {
+          const pending = pendingMessages[index];
+          if (pending.projectKey !== socketProjectKey) {
+            index += 1;
+            continue;
+          }
+          pendingMessages.splice(index, 1);
+          socket.send(JSON.stringify(pending.message));
         }
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
@@ -1324,15 +1346,31 @@
       }
 
       function installSocketEventHandlers(activeSocket) {
-        activeSocket.addEventListener("open", handleSocketOpen);
-        activeSocket.addEventListener("message", handleSocketMessage);
-        activeSocket.addEventListener("close", handleSocketClose);
+        for (const [kind, handler] of [
+          ["open", handleSocketOpen],
+          ["message", handleSocketMessage],
+          ["close", handleSocketClose],
+        ]) {
+          activeSocket.addEventListener(kind, (event) => {
+            if (socket === activeSocket) handler(event);
+          });
+        }
       }
 
       function connectSocket() {
-        if (socket && socket.readyState <= WebSocket.OPEN) {
+        const projectKey = activeProjectKey();
+        if (socket && socket.readyState <= WebSocket.OPEN
+          && socketProjectKey === projectKey) {
           return;
         }
+        const previousSocket = socket;
+        socket = null;
+        socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher = null;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        previousSocket?.close();
+        socketProjectKey = projectKey;
         socket = new WebSocket(websocketUrl());
         setConnectionState(false);
         installSocketEventHandlers(socket);
@@ -1749,6 +1787,8 @@
               active_tab_id: null,
               recent_projects: [],
             };
+            // Rebind before rendering can emit requests for the new project.
+            connectSocket();
             setVersionState(appState.app_version, versionState.latest);
             const nextProjectTabsKey = projectTabsRenderKey(appState);
             if (renderedProjectTabsKey !== nextProjectTabsKey) {
@@ -3566,10 +3606,14 @@
             recomputeOperatorTelemetry();
             refreshWindowTabTelemetry(windowData);
             label.textContent = windowRuntimeLabel(runtimeState);
+            const runtimeDescription = windowRuntimeDescription(runtimeState, windowData?.preset);
             const statusTitle = effectiveDetail
-              ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
-              : windowRuntimeLabel(runtimeState);
+              ? `${runtimeDescription}: ${effectiveDetail}`
+              : runtimeDescription;
             chip.title = statusTitle;
+            chip.setAttribute("aria-label", statusTitle === windowRuntimeLabel(runtimeState)
+              ? statusTitle
+              : `${windowRuntimeLabel(runtimeState)}: ${statusTitle}`);
             label.title = statusTitle;
             if (overlay) {
               const messageEl = overlay.querySelector(".overlay-message");
@@ -4728,7 +4772,8 @@
           return send(message);
         }
         const activeSocket = socket;
-        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN
+          || socketProjectKey !== activeProjectKey()) {
           return "unavailable";
         }
         try {

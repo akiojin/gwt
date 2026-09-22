@@ -872,6 +872,42 @@ fn lint_command(number: u64) -> IssueCommand {
     }
 }
 
+#[test]
+fn spec_lint_reports_missing_references_and_orphan_parts() {
+    use gwt_github::client::{CommentId, CommentSnapshot};
+
+    let mut fixture = lint_fixture(4613, "- **FR-001**: one", "- [ ] T-001: do");
+    let mut snapshot = Cache::new(fixture.env.cache_root())
+        .load_entry(IssueNumber(4613))
+        .unwrap()
+        .snapshot;
+    snapshot.body = snapshot
+        .body
+        .replace("tasks=body", "tasks=comment:111,comment:222");
+    snapshot.comments = vec![CommentSnapshot {
+        id: CommentId(333),
+        body: "<!-- artifact:tasks BEGIN part=1/2 -->\nrecovered task\n<!-- artifact:tasks END part=1/2 -->".into(),
+        updated_at: UpdatedAt::new("orphan"),
+    }];
+    fixture.env.client.seed(snapshot);
+
+    let mut out = String::new();
+    let code = route(&mut fixture.env, lint_command(4613), &mut out).unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("missing: section=tasks comment:111"), "{out}");
+    assert!(out.contains("missing: section=tasks comment:222"), "{out}");
+    assert!(
+        out.contains("orphan: section=tasks comment:333 part=1/2"),
+        "{out}"
+    );
+    assert!(
+        crate::cli::intake_inspection::load_snapshot(fixture.env.repo_path(), 4613)
+            .unwrap()
+            .is_none(),
+        "broken routing must not produce an inspection snapshot"
+    );
+}
+
 /// AC-1 / AC-3 / AC-4 / AC-5 through the operation surface: the lint runs,
 /// its findings land in the snapshot and the ledger without billing the
 /// reviewer, and the reviewer gets the four-item checklist.

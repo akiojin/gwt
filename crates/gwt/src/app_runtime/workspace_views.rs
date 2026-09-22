@@ -4356,7 +4356,10 @@ impl AppRuntime {
     pub(super) fn active_work_projection_broadcast_on_tab_change(&self) -> Option<OutboundEvent> {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
-        if self.dispatch_cached_active_work_projection(tab_id, super::DispatchTarget::Broadcast) {
+        if self.dispatch_cached_active_work_projection(
+            tab_id,
+            super::DispatchTarget::Project(self.project_key_for_tab(tab_id)?.clone()),
+        ) {
             return None;
         }
         self.schedule_active_work_projection_refresh(&tab.project_root, None);

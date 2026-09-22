@@ -13,7 +13,7 @@
 //! [`HttpIssueClient`] composes a transport with repo coordinates (owner,
 //! name) and an authentication token to implement every method of
 //! [`IssueClient`]. Fetches and list queries go through the GraphQL endpoint
-//! so one network round-trip covers "issue body + every comment"; mutations
+//! with paginated comments to cover "issue body + every comment"; mutations
 //! go through the REST endpoints.
 
 use std::{
@@ -1753,13 +1753,16 @@ fn encode_path_segment(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const FETCH_ISSUE_QUERY: &str = r#"
-query($owner:String!,$repo:String!,$number:Int!){
+query($owner:String!,$repo:String!,$number:Int!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issue(number:$number){
       number title body state updatedAt
       labels(first:50){nodes{name}}
-      comments(first:100){nodes{databaseId body updatedAt}}
+      comments(first:100, after:$after){
+        nodes{databaseId body updatedAt}
+        pageInfo{ hasNextPage endCursor }
+      }
     }
   }
 }
@@ -1858,24 +1861,51 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
             }
         }
 
-        let value = self.graphql(
-            FETCH_ISSUE_QUERY,
-            json!({
-                "owner": self.owner,
-                "repo": self.repo,
-                "number": number.0,
-            }),
-        )?;
-        let issue = value
-            .get("data")
-            .and_then(|d| d.get("repository"))
-            .and_then(|r| r.get("issue"))
-            .ok_or(ApiError::NotFound(number))?;
-        if issue.is_null() {
-            return Err(ApiError::NotFound(number));
+        let operation = "fetch issue comments";
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        let mut completed_pages = 0;
+        let mut snapshot: Option<IssueSnapshot> = None;
+        loop {
+            let value = self.graphql(
+                FETCH_ISSUE_QUERY,
+                json!({
+                    "owner": self.owner,
+                    "repo": self.repo,
+                    "number": number.0,
+                    "after": cursor,
+                }),
+            )?;
+            let issue = value
+                .pointer("/data/repository/issue")
+                .filter(|issue| !issue.is_null())
+                .ok_or(ApiError::NotFound(number))?;
+            let (_, has_next, next_cursor) = page_connection(issue, &["comments"], operation)
+                .map_err(|error| remap_partial_page(error, completed_pages))?;
+            let page = parse_graphql_issue(issue)?;
+            if let Some(snapshot) = &mut snapshot {
+                snapshot.comments.extend(page.comments);
+            } else {
+                snapshot = Some(page);
+            }
+            completed_pages += 1;
+            if !has_next {
+                return Ok(FetchResult::Updated(snapshot.expect("first page parsed")));
+            }
+            let next_cursor = next_cursor
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                })?;
+            if !seen_cursors.insert(next_cursor.to_string()) {
+                return Err(ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                });
+            }
+            cursor = Some(next_cursor.to_string());
         }
-        let snapshot = parse_graphql_issue(issue)?;
-        Ok(FetchResult::Updated(snapshot))
     }
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError> {

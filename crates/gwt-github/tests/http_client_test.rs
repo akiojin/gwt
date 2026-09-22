@@ -125,7 +125,7 @@ fn red_50_fetch_posts_graphql_with_auth() {
         r#"{"data":{"repository":{"issue":{
             "number":2001,"title":"T","body":"B","state":"OPEN","updatedAt":"2026-04-08T00:00:00Z",
             "labels":{"nodes":[{"name":"gwt-spec"},{"name":"phase/review"}]},
-            "comments":{"nodes":[]}
+            "comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
         }}}}"#,
     ));
     let client = client_with(transport);
@@ -164,6 +164,51 @@ fn red_50_fetch_posts_graphql_with_auth() {
     }
 }
 
+#[test]
+fn fetch_collects_comments_beyond_first_hundred() {
+    let transport = FakeTransport::new();
+    for (start, end, has_next, cursor) in [(1, 100, true, "page-1"), (101, 101, false, "page-2")] {
+        let comments: Vec<_> = (start..=end)
+            .map(|id| serde_json::json!({"databaseId":id,"body":format!("comment {id}"),"updatedAt":"T1"}))
+            .collect();
+        transport.enqueue(ok_body(
+            &serde_json::json!({"data":{"repository":{"issue":{
+                "number":4613,"title":"Spec","body":"index","state":"OPEN","updatedAt":"T1",
+                "comments":{"nodes":comments,"pageInfo":{"hasNextPage":has_next,"endCursor":cursor}}
+            }}}})
+            .to_string(),
+        ));
+    }
+    let client = client_with(transport);
+    let FetchResult::Updated(snapshot) = client.fetch(IssueNumber(4613), None).unwrap() else {
+        panic!("expected full snapshot");
+    };
+    assert_eq!(snapshot.comments.len(), 101);
+    assert_eq!(snapshot.comments[100].id, CommentId(101));
+    assert_eq!(snapshot.comments[100].body, "comment 101");
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(second["variables"]["after"], "page-1");
+    assert!(second["query"].as_str().unwrap().contains("after:$after"));
+}
+
+#[test]
+fn fetch_rejects_incomplete_comment_pagination() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{
+        "number":4613,"comments":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":null}}
+    }}}}"#,
+    ));
+    let client = client_with(transport);
+    assert!(matches!(
+        client.fetch(IssueNumber(4613), None),
+        Err(ApiError::PartialPage { .. })
+    ));
+}
+
 // -----------------------------------------------------------------------
 // RED-51: fetch returns NotModified when updatedAt matches
 // -----------------------------------------------------------------------
@@ -200,7 +245,7 @@ fn conditional_fetch_runs_full_query_only_after_changed_probe() {
         r#"{"data":{"repository":{"issue":{
             "number":1,"title":"changed","body":"fresh body","state":"CLOSED","updatedAt":"T2",
             "labels":{"nodes":[{"name":"bug"}]},
-            "comments":{"nodes":[]}
+            "comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
         }}}}"#,
     ));
     let client = client_with(transport);

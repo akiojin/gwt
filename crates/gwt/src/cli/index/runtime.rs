@@ -170,6 +170,8 @@ pub(crate) fn run_runner_rebuild_with_repair(
     #[cfg(test)]
     LEGACY_REBUILD_RUNNER_CALLS.fetch_add(1, Ordering::Relaxed);
     let args = rebuild_runner_args(context, action, qos);
+    #[cfg(test)]
+    let args = rebuild_runner_fixture_args().unwrap_or(args);
     let mut command = gwt_core::process::hidden_command(&context.python);
     command.args(args).current_dir(&context.project_root);
     if repair && action.label == "issues" {
@@ -182,33 +184,37 @@ pub(crate) fn run_runner_rebuild_with_repair(
     }
 }
 
+// Fixture selection belongs to process execution, never canonical argv generation.
+#[cfg(test)]
+pub(crate) fn rebuild_runner_fixture_args() -> Option<Vec<OsString>> {
+    if std::env::var_os("GWT_INDEX_TEST_REBUILD_FAILURE").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        return Some(vec![
+            OsString::from("--ignored"),
+            OsString::from("--exact"),
+            OsString::from("index_worker::tests::rebuild_runner_failure_fixture"),
+            OsString::from("--nocapture"),
+        ]);
+    }
+    if std::env::var_os("GWT_INDEX_TEST_REBUILD_HANG").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
+        return Some(vec![
+            OsString::from("--ignored"),
+            OsString::from("--exact"),
+            OsString::from("index_worker::tests::rebuild_runner_hang_fixture"),
+            OsString::from("--nocapture"),
+        ]);
+    }
+
+    None
+}
+
 pub(crate) fn rebuild_runner_args(
     context: &IndexContext,
     action: RebuildAction,
     qos: &str,
 ) -> Vec<OsString> {
-    #[cfg(test)]
-    if std::env::var_os("GWT_INDEX_TEST_REBUILD_FAILURE").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
-    {
-        return vec![
-            OsString::from("--ignored"),
-            OsString::from("--exact"),
-            OsString::from("index_worker::tests::rebuild_runner_failure_fixture"),
-            OsString::from("--nocapture"),
-        ];
-    }
-    #[cfg(test)]
-    if std::env::var_os("GWT_INDEX_TEST_REBUILD_HANG").as_deref() == Some(std::ffi::OsStr::new("1"))
-    {
-        return vec![
-            OsString::from("--ignored"),
-            OsString::from("--exact"),
-            OsString::from("index_worker::tests::rebuild_runner_hang_fixture"),
-            OsString::from("--nocapture"),
-        ];
-    }
-
     let mut args = vec![
         context.runner.clone().into_os_string(),
         OsString::from("--action"),
@@ -416,9 +422,6 @@ mod tests {
 
     #[test]
     fn rebuild_runner_args_are_shared_for_worktree_scoped_actions() {
-        let _lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let context = IndexContext {
             project_root: PathBuf::from("project-root"),
             repo_hash: gwt_core::repo_hash::compute_repo_hash(

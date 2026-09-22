@@ -248,7 +248,17 @@ pub struct PersistedSessionTabState {
 pub struct PersistedSessionState {
     #[serde(default)]
     pub tabs: Vec<PersistedSessionTabState>,
-    pub active_tab_id: Option<String>,
+    /// Issue #4535 AC-4: read-only legacy field.
+    ///
+    /// Which project a viewer is looking at belongs to the browser tab that is
+    /// viewing it (SPEC #3287), not to one process-wide value in the session
+    /// file — a second browser tab switching projects used to move it for
+    /// everyone. It is still *read*, because a legacy session file is the only
+    /// thing that can say which of several duplicate project roots the user was
+    /// last on (see [`collapse_duplicate_session_tabs`]), but it is never
+    /// written back, so the key disappears on the first save.
+    #[serde(rename = "active_tab_id", default, skip_serializing)]
+    pub legacy_active_tab_id: Option<String>,
     #[serde(default)]
     pub recent_projects: Vec<RecentProjectEntry>,
 }
@@ -269,6 +279,55 @@ struct LegacyPersistedAppState {
     pub active_tab_id: Option<String>,
     #[serde(default)]
     pub recent_projects: Vec<RecentProjectEntry>,
+}
+
+/// Issue #4535 AC-2: collapse legacy duplicate project roots down to one tab
+/// per [`ProjectKey`](gwt_core::repo_hash::ProjectKey).
+///
+/// Sessions written before the project store keyed on a ProjectKey could hold
+/// several tabs for one repository — the workspace home and one of its
+/// worktrees, or the same root opened twice. Each of those tabs loads and then
+/// *writes back* `~/.gwt/projects/<key>/workspace.json`, so the last tab to
+/// persist silently overwrites its siblings' canvases.
+///
+/// The survivor is deterministic: the tab named by the legacy `active_tab_id`
+/// wins, because that is the canvas the user was last looking at; otherwise the
+/// first tab in session order wins. Ordering of the surviving tabs is session
+/// order in both cases, so a collapse never reshuffles the tab bar.
+///
+/// `project_key_of` is injected so the ordering contract is testable without a
+/// git fixture per tab; production passes
+/// [`project_scope_hash`](gwt_core::paths::project_scope_hash).
+pub fn collapse_duplicate_session_tabs(
+    tabs: Vec<PersistedSessionTabState>,
+    active_tab_id: Option<&str>,
+    project_key_of: impl Fn(&Path) -> gwt_core::repo_hash::ProjectKey,
+) -> Vec<PersistedSessionTabState> {
+    let keys: Vec<_> = tabs
+        .iter()
+        .map(|tab| project_key_of(&tab.project_root))
+        .collect();
+    let active_key = active_tab_id.and_then(|active| {
+        tabs.iter()
+            .position(|tab| tab.id == active)
+            .map(|index| keys[index].clone())
+    });
+    let mut kept: Vec<gwt_core::repo_hash::ProjectKey> = Vec::new();
+    tabs.into_iter()
+        .zip(keys)
+        .filter(|(tab, key)| {
+            // The active tab claims its key even when a duplicate precedes it.
+            if active_key.as_ref() == Some(key) && Some(tab.id.as_str()) != active_tab_id {
+                return false;
+            }
+            if kept.contains(key) {
+                return false;
+            }
+            kept.push(key.clone());
+            true
+        })
+        .map(|(tab, _)| tab)
+        .collect()
 }
 
 pub fn empty_workspace_state() -> PersistedWindowCanvasState {
@@ -347,7 +406,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
 pub fn default_session_state() -> PersistedSessionState {
     PersistedSessionState {
         tabs: Vec::new(),
-        active_tab_id: None,
+        legacy_active_tab_id: None,
         recent_projects: Vec::new(),
     }
 }
@@ -553,7 +612,7 @@ pub fn migrate_legacy_workspace_state(
                         kind: tab.kind,
                     })
                     .collect(),
-                active_tab_id: legacy.active_tab_id,
+                legacy_active_tab_id: legacy.active_tab_id,
                 recent_projects: legacy.recent_projects,
             },
             legacy
@@ -573,7 +632,7 @@ pub fn migrate_legacy_workspace_state(
                     project_root: fallback_project_root.to_path_buf(),
                     kind: fallback_kind,
                 }],
-                active_tab_id: Some("project-1".to_string()),
+                legacy_active_tab_id: Some("project-1".to_string()),
                 recent_projects: vec![RecentProjectEntry {
                     path: fallback_project_root.to_path_buf(),
                     title,
@@ -637,6 +696,85 @@ mod tests {
         assert_eq!(state.next_z_index, 3);
     }
 
+    /// Issue #4535 AC-2 helpers: map a project root onto a stand-in ProjectKey
+    /// so the collapse ordering is exercised without one git fixture per tab.
+    fn session_tab(id: &str, project_root: &str) -> PersistedSessionTabState {
+        PersistedSessionTabState {
+            id: id.to_string(),
+            title: id.to_string(),
+            project_root: PathBuf::from(project_root),
+            kind: ProjectKind::Git,
+        }
+    }
+
+    /// Every root that shares a leading path component resolves to one key,
+    /// mirroring a workspace home and its worktrees resolving to one origin.
+    fn stub_project_key(path: &std::path::Path) -> gwt_core::repo_hash::ProjectKey {
+        // `/tmp/ws/<project>/...` -> the `/tmp/ws/<project>` workspace home.
+        let workspace_home: PathBuf = path.components().take(4).collect();
+        gwt_core::repo_hash::compute_path_hash(&workspace_home)
+    }
+
+    fn collapsed_ids(
+        tabs: Vec<PersistedSessionTabState>,
+        active_tab_id: Option<&str>,
+    ) -> Vec<String> {
+        collapse_duplicate_session_tabs(tabs, active_tab_id, stub_project_key)
+            .into_iter()
+            .map(|tab| tab.id)
+            .collect()
+    }
+
+    #[test]
+    fn collapse_duplicate_session_tabs_keeps_the_active_entry_of_a_duplicated_root() {
+        let tabs = vec![
+            session_tab("project-1", "/tmp/ws/gwt/develop"),
+            session_tab("project-2", "/tmp/ws/gwt/work/issue-1"),
+            session_tab("project-3", "/tmp/ws/other/develop"),
+        ];
+
+        assert_eq!(
+            collapsed_ids(tabs, Some("project-2")),
+            vec!["project-2", "project-3"],
+            "the active tab must survive its duplicate group, even when a duplicate precedes it"
+        );
+    }
+
+    #[test]
+    fn collapse_duplicate_session_tabs_falls_back_to_session_order() {
+        let tabs = vec![
+            session_tab("project-1", "/tmp/ws/gwt/develop"),
+            session_tab("project-2", "/tmp/ws/gwt/work/issue-1"),
+            session_tab("project-3", "/tmp/ws/other/develop"),
+        ];
+
+        // No active id, and an active id naming a tab that no longer exists,
+        // both fall back to the first tab in session order.
+        assert_eq!(
+            collapsed_ids(tabs.clone(), None),
+            vec!["project-1", "project-3"]
+        );
+        assert_eq!(
+            collapsed_ids(tabs, Some("project-gone")),
+            vec!["project-1", "project-3"]
+        );
+    }
+
+    #[test]
+    fn collapse_duplicate_session_tabs_preserves_every_unique_project() {
+        let tabs = vec![
+            session_tab("project-1", "/tmp/ws/gwt/develop"),
+            session_tab("project-2", "/tmp/ws/other/develop"),
+            session_tab("project-3", "/tmp/ws/third/develop"),
+        ];
+
+        assert_eq!(
+            collapsed_ids(tabs, Some("project-2")),
+            vec!["project-1", "project-2", "project-3"],
+            "collapsing duplicates must not drop or reorder unique projects"
+        );
+    }
+
     #[test]
     fn load_session_state_defaults_to_empty_state_for_missing_file() {
         let dir = tempdir().expect("tempdir");
@@ -652,7 +790,7 @@ mod tests {
         let path = dir.path().join("session.json");
         let project_root = dir.path().join("demo");
         let state = PersistedSessionState {
-            active_tab_id: Some("project-2".to_string()),
+            legacy_active_tab_id: None,
             recent_projects: vec![
                 RecentProjectEntry {
                     path: project_root.clone(),
@@ -684,6 +822,59 @@ mod tests {
         save_session_state(&path, &state).expect("save should succeed");
         let loaded = load_session_state(&path).expect("load");
         assert_eq!(loaded, state);
+    }
+
+    /// Issue #4535 AC-4: which project a viewer is looking at belongs to the
+    /// browser tab viewing it (SPEC #3287), so the process-wide `active_tab_id`
+    /// is read for legacy files and then dropped on the first save.
+    #[test]
+    fn saving_a_legacy_session_drops_active_tab_id_but_still_reads_it() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("session.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "tabs": [
+    {
+      "id": "project-1",
+      "title": "demo",
+      "project_root": "/tmp/demo",
+      "kind": "git"
+    },
+    {
+      "id": "project-2",
+      "title": "notes",
+      "project_root": "/tmp/notes",
+      "kind": "non_repo"
+    }
+  ],
+  "active_tab_id": "project-2",
+  "recent_projects": []
+}"#,
+        )
+        .expect("seed legacy session");
+
+        let loaded = load_session_state(&path).expect("legacy load");
+        assert_eq!(
+            loaded.legacy_active_tab_id.as_deref(),
+            Some("project-2"),
+            "read compatibility: a legacy file still reports its active tab"
+        );
+
+        save_session_state(&path, &loaded).expect("save");
+
+        let raw = std::fs::read_to_string(&path).expect("read saved session");
+        assert!(
+            !raw.contains("active_tab_id"),
+            "the saved session must not carry active_tab_id: {raw}"
+        );
+        let reloaded = load_session_state(&path).expect("reload");
+        assert_eq!(reloaded.legacy_active_tab_id, None);
+        assert_eq!(
+            reloaded.tabs.len(),
+            2,
+            "dropping the legacy field must not disturb the tabs themselves"
+        );
     }
 
     #[test]
@@ -1559,7 +1750,9 @@ mod tests {
 
         let session = load_session_state(&session_path).expect("session");
         assert_eq!(session.tabs.len(), 2);
-        assert_eq!(session.active_tab_id.as_deref(), Some("project-2"));
+        // Issue #4535 AC-4: the migration writes the new session file, and the
+        // new file never carries `active_tab_id`.
+        assert_eq!(session.legacy_active_tab_id, None);
         assert_eq!(session.recent_projects.len(), 1);
 
         let workspace_one = load_workspace_state(&workspace_state_path(&project_one)).expect("one");

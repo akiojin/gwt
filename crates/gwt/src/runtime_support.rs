@@ -122,6 +122,9 @@ pub fn app_state_view_from_parts(
                 let running_agents = collect_running_agents(&tab.workspace.persisted().windows);
                 gwt::ProjectTabView {
                     id: tab.id.clone(),
+                    project_key: gwt_core::paths::resolve_project_scope(&tab.project_root)
+                        .hash
+                        .to_string(),
                     title: tab.title.clone(),
                     project_root: tab.project_root.display().to_string(),
                     kind: tab.kind,
@@ -1279,6 +1282,44 @@ mod tests {
             &super::RepoEnvOverrides::default(),
         );
         assert_eq!(coords, None);
+    }
+
+    /// Issue #4535 AC-5: startup restores every unique project workspace, so
+    /// the auto-start rule is what keeps that from spawning one agent process
+    /// per restored project. Agent panes stay dormant and are revived only by
+    /// the resume path; a Shell pane the user never closed still comes back.
+    #[test]
+    fn restored_agent_panes_never_auto_start_while_shell_panes_do() {
+        let restored = |preset: WindowPreset, agent_id: Option<&str>| {
+            let mut window = gwt::default_workspace_state().windows.remove(0);
+            window.preset = preset;
+            window.agent_id = agent_id.map(str::to_string);
+            // Exactly what `pause_process_windows_for_restore` leaves behind.
+            window.status = gwt::WindowState::Stopped;
+            window
+        };
+
+        for preset in [
+            WindowPreset::Agent,
+            WindowPreset::Claude,
+            WindowPreset::Codex,
+        ] {
+            assert!(
+                !super::should_auto_start_restored_window(&restored(preset, None)),
+                "a restored {preset:?} pane must not spawn its agent process at startup"
+            );
+        }
+        assert!(
+            !super::should_auto_start_restored_window(&restored(
+                WindowPreset::Shell,
+                Some("agent-1")
+            )),
+            "an agent-occupied pane is an agent pane whatever its preset says"
+        );
+        assert!(
+            super::should_auto_start_restored_window(&restored(WindowPreset::Shell, None)),
+            "a Shell pane the user never closed must still come back"
+        );
     }
 
     #[test]
