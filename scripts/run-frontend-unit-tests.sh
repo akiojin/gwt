@@ -2,6 +2,7 @@
 set -euo pipefail
 
 bash scripts/run-node-tests-with-linkedom.sh \
+  crates/gwt/web/__tests__/socket-project-scope.test.mjs \
   crates/gwt/web/__tests__/contrast.test.mjs \
   crates/gwt/web/__tests__/theme-manager.test.mjs \
   crates/gwt/web/__tests__/theme-segmented.test.mjs \

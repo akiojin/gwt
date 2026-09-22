@@ -2319,7 +2319,7 @@ impl AppRuntime {
                     .into_iter()
                     .map(|mut event| {
                         if matches!(event.target, DispatchTarget::Client(_)) {
-                            event.target = DispatchTarget::Broadcast;
+                            event.target = DispatchTarget::All;
                         }
                         event
                     })

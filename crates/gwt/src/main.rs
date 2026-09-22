@@ -1392,7 +1392,64 @@ pub(crate) struct DockerBundleMounts {
 /// the single-threaded tao main loop, and (b) pane mutex held by the reader
 /// thread while parsing vt100 chunks. Reads are hot (every keystroke), writes
 /// are rare (pane create/destroy), so `RwLock` is the natural fit.
-type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
+pub(crate) struct PtyWriterEntry {
+    pub(crate) project_key: gwt_core::repo_hash::ProjectKey,
+    pub(crate) handle: Arc<PtyHandle>,
+}
+
+type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;
+
+fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
+    matches!(
+        event,
+        FrontendEvent::FrontendReady
+            | FrontendEvent::StartupFirstFrame { .. }
+            | FrontendEvent::RefreshUsage
+            | FrontendEvent::SetClaudeAccountUsageEnabled { .. }
+            | FrontendEvent::OpenProjectDialog
+            | FrontendEvent::SelectCloneProjectParent
+            | FrontendEvent::GithubRepositorySearch { .. }
+            | FrontendEvent::CloneProjectStart { .. }
+            | FrontendEvent::ReopenRecentProject { .. }
+            | FrontendEvent::SelectProjectTab { .. }
+            | FrontendEvent::GetSystemSettings
+            | FrontendEvent::UpdateSystemSettings { .. }
+            | FrontendEvent::GetAutostartStatus
+            | FrontendEvent::UpdateAutostart { .. }
+            | FrontendEvent::GetBoardAuthStatus
+            | FrontendEvent::BoardProviderSignIn { .. }
+            | FrontendEvent::BoardProviderSignOut { .. }
+            | FrontendEvent::UpdateBoardProviderConfig { .. }
+            | FrontendEvent::UpdateBoardOauthPort { .. }
+            | FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListCustomAgentPresets
+            | FrontendEvent::AddCustomAgentFromPreset { .. }
+            | FrontendEvent::UpdateCustomAgent { .. }
+            | FrontendEvent::DeleteCustomAgent { .. }
+            | FrontendEvent::TestBackendConnection { .. }
+            | FrontendEvent::ListAgentBackends { .. }
+            | FrontendEvent::AddAgentBackend { .. }
+            | FrontendEvent::UpdateAgentBackend { .. }
+            | FrontendEvent::DeleteAgentBackend { .. }
+            | FrontendEvent::TestAgentBackendConnection { .. }
+            | FrontendEvent::ApplyUpdate
+            | FrontendEvent::ApplyUpdateStart
+            | FrontendEvent::CancelUpdateDownload
+            | FrontendEvent::ApplyUpdateLater
+            | FrontendEvent::ApplyUpdateRestartNow
+            | FrontendEvent::CancelUpdateAutoApply
+            | FrontendEvent::OpenUpdateLog { .. }
+            | FrontendEvent::ApplyUpdateToVersion { .. }
+            | FrontendEvent::OpenServerUrl { .. }
+    )
+}
+
+fn browser_project_input_allowed(
+    scope: Option<&app_runtime::ClientScope>,
+    owner: Option<&gwt_core::repo_hash::ProjectKey>,
+) -> bool {
+    matches!((scope, owner), (Some(app_runtime::ClientScope::Project(project)), Some(owner)) if project == owner)
+}
 
 #[cfg_attr(
     windows,
@@ -1971,6 +2028,48 @@ mod tests {
             !label.as_str().contains("secret-project-root"),
             "dispatch labels must never carry payload fields"
         );
+    }
+
+    #[test]
+    fn hub_keeps_global_settings_and_updates_without_project_mutation_authority() {
+        use crate::hub_frontend_event_allowed;
+        use gwt::FrontendEvent;
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::GetSystemSettings
+        ));
+        assert!(hub_frontend_event_allowed(&FrontendEvent::ApplyUpdateStart));
+        assert!(hub_frontend_event_allowed(
+            &FrontendEvent::OpenProjectDialog
+        ));
+        assert!(!hub_frontend_event_allowed(&FrontendEvent::RestartPmAgent));
+        assert!(!hub_frontend_event_allowed(&FrontendEvent::TerminalInput {
+            id: "pane".to_string(),
+            data: "input".to_string(),
+        }));
+    }
+
+    #[test]
+    fn browser_input_fallback_requires_a_matching_project_scope() {
+        use crate::{app_runtime::ClientScope, browser_project_input_allowed};
+        let a = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+        let b = gwt_core::repo_hash::ProjectKey::parse("fedcba9876543210").unwrap();
+        assert!(browser_project_input_allowed(
+            Some(&ClientScope::Project(a.clone())),
+            Some(&a)
+        ));
+        assert!(!browser_project_input_allowed(
+            Some(&ClientScope::Project(b)),
+            Some(&a)
+        ));
+        assert!(!browser_project_input_allowed(
+            Some(&ClientScope::Hub),
+            Some(&a)
+        ));
+        assert!(!browser_project_input_allowed(None, Some(&a)));
+        assert!(!browser_project_input_allowed(
+            Some(&ClientScope::Project(a)),
+            None
+        ));
     }
 
     #[test]
@@ -3380,6 +3479,7 @@ mod tests {
     fn project_tab_view_serializes_running_agents_fields() {
         let view = gwt::ProjectTabView {
             id: "tab-1".to_string(),
+            project_key: "0123456789abcdef".to_string(),
             title: "Repo".to_string(),
             project_root: "/tmp/repo".to_string(),
             kind: gwt::ProjectKind::Git,
@@ -3399,6 +3499,7 @@ mod tests {
             }],
         };
         let serialized = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(serialized["project_key"], "0123456789abcdef");
         assert_eq!(serialized["running_agent_count"], serde_json::json!(1));
         assert_eq!(
             serialized["running_agents"],
@@ -3997,7 +4098,7 @@ mod tests {
         assert!(matches!(
             events.as_slice(),
             [OutboundEvent {
-                target: DispatchTarget::Broadcast,
+                target: DispatchTarget::All,
                 event: BackendEvent::UpdateState(gwt_core::update::UpdateState::Available {
                     latest,
                     asset_url: Some(_),
@@ -5158,7 +5259,7 @@ mod tests {
                         if dispatched.iter().any(|outbound| matches!(
                             (&outbound.target, &outbound.event),
                             (
-                                DispatchTarget::Broadcast,
+                                DispatchTarget::All,
                                 BackendEvent::BranchCleanupProgress {
                                     operation_id: Some(operation_id),
                                     ..
@@ -5176,7 +5277,7 @@ mod tests {
                         if dispatched.iter().any(|outbound| matches!(
                             (&outbound.target, &outbound.event),
                             (
-                                DispatchTarget::Broadcast,
+                                DispatchTarget::All,
                                 BackendEvent::BranchCleanupResult {
                                     operation_id: Some(operation_id),
                                     ..
@@ -9470,6 +9571,46 @@ fn main() -> std::io::Result<()> {
                 event,
                 received_at,
             }) => {
+                // Resolve the immutable registration again after queueing: a disconnected
+                // client cannot retain input authority through the fallback queue.
+                let Some(scope) = clients.scope(&client_id) else {
+                    return;
+                };
+                if let FrontendEvent::PaneSendInput { session_id, text } = &event {
+                    let events = match &scope {
+                        app_runtime::ClientScope::Project(key) => app.pane_send_input_for_project_events(
+                            client_id.clone(), key, session_id, text,
+                        ),
+                        app_runtime::ClientScope::Hub => vec![OutboundEvent::reply(
+                            client_id.clone(), BackendEvent::PaneSendResult {
+                                ok: false,
+                                window_id: None,
+                                error: Some("a project-scoped connection is required".to_string()),
+                            },
+                        )],
+                    };
+                    clients.dispatch(events);
+                    return;
+                }
+                let input_window = match &event {
+                    FrontendEvent::TerminalInput { id, .. }
+                    | FrontendEvent::PasteImage { id, .. }
+                    | FrontendEvent::PasteImageUploaded { id, .. }
+                    | FrontendEvent::AttachFiles { id, .. } => Some(id),
+                    _ => None,
+                };
+                if let Some(id) = input_window {
+                    let owner = app.project_key_for_window(id);
+                    if !browser_project_input_allowed(Some(&scope), owner) {
+                        return;
+                    }
+                } else if matches!(scope, app_runtime::ClientScope::Hub)
+                    && !hub_frontend_event_allowed(&event)
+                {
+                    // Hub navigation is explicit. It never borrows the active
+                    // project's implicit mutation authority.
+                    return;
+                }
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
                 // Issue #4145 AC-1: the canvas reporting its bounds is the
@@ -9724,13 +9865,14 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
+                let project_key = gwt_core::paths::resolve_project_scope(&prepared.project_root).hash;
                 let commit = app.handle_active_work_projection_prepared(*prepared);
                 let mut dispatch_ms = 0;
                 if let Some(prepared_dispatch) = commit.prepared_dispatch {
                     let dispatch_started = std::time::Instant::now();
                     clients.dispatch_prepared_active_work(
                         prepared_dispatch.payload,
-                        DispatchTarget::Broadcast,
+                        DispatchTarget::Project(project_key),
                     );
                     dispatch_ms = dispatch_started.elapsed().as_millis() as u64;
                 }
@@ -9884,12 +10026,15 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
-                clients.dispatch(vec![OutboundEvent::broadcast(
-                    BackendEvent::LaunchProgress {
-                        id: window_id,
-                        message,
-                    },
-                )]);
+                if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
+                    clients.dispatch(vec![OutboundEvent::project(
+                        project_key,
+                        BackendEvent::LaunchProgress {
+                            id: window_id,
+                            message,
+                        },
+                    )]);
+                }
             }
             Event::UserEvent(UserEvent::ClientPaneSnapshotRepair {
                 client_id,
@@ -9899,12 +10044,15 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
-                clients.dispatch(vec![OutboundEvent::broadcast(
-                    BackendEvent::TerminalOutput {
-                        id: window_id,
-                        data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-                    },
-                )]);
+                if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
+                    clients.dispatch(vec![OutboundEvent::project(
+                        project_key,
+                        BackendEvent::TerminalOutput {
+                            id: window_id,
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+                        },
+                    )]);
+                }
             }
             Event::UserEvent(UserEvent::AttachmentPromptReady {
                 client_id,
@@ -9952,7 +10100,9 @@ fn main() -> std::io::Result<()> {
                         startup_index_project = None;
                     }
                 }
-                clients.dispatch(vec![OutboundEvent::broadcast(
+                let project_key = gwt_core::paths::resolve_project_scope(std::path::Path::new(&project_root)).hash;
+                clients.dispatch(vec![OutboundEvent::project(
+                    project_key,
                     BackendEvent::ProjectIndexStatus {
                         project_root,
                         status,
@@ -10274,13 +10424,16 @@ fn main() -> std::io::Result<()> {
                 phase,
                 percent,
             }) => {
-                clients.dispatch(vec![OutboundEvent::broadcast(
-                    BackendEvent::MigrationProgress {
-                        tab_id,
-                        phase: phase.as_str().to_string(),
-                        percent,
-                    },
-                )]);
+                if let Some(project_key) = app.project_key_for_tab(&tab_id).cloned() {
+                    clients.dispatch(vec![OutboundEvent::project(
+                        project_key,
+                        BackendEvent::MigrationProgress {
+                            tab_id,
+                            phase: phase.as_str().to_string(),
+                            percent,
+                        },
+                    )]);
+                }
             }
             Event::UserEvent(UserEvent::MigrationDone {
                 tab_id,
