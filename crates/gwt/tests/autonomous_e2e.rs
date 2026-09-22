@@ -483,6 +483,7 @@ mod idle_windows {
         review_dispatch: bool,
     ) -> IssueMonitorWindowObservation {
         IssueMonitorWindowObservation {
+            monitor_owned: false,
             window_id: window_id.to_string(),
             issue_number: Some(issue_number),
             status,

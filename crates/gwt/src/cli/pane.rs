@@ -2461,6 +2461,29 @@ mod tests {
     }
 
     #[test]
+    fn render_pane_list_keeps_error_panes_in_mixed_state_inventory() {
+        let windows = [
+            ("running", WindowState::Running),
+            ("idle", WindowState::Idle),
+            ("stopped", WindowState::Stopped),
+            ("error", WindowState::Error),
+        ]
+        .into_iter()
+        .map(|(id, state)| {
+            let mut pane = window(id, WindowPreset::Codex, Some("codex"));
+            pane.status = state;
+            pane
+        })
+        .collect::<Vec<_>>();
+        let temp = tempfile::tempdir().unwrap();
+        let rendered = render_pane_list_with_sessions(&windows, temp.path());
+        assert_eq!(rendered.lines().count(), 4);
+        for state in ["running", "idle", "stopped", "error"] {
+            assert!(rendered.contains(&format!("{state}\t{state}\tcodex\t")));
+        }
+    }
+
+    #[test]
     fn render_pane_list_projects_approval_wait_as_waiting() {
         let mut windows = vec![window("tab-1::agent-1", WindowPreset::Agent, Some("codex"))];
         windows[0].status = WindowState::Waiting;

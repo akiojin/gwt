@@ -133,6 +133,23 @@ export function windowRuntimeLabel(status) {
   return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
 }
 
+// Keep compact state labels stable while explaining what an idle turn means.
+export function windowRuntimeDescription(status, preset) {
+  if (!presetSupportsWaitingStatus(preset)) {
+    return windowRuntimeLabel(status);
+  }
+  switch (status) {
+    case "idle":
+      return "Turn ended; ready for input";
+    case "running":
+      return "Turn in progress, including waiting for a model response";
+    case "waiting":
+      return "Waiting for approval or an external condition";
+    default:
+      return windowRuntimeLabel(status);
+  }
+}
+
 // SPEC-2356 — translate runtime state vocabulary to Operator telemetry states
 // (`running|idle|waiting|error|done`). The mapping stays intentionally narrow
 // so future runtime states surface as `idle` until the design language
