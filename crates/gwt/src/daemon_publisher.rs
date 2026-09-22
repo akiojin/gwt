@@ -568,6 +568,7 @@ mod window_snapshot_publish_tests {
             project_tab_id: "tab-1".to_string(),
             observed_at: "2026-09-08T01:11:27Z".to_string(),
             windows: vec![crate::IssueMonitorWindowObservation {
+                monitor_owned: false,
                 window_id: "tab-1::agent-149".to_string(),
                 issue_number: Some(4009),
                 status: crate::WindowState::Stopped,
