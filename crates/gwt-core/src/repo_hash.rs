@@ -40,7 +40,7 @@ pub type ProjectKey = RepoHash;
 pub enum ProjectKeyParseError {
     /// The value was empty or only whitespace.
     Empty,
-    /// The value was not exactly [`HASH_HEX_LEN`] characters long.
+    /// The value was not exactly 16 characters long.
     InvalidLength { actual: usize },
     /// The value contained a character that is not a lowercase hex digit.
     InvalidCharacter { found: char },
