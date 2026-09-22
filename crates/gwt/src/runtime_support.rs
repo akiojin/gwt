@@ -122,6 +122,9 @@ pub fn app_state_view_from_parts(
                 let running_agents = collect_running_agents(&tab.workspace.persisted().windows);
                 gwt::ProjectTabView {
                     id: tab.id.clone(),
+                    project_key: gwt_core::paths::resolve_project_scope(&tab.project_root)
+                        .hash
+                        .to_string(),
                     title: tab.title.clone(),
                     project_root: tab.project_root.display().to_string(),
                     kind: tab.kind,

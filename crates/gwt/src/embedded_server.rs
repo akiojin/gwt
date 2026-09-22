@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::app_runtime::ClientScope;
 use axum::{
     extract::{
         connect_info::ConnectInfo,
@@ -31,7 +32,7 @@ use gwt::{
     AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest,
     BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
 };
-use gwt_terminal::PtyHandle;
+use gwt_core::repo_hash::ProjectKey;
 use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt, net::TcpListener, runtime::Runtime, sync::oneshot};
 use uuid::Uuid;
@@ -41,7 +42,7 @@ use crate::{
     UploadedAttachment, UserEvent,
 };
 
-type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
+use crate::PtyWriterRegistry;
 
 /// SPEC-2359 W-17 (FR-394/FR-395): per-client outbound queue limits.
 ///
@@ -628,6 +629,24 @@ pub struct ClientHub {
 struct ClientRegistration {
     queue: Arc<ClientQueue>,
     receives_broadcasts: bool,
+    scope: ClientScope,
+}
+
+fn target_selects(
+    target: &DispatchTarget,
+    client_id: &str,
+    receives_broadcasts: bool,
+    scope: &ClientScope,
+) -> bool {
+    match target {
+        DispatchTarget::All => receives_broadcasts,
+        DispatchTarget::Hub => receives_broadcasts && *scope == ClientScope::Hub,
+        DispatchTarget::Project(key) => {
+            receives_broadcasts
+                && matches!(scope, ClientScope::Project(client_key) if client_key == key)
+        }
+        DispatchTarget::Client(id) => id == client_id,
+    }
 }
 
 impl ClientHub {
@@ -639,18 +658,36 @@ impl ClientHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
+    #[cfg(test)]
     pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
-        self.register_with_broadcasts(client_id, true)
+        self.register_scoped(client_id, ClientScope::Hub)
+    }
+
+    pub(super) fn register_scoped(
+        &self,
+        client_id: String,
+        scope: ClientScope,
+    ) -> Arc<ClientQueue> {
+        self.register_with_broadcasts(client_id, true, scope)
+    }
+
+    pub(super) fn scope(&self, client_id: &str) -> Option<ClientScope> {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(client_id)
+            .map(|registration| registration.scope.clone())
     }
 
     fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
-        self.register_with_broadcasts(client_id, false)
+        self.register_with_broadcasts(client_id, false, ClientScope::Hub)
     }
 
     fn register_with_broadcasts(
         &self,
         client_id: String,
         receives_broadcasts: bool,
+        scope: ClientScope,
     ) -> Arc<ClientQueue> {
         let queue = Arc::new(ClientQueue::default());
         self.clients
@@ -661,6 +698,7 @@ impl ClientHub {
                 ClientRegistration {
                     queue: queue.clone(),
                     receives_broadcasts,
+                    scope,
                 },
             );
         queue
@@ -729,7 +767,7 @@ impl ClientHub {
         // and per-client enqueue work happen outside the registry mutex. This
         // keeps register/unregister responsive even when the broadcast batch
         // is large or one client is slow to drain its queue.
-        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool, ClientScope)> = {
             let clients = self
                 .clients
                 .lock()
@@ -741,6 +779,7 @@ impl ClientHub {
                         id.clone(),
                         registration.queue.clone(),
                         registration.receives_broadcasts,
+                        registration.scope.clone(),
                     )
                 })
                 .collect()
@@ -763,24 +802,11 @@ impl ClientHub {
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
             let prepared = prepare_outbound_event(&outbound);
-            match outbound.target {
-                DispatchTarget::Broadcast => {
-                    for (client_id, queue, receives_broadcasts) in &snapshot {
-                        if !receives_broadcasts {
-                            continue;
-                        }
-                        if queue.enqueue(&prepared) {
-                            dead_clients.push(client_id.clone());
-                        }
-                    }
-                }
-                DispatchTarget::Client(client_id) => {
-                    if let Some((_, queue, _)) = snapshot.iter().find(|(id, _, _)| id == &client_id)
-                    {
-                        if queue.enqueue(&prepared) {
-                            dead_clients.push(client_id);
-                        }
-                    }
+            for (client_id, queue, receives_broadcasts, scope) in &snapshot {
+                if target_selects(&outbound.target, client_id, *receives_broadcasts, scope)
+                    && queue.enqueue(&prepared)
+                {
+                    dead_clients.push(client_id.clone());
                 }
             }
         }
@@ -813,7 +839,7 @@ impl ClientHub {
     /// Issue #3777: enqueue a background-serialized Active Work snapshot
     /// without reserializing its large Work/event graph on the tao thread.
     pub(super) fn dispatch_prepared_active_work(&self, payload: Arc<str>, target: DispatchTarget) {
-        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool, ClientScope)> = {
             let clients = self
                 .clients
                 .lock()
@@ -825,6 +851,7 @@ impl ClientHub {
                         id.clone(),
                         registration.queue.clone(),
                         registration.receives_broadcasts,
+                        registration.scope.clone(),
                     )
                 })
                 .collect()
@@ -842,11 +869,8 @@ impl ClientHub {
             stream_seq: None,
         };
         let mut dead_clients = Vec::new();
-        for (client_id, queue, receives_broadcasts) in snapshot {
-            let selected = match &target {
-                DispatchTarget::Broadcast => receives_broadcasts,
-                DispatchTarget::Client(target_id) => target_id == &client_id,
-            };
+        for (client_id, queue, receives_broadcasts, scope) in snapshot {
+            let selected = target_selects(&target, &client_id, receives_broadcasts, &scope);
             if selected && queue.enqueue(&prepared) {
                 dead_clients.push(client_id);
             }
@@ -3336,7 +3360,24 @@ fn should_drop_access_log_record(record: &AccessLogRecord) -> bool {
     record.method == "POST" && record.path == "/internal/hook-live" && record.status == 204
 }
 
+#[derive(Default, Deserialize)]
+struct WebsocketQuery {
+    repo_hash: Option<String>,
+}
+
+impl WebsocketQuery {
+    fn scope(self) -> Result<ClientScope, StatusCode> {
+        match self.repo_hash {
+            Some(hash) => ProjectKey::parse(&hash)
+                .map(ClientScope::Project)
+                .map_err(|_| StatusCode::BAD_REQUEST),
+            None => Ok(ClientScope::Hub),
+        }
+    }
+}
+
 async fn websocket_handler(
+    Query(query): Query<WebsocketQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
@@ -3344,7 +3385,11 @@ async fn websocket_handler(
     if !websocket_origin_authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    ws.on_upgrade(move |socket| client_session(socket, state))
+    let scope = match query.scope() {
+        Ok(scope) => scope,
+        Err(status) => return status.into_response(),
+    };
+    ws.on_upgrade(move |socket| client_session(socket, state, scope))
 }
 
 async fn agent_pane_websocket_handler(
@@ -4003,7 +4048,7 @@ impl AgentPaneSessionScope {
 }
 
 enum ClientSessionScope {
-    Browser,
+    Browser(ClientScope),
     Agent(AgentPaneSessionScope),
 }
 
@@ -4022,7 +4067,7 @@ enum ScopedFrontendRequest {
 impl ClientSessionScope {
     fn refresh_agent_grant(&mut self, registry: &AgentCapabilityRegistry) -> bool {
         match self {
-            Self::Browser => true,
+            Self::Browser(_) => true,
             Self::Agent(scope) => {
                 let Some(grant) = registry.refresh_grant(&scope.grant) else {
                     return false;
@@ -4035,7 +4080,7 @@ impl ClientSessionScope {
 
     fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
-            Self::Browser => Some(ScopedFrontendRequest::Browser(event)),
+            Self::Browser(_) => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
                 if let FrontendEvent::PmPaneSendInput {
                     operation_id,
@@ -4064,21 +4109,21 @@ impl ClientSessionScope {
 
     fn filter_outbound(&mut self, payload: String) -> Option<String> {
         match self {
-            Self::Browser => Some(payload),
+            Self::Browser(_) => Some(payload),
             Self::Agent(scope) => scope.filter_outbound(payload),
         }
     }
 
     fn filter_repair_panes(&self, repair_panes: Vec<String>) -> Vec<String> {
         match self {
-            Self::Browser => repair_panes,
+            Self::Browser(_) => repair_panes,
             Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
         }
     }
 }
 
-async fn client_session(socket: WebSocket, state: ServerState) {
-    client_session_with_scope(socket, state, ClientSessionScope::Browser).await;
+async fn client_session(socket: WebSocket, state: ServerState, scope: ClientScope) {
+    client_session_with_scope(socket, state, ClientSessionScope::Browser(scope)).await;
 }
 
 async fn agent_pane_client_session(
@@ -4201,7 +4246,9 @@ async fn client_session_with_scope(
 ) {
     let client_id = Uuid::new_v4().to_string();
     let outbound = match &scope {
-        ClientSessionScope::Browser => state.clients.register(client_id.clone()),
+        ClientSessionScope::Browser(scope) => state
+            .clients
+            .register_scoped(client_id.clone(), scope.clone()),
         ClientSessionScope::Agent(_) => state.clients.register_pane(client_id.clone()),
     };
     let (mut sender, mut receiver) = socket.split();
@@ -4596,6 +4643,10 @@ fn handle_frontend_message(
         }
     };
 
+    let Some(ClientScope::Project(project_key)) = state.clients.scope(client_id) else {
+        return;
+    };
+
     // Issue #4145 AC-1: the prompt-send route is the submit reaching the PTY,
     // covering both the WebSocket fast path and the event-loop fallback below.
     // Only a submit is timed — Issue #3611 is the reminder that per-keystroke
@@ -4630,7 +4681,11 @@ fn handle_frontend_message(
 
     let approval_resolution = gwt::window_state::is_approval_resolution_input(&data);
     let mut resolution_marked = false;
-    if let Some((pty, pty_writer_count)) = pty_handle {
+    if let Some((entry, pty_writer_count)) = pty_handle {
+        if entry.project_key != project_key {
+            return;
+        }
+        let pty = &entry.handle;
         if approval_resolution {
             // `EventLoopProxy::send_event` completes the tao channel enqueue
             // synchronously. Enqueue the causal marker before the PTY write so
@@ -4922,6 +4977,13 @@ mod tests {
         ) -> Poll<Result<(), Self::Error>> {
             Poll::Pending
         }
+    }
+
+    use crate::app_runtime::ClientScope;
+    use gwt_core::repo_hash::ProjectKey;
+
+    fn project_a() -> ProjectKey {
+        ProjectKey::parse("0123456789abcdef").unwrap()
     }
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
@@ -6185,7 +6247,7 @@ mod tests {
 
     #[test]
     fn browser_client_scope_preserves_existing_unrestricted_websocket_contract() {
-        let mut scope = super::ClientSessionScope::Browser;
+        let mut scope = super::ClientSessionScope::Browser(ClientScope::Hub);
         assert!(matches!(
             scope.filter_inbound(FrontendEvent::TerminalInput {
                 id: "any-project::terminal-1".to_string(),
@@ -8992,8 +9054,327 @@ mod tests {
     }
 
     #[test]
+    fn websocket_handshake_binds_scope_until_disconnect_and_reconnect() {
+        let runtime = Runtime::new().unwrap();
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .unwrap();
+        let url = server
+            .agent_capability_issuer()
+            .pane_websocket_url()
+            .to_string();
+        runtime.block_on(async {
+            let invalid = connect_async(format!("{url}?repo_hash=invalid")).await.unwrap_err();
+            assert!(matches!(invalid, WebSocketError::Http(response) if response.status() == StatusCode::BAD_REQUEST));
+            for expected in [ClientScope::Project(project_a()), ClientScope::Hub] {
+                let scoped_url = match &expected { ClientScope::Project(key) => format!("{url}?repo_hash={key}"), ClientScope::Hub => url.clone() };
+                let (mut socket, _) = connect_async(scoped_url).await.unwrap();
+                socket.send(WebSocketMessage::Text(r#"{"kind":"frontend_ready","repo_hash":"fedcba9876543210"}"#.into())).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if !events.lock().unwrap().is_empty() { break; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+                {
+                    let registration = clients.clients.lock().unwrap();
+                    assert_eq!(registration.len(), 1);
+                    assert_eq!(registration.values().next().unwrap().scope, expected);
+                }
+                events.lock().unwrap().clear();
+                socket.close(None).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while clients.has_clients() { tokio::task::yield_now().await; }
+                }).await.unwrap();
+            }
+        });
+        server.shutdown();
+    }
+
+    // AC-5 inventory: host process/log streams, provider usage (including
+    // its session rows), runtime health, and Board sign-in are global host
+    // views. Uploads are host staging addressed by opaque upload_id and reply
+    // only to their HTTP caller; attaching one to a pane follows scoped input.
+    // Project-derived hook/PTY/projection payloads must go through runtime
+    // routing, never a new direct transport broadcast.
+    #[test]
+    fn transport_direct_dispatch_inventory_stays_explicit() {
+        let server = include_str!("embedded_server.rs")
+            .split("#[cfg(test)]\npub fn broadcast_runtime_hook_event")
+            .next()
+            .unwrap();
+        assert_eq!(
+            server.matches(".dispatch(").count(),
+            1,
+            "classify every new direct transport dispatch"
+        );
+        let oauth = server
+            .split("async fn oauth_callback_handler(")
+            .nth(1)
+            .unwrap()
+            .split("struct AttachmentUploadTokenResponse")
+            .next()
+            .unwrap();
+        assert!(oauth.contains("OutboundEvent::broadcast("));
+        assert!(oauth.contains("board_auth_status_event("));
+        let upload = server
+            .split("async fn attachment_upload_handler(")
+            .nth(1)
+            .unwrap()
+            .split("async fn access_log_middleware(")
+            .next()
+            .unwrap();
+        assert!(
+            !upload.contains(".dispatch("),
+            "upload staging replies only to its HTTP caller"
+        );
+        let hook = server
+            .split("async fn hook_live_handler(")
+            .nth(1)
+            .unwrap()
+            .split("async fn workspace_update_handler(")
+            .next()
+            .unwrap();
+        assert!(hook.contains("UserEvent::RuntimeHook(event)"));
+        assert!(
+            !hook.contains(".dispatch("),
+            "hook events require project routing in the runtime"
+        );
+        let main = include_str!("main.rs")
+            .split("fn main() ->")
+            .nth(1)
+            .unwrap();
+        for (arm, policy) in [
+            (
+                "ActiveWorkProjectionPrepared(prepared)",
+                "DispatchTarget::Project(project_key)",
+            ),
+            (
+                "LaunchProgress { window_id, message }",
+                "project_key_for_window",
+            ),
+            (
+                "LaunchTerminalOutput { window_id, data }",
+                "project_key_for_window",
+            ),
+            ("ProjectIndexStatus {", "OutboundEvent::project("),
+            ("MigrationProgress {", "project_key_for_tab"),
+        ] {
+            let body = main
+                .split(&format!("Event::UserEvent(UserEvent::{arm}"))
+                .nth(1)
+                .unwrap()
+                .split("Event::UserEvent(")
+                .next()
+                .unwrap();
+            assert!(
+                body.contains(policy),
+                "direct event {arm} must use {policy}"
+            );
+            assert!(!body.contains("OutboundEvent::broadcast("));
+        }
+        // Only host monitor/update notifications and pre-project clone navigation
+        // retain direct global construction in the event loop.
+        let compact: String = main.chars().filter(|c| !c.is_whitespace()).collect();
+        let direct_globals: Vec<_> = compact
+            .split("OutboundEvent::broadcast(BackendEvent::")
+            .skip(1)
+            .map(|tail| tail.split('{').next().unwrap())
+            .collect();
+        assert_eq!(
+            direct_globals,
+            [
+                "IssueMonitorToast",
+                "UpdateProgress",
+                "UpdateReady",
+                "IssueMonitorToast",
+                "CloneProjectProgress",
+                "CloneProjectError",
+            ]
+        );
+        let health = include_str!("runtime_health_poller.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(health.matches(".dispatch(").count(), 1);
+        assert!(health.contains("BackendEvent::RuntimeHealth { snapshot }"));
+        let usage = include_str!("usage_poller.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(usage.matches(".dispatch(").count(), 1);
+        assert!(usage.contains("OutboundEvent::broadcast("));
+        assert!(usage.contains("BackendEvent::ProviderUsage {"));
+        assert!(usage.contains("sessions: snapshot.sessions"));
+        let runtime = include_str!("app_runtime/runtime_events.rs");
+        for event in ["ProcessLine", "LogEntryAppended"] {
+            assert!(
+                runtime.contains(&format!("OutboundEvent::broadcast(BackendEvent::{event}")),
+                "global host diagnostic classification changed: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_query_validates_project_scope() {
+        assert_eq!(
+            super::WebsocketQuery::default().scope().unwrap(),
+            ClientScope::Hub
+        );
+        assert_eq!(
+            super::WebsocketQuery {
+                repo_hash: Some(project_a().to_string())
+            }
+            .scope()
+            .unwrap(),
+            ClientScope::Project(project_a())
+        );
+        for hash in ["", "../project", "0123456789ABCDEF", "0123456789abcde"] {
+            assert_eq!(
+                super::WebsocketQuery {
+                    repo_hash: Some(hash.into())
+                }
+                .scope()
+                .unwrap_err(),
+                axum::http::StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[test]
+    fn client_hub_filters_both_dispatch_paths_by_connection_scope() {
+        let hub = ClientHub::default();
+        let a = hub.register_scoped("a".into(), ClientScope::Project(project_a()));
+        let b = hub.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        let home = hub.register("home".into());
+        let agent = hub.register_pane("agent".into());
+        let queues = [&a, &b, &home, &agent];
+        for (target, expected) in [
+            (crate::DispatchTarget::Project(project_a()), [1, 0, 0, 0]),
+            (crate::DispatchTarget::Hub, [0, 0, 1, 0]),
+            (crate::DispatchTarget::All, [1, 1, 1, 0]),
+            (crate::DispatchTarget::Client("agent".into()), [0, 0, 0, 1]),
+        ] {
+            let outbound = match &target {
+                crate::DispatchTarget::Project(key) => {
+                    OutboundEvent::project(key.clone(), lossless_error("scope"))
+                }
+                _ => crate::OutboundEvent {
+                    target: target.clone(),
+                    event: lossless_error("scope"),
+                    knowledge_wire_metadata: None,
+                    terminal_stream_seq: None,
+                },
+            };
+            hub.dispatch(vec![outbound]);
+            for (queue, count) in queues.iter().zip(expected) {
+                assert_eq!(drain_all(queue).0.len(), count);
+            }
+            hub.dispatch_prepared_active_work(Arc::from("{}"), target);
+            for (queue, count) in queues.iter().zip(expected) {
+                assert_eq!(drain_all(queue).0.len(), count);
+            }
+        }
+        assert_eq!(hub.scope("a"), Some(ClientScope::Project(project_a())));
+        hub.unregister("a");
+        assert_eq!(hub.scope("a"), None);
+        hub.register("a".into());
+        assert_eq!(hub.scope("a"), Some(ClientScope::Hub));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_input_rejects_other_project_without_writing_or_fallback() {
+        let (state, events) = sample_server_state();
+        let pane = gwt_terminal::Pane::new(
+            "scoped-pane".into(),
+            "sh".into(),
+            vec!["-c".into(), "cat >/dev/null".into()],
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .unwrap();
+        let handle = pane.shared_pty();
+        state.pty_writers.write().unwrap().insert(
+            "pane-a".into(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: handle.clone(),
+            }),
+        );
+        state.clients.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        state.clients.register("hub".into());
+        for client_id in ["b", "hub", "unknown"] {
+            handle_frontend_message(
+                &state,
+                client_id,
+                &AtomicU64::new(0),
+                FrontendEvent::TerminalInput {
+                    id: "pane-a".into(),
+                    data: "x".into(),
+                },
+                Instant::now(),
+            );
+        }
+        assert!(!handle.has_unsent_user_input());
+        assert!(events.lock().unwrap().is_empty());
+        state
+            .clients
+            .register_scoped("a".into(), ClientScope::Project(project_a()));
+        handle_frontend_message(
+            &state,
+            "a",
+            &AtomicU64::new(0),
+            FrontendEvent::TerminalInput {
+                id: "pane-a".into(),
+                data: "x".into(),
+            },
+            Instant::now(),
+        );
+        assert!(handle.has_unsent_user_input());
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_input_rejects_hub_and_unregistered_clients_before_fallback() {
+        let (state, events) = sample_server_state();
+        state.clients.register("hub".to_string());
+        for client_id in ["hub", "unknown"] {
+            handle_frontend_message(
+                &state,
+                client_id,
+                &AtomicU64::new(0),
+                FrontendEvent::TerminalInput {
+                    id: "project-a-pane".into(),
+                    data: "x".into(),
+                },
+                Instant::now(),
+            );
+        }
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let received_at = Instant::now() - Duration::from_millis(50);
 
         handle_frontend_message(
@@ -9024,6 +9405,9 @@ mod tests {
     #[test]
     fn invalidated_fast_path_generation_cancels_resolution_without_fallback_input() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let pane = gwt_terminal::Pane::new(
             "stale-pane".to_string(),
             "sh".to_string(),
@@ -9036,11 +9420,13 @@ mod tests {
         .expect("long-running stale pane");
         let stale_generation = pane.shared_pty();
         stale_generation.invalidate_input_generation();
-        state
-            .pty_writers
-            .write()
-            .expect("writer registry")
-            .insert("tab-1::agent-1".to_string(), stale_generation);
+        state.pty_writers.write().expect("writer registry").insert(
+            "tab-1::agent-1".to_string(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: stale_generation,
+            }),
+        );
 
         handle_frontend_message(
             &state,
@@ -9078,6 +9464,9 @@ mod tests {
     #[test]
     fn handle_frontend_message_fast_path_marks_submit_before_write_and_ignores_navigation() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let pane = gwt_terminal::Pane::new(
             "test-pane".to_string(),
             "sh".to_string(),
@@ -9088,11 +9477,13 @@ mod tests {
             None,
         )
         .expect("long-running test pane");
-        state
-            .pty_writers
-            .write()
-            .expect("writer registry")
-            .insert("tab-1::agent-1".to_string(), pane.shared_pty());
+        state.pty_writers.write().expect("writer registry").insert(
+            "tab-1::agent-1".to_string(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: pane.shared_pty(),
+            }),
+        );
 
         handle_frontend_message(
             &state,
@@ -9141,6 +9532,9 @@ mod tests {
     #[test]
     fn handle_frontend_message_flushes_held_pm_wake_after_composer_submit() {
         let (state, events) = sample_server_state();
+        state
+            .clients
+            .register_scoped("client-1".into(), ClientScope::Project(project_a()));
         let pane = gwt_terminal::Pane::new(
             "test-pane".to_string(),
             "sh".to_string(),
@@ -9151,11 +9545,13 @@ mod tests {
             None,
         )
         .expect("long-running test pane");
-        state
-            .pty_writers
-            .write()
-            .expect("writer registry")
-            .insert("tab-1::pm-window".to_string(), pane.shared_pty());
+        state.pty_writers.write().expect("writer registry").insert(
+            "tab-1::pm-window".to_string(),
+            Arc::new(crate::PtyWriterEntry {
+                project_key: project_a(),
+                handle: pane.shared_pty(),
+            }),
+        );
 
         handle_frontend_message(
             &state,

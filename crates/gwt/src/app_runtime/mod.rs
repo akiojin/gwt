@@ -422,9 +422,19 @@ pub(crate) struct PendingStartupAutoResumeSession {
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientScope {
+    Hub,
+    Project(gwt_core::repo_hash::ProjectKey),
+}
+
 #[derive(Debug, Clone)]
 pub enum DispatchTarget {
-    Broadcast,
+    All,
+    // Explicit Hub recipients are part of the routing contract; producers migrate separately.
+    #[allow(dead_code)]
+    Hub,
+    Project(gwt_core::repo_hash::ProjectKey),
     Client(ClientId),
 }
 
@@ -507,9 +517,21 @@ fn run_agent_dispatch_test_hook(slot: &'static std::thread::LocalKey<AgentDispat
 }
 
 impl OutboundEvent {
+    pub(crate) fn project(
+        project_key: gwt_core::repo_hash::ProjectKey,
+        event: BackendEvent,
+    ) -> Self {
+        Self {
+            target: DispatchTarget::Project(project_key),
+            event,
+            knowledge_wire_metadata: None,
+            terminal_stream_seq: None,
+        }
+    }
+
     pub(crate) fn broadcast(event: BackendEvent) -> Self {
         Self {
-            target: DispatchTarget::Broadcast,
+            target: DispatchTarget::All,
             event,
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
@@ -2877,6 +2899,23 @@ fn issue_monitor_issue_from_snapshot(
 }
 
 impl AppRuntime {
+    pub(crate) fn project_key_for_tab(
+        &self,
+        tab_id: &str,
+    ) -> Option<&gwt_core::repo_hash::ProjectKey> {
+        self.project_tab_incarnations
+            .get(tab_id)
+            .map(|incarnation| &incarnation.project_key)
+    }
+
+    pub(crate) fn project_key_for_window(
+        &self,
+        window_id: &str,
+    ) -> Option<&gwt_core::repo_hash::ProjectKey> {
+        let address = self.window_lookup.get(window_id)?;
+        self.project_key_for_tab(&address.tab_id)
+    }
+
     pub(crate) fn new(
         proxy: EventLoopProxy<UserEvent>,
         pty_writers: PtyWriterRegistry,
@@ -9020,6 +9059,9 @@ impl AppRuntime {
         let running_agents = crate::runtime_support::collect_running_agents(&workspace.windows);
         gwt::ProjectTabView {
             id: tab.id.clone(),
+            project_key: self.project_tab_incarnations[&tab.id]
+                .project_key
+                .to_string(),
             title: tab.title.clone(),
             project_root: tab.project_root.display().to_string(),
             kind: tab.kind,

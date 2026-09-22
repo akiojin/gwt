@@ -1185,7 +1185,7 @@ impl AppRuntime {
             .and_then(|writers| {
                 writers
                     .get(&principal_window_id)
-                    .cloned()
+                    .map(|entry| Arc::clone(&entry.handle))
                     .ok_or_else(|| "pm.message.send caller has no live PTY".to_string())
             }) {
             Ok(pty) => pty,
@@ -1273,10 +1273,11 @@ impl AppRuntime {
             },
         );
         let expected_pty = if target_is_live_agent {
-            self.pty_writers
-                .read()
-                .ok()
-                .and_then(|writers| writers.get(window_id).cloned())
+            self.pty_writers.read().ok().and_then(|writers| {
+                writers
+                    .get(window_id)
+                    .map(|entry| Arc::clone(&entry.handle))
+            })
         } else {
             None
         };
@@ -1441,11 +1442,11 @@ impl AppRuntime {
                                             })?;
                                             if !current
                                                 .get(&worker_window_id)
-                                                .is_some_and(|pty| Arc::ptr_eq(pty, &expected_pty))
+                                                .is_some_and(|entry| Arc::ptr_eq(&entry.handle, &expected_pty))
                                                 || !current
                                                     .get(&principal_window_id)
-                                                    .is_some_and(|pty| {
-                                                        Arc::ptr_eq(pty, &principal_pty)
+                                                    .is_some_and(|entry| {
+                                                        Arc::ptr_eq(&entry.handle, &principal_pty)
                                                     })
                                             {
                                                 return Err(

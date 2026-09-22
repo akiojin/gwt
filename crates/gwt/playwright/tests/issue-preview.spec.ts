@@ -707,6 +707,7 @@ async function installIssuePreviewBackend(page, { agentStatus = "running" } = {}
               id: "tab-issue",
               title: "Fixture Project",
               project_root: "/fixture",
+              project_key: "0123456789abcdef",
               kind: "git",
               workspace: {
                 viewport: { x: 0, y: 0, zoom: 1 },

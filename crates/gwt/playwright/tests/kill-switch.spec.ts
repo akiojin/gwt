@@ -381,6 +381,7 @@ async function installKillSwitchBackend(page) {
               id: "tab-1",
               title: "Kill Switch Fixture",
               project_root: "/fixture",
+              project_key: "0123456789abcdef",
               kind: "git",
               workspace: {
                 viewport: { x: 0, y: 0, zoom: 1 },

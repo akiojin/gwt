@@ -1,8 +1,92 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 test.describe("Project tabs", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("live checkout bootstraps a project-scoped connection and accepts terminal input", async ({ page }) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base, "requires browser-check isolated checkout server");
+    const errors: string[] = [];
+    const sockets: string[] = [];
+    let projectKey: string | undefined;
+    let scopedWorkspaceReceived = false;
+    let terminalOutput = "";
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("websocket", (socket) => {
+      sockets.push(socket.url());
+      socket.on("framereceived", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "terminal_output") {
+          terminalOutput += Buffer.from(event.data_base64, "base64").toString("utf8");
+        }
+        if (event.kind !== "workspace_state") return;
+        const workspace = event.workspace;
+        const tab = workspace.tabs.find((entry) => entry.id === workspace.active_tab_id)
+          ?? workspace.tabs[0];
+        projectKey = tab?.project_key;
+        if (projectKey && new URL(socket.url()).searchParams.get("repo_hash") === projectKey) {
+          scopedWorkspaceReceived = true;
+        }
+      });
+    });
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(page.locator(".project-tab").first()).toBeVisible();
+    await expect.poll(() => scopedWorkspaceReceived).toBe(true);
+    expect(projectKey).toMatch(/^[0-9a-f]{16}$/);
+    expect(sockets).toHaveLength(2);
+    expect(new URL(sockets[0]).searchParams.has("repo_hash")).toBe(false);
+    expect(new URL(sockets[1]).searchParams.get("repo_hash")).toBe(projectKey);
+    await sendLiveGwtEvent(page, {
+      kind: "create_window", preset: "shell",
+      bounds: { x: 80, y: 80, width: 720, height: 420 },
+    });
+    const shell = page.locator('.workspace-window[data-preset="shell"]').last();
+    await expect(shell).toBeVisible({ timeout: 30_000 });
+    const terminal = shell.locator(".terminal-root");
+    await expect(terminal).toBeVisible();
+    await terminal.click();
+    await page.keyboard.type("printf 'GWT_%s\\n' 'SCOPED_4536'\r");
+    await expect.poll(() => terminalOutput, { timeout: 15_000 }).toContain("GWT_SCOPED_4536");
+    const id = await shell.getAttribute("data-id");
+    await sendLiveGwtEvent(page, { kind: "close_window", id });
+    expect(errors).toEqual([]);
+  });
+
+  test("project switching reconnects with the selected immutable scope", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    await installEmbeddedRoutes(page);
+    const tabs = projectTabsFixture(2).map((tab, index) => ({
+      ...tab,
+      project_key: index === 0 ? "0123456789abcdef" : "fedcba9876543210",
+    }));
+    await installProjectTabsBackend(page, tabs);
+    await page.goto(APP_URL);
+    const urls = () => page.evaluate(() => window.__gwtProjectTabsSocketUrls);
+    await expect.poll(urls).toEqual([
+      "ws://gwt-playwright.local/ws",
+      "ws://gwt-playwright.local/ws?repo_hash=0123456789abcdef",
+    ]);
+    await page.locator(".project-tab").nth(1).click();
+    await expect(page.locator(".project-tab").nth(1)).toHaveAttribute("aria-current", "page");
+    await expect.poll(urls).toEqual([
+      "ws://gwt-playwright.local/ws",
+      "ws://gwt-playwright.local/ws?repo_hash=0123456789abcdef",
+      "ws://gwt-playwright.local/ws?repo_hash=fedcba9876543210",
+    ]);
+    await page.locator(".project-tab").nth(0).click();
+    await expect.poll(urls).toHaveLength(4);
+    expect((await urls()).at(-1)).toContain("repo_hash=0123456789abcdef");
+    expect(errors).toEqual([]);
+  });
 
   test("tab switching stays responsive while streamed WebSocket output is backlogged", async ({
     page,
@@ -368,6 +452,7 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
       constructor(url) {
         super();
         this.url = url;
+        (window.__gwtProjectTabsSocketUrls ??= []).push(url);
         this.readyState = FixtureWebSocket.CONNECTING;
         window.__gwtProjectTabsFixtureSocket = this;
         setTimeout(() => {
