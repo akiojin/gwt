@@ -2713,7 +2713,20 @@ struct ExecutionRepairOutcome {
 #[must_use]
 pub fn compute_content_hash(record: &ExecutionControlRecord) -> String {
     use sha2::{Digest, Sha256};
-    let canonical = recovery_storage_projection(record);
+    let mut canonical = recovery_storage_projection(record);
+    // Issue #4591 follow-up: hashed without the Permission Mode Decision, for
+    // the same reason `recoveries` is folded into `transfers` above — and here
+    // rather than in the projection, because the projection is also what gets
+    // written. Dropping the field there would stop persisting it entirely.
+    //
+    // `compute_content_hash` hashes the deserialized record re-serialized, and
+    // `load` parses with plain serde. A binary that does not know this field
+    // drops it, recomputes a different hash, and reports the record `corrupt`
+    // with an empty `available_recoveries` — measured against gwtd 9.101.1.
+    // The decision describes how a launch was decided, not the identity of the
+    // execution, so excluding it costs nothing and keeps the record readable
+    // across the release that introduces the field.
+    canonical.permission_decision = None;
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     format!("{:x}", Sha256::digest(&bytes))
 }
@@ -2775,17 +2788,6 @@ fn recovery_storage_projection(record: &ExecutionControlRecord) -> ExecutionCont
     transfers.append(&mut canonical.transfers);
     canonical.transfers = transfers;
     canonical.recoveries.clear();
-    // Issue #4591 follow-up: keep the Permission Mode Decision out of the body
-    // hash, for the same reason `recoveries` is folded into `transfers` above.
-    //
-    // `compute_content_hash` hashes the deserialized record re-serialized, and
-    // `load` parses with plain serde. A binary that does not know this field
-    // drops it, recomputes a different hash, and reports the record `corrupt`
-    // with an empty `available_recoveries` — measured against gwtd 9.101.1.
-    // The decision describes how a launch was decided, not the identity of the
-    // execution, so excluding it costs nothing and keeps the record readable
-    // across the release that introduces the field.
-    canonical.permission_decision = None;
     canonical.content_hash = String::new();
     canonical
 }
@@ -16631,6 +16633,15 @@ mod tests {
             compute_content_hash(&without),
             "a record carrying a permission decision must validate on a binary that does not know the field"
         );
+
+        // Excluded from the hash, not from the record. The first attempt at
+        // this dropped the field inside `recovery_storage_projection`, which
+        // is also what gets written — the hash matched and the decision was
+        // never persisted at all.
+        let stored: ExecutionControlRecord =
+            serde_json::from_slice(&serialize_execution_control(&with).unwrap()).unwrap();
+        assert_eq!(stored.permission_decision, with.permission_decision);
+        assert!(integrity_ok(&stored));
     }
 
     fn test_recovery(session: &str, index: usize) -> ExecutionRecovery {
