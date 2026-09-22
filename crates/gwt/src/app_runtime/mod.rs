@@ -2707,7 +2707,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         .map(|_| {
             gwt::issue_monitor_worker::read_execution_settlements(
                 project_root,
-                &monitor.active_issue_numbers(),
+                &monitor.execution_settlement_issue_numbers(),
             )
         })
         .unwrap_or_default();
@@ -6388,6 +6388,11 @@ impl AppRuntime {
                         .and_then(|session| session.linked_issue_number)
                 });
                 gwt::IssueMonitorWindowObservation {
+                    // Use the canonical route resolver: it also recognizes
+                    // legacy Monitor launches stamped Manual (Issue #4510).
+                    monitor_owned: gwt::cli::execution_state::session_launch_route(
+                        window.session_id.as_deref(),
+                    ) == Some(gwt_agent::LaunchRoute::Autonomous),
                     review_dispatch: self
                         .issue_monitor_review_dispatch_windows
                         .contains(&window_id),
