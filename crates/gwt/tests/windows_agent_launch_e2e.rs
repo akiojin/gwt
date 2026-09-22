@@ -430,9 +430,9 @@ async fn assert_public_ws_conpty_boundary_async(
     let project_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let canonical_workspace = std::fs::canonicalize(&workspace)
         .map_err(|error| format!("canonicalize public workspace: {error}"))?;
-    let mut project_open = false;
+    let mut project_key = None;
     let mut project_event_kinds = Vec::new();
-    while !project_open && tokio::time::Instant::now() < project_deadline {
+    while project_key.is_none() && tokio::time::Instant::now() < project_deadline {
         let remaining = project_deadline.saturating_duration_since(tokio::time::Instant::now());
         let message = tokio::time::timeout(remaining, socket.next())
             .await
@@ -452,19 +452,42 @@ async fn assert_public_ws_conpty_boundary_async(
         if let Some(kind) = value["kind"].as_str() {
             project_event_kinds.push(kind.to_string());
         }
-        project_open = value["kind"] == "workspace_state"
-            && value["workspace"]["tabs"].as_array().is_some_and(|tabs| {
-                tabs.iter().any(|tab| {
-                    tab["project_root"]
-                        .as_str()
-                        .and_then(|path| std::fs::canonicalize(Path::new(path)).ok())
-                        .is_some_and(|path| path == canonical_workspace)
-                })
+        if value["kind"] == "workspace_state" {
+            project_key = value["workspace"]["tabs"].as_array().and_then(|tabs| {
+                tabs.iter()
+                    .find(|tab| {
+                        tab["project_root"]
+                            .as_str()
+                            .and_then(|path| std::fs::canonicalize(Path::new(path)).ok())
+                            .is_some_and(|path| path == canonical_workspace)
+                    })
+                    .and_then(|tab| tab["project_key"].as_str())
+                    .map(str::to_owned)
             });
+        }
     }
-    if !project_open {
-        return Err("project tab was not materialized".to_string());
-    }
+    let project_key =
+        project_key.ok_or_else(|| "project tab key was not materialized".to_string())?;
+    // Match the browser: the bootstrap connection is Hub-only; project
+    // mutations require a new connection bound to the materialized key.
+    socket
+        .close(None)
+        .await
+        .map_err(|error| format!("close Hub websocket: {error}"))?;
+    let mut project_ws_url = reqwest::Url::parse(&ws_url)
+        .map_err(|error| format!("parse public websocket URL: {error}"))?;
+    project_ws_url
+        .query_pairs_mut()
+        .append_pair("repo_hash", &project_key);
+    let (mut socket, _) = tokio_tungstenite::connect_async(project_ws_url.as_str())
+        .await
+        .map_err(|error| format!("connect project websocket: {error}"))?;
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"kind":"frontend_ready"}"#.into(),
+        ))
+        .await
+        .map_err(|error| format!("send project frontend_ready: {error}"))?;
 
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
