@@ -847,7 +847,10 @@ JSON
   表との整合、supersede のインライン注記、section マーカー / roundtrip の健全性を
   検査し、結果を Intake Inspection Snapshot に記録し、Finding Disposition Ledger
   を seed して reviewer checklist を出力します。critical finding があると非ゼロ
-  終了します。
+  終了します。索引が参照する欠落 comment ID と、索引外の artifact comment
+  （section・part 番号付き）も報告し、内容の書き換えや削除は行いません。
+  section 書き込みはホストの同じ cache を使う writer を直列化し、索引更新直前に
+  最新本文と比較します。別ホスト・外部 writer・通信結果不明は保証対象外です。
 
 ```bash
 gwtd <<'JSON'
