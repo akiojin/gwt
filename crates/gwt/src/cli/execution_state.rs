@@ -61,6 +61,10 @@ pub const BINDING_REPAIR_OUTCOME_FILE: &str = "binding-repair-outcome.json";
 const BINDING_REPAIR_OUTCOME_SCHEMA_VERSION: u32 = 1;
 const BINDING_REPAIR_OPERATION_ID: &str = "continue-work-local-repair";
 const GENERATION_BINDING_MISMATCH_PREFIX: &str = "generation settlement binding mismatch:";
+/// Marks the owner ledger's lifecycle event for a No Action settlement, so the
+/// ledger keeps a delivery and a successful non-delivery apart even though
+/// both project the same terminal status (Issue #4590).
+pub const NO_ACTION_LIFECYCLE_REASON_PREFIX: &str = "no action:";
 const RECOVERY_SESSION_CHANGED_PREFIX: &str = "execution_recovery_session_changed:";
 const ACTIVE_BINDING_LEASE_WAIT: Duration = Duration::from_secs(2);
 
@@ -10809,6 +10813,18 @@ pub enum ExecutionSettlement {
     CompletedWithEvidence {
         evidence: ExecutionCompletionEvidence,
     },
+    /// A successful non-delivery: the owner was already delivered, so the
+    /// generation produced nothing (Issue #4545).
+    ///
+    /// It projects the same terminal status as [`Self::Completed`] because a
+    /// reader that predates `execution.no_action` knows only these three
+    /// statuses, and an execution that stays Active after settling wedges
+    /// every such reader's Stop gate (Issue #4590). The owner ledger's
+    /// lifecycle event and the trusted No Action audit — not the status —
+    /// are what tell a non-delivery from a delivery.
+    NoAction {
+        reason: String,
+    },
     Blocked {
         reason: String,
         missing_verification: Option<String>,
@@ -10952,7 +10968,9 @@ fn settle_locked(
     if record.status != ExecutionControlStatus::Active {
         if matches!(
             settlement,
-            ExecutionSettlement::Completed | ExecutionSettlement::CompletedWithEvidence { .. }
+            ExecutionSettlement::Completed
+                | ExecutionSettlement::CompletedWithEvidence { .. }
+                | ExecutionSettlement::NoAction { .. }
         ) {
             complete_matching_build_lifecycle(worktree, &record)?;
         }
@@ -10967,6 +10985,10 @@ fn settle_locked(
             record.status = ExecutionControlStatus::Completed;
             record.completion_evidence = Some(evidence);
             "completed with verification evidence".to_string()
+        }
+        ExecutionSettlement::NoAction { reason } => {
+            record.status = ExecutionControlStatus::Completed;
+            format!("{NO_ACTION_LIFECYCLE_REASON_PREFIX} {reason}")
         }
         ExecutionSettlement::Blocked {
             reason,
@@ -11227,6 +11249,26 @@ fn evaluate_pr_handoff(
         return Ok(Vec::new());
     }
     match record.status {
+        // FR-243 (Issue #4545 AC-4): a Completed record normally means the
+        // completion already consumed its verification evidence, which is what
+        // lets it hand off a Ready PR. A No Action settles terminally too
+        // (Issue #4590) but consumes no evidence at all, so the trusted audit
+        // — not the status — keeps the Ready gate shut for a successful
+        // non-delivery. The draft path stays open, exactly as before.
+        ExecutionControlStatus::Completed
+            if ready_handoff
+                && crate::cli::delivered_owner::trusted_no_action_for_session(
+                    &worktree,
+                    &session_id,
+                )
+                .is_some() =>
+        {
+            Err(format!(
+                "PR handoff refused: the execution for {kind} #{number} settled as No Action — a successful non-delivery that carries none of the verification evidence a Ready PR requires. A delivered owner has nothing to hand off; open a new owner for follow-up work instead.",
+                kind = record.owner_kind.as_str(),
+                number = record.owner_number,
+            ))
+        }
         ExecutionControlStatus::Completed => Ok(Vec::new()),
         ExecutionControlStatus::Blocked => Err(format!(
             "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR. In the same owning session, resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run it through `verify.run`, then call `execution.reopen` with a non-empty `params.reason`; otherwise use a fresh launch or leave the blocked report as the outcome.",
@@ -14825,7 +14867,7 @@ fn run_no_action(
         NoActionOutcome::Recorded(audit) | NoActionOutcome::AlreadyRecorded(audit) => {
             out.push_str(&format!(
                 "execution: no action for {kind} #{number} (session {session}) — {reason}\n\
-                 Nothing was committed, pushed, verified, or handed to a PR, and the predecessor record is unchanged (bytes {bytes}).\n",
+                 Nothing was committed, pushed, verified, or handed to a PR. The predecessor record is preserved byte-identically in the audit (bytes {bytes}), and the execution is settled, so a gwtd that predates execution.no_action does not block Stop on it.\n",
                 kind = audit.owner_kind.as_str(),
                 number = audit.owner_number,
                 session = audit.session_id,
@@ -15641,6 +15683,20 @@ fn run_impl<E: CliEnv>(
                 out.push_str(
                     "execution: open action obligations deferred with the blocker reason\n",
                 );
+            }
+            // FR-243 (Issue #4590): a No Action settles terminally, so the
+            // record's status alone would report it as a completion. Name the
+            // settlement the audit actually recorded, or a session that
+            // proved it had nothing to deliver reads back a delivery claim.
+            if crate::cli::delivered_owner::trusted_no_action_for_session(&worktree, &session_id)
+                .is_some()
+            {
+                out.push_str(&format!(
+                    "execution: record already settled as No Action for {kind} #{number} — a successful non-delivery, not a completion. Nothing was verified, committed, or handed to a PR.\n",
+                    kind = record.owner_kind.as_str(),
+                    number = record.owner_number,
+                ));
+                return Ok(0);
             }
             out.push_str(&format!(
                 "execution: record already settled ({status:?}) for {kind} #{number}\n",
@@ -28211,13 +28267,23 @@ exit 1
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("no action for spec #3248"), "{out}");
 
+            let audit = crate::cli::delivered_owner::load_audit(dir.path())
+                .unwrap()
+                .unwrap();
             assert_eq!(
-                record_contents(dir.path()).unwrap().unwrap(),
-                before,
-                "No Action rewrites no byte of the predecessor record"
+                audit.predecessor_execution_control_json, before,
+                "the audit keeps the predecessor record byte-identical"
             );
             let record = load(dir.path()).unwrap().unwrap();
-            assert_eq!(record.status, ExecutionControlStatus::Active);
+            assert_eq!(
+                record.status,
+                ExecutionControlStatus::Completed,
+                "Issue #4590: the projection settles so a no_action-blind reader is released"
+            );
+            assert!(
+                record.completion_evidence.is_none(),
+                "No Action claims no verification evidence"
+            );
             assert_eq!(
                 gwt_core::process::hidden_command("git")
                     .arg("-C")
@@ -28239,7 +28305,9 @@ exit 1
                 "No Action produces no verification evidence"
             );
 
-            // Idempotent: the second call reports the same settled outcome.
+            // Idempotent: the second call reports the same settled outcome and
+            // rewrites nothing.
+            let settled = record_contents(dir.path()).unwrap().unwrap();
             let (code, out) = run_cmd(
                 dir.path(),
                 ExecutionCommand::NoAction {
@@ -28248,13 +28316,21 @@ exit 1
             )
             .unwrap();
             assert_eq!(code, 0, "{out}");
-            assert_eq!(record_contents(dir.path()).unwrap().unwrap(), before);
+            assert_eq!(record_contents(dir.path()).unwrap().unwrap(), settled);
 
-            // FR-243: the completion gate is unmoved by a No Action.
+            // FR-243: a No Action never turns into a completion claim. The
+            // record settles so older readers are released (Issue #4590), so
+            // `execution.complete` reports the settlement the audit recorded
+            // instead of manufacturing a delivery.
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
-            assert_eq!(
-                code, 2,
-                "a No Action must never satisfy the completion gate: {out}"
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                out.contains("already settled as No Action") && out.contains("not a completion"),
+                "a No Action must never read back as a completion: {out}"
+            );
+            assert!(
+                pr_handoff_refusal(dir.path(), true).is_some(),
+                "and it never opens the Ready PR gate"
             );
         }
 

@@ -24,6 +24,7 @@ mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
 pub mod hook;
+pub mod host_contract;
 pub(crate) mod index;
 pub(crate) mod intake_inspection;
 pub(crate) mod intake_outcome;
