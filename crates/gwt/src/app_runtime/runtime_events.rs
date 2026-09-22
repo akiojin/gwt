@@ -561,6 +561,10 @@ impl AppRuntime {
         if publish_to_daemon {
             events.extend(self.observe_codex_directory_trust_prompt_from_screen(&output_id));
             let prompt = self.current_screen_approval_prompt(&output_id);
+            // Issue #4544 AC-3: the same fingerprint, read for a different
+            // question. `observe_runtime_approval_prompt` asks "is this pane
+            // waiting?"; this asks "was this pane ever allowed to wait?".
+            self.observe_permission_prompt_regression(&output_id, prompt);
             events.extend(self.observe_runtime_approval_prompt(&output_id, prompt));
             // Issue #3616: the only place a still-running quota-blocked pane can
             // be recognized. Claude keeps its process alive and reports `idle`,
@@ -603,6 +607,85 @@ impl AppRuntime {
             Some(issue_number),
             Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt),
         )
+    }
+
+    /// Issue #4544 AC-3: record a provider permission prompt that the launch
+    /// contract said could not happen.
+    ///
+    /// The Codex directory-trust prompt one function up is already handled as
+    /// its own terminal handoff. This is the ordinary approval prompt, and the
+    /// distinction that matters is not the prompt — it is who could answer it.
+    /// An autonomous launch has nobody watching by construction, so a prompt
+    /// there is not a question, it is a stall that will read as a healthy
+    /// running pane until something times out.
+    ///
+    /// Deliberately silent (no events): the pane's own waiting overlay is
+    /// `observe_runtime_approval_prompt`'s job, and this must not change what
+    /// the window looks like. It records the fact where the settlement gates
+    /// read it, and nothing else.
+    fn observe_permission_prompt_regression(&mut self, window_id: &str, prompt: Option<u64>) {
+        let Some(fingerprint) = prompt else {
+            return;
+        };
+        let Some(session) = self.active_agent_sessions.get(window_id) else {
+            return;
+        };
+        let (worktree, session_id, agent_id) = (
+            session.worktree_path.clone(),
+            session.session_id.clone(),
+            session.agent_id.clone(),
+        );
+        // A producing-work launch is the only one that carries an Execution
+        // Control Record, and the record must be this session's — a pane
+        // sitting in a worktree whose execution belongs to someone else is
+        // not evidence about that execution.
+        let Ok(Some(record)) = gwt::cli::execution_state::load(&worktree) else {
+            return;
+        };
+        if record.primary_session_id != session_id {
+            return;
+        }
+        if !Self::launch_had_to_be_prompt_free(&session_id) {
+            return;
+        }
+        // The prompt stays on screen across many output chunks. Recording it
+        // once is the fact; recording it per chunk would take the trusted
+        // store write lease in a loop for no added truth.
+        if matches!(gwt::cli::permission_readiness::load(&worktree), Ok(Some(_))) {
+            return;
+        }
+        match gwt::cli::permission_readiness::record_prompt_regression(
+            &worktree,
+            record.owner_kind.as_str(),
+            record.owner_number,
+            &session_id,
+            &agent_id,
+            fingerprint,
+        ) {
+            Ok(recorded) => tracing::warn!(
+                gate_id = %recorded.gate_id,
+                owner = record.owner_number,
+                provider = %agent_id,
+                "permission prompt regression recorded on a launch that had to be prompt-free (Issue #4544)"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                owner = record.owner_number,
+                "could not record the permission prompt regression"
+            ),
+        }
+    }
+
+    /// Whether this session's launch was required to run without permission
+    /// prompts.
+    ///
+    /// Today that is exactly the unattended route: an autonomous launch has no
+    /// human who could answer. A manual Start Work launch may still legitimately
+    /// prompt, and treating it as a regression would block deliveries that were
+    /// never broken.
+    fn launch_had_to_be_prompt_free(session_id: &str) -> bool {
+        gwt::cli::execution_state::session_launch_route(Some(session_id))
+            .is_some_and(|route| !route.is_attended())
     }
 
     fn current_screen_approval_prompt(&self, id: &str) -> Option<u64> {

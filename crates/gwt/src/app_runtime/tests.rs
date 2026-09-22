@@ -58923,6 +58923,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
             warnings: vec!["Host status is temporarily unavailable".to_string()],
             launch_route: Some("manual".to_string()),
             permission_decision: None,
+            permission_readiness: None,
         },
     );
 
