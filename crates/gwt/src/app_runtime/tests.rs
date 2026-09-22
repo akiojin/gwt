@@ -4156,6 +4156,7 @@ fn sample_runtime_with_events(
         recoverable_agent_error_windows: HashSet::new(),
         provider_quota_holds: HashMap::new(),
         provider_quota_candidates: HashMap::new(),
+        provider_api_error_holds: HashMap::new(),
         released_provider_quota_notices: HashMap::new(),
         provider_usage_accounts: Vec::new(),
         last_agent_activity: HashMap::new(),
@@ -33441,6 +33442,237 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
             .get(&window_id)
             .is_some_and(|detail| detail.contains("usage limit")),
         "the pane must say why it is waiting; a clean exit used to discard the screen"
+    );
+}
+
+/// The screen a Claude pane shows after a provider API error ended its turn:
+/// the error, the CLI's own "done" line, then the prompt it went back to.
+const CLAUDE_API_ERROR_SCREEN: &str = concat!(
+    "⏺ Running the verification matrix now.\n",
+    "API Error: 529 Overloaded. This is a server-side issue, usually temporary\n",
+    "✻ Sautéed for 1h 40m 43s · done 9:56 AM\n",
+    "───────────────────────────────────────────\n",
+    "❯\n",
+    "───────────────────────────────────────────\n",
+    "⏵⏵ bypass permissions on\n",
+);
+
+/// A pane mid-turn, exactly as the two windows in Issue #4584's report were:
+/// hooks last said the agent was working, and nothing has contradicted that.
+fn api_error_live_runtime(temp: &Path) -> (AppRuntime, String) {
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp, vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut session = sample_active_agent_session("tab-1", &window_id);
+    session.agent_id = "claude".to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), session);
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+    (runtime, window_id)
+}
+
+/// Issue #4584 AC-1/AC-4: the regression this Issue exists for. A turn ended
+/// on a provider API error and the pane kept reporting `running`.
+///
+/// Unlike the quota path there is no settle window. A quota hold releases the
+/// Monitor's slot, so a false positive throws away a live launch and has to be
+/// paid for with a wait. This changes only what the pane reports, and the
+/// detector re-runs on every output chunk — so a pane that is genuinely still
+/// working clears itself on its very next write. The state can only persist
+/// when output has actually stopped, which is the condition being reported.
+#[test]
+fn a_provider_api_error_stops_the_pane_reading_as_running() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = api_error_live_runtime(temp.path());
+
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running),
+        "precondition: the pane reads as working before the error"
+    );
+
+    let _ = runtime.observe_provider_api_error(&window_id, Some(CLAUDE_API_ERROR_SCREEN));
+
+    assert_ne!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running),
+        "a pane whose turn died on an API error must not read as working"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Waiting),
+        "it is waiting for something from outside, like a quota-blocked pane"
+    );
+}
+
+/// AC-2: the reason has to travel with the state, or the reader is back to
+/// opening panes one at a time — which is what cost the twenty minutes.
+#[test]
+fn the_api_error_hold_carries_the_status_and_the_message() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = api_error_live_runtime(temp.path());
+
+    let _ = runtime.observe_provider_api_error(&window_id, Some(CLAUDE_API_ERROR_SCREEN));
+
+    let hold = runtime
+        .provider_api_error_holds
+        .get(&window_id)
+        .expect("the hold records what stopped the pane");
+    assert_eq!(hold.http_status, Some(529));
+    assert!(hold.summary.contains("Overloaded"));
+
+    let detail = runtime
+        .window_details
+        .get(&window_id)
+        .expect("the pane must say why it is waiting");
+    assert!(
+        detail.contains("529"),
+        "detail carries the status: {detail}"
+    );
+    assert!(
+        detail.contains("Overloaded"),
+        "detail carries the message: {detail}"
+    );
+}
+
+/// The self-clearing property the design leans on. Without it a pane that
+/// recovered would stay mislabelled — the same defect pointing the other way.
+#[test]
+fn resumed_output_releases_the_api_error_hold() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = api_error_live_runtime(temp.path());
+
+    let _ = runtime.observe_provider_api_error(&window_id, Some(CLAUDE_API_ERROR_SCREEN));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Waiting)
+    );
+
+    let _ = runtime.observe_provider_api_error(
+        &window_id,
+        Some("⏺ Resuming. Re-running the failing test now.\n❯\n"),
+    );
+
+    assert!(!runtime.provider_api_error_holds.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running),
+        "the pane must go back to reporting the work it resumed"
+    );
+    assert!(
+        !runtime
+            .window_details
+            .get(&window_id)
+            .is_some_and(|detail| detail.contains("529")),
+        "a released hold must not leave its reason behind"
+    );
+}
+
+/// AC-1/AC-2 end to end: the canvas snapshot is what the Issue Monitor joins
+/// into its status rows, so the state and the reason have to survive the trip
+/// out of the runtime, not just exist inside it.
+#[test]
+fn the_window_snapshot_carries_the_api_error_state_and_reason() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = api_error_live_runtime(temp.path());
+
+    let observed = |runtime: &AppRuntime| {
+        runtime
+            .issue_monitor_window_snapshot_for_tab("tab-1", "2026-09-22T01:13:00Z")
+            .expect("snapshot")
+            .windows
+            .into_iter()
+            .find(|observed| observed.window_id == window_id)
+            .expect("the window is on the canvas")
+    };
+
+    let healthy = observed(&runtime);
+    assert_eq!(healthy.status, WindowProcessStatus::Running);
+    assert_eq!(
+        healthy.hold_reason, None,
+        "a working pane must not claim to be held"
+    );
+
+    let _ = runtime.observe_provider_api_error(&window_id, Some(CLAUDE_API_ERROR_SCREEN));
+
+    let held = observed(&runtime);
+    assert_eq!(
+        held.status,
+        WindowProcessStatus::Waiting,
+        "the state the Monitor joins must be the corrected one"
+    );
+    let reason = held.hold_reason.expect("the snapshot names the cause");
+    assert!(reason.contains("529"), "{reason}");
+    assert!(reason.contains("Overloaded"), "{reason}");
+}
+
+/// Quota exhaustion is the more specific diagnosis, is corroborated by the
+/// usage poller, and carries a reset instant. It must not be displaced by the
+/// weaker reading.
+#[test]
+fn a_quota_hold_outranks_an_api_error_on_the_same_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
+
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:20:00Z"),
+    );
+    let _ = runtime.observe_provider_quota_notice(
+        &window_id,
+        Some(CLAUDE_USAGE_LIMIT_SCREEN),
+        instant("2026-08-17T09:25:00Z"),
+    );
+    assert!(runtime.provider_quota_holds.contains_key(&window_id));
+
+    let _ = runtime.observe_provider_api_error(&window_id, Some(CLAUDE_API_ERROR_SCREEN));
+
+    assert!(
+        !runtime.provider_api_error_holds.contains_key(&window_id),
+        "the quota hold already explains this pane"
+    );
+    assert!(
+        runtime
+            .window_details
+            .get(&window_id)
+            .is_some_and(|detail| detail.contains("usage limit")),
+        "the quota reason must survive"
     );
 }
 

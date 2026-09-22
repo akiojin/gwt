@@ -25,6 +25,11 @@ const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 /// quota notice. Wider than the error tail because a CLI can print a prompt or
 /// blank frame after the notice, and the notice itself soft-wraps.
 const QUOTA_NOTICE_TAIL_LINES: usize = 8;
+
+/// Issue #4584: how much of a pane's screen is read for a turn-ending API
+/// error. Wider than the quota window because the CLI draws its own "done"
+/// line and four lines of prompt furniture below the error.
+const API_ERROR_TAIL_LINES: usize = 16;
 /// Issue #3616: how long a quota notice must sit on a *live* pane's screen,
 /// with no agent activity at all, before it is treated as a block.
 ///
@@ -563,6 +568,12 @@ impl AppRuntime {
             events.extend(
                 self.observe_provider_quota_notice_from_screen(&output_id, chrono::Utc::now()),
             );
+            // Issue #4584: the turn can also end on a transient provider
+            // error, which leaves the process alive and the hook state on
+            // whatever the turn was last doing. Nothing else fires, so this
+            // read is the only thing standing between a stopped pane and
+            // twenty minutes of reading as healthy.
+            events.extend(self.observe_provider_api_error_from_screen(&output_id));
         }
         events
     }
@@ -1452,6 +1463,95 @@ impl AppRuntime {
             ));
         }
         events
+    }
+
+    /// Issue #4584: fold one live-screen observation into the API-error state
+    /// for `window_id`.
+    ///
+    /// Both directions matter and both are immediate. An error that has just
+    /// appeared stops the pane reading as `running` on this call, because the
+    /// twenty minutes this Issue reports were spent waiting for some other
+    /// mechanism to notice. An error that has left the screen releases the
+    /// hold on this call, because output resuming is proof the agent is back
+    /// — and that release is what keeps a momentary false reading from
+    /// outliving the chunk that caused it.
+    pub(crate) fn observe_provider_api_error(
+        &mut self,
+        window_id: &str,
+        screen: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        if !matches!(
+            self.window_preset(window_id),
+            Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
+        ) {
+            return Vec::new();
+        }
+        // Issue #3616 owns this pane already, with a corroborated account and
+        // a reset instant this reading does not have. Two holds for one pane
+        // would only fight over its detail. An earlier API-error hold is
+        // dropped rather than left behind: the quota hold now explains the
+        // pane, and a stale entry would outlive it at teardown.
+        if self.provider_quota_holds.contains_key(window_id) {
+            self.provider_api_error_holds.remove(window_id);
+            return Vec::new();
+        }
+        let detected = screen.and_then(gwt_core::usage::detect_provider_api_error);
+        match detected {
+            Some(error) => {
+                if self.provider_api_error_holds.get(window_id) == Some(&error) {
+                    return Vec::new();
+                }
+                let detail = gwt_core::usage::describe_provider_api_error(
+                    &error,
+                    self.pane_agent_id(window_id).as_deref(),
+                );
+                tracing::warn!(
+                    window_id = %window_id,
+                    http_status = ?error.http_status,
+                    transient = error.transient,
+                    summary = %error.summary,
+                    "a provider API error ended this pane's turn; projecting it as waiting (Issue #4584)"
+                );
+                self.provider_api_error_holds
+                    .insert(window_id.to_string(), error);
+                self.window_details
+                    .insert(window_id.to_string(), detail.clone());
+                let mut events = Vec::new();
+                if let Some(composed) = self.recompute_window_state(window_id) {
+                    events.extend(Self::status_events(
+                        window_id.to_string(),
+                        composed,
+                        Some(detail),
+                    ));
+                }
+                events
+            }
+            None => {
+                if self.provider_api_error_holds.remove(window_id).is_none() {
+                    return Vec::new();
+                }
+                self.window_details.remove(window_id);
+                let mut events = Vec::new();
+                if let Some(composed) = self.recompute_window_state(window_id) {
+                    events.extend(Self::status_events(window_id.to_string(), composed, None));
+                }
+                events
+            }
+        }
+    }
+
+    /// Issue #4584: classify this pane's own live screen, the same way the
+    /// quota path does, so a test exercises the read a real pty feeds.
+    ///
+    /// A wider tail than the quota notice needs: the CLI writes its own "done"
+    /// line plus four lines of prompt furniture underneath the error, so an
+    /// eight-line window would only just reach it.
+    pub(crate) fn observe_provider_api_error_from_screen(
+        &mut self,
+        window_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let screen = self.screen_tail(window_id, API_ERROR_TAIL_LINES, "\n");
+        self.observe_provider_api_error(window_id, screen.as_deref())
     }
 
     /// Issue #3616: classify this pane's own live screen. The production entry
