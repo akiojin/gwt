@@ -417,6 +417,12 @@ fn red_92_multipart_failure_zero_partial_overwrite() {
     let err = ops.write_section(IssueNumber(1), &n("tasks"), &huge);
     assert!(err.is_err(), "expected injected create failure to surface");
 
+    assert_eq!(
+        ops.client().comments(IssueNumber(1)).len(),
+        1,
+        "failed partial creation must clean up unreferenced new comments"
+    );
+
     // The section must still read back as the previous content.
     let got = ops.read_section(IssueNumber(1), &n("tasks")).unwrap();
     assert_eq!(got, oversized_content(20_000));
@@ -539,4 +545,41 @@ fn red_96_spec_3248_scale_roundtrip() {
     }
     let got = ops.read_section(IssueNumber(1), &n("tasks")).unwrap();
     assert_eq!(got, content);
+}
+
+#[test]
+fn missing_index_reference_is_not_reported_as_absent_section() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let mut snapshot = seed_spec(&client, &cache, 1, "old", "tasks");
+    snapshot.body = snapshot.body.replace("spec=body", "spec=comment:999");
+    snapshot.updated_at = UpdatedAt::new("missing-reference");
+    client.seed(snapshot);
+    let ops = SpecOps::new(client, cache);
+    let error = ops.read_section(IssueNumber(1), &n("spec")).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("index") && message.contains("999"),
+        "{message}"
+    );
+    assert!(!matches!(error, SpecOpsError::SectionNotFound(_)));
+}
+
+#[test]
+fn section_write_preserves_same_timestamp_remote_index_update() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let mut snapshot = seed_spec(&client, &cache, 1, "old", "tasks");
+    snapshot.body = mk_body("new remote spec", "tasks");
+    // GitHub can retain the same updatedAt for two writes in one second.
+    client.seed(snapshot);
+    let ops = SpecOps::new(client, cache);
+    ops.write_section(IssueNumber(1), &n("tasks"), "new tasks")
+        .unwrap();
+    assert_eq!(
+        ops.read_section(IssueNumber(1), &n("spec")).unwrap(),
+        "new remote spec"
+    );
 }
