@@ -327,10 +327,12 @@ mod tests {
     }
 
     // AC-4 / FR-243: a trusted No Action releases Stop as a successful
-    // non-delivery. The record itself stays Active — No Action is neither
-    // Completed nor Blocked — so only the audit can be what released it.
+    // non-delivery. The projection settles so that every reader — including
+    // one that predates `execution.no_action` (Issue #4590) — sees a settled
+    // execution, while the audit keeps it a non-delivery: no blocker, and no
+    // verification evidence claiming a delivery.
     #[test]
-    fn trusted_no_action_releases_stop_without_completing_or_blocking() {
+    fn trusted_no_action_releases_stop_without_blocking_or_claiming_evidence() {
         let (_home_guard, _home, dir) = delivered_worktree();
         materialize_at_launch(
             dir.path(),
@@ -364,21 +366,26 @@ mod tests {
         let record = crate::cli::execution_state::load(dir.path())
             .unwrap()
             .unwrap();
-        assert_eq!(
-            record.status,
-            ExecutionControlStatus::Active,
-            "No Action must not be recorded as Completed or Blocked"
+        assert!(
+            record.blocked_reason.is_none(),
+            "a delivered owner is never a blocker"
         );
         assert!(
-            record.settled_at.is_none() && record.blocked_reason.is_none(),
-            "No Action writes nothing into the predecessor record"
+            record.completion_evidence.is_none(),
+            "No Action never claims the verification evidence of a delivery"
+        );
+        assert!(
+            crate::cli::delivered_owner::trusted_no_action_for_session(dir.path(), "sess-1")
+                .is_some(),
+            "the audit is what tells this settlement from a delivery"
         );
     }
 
-    // AC-4: the release is fail-closed. Another session's Stop is unaffected,
-    // and an audit edited outside the canonical operation releases nothing.
+    // AC-4: the release is fail-closed. A hand-written audit settles nothing —
+    // only the canonical operation, which proves the zero source surface
+    // first, can release the gate.
     #[test]
-    fn no_action_stop_release_fails_closed() {
+    fn a_hand_written_no_action_audit_does_not_release_the_gate() {
         let (_home_guard, _home, dir) = delivered_worktree();
         materialize_at_launch(
             dir.path(),
@@ -392,37 +399,109 @@ mod tests {
         crate::cli::delivered_owner::record_no_action(dir.path(), "sess-1", "already delivered")
             .unwrap();
 
-        // Another session holds no authority over this record, so the gate is
-        // silent for the pre-existing reason (FR-014t) rather than because of
-        // the audit — the audit itself never crosses sessions.
+        // Another session holds no authority over this record, so its own
+        // lookup stays empty (FR-014t) — the audit never crosses sessions.
         assert!(
             crate::cli::delivered_owner::trusted_no_action_for_session(dir.path(), "sess-2")
                 .is_none()
         );
 
-        let mut audit = crate::cli::delivered_owner::load_audit(dir.path())
-            .unwrap()
-            .unwrap();
-        audit.reason = "forged".to_string();
-        let bytes = serde_json::to_vec_pretty(&audit).unwrap();
+        // Replay the same audit against a fresh, unsettled generation: the
+        // audit is byte-for-byte the one the canonical operation wrote, and it
+        // still releases nothing, because it is bound to the generation it
+        // settled.
+        let bytes = serde_json::to_vec_pretty(
+            &crate::cli::delivered_owner::load_audit(dir.path())
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let (_home_guard, _home, fresh) = delivered_worktree();
+        materialize_at_launch(
+            fresh.path(),
+            ExecutionOwnerKind::Issue,
+            3290,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
         crate::cli::trusted_store::write(
-            dir.path(),
+            fresh.path(),
             crate::cli::delivered_owner::NO_ACTION_AUDIT_FILE,
             &bytes,
         )
         .unwrap();
         std::fs::write(
-            crate::cli::delivered_owner::audit_mirror_path(dir.path()),
+            crate::cli::delivered_owner::audit_mirror_path(fresh.path()),
             &bytes,
         )
         .unwrap();
 
         assert!(
+            crate::cli::delivered_owner::trusted_no_action_for_session(fresh.path(), "sess-1")
+                .is_none(),
+            "an audit from another generation is no audit at all"
+        );
+        assert!(
             matches!(
-                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                handle_with_input(fresh.path(), "{}", Some("sess-1")),
                 HookOutput::StopBlock { .. }
             ),
-            "an edited audit must not release the gate"
+            "a planted audit must not release the gate"
+        );
+    }
+
+    // Issue #4590 AC-1/AC-4: a reader that knows nothing about
+    // `execution.no_action` must not block an execution that settled as No
+    // Action. Such a reader never opens the audit — it only knows the
+    // Execution Control Record — so the test evaluates the gate with the
+    // audit removed from both of its locations.
+    #[test]
+    fn a_no_action_blind_reader_does_not_block_a_settled_no_action() {
+        let (_home_guard, _home, dir) = delivered_worktree();
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Issue,
+            3290,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        crate::cli::delivered_owner::record_no_action(
+            dir.path(),
+            "sess-1",
+            "owner #3290 was delivered in PR #3328",
+        )
+        .unwrap();
+
+        // The shipped generation that raised #4590 has no No Action audit to
+        // read: it predates the file entirely.
+        let trusted_audit = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path())
+            .unwrap()
+            .join(crate::cli::delivered_owner::NO_ACTION_AUDIT_FILE);
+        std::fs::remove_file(&trusted_audit).unwrap();
+        std::fs::remove_file(crate::cli::delivered_owner::audit_mirror_path(dir.path())).unwrap();
+        assert!(
+            crate::cli::delivered_owner::load_audit(dir.path())
+                .unwrap()
+                .is_none(),
+            "the No Action audit is invisible to this reader"
+        );
+
+        let record = crate::cli::execution_state::load(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            record.status,
+            ExecutionControlStatus::Active,
+            "a settled No Action must not read as an unsettled execution"
+        );
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            HookOutput::Silent,
+            "an execution.no_action-blind Stop gate must not block a settled No Action"
         );
     }
 

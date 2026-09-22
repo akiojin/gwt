@@ -11143,7 +11143,10 @@ fn app_runtime_open_agent_kanban_launch_wizard_records_launch_target() {
         .wait_idle(std::time::Duration::from_secs(5)));
     let persisted = load_session_state(&temp.path().join("session-state.json"))
         .expect("persisted wizard tab activation");
-    assert_eq!(persisted.active_tab_id.as_deref(), Some("tab-1"));
+    // Issue #4535 AC-4: which tab is active lives in the viewing browser tab,
+    // so it is no longer written to `session-state.json`; the tab itself is.
+    assert_eq!(persisted.legacy_active_tab_id, None);
+    assert!(persisted.tabs.iter().any(|tab| tab.id == "tab-1"));
     let session = runtime.launch_wizard.as_ref().expect("launch wizard");
     let view = session.wizard.view();
     assert_eq!(view.title, "Launch Agent");
@@ -40984,8 +40987,10 @@ fn app_runtime_viewport_and_geometry_updates_persist_workspace_state() {
     );
     let session = load_session_state(&temp.path().join("session-state.json"))
         .expect("load persisted session state");
-    assert_eq!(session.active_tab_id.as_deref(), Some("tab-1"));
+    // Issue #4535 AC-4: `active_tab_id` is no longer persisted.
+    assert_eq!(session.legacy_active_tab_id, None);
     assert_eq!(session.tabs.len(), 1);
+    assert_eq!(session.tabs[0].id, "tab-1");
     assert_eq!(session.tabs[0].project_root, repo);
 
     let workspace = load_restored_workspace_state(&repo).expect("load persisted workspace");

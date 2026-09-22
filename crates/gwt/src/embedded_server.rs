@@ -2800,6 +2800,12 @@ impl EmbeddedServer {
         );
         let attachment_upload_token = Uuid::new_v4().to_string();
         let host_instance_id = Uuid::new_v4().to_string();
+        // SPEC #3248 FR-242: from here on this process *is* a Host, so the
+        // generation preflight must not ask some other Host to vouch for it.
+        // A `gwt` started from inside an agent pane inherits that pane's
+        // bridge environment, and without this marker it would preflight
+        // itself against the pane's parent Host and refuse its own launches.
+        gwt::cli::host_contract::mark_host_process();
         let access_log = AccessLogSink::default();
         let server_state = ServerState {
             proxy,
@@ -2958,6 +2964,7 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
     Router::new()
         .route("/internal/hook-live", post(hook_live_handler))
         .route("/internal/pane-ws", get(agent_pane_websocket_handler))
+        .route("/internal/host-contract", post(host_contract_handler))
         .route(
             "/internal/execution-binding-probe",
             post(execution_binding_probe_handler),
@@ -3558,6 +3565,48 @@ fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusC
         | AgentWorkspaceUpdateErrorCode::IdentityConflict
         | AgentWorkspaceUpdateErrorCode::TransactionConflict => StatusCode::CONFLICT,
         AgentWorkspaceUpdateErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Answer the Host contract preflight (SPEC #3248 FR-242, Issue #4546).
+///
+/// Deliberately the one authenticated route that does *not* demand execution
+/// authority. The preflight runs before a generation, a binding or a
+/// capability exists — requiring one here would make the contract unprovable
+/// exactly when it matters, and the launch would materialize first and
+/// discover the mismatch afterwards, which is the failure this route removes.
+///
+/// It touches no store and spawns no work: the answer is assembled from
+/// compile-time constants and the presented principal, which is what makes the
+/// zero-side-effect guarantee checkable rather than merely asserted.
+async fn host_contract_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<gwt::AgentHostContractRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError::new(
+                AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                "agent capability is missing or invalid".to_string(),
+            ),
+        );
+    };
+    let capability_generation = principal
+        .execution_binding()
+        .map_or(0, |binding| binding.capability_generation);
+    match gwt::describe_authenticated_host_contract(
+        &request,
+        principal.session_id(),
+        &state.host_instance_id,
+        capability_generation,
+    ) {
+        Ok(receipt) => Json(receipt).into_response(),
+        Err(error) => {
+            let status = workspace_update_error_status(error.code);
+            workspace_update_error_response(status, error)
+        }
     }
 }
 
@@ -7432,6 +7481,96 @@ mod tests {
         );
 
         drop(recorded);
+        server.shutdown();
+    }
+
+    // SPEC #3248 FR-242 / Issue #4546 AC-1: the preflight is authenticated,
+    // reachable only on the agent router, and — unlike every other agent
+    // route — answerable to a principal that holds no execution authority
+    // yet. That last property is the whole point: the contract has to be
+    // provable *before* a generation exists, or the launch mints one first
+    // and discovers the mismatch afterwards.
+    #[test]
+    fn host_contract_route_authenticates_without_demanding_execution_authority() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(project.path());
+        let issuer = server.agent_capability_issuer();
+        // An Inspection principal: authenticated, but carrying no execution
+        // binding — exactly the state a launch is in before genesis.
+        let inspection = issuer
+            .issue(project.path(), "session-preflight")
+            .expect("inspection capability");
+        let mut host_contract_url = reqwest::Url::parse(&inspection.url).expect("agent hook URL");
+        host_contract_url.set_path("/internal/host-contract");
+        let request = serde_json::json!({
+            "schema_version": gwt::AGENT_HOST_CONTRACT_SCHEMA_VERSION,
+            "operation_id": "host-contract:genesis",
+            "nonce": "nonce-route",
+        });
+        let client = reqwest::blocking::Client::new();
+
+        // The browser surface must not expose it at all.
+        let browser_response = client
+            .post(format!("{}internal/host-contract", server.url()))
+            .json(&request)
+            .send()
+            .expect("browser host-contract request");
+        assert_eq!(browser_response.status(), HttpStatusCode::NOT_FOUND);
+
+        // An unauthenticated caller learns nothing.
+        let anonymous = client
+            .post(host_contract_url.clone())
+            .json(&request)
+            .send()
+            .expect("anonymous host-contract request");
+        assert_eq!(anonymous.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let response = client
+            .post(host_contract_url.clone())
+            .bearer_auth(&inspection.token)
+            .json(&request)
+            .send()
+            .expect("authenticated host-contract request");
+        assert_eq!(response.status(), HttpStatusCode::OK);
+        let receipt = response
+            .json::<gwt::AgentHostContractReceipt>()
+            .expect("host contract receipt");
+        assert_eq!(receipt.operation_id, "host-contract:genesis");
+        assert_eq!(receipt.nonce, "nonce-route");
+        assert_eq!(receipt.session_id, "session-preflight");
+        assert_eq!(
+            receipt.execution_generation_contract_version,
+            gwt::EXECUTION_GENERATION_CONTRACT_VERSION
+        );
+        assert!(!receipt.host_instance_id.trim().is_empty());
+        assert_eq!(receipt.host_version, env!("CARGO_PKG_VERSION"));
+        // No generation exists yet, so the capability generation is zero —
+        // and that must not read as a defective receipt.
+        assert_eq!(receipt.capability_generation, 0);
+
+        // A malformed question is refused without inventing an answer.
+        let malformed = client
+            .post(host_contract_url)
+            .bearer_auth(&inspection.token)
+            .json(&serde_json::json!({
+                "schema_version": gwt::AGENT_HOST_CONTRACT_SCHEMA_VERSION,
+                "operation_id": "",
+                "nonce": "nonce-route",
+            }))
+            .send()
+            .expect("malformed host-contract request");
+        assert_eq!(malformed.status(), HttpStatusCode::BAD_REQUEST);
+
         server.shutdown();
     }
 

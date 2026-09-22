@@ -2898,15 +2898,22 @@ impl AppRuntime {
             legacy_target.kind,
         )?;
         let persisted = load_session_state(&session_state_path)?;
-        let tabs = persisted
-            .tabs
-            .into_iter()
-            .map(|tab| {
-                let workspace = load_restored_workspace_state(&tab.project_root)?;
-                Ok(ProjectTabRuntime::from_persisted(tab, workspace))
-            })
-            .collect::<std::io::Result<Vec<_>>>()?;
-        let active_tab_id = normalize_active_tab_id(&tabs, persisted.active_tab_id);
+        // Issue #4535 AC-2 / AC-5: one tab per ProjectKey, so every unique
+        // project workspace is restored and no two tabs write back the same
+        // `~/.gwt/projects/<key>/workspace.json`.
+        let legacy_active_tab_id = persisted.legacy_active_tab_id;
+        let tabs = collapse_duplicate_session_tabs(
+            persisted.tabs,
+            legacy_active_tab_id.as_deref(),
+            gwt_core::paths::project_scope_hash,
+        )
+        .into_iter()
+        .map(|tab| {
+            let workspace = load_restored_workspace_state(&tab.project_root)?;
+            Ok(ProjectTabRuntime::from_persisted(tab, workspace))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+        let active_tab_id = normalize_active_tab_id(&tabs, legacy_active_tab_id);
         let (project_tab_incarnations, next_project_incarnation) =
             initial_project_tab_incarnations(&tabs);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
@@ -9637,7 +9644,9 @@ impl AppRuntime {
                         kind: tab.kind,
                     })
                     .collect(),
-                active_tab_id: normalize_active_tab_id(&self.tabs, self.active_tab_id.clone()),
+                // Issue #4535 AC-4: read-only legacy field — never written
+                // back, so the key leaves `session-state.json` on first save.
+                legacy_active_tab_id: None,
                 recent_projects: self.recent_projects.clone(),
             },
             workspaces: self
