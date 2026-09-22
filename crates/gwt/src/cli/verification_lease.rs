@@ -215,14 +215,15 @@ pub enum VerificationLeaseCommand {
 }
 
 pub(super) fn run<E: CliEnv>(
-    _env: &mut E,
+    env: &mut E,
     command: VerificationLeaseCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
         VerificationLeaseCommand::Status => {
             let mut status = status()?;
-            observe_holder_activity(&mut status);
+            let worktree = resolve_current_worktree_root(env.repo_path());
+            observe_holder_activity(&mut status, &worktree);
             render(out, "held", "free", &status);
             Ok(0)
         }
@@ -304,6 +305,17 @@ fn control_dir_for(lease_id: &str) -> Option<PathBuf> {
         })
 }
 
+/// Issue #4561 AC-4: what a reader may do with `holder_state`.
+///
+/// It is a sampled reading of one process set, not a decision about the
+/// holder. `stalled` was acted on three times in one morning against holders
+/// that were working, so the licence has to travel with the value.
+const HOLDER_STATE_ADVICE: &str = "holder_state is one sampled reading, not a verdict — never \
+                                   interrupt or kill a holder on it alone. `stalled` means this \
+                                   reading saw no CPU and no process turnover; `unknown` means \
+                                   the work runs outside the holder's tree and was not found. \
+                                   Confirm with `ps -eo pid,ppid,time,command` before acting.";
+
 /// Status rendering and the pre-upgrade detached holder wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LeaseStatusSnapshot {
@@ -347,6 +359,11 @@ struct LeaseStatusSnapshot {
     holder_cpu_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     holder_state: Option<String>,
+    /// Issue #4561 AC-4: what the state was measured from. A bare
+    /// `holder_state` carries no basis, so a reader could only take it at
+    /// face value — which is how three live holders were reported stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    holder_state_detail: Option<String>,
     /// Issue #4470 AC-3: whether the ticket's owner process still exists and
     /// what job status it last published, so a waiter can tell a working
     /// holder from residue without reading the coordinator's files.
@@ -360,14 +377,20 @@ struct LeaseStatusSnapshot {
 
 /// Fill in the holder's activity; only the status report pays for the
 /// process-table read.
-fn observe_holder_activity(status: &mut LeaseStatusSnapshot) {
+fn observe_holder_activity(status: &mut LeaseStatusSnapshot, worktree: &Path) {
     let Some(pid) = status.owner_pid.filter(|_| status.held) else {
         return;
     };
-    if let Some(activity) = holder_activity::observe(pid, status.acquired_at_ms) {
+    // Issue #4561: a `daemon` holder's work is not under `owner_pid`, so the
+    // working set has to reach into the daemons that launched it.
+    let workload = holder_activity::workload_for(status.holder_spawn_host.as_deref(), || {
+        crate::cli::daemon::verification_host::live_daemon_pids(worktree)
+    });
+    if let Some(activity) = holder_activity::observe(pid, &workload, status.acquired_at_ms) {
         status.holder_held_ms = Some(activity.held_ms);
         status.holder_cpu_percent = Some(activity.cpu_percent);
         status.holder_state = Some(activity.state().to_string());
+        status.holder_state_detail = Some(activity.describe());
     }
 }
 
@@ -392,6 +415,7 @@ impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
             holder_held_ms: None,
             holder_cpu_percent: None,
             holder_state: None,
+            holder_state_detail: None,
             holder_alive: status.holder_alive,
             holder_job_status: status.holder_job_status.map(|job| job.as_str().to_string()),
             holder_stale: status.holder_stale,
@@ -501,6 +525,13 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot) {
     }
     if let Some(state) = &status.holder_state {
         out.push_str(&format!("holder_state: {state}\n"));
+        if let Some(detail) = &status.holder_state_detail {
+            out.push_str(&format!("holder_state_detail: {detail}\n"));
+        }
+        // Issue #4561 AC-4: the value is one sampled reading, and the reader
+        // is usually deciding whether to interrupt someone. Say what it does
+        // and does not license, next to the value itself.
+        out.push_str(&format!("holder_state_advice: {HOLDER_STATE_ADVICE}\n"));
     }
     out.push_str(&format!("pending: {}\n", status.pending));
     // Issue #4169 AC-2: `pending` is a count, and a count cannot tell an agent
@@ -715,6 +746,7 @@ mod tests {
                 holder_held_ms: None,
                 holder_cpu_percent: None,
                 holder_state: None,
+                holder_state_detail: None,
                 holder_alive: Some(true),
                 holder_job_status: Some("running".to_string()),
                 holder_stale: false,
@@ -746,6 +778,39 @@ mod tests {
              queue[1]: target=repo--verification--late priority=manual-rebuild \
              queued_at_ms=900 waiting_ms=89600\n"
         );
+    }
+
+    /// Issue #4561 AC-4: `holder_state` on its own was read as a decision —
+    /// three live holders were reported stopped and one was asked to abort.
+    /// The value now travels with what it was measured from and with what it
+    /// does not license.
+    #[test]
+    fn holder_state_is_rendered_with_its_basis_and_its_limits() {
+        let mut out = String::new();
+        render(
+            &mut out,
+            "held",
+            "free",
+            &LeaseStatusSnapshot {
+                held: true,
+                owner_pid: Some(12121),
+                holder_spawn_host: Some("daemon".to_string()),
+                holder_held_ms: Some(499_762),
+                holder_cpu_percent: Some(0.0),
+                holder_state: Some("unknown".to_string()),
+                holder_state_detail: Some("holder state unknown: held 8m19s".to_string()),
+                ..LeaseStatusSnapshot::default()
+            },
+        );
+
+        assert!(out.contains("holder_state: unknown\n"), "{out}");
+        assert!(
+            out.contains("holder_state_detail: holder state unknown: held 8m19s\n"),
+            "{out}"
+        );
+        assert!(out.contains("holder_state_advice: "), "{out}");
+        assert!(out.contains("not a verdict"), "{out}");
+        assert!(out.contains("ps -eo pid,ppid,time,command"), "{out}");
     }
 
     /// Issue #4352 AC-2: the retired manual acquire never reserves a lease
