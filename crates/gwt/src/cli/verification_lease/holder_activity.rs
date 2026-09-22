@@ -1,8 +1,14 @@
 //! Issue #4405 AC-3: tell a starved lease holder from a progressing one.
 //!
-//! The host-wide lease is held by one process tree. When that tree is not
+//! The host-wide lease protects one workload. When that workload is not
 //! making progress, every waiter stalls behind it, yet from the outside the
 //! holder only looks "busy".
+//!
+//! Issue #4561 corrects what this module used to assume — that the workload
+//! *is* the holder's process tree. A `spawn_host: daemon` holder launches its
+//! commands from the daemon instead, so its own tree is a socket wait however
+//! hard the verification works. `HolderWorkload` names where to look, and a
+//! reading that could not find the work says `unknown` rather than `stalled`.
 //!
 //! Issue #4409 AC-8/9/10 settles *how* that question is asked. A single
 //! snapshot cannot answer it: averaging each process's CPU over its own
@@ -42,6 +48,39 @@ pub(crate) const HOST_SATURATED_CPU_PERCENT: f64 = 80.0;
 /// a gain under Linux's 10 ms clock tick.
 pub(crate) const PROGRESS_WINDOW: Duration = Duration::from_millis(1_200);
 
+/// Where the work this lease protects actually runs (Issue #4561).
+///
+/// The doc comment above assumed one process tree, and that assumption breaks
+/// the moment a holder escapes its own: a `spawn_host: daemon` holder
+/// (Issue #4409) launches every command from the daemon and then only waits on
+/// a socket, so its own tree gains nothing however hard the verification works.
+/// Read alone, that tree reports *every* daemon-hosted holder stalled five
+/// minutes in — measured on 2026-09-21 against a test binary at 34.5% of a
+/// core, and acted on three times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HolderWorkload {
+    /// Inside the holder's own tree, which `owner_pid`'s descendants measure.
+    Owned,
+    /// Launched from other process trees. `hosts` are the launchers — the
+    /// project's live daemons — whose descendants may carry the work. The
+    /// launchers themselves are excluded from the working set: a daemon burns
+    /// CPU on scans and hooks of its own, and that is not this lease's work.
+    Delegated { hosts: Vec<u32> },
+}
+
+impl HolderWorkload {
+    fn hosts(&self) -> &[u32] {
+        match self {
+            Self::Owned => &[],
+            Self::Delegated { hosts } => hosts,
+        }
+    }
+
+    fn is_delegated(&self) -> bool {
+        matches!(self, Self::Delegated { .. })
+    }
+}
+
 /// One live process, as the host reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProcessSample {
@@ -70,6 +109,11 @@ pub(crate) struct HolderActivity {
     pub window_ms: u64,
     /// Host-wide CPU usage in percent, `None` when it could not be sampled.
     pub host_cpu_percent: Option<f64>,
+    /// The holder launched its commands outside its own process tree
+    /// (Issue #4561). A silent working set then has two explanations — the
+    /// work is wedged, or this reading never found it — so the verdict may
+    /// not claim the first one.
+    pub delegated: bool,
 }
 
 impl HolderActivity {
@@ -93,13 +137,24 @@ impl HolderActivity {
     }
 
     /// Nothing in the tree gained a millisecond and its process set did not
-    /// change. The only measured basis for "may be hung" (AC-10).
+    /// change. The only measured basis for "may be hung" (AC-10) — and only
+    /// for a holder whose work is inside the tree that was read
+    /// (Issue #4561 AC-2).
     fn wedged(&self) -> bool {
-        self.old_enough() && !self.advancing()
+        self.old_enough() && !self.advancing() && !self.delegated
+    }
+
+    /// The same silence, from a holder whose work runs somewhere this reading
+    /// may not have reached. Not knowing and being stopped are different
+    /// answers and must not share a value (Issue #4561 AC-2).
+    fn undecidable(&self) -> bool {
+        self.old_enough() && !self.advancing() && self.delegated
     }
 
     pub(crate) fn state(&self) -> &'static str {
-        if self.starved() {
+        if self.undecidable() {
+            "unknown"
+        } else if self.starved() {
             "starved"
         } else if self.wedged() {
             "stalled"
@@ -113,6 +168,15 @@ impl HolderActivity {
         let cpu = self.cpu_percent;
         let processes = self.processes;
         let window = self.window_ms as f64 / 1000.0;
+        if self.undecidable() {
+            return format!(
+                "holder state unknown: held {held}, it launched its commands outside its own \
+                 process tree (spawn-host daemon) and none of the {processes} processes this \
+                 reading could reach gained CPU over the last {window:.1}s — that is not evidence \
+                 of a stopped holder, only that the work was not found. Confirm with `ps -eo \
+                 pid,ppid,time,command` before acting on it"
+            );
+        }
         if self.starved() {
             let host = self.host_cpu_percent.unwrap_or_default();
             return format!(
@@ -141,26 +205,34 @@ impl HolderActivity {
     }
 }
 
-/// The activity of `owner_pid` and its live descendants across two readings
-/// `window_ms` apart, or `None` when the owner is not in `second`.
+/// The activity of the work `workload` says this lease is protecting, across
+/// two readings `window_ms` apart, or `None` when the owner is not in
+/// `second`.
 ///
 /// `first` is the earlier reading. Processes present in only one of them are
 /// turnover: a child that exited finished its work, and one that appeared
 /// took over.
 pub(crate) fn activity_from_samples(
     owner_pid: u32,
+    workload: &HolderWorkload,
     held_ms: u64,
     first: &[ProcessSample],
     second: &[ProcessSample],
     window_ms: u64,
     host_cpu_percent: Option<f64>,
 ) -> Option<HolderActivity> {
-    let tree = descendants(owner_pid, second)?;
+    // The owner's own absence still means the holder is gone (#4496), so it
+    // stays the one root that must be present.
+    let mut tree = descendants(owner_pid, second)?;
+    let mut earlier_tree = descendants(owner_pid, first).unwrap_or_default();
+    for host in workload.hosts() {
+        tree.extend(delegated_descendants(*host, second));
+        earlier_tree.extend(delegated_descendants(*host, first));
+    }
     let before: HashMap<u32, u64> = first
         .iter()
         .map(|sample| (sample.pid, sample.cpu_ms))
         .collect();
-    let earlier_tree = descendants(owner_pid, first).unwrap_or_default();
 
     // A parent that only ever waits gains nothing; the leaves are what the
     // reading is about (AC-8).
@@ -192,7 +264,20 @@ pub(crate) fn activity_from_samples(
         processes,
         window_ms,
         host_cpu_percent,
+        delegated: workload.is_delegated(),
     })
+}
+
+/// A launcher's descendants without the launcher itself (Issue #4561).
+///
+/// The daemon is where the work was started from, not the work: it runs
+/// Issue Monitor scans and hook children of its own, and counting its CPU as
+/// this lease's progress would answer "progressing" for a holder whose
+/// commands died.
+fn delegated_descendants(host_pid: u32, samples: &[ProcessSample]) -> BTreeSet<u32> {
+    let mut tree = descendants(host_pid, samples).unwrap_or_default();
+    tree.remove(&host_pid);
+    tree
 }
 
 /// `owner_pid` and every live descendant of it in `samples`, or `None` when
@@ -231,6 +316,7 @@ impl HolderProbe {
     pub(crate) fn observe(
         &mut self,
         owner_pid: u32,
+        workload: &HolderWorkload,
         acquired_at_ms: Option<u64>,
     ) -> Option<HolderActivity> {
         let (first, taken_at) = match self.previous.take() {
@@ -256,6 +342,7 @@ impl HolderProbe {
             .unwrap_or(0);
         activity_from_samples(
             owner_pid,
+            workload,
             held_ms,
             &first,
             &second,
@@ -266,8 +353,25 @@ impl HolderProbe {
 }
 
 /// One-shot reading, for a caller with no wait loop to amortize it over.
-pub(crate) fn observe(owner_pid: u32, acquired_at_ms: Option<u64>) -> Option<HolderActivity> {
-    HolderProbe::default().observe(owner_pid, acquired_at_ms)
+pub(crate) fn observe(
+    owner_pid: u32,
+    workload: &HolderWorkload,
+    acquired_at_ms: Option<u64>,
+) -> Option<HolderActivity> {
+    HolderProbe::default().observe(owner_pid, workload, acquired_at_ms)
+}
+
+/// What a ticket's `holder_spawn_host` says about where to look for the work
+/// (Issue #4561). Only `daemon` escapes the holder's tree; `inherit` and an
+/// unresolved host both keep their commands inside it.
+pub(crate) fn workload_for(
+    spawn_host: Option<&str>,
+    hosts: impl FnOnce() -> Vec<u32>,
+) -> HolderWorkload {
+    match spawn_host {
+        Some("daemon") => HolderWorkload::Delegated { hosts: hosts() },
+        _ => HolderWorkload::Owned,
+    }
 }
 
 fn read_processes() -> Vec<ProcessSample> {
@@ -338,8 +442,16 @@ mod tests {
         held_ms: u64,
         host_cpu_percent: Option<f64>,
     ) -> HolderActivity {
-        activity_from_samples(21468, held_ms, first, second, WINDOW_MS, host_cpu_percent)
-            .expect("the owner is sampled")
+        activity_from_samples(
+            21468,
+            &HolderWorkload::Owned,
+            held_ms,
+            first,
+            second,
+            WINDOW_MS,
+            host_cpu_percent,
+        )
+        .expect("the owner is sampled")
     }
 
     /// `gwtd` waits on `cargo`, which waits on the binary that does the work.
@@ -403,9 +515,16 @@ mod tests {
             sample(96677, Some(95217), 560),
             sample(98503, Some(96677), 30),
         ];
-        let activity =
-            activity_from_samples(95217, 576_000, &first, &second, WINDOW_MS, Some(40.0))
-                .expect("the owner is sampled");
+        let activity = activity_from_samples(
+            95217,
+            &HolderWorkload::Owned,
+            576_000,
+            &first,
+            &second,
+            WINDOW_MS,
+            Some(40.0),
+        )
+        .expect("the owner is sampled");
 
         assert!(activity.turnover, "{activity:?}");
         assert_eq!(activity.state(), "progressing", "{activity:?}");
@@ -484,8 +603,127 @@ mod tests {
     fn a_missing_owner_has_no_activity() {
         let samples = [sample(10, Some(1), 10)];
         assert_eq!(
-            activity_from_samples(42, 60_000, &samples, &samples, WINDOW_MS, None),
+            activity_from_samples(
+                42,
+                &HolderWorkload::Owned,
+                60_000,
+                &samples,
+                &samples,
+                WINDOW_MS,
+                None
+            ),
             None
         );
+    }
+
+    const DAEMON_PID: u32 = 56109;
+
+    /// The 2026-09-21 reading, as the PM measured it: the holder (`12121`)
+    /// waits on a socket with no children at all, while the verification it
+    /// launched runs under the daemon — `cargo test` (`94966`) driving a test
+    /// binary (`6491`) at a third of a core.
+    fn daemon_hosted(leaf_cpu_ms: u64) -> [ProcessSample; 4] {
+        [
+            sample(12121, Some(1), 4_100),
+            sample(DAEMON_PID, Some(1), 900_000),
+            sample(94966, Some(DAEMON_PID), 2_430),
+            sample(6491, Some(94966), leaf_cpu_ms),
+        ]
+    }
+
+    fn delegated() -> HolderWorkload {
+        HolderWorkload::Delegated {
+            hosts: vec![DAEMON_PID],
+        }
+    }
+
+    fn daemon_activity(
+        first: &[ProcessSample],
+        second: &[ProcessSample],
+        held_ms: u64,
+    ) -> HolderActivity {
+        activity_from_samples(
+            12121,
+            &delegated(),
+            held_ms,
+            first,
+            second,
+            WINDOW_MS,
+            Some(30.0),
+        )
+        .expect("the owner is sampled")
+    }
+
+    /// Issue #4561 AC-1/AC-3: the holder's own tree is empty of work because
+    /// the work is not in it. Reading only that tree reported every
+    /// daemon-hosted holder stalled after five minutes, and the PM asked a
+    /// live `verify.run` to be interrupted on the strength of it.
+    #[test]
+    fn a_daemon_hosted_holder_is_progressing_while_its_workload_burns_cpu() {
+        let activity = daemon_activity(&daemon_hosted(15_400), &daemon_hosted(15_750), 499_762);
+
+        assert_eq!(activity.cpu_gained_ms, 350, "{activity:?}");
+        assert_eq!(activity.state(), "progressing", "{activity:?}");
+        let described = activity.describe();
+        assert!(!described.contains("may be hung"), "{described}");
+        assert!(!described.contains("stalled"), "{described}");
+    }
+
+    /// Issue #4561 AC-2: the same holder with nothing moving anywhere. The
+    /// reading cannot separate a wedged holder from work it never found, so
+    /// it must not present the two the same way.
+    #[test]
+    fn a_silent_daemon_hosted_holder_is_unknown_rather_than_stalled() {
+        let activity = daemon_activity(&daemon_hosted(15_750), &daemon_hosted(15_750), 499_762);
+
+        assert_eq!(activity.cpu_gained_ms, 0, "{activity:?}");
+        assert_eq!(activity.state(), "unknown", "{activity:?}");
+        let described = activity.describe();
+        assert!(!described.contains("may be hung"), "{described}");
+        assert!(described.contains("not evidence"), "{described}");
+        assert!(described.contains("ps -eo"), "{described}");
+    }
+
+    /// The daemon is the launcher, not the work. Its own CPU — Issue Monitor
+    /// scans, hook children — must not stand in for a workload that is gone,
+    /// or the verdict flips to "progressing" for a holder with nothing left
+    /// running.
+    #[test]
+    fn the_daemons_own_cpu_is_not_the_holders_progress() {
+        let idle = [
+            sample(12121, Some(1), 4_100),
+            sample(DAEMON_PID, Some(1), 900_000),
+        ];
+        let busy = [
+            sample(12121, Some(1), 4_100),
+            sample(DAEMON_PID, Some(1), 903_000),
+        ];
+        let activity = daemon_activity(&idle, &busy, 499_762);
+
+        assert_eq!(activity.cpu_gained_ms, 0, "{activity:?}");
+        assert_eq!(activity.state(), "unknown", "{activity:?}");
+    }
+
+    /// A holder that never left its own tree keeps the #4409 verdict: the
+    /// measurement covers its work, so silence still means wedged.
+    #[test]
+    fn an_in_tree_holder_is_still_reported_stalled() {
+        let activity = activity(&tree(3_600), &tree(3_600), 7_260_000, Some(30.0));
+
+        assert!(!activity.delegated, "{activity:?}");
+        assert_eq!(activity.state(), "stalled");
+    }
+
+    #[test]
+    fn only_a_daemon_spawn_host_looks_outside_the_holders_tree() {
+        assert_eq!(
+            workload_for(Some("daemon"), || vec![DAEMON_PID]),
+            delegated()
+        );
+        assert_eq!(
+            workload_for(Some("inherit"), || vec![DAEMON_PID]),
+            HolderWorkload::Owned
+        );
+        assert_eq!(workload_for(None, Vec::new), HolderWorkload::Owned);
     }
 }
