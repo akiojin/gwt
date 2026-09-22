@@ -1,6 +1,7 @@
 #[test]
 fn project_wizards_keep_independent_open_sessions() {
     let temp = tempfile::tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let root_a = temp.path().join("a");
     let root_b = temp.path().join("b");
     std::fs::create_dir_all(&root_a).unwrap();

@@ -1,6 +1,7 @@
 #[test]
 fn project_worker_completion_rejects_reopened_generation() {
     let temp = tempfile::tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project_root = temp.path().join("project");
     std::fs::create_dir_all(&project_root).unwrap();
     let mut runtime = sample_runtime(
