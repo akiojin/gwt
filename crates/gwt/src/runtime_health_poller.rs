@@ -500,7 +500,12 @@ fn focus_window_ids_by_pty_pid(pty_writers: &PtyWriterRegistry) -> HashMap<u32, 
     };
     guard
         .iter()
-        .filter_map(|(window_id, pty)| pty.process_id().map(|pid| (pid, window_id.clone())))
+        .filter_map(|(window_id, entry)| {
+            entry
+                .handle
+                .process_id()
+                .map(|pid| (pid, window_id.clone()))
+        })
         .collect()
 }
 

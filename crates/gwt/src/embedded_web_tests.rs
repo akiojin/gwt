@@ -1918,32 +1918,24 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         "expected socket listener registration to be isolated behind an installer",
     );
     assert!(
-        html.contains("activeSocket.addEventListener(\"open\", handleSocketOpen)")
-            && html.contains("activeSocket.addEventListener(\"message\", handleSocketMessage)")
-            && html.contains("activeSocket.addEventListener(\"close\", handleSocketClose)"),
-        "expected socket listeners to be registered through named handlers",
+        html.contains("[\"open\", handleSocketOpen]")
+            && html.contains("[\"message\", handleSocketMessage]")
+            && html.contains("[\"close\", handleSocketClose]")
+            && html.contains("activeSocket.addEventListener(kind, (event) => {")
+            && html.contains("if (socket === activeSocket) handler(event);"),
+        "expected named socket handlers to ignore events from replaced connections",
     );
 }
 
 #[test]
 fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
     let html = frontend_bundle_source();
-    // Issue #2694 Phase C: handleSocketOpen now also re-initializes the
-    // per-connection dispatcher before the frontend_ready handshake. The
-    // regex below is intentionally `[\s\S]*?` (non-greedy any) between
-    // setConnectionState and the pendingMessages flush so dispatcher
-    // setup is allowed inside the function, but the ordering assertion
-    // — frontend_ready strictly precedes the queued-message replay — is
-    // preserved. Recovery Center also reloads after the readiness handshake.
-    //
-    // Issue #4433: the contract is that ordering, not "the flush is the last
-    // statement". handleSocketOpen now re-subscribes to in-flight branch
-    // cleanups after the flush, so the match deliberately stops at the end of
-    // the while loop instead of anchoring on the function's closing brace.
+    // Readiness must precede queue replay, and replay must match the immutable
+    // connection scope. Other projects retain their own pending messages.
     let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}"#,
-        )
-        .expect("valid regex");
+        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+    )
+    .expect("valid regex");
 
     assert!(
         html.contains("function connectSocket()"),
@@ -1999,7 +1991,7 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
 fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
     let html = frontend_bundle_source();
     let websocket_url = regex::Regex::new(
-            r#"function websocketUrl\(\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
+            r#"function websocketUrl\(\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*const projectKey = activeProjectKey\(\);\s*if \(projectKey\) url\.searchParams\.set\("repo_hash", projectKey\);\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
         )
         .expect("valid regex");
 
