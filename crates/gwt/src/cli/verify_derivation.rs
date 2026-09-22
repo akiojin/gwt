@@ -7,8 +7,8 @@
 //! surfaces and derives the verification matrix from them, instead of
 //! trusting the agent to hand-pick commands:
 //!
-//! - **rust** (`crates/<name>/…`, workspace manifests): CI's fmt and clippy
-//!   gates verbatim, plus the CI Rust test gate scoped to each changed
+//! - **rust** (`crates/<name>/…`, workspace manifests): CI's fmt, clippy, and
+//!   rustdoc gates verbatim, plus the CI Rust test gate scoped to each changed
 //!   crate (the whole workspace gate when a workspace manifest changed).
 //! - **skills / guidance** (`.claude/skills/`, `.codex/skills/`): the
 //!   `gwt-skills` test suite (managed-asset parity lives there).
@@ -22,7 +22,8 @@
 //! # Package narrowing, never target narrowing
 //!
 //! The commands are CI's own gates ([`CI_RUST_TEST_GATE`], [`CI_FMT_GATE`],
-//! [`CI_CLIPPY_GATE`]) narrowed to the changed packages, and nothing else.
+//! [`CI_CLIPPY_GATE`], [`CI_RUSTDOC_GATE`]) narrowed to the changed packages,
+//! and nothing else.
 //! Narrowing by *target* instead is what made this derivation unsound: the
 //! `gwt` crate's matrix used to be `cargo test -p gwt --lib`, which never
 //! ran the ~1300 unit tests living in its binary targets (`app_runtime` and
@@ -83,6 +84,12 @@ const CI_RUST_TEST_GATE: &str = "cargo test --workspace --all-features";
 const CI_FMT_GATE: &str = "cargo fmt --all -- --check";
 /// CI's clippy gate (`.github/workflows/lint.yml`, job `lint`).
 const CI_CLIPPY_GATE: &str = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
+/// CI's rustdoc gate (`.github/workflows/lint.yml`, job `lint`). The step's
+/// `env: RUSTDOCFLAGS` is written as a leading assignment because `cargo doc`
+/// has no `-- -D warnings`; `verify.run` applies such a prefix as process
+/// environment (#3698).
+const CI_RUSTDOC_GATE: &str =
+    r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items"#;
 
 /// The Rust test gate derivation uses on Windows: CI's gate restricted to
 /// library targets. Derivation cannot go wider there — see the module header
@@ -419,6 +426,7 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
     if code_changed {
         push_unique(&mut commands, CI_FMT_GATE.to_string());
         push_unique(&mut commands, CI_CLIPPY_GATE.to_string());
+        push_unique(&mut commands, CI_RUSTDOC_GATE.to_string());
     }
     // Which packages the changed surfaces put under test. Narrowing stops
     // here: every package runs CI's whole gate, never a target subset.
@@ -542,6 +550,7 @@ mod tests {
             vec![
                 CI_FMT_GATE.to_string(),
                 CI_CLIPPY_GATE.to_string(),
+                CI_RUSTDOC_GATE.to_string(),
                 "cargo test -p gwt --all-features".to_string(),
                 "cargo test -p gwt-core --all-features".to_string(),
                 "cargo test -p gwt-skills --all-features".to_string(),
@@ -776,7 +785,7 @@ mod tests {
         assert!(err.contains("git worktree"), "{err}");
     }
 
-    /// Every `run:` script the named job executes, in step order.
+    /// The parsed workflow document.
     fn workflow_doc(workflow: &str) -> serde_yaml::Value {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -789,14 +798,52 @@ mod tests {
         serde_yaml::from_str(&text).expect("workflow is valid YAML")
     }
 
-    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+    /// Every step of the named job, in step order.
+    fn workflow_job_steps(workflow: &str, job: &str) -> Vec<serde_yaml::Value> {
         let doc = workflow_doc(workflow);
         doc["jobs"][job]["steps"]
             .as_sequence()
             .unwrap_or_else(|| panic!("{workflow} job `{job}` has steps"))
+            .clone()
+    }
+
+    /// Every `run:` script the named job executes, in step order.
+    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+        workflow_job_steps(workflow, job)
             .iter()
             .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
             .collect()
+    }
+
+    /// The named job's single-line `run:` script rewritten with its `env:`
+    /// mapping as leading `KEY=value` assignments — the shape derivation
+    /// stores and `verify.run` executes (#3698). A step whose environment
+    /// CI supplies out-of-band is otherwise invisible to
+    /// [`workflow_job_runs`], which is how the rustdoc gate's `-D warnings`
+    /// stayed out of the derived matrix.
+    fn workflow_env_prefixed_run(step: &serde_yaml::Value) -> Option<String> {
+        let run = step.get("run")?.as_str()?.trim();
+        assert!(
+            !run.contains('\n'),
+            "env-prefixed reconstruction only models single-command steps: {run}"
+        );
+        let mut parts: Vec<String> = step
+            .get("env")
+            .and_then(|env| env.as_mapping())
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| {
+                let value = value.as_str()?;
+                let quoted = if value.is_empty() || value.contains(char::is_whitespace) {
+                    format!("\"{value}\"")
+                } else {
+                    value.to_string()
+                };
+                Some(format!("{}={quoted}", key.as_str()?))
+            })
+            .collect();
+        parts.push(run.to_string());
+        Some(parts.join(" "))
     }
 
     /// Every `run:` script declared by any job in `workflow` whose runner
@@ -1136,6 +1183,29 @@ mod tests {
         assert!(
             plan.commands.contains(&CI_CLIPPY_GATE.to_string()),
             "{plan:?}"
+        );
+    }
+
+    // #3698 AC-2: the rustdoc gate carries `-D warnings` in the step's
+    // `env:` mapping, so the #3640 drift check — which only reads `run:` —
+    // could not see it, and derivation shipped without a rustdoc gate at
+    // all. Pin the reconstructed env-prefixed command so neither half can
+    // drift away unnoticed.
+    #[test]
+    fn derived_rustdoc_gate_tracks_the_ci_rustdoc_gate() {
+        let ci_gate = workflow_job_steps("lint.yml", "lint")
+            .iter()
+            .filter_map(workflow_env_prefixed_run)
+            .find(|run| run.contains("cargo doc"))
+            .expect("CI's lint gate no longer runs `cargo doc` — update derivation (#3698)");
+        assert_eq!(
+            ci_gate, CI_RUSTDOC_GATE,
+            "CI's rustdoc gate changed — update verify.plan derivation with it (#3698)"
+        );
+        let plan = derive_for(&["crates/gwt-core/src/lib.rs"]);
+        assert!(
+            plan.commands.contains(&CI_RUSTDOC_GATE.to_string()),
+            "a Rust change must derive CI's rustdoc gate (#3698): {plan:?}"
         );
     }
 

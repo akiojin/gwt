@@ -2515,6 +2515,11 @@ pub(crate) fn derived_coverage_note(
 /// double- and single-quote grouping. Deliberately supports no shell
 /// features (pipes, redirects, `&&`) — verification commands run as direct
 /// process invocations so the recorded command is exactly what executed.
+///
+/// Leading `KEY=value` assignments stay in the token list here;
+/// `take_env_assignments` separates them just before the spawn, so command
+/// *validators* (quarantine requests, for one) keep seeing the command
+/// exactly as written.
 pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
     let mut args: Vec<(String, bool)> = Vec::new();
     let mut current = String::new();
@@ -2567,6 +2572,49 @@ pub fn split_command_line(command: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(args.into_iter().map(|(arg, _)| arg).collect())
+}
+
+/// Environment overrides a verification command carries as leading
+/// `KEY=value` tokens, in the order they were written.
+type EnvAssignments = Vec<(String, String)>;
+
+/// Whether `key` is a POSIX-shaped environment variable name, so that
+/// `KEY=value` is an assignment rather than an ordinary argument that
+/// happens to contain `=`.
+fn is_env_assignment_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// Split off the leading `KEY=value` assignments a command carries, the way
+/// a shell would, and return them alongside the command that remains.
+///
+/// There is no shell here, so without this a command such as CI's rustdoc
+/// gate (`RUSTDOCFLAGS="-D warnings" cargo doc …`) would try to spawn a
+/// binary literally named `RUSTDOCFLAGS=-D warnings` (#3698). Quotes are
+/// already gone by the time [`split_command_line`] hands the tokens over, so
+/// `FOO="bar baz"` arrives as the single token `FOO=bar baz`.
+fn take_env_assignments(tokens: Vec<String>) -> Result<(EnvAssignments, Vec<String>), String> {
+    let mut env = Vec::new();
+    let mut rest = tokens.into_iter().peekable();
+    while let Some(token) = rest.peek() {
+        let Some((key, value)) = token
+            .split_once('=')
+            .filter(|(key, _)| is_env_assignment_key(key))
+        else {
+            break;
+        };
+        env.push((key.to_string(), value.to_string()));
+        rest.next();
+    }
+    let args: Vec<String> = rest.collect();
+    if args.is_empty() {
+        return Err("command is only environment assignments, with nothing to run".to_string());
+    }
+    Ok((env, args))
 }
 
 /// Execute one verification command in the worktree and return its exit code
@@ -2691,12 +2739,13 @@ fn execute_command_with_isolation(
     capture: Option<&headed_e2e::Capture>,
     host: &VerificationHost,
 ) -> Result<(i32, String), String> {
-    let args = split_command_line(command)?;
+    let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
     match host {
         VerificationHost::Daemon(endpoint) => execute_command_on_daemon(
             worktree,
             command,
             &args,
+            &assignments,
             isolated_baseline,
             capture,
             endpoint,
@@ -2707,6 +2756,11 @@ fn execute_command_with_isolation(
             apply_child_environment_contract(&mut process);
             if let Some(capture) = capture {
                 capture.configure(&mut process);
+            }
+            // After the contract, so a command that names one of its
+            // variables still gets the value it asked for.
+            for (key, value) in &assignments {
+                process.env(key, value);
             }
             if isolated_baseline {
                 gwt_core::process::scrub_git_env(&mut process);
@@ -2760,6 +2814,7 @@ fn execute_command_with_isolation(
 fn delegated_spawn_request(
     worktree: &Path,
     args: &[String],
+    assignments: &[(String, String)],
     isolated_baseline: bool,
     capture: Option<&headed_e2e::Capture>,
     stdout_path: std::path::PathBuf,
@@ -2772,6 +2827,13 @@ fn delegated_spawn_request(
         let (key, value) = capture.environment();
         env.retain(|(existing, _)| existing != &key);
         env.push((key, value));
+    }
+    // Leading `KEY=value` tokens the command declared for itself (#3698).
+    // Last, so a gate like the rustdoc one still gets the value it asked
+    // for after the contract and the reporter have had their say.
+    for (key, value) in assignments {
+        env.retain(|(existing, _)| existing != key);
+        env.push((key.clone(), value.clone()));
     }
     gwt_core::daemon::VerificationSpawnRequest {
         program: args[0].clone(),
@@ -2788,6 +2850,7 @@ fn execute_command_on_daemon(
     worktree: &Path,
     command: &str,
     args: &[String],
+    assignments: &[(String, String)],
     isolated_baseline: bool,
     capture: Option<&headed_e2e::Capture>,
     endpoint: &gwt_core::daemon::DaemonEndpoint,
@@ -2798,6 +2861,7 @@ fn execute_command_on_daemon(
     let request = delegated_spawn_request(
         worktree,
         args,
+        assignments,
         isolated_baseline,
         capture,
         stdout_path.clone(),
@@ -4999,6 +5063,66 @@ pub(crate) mod tests {
             split_command_line("grep ';' config.toml").unwrap(),
             vec!["grep", ";", "config.toml"]
         );
+        // Leading assignments survive splitting; `execute_command` turns them
+        // into process environment (#3698).
+        assert_eq!(
+            split_command_line(r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace"#).unwrap(),
+            vec!["RUSTDOCFLAGS=-D warnings", "cargo", "doc", "--workspace"]
+        );
+    }
+
+    #[test]
+    fn take_env_assignments_consumes_only_leading_assignments() {
+        let (env, args) = take_env_assignments(vec![
+            "RUSTDOCFLAGS=-D warnings".into(),
+            "cargo".into(),
+            "doc".into(),
+            "RUSTFLAGS=not-env".into(),
+        ])
+        .expect("leading assignment plus a command");
+        assert_eq!(env, vec![("RUSTDOCFLAGS".into(), "-D warnings".into())]);
+        assert_eq!(args, vec!["cargo", "doc", "RUSTFLAGS=not-env"]);
+
+        // A bare command keeps every token.
+        let (env, args) =
+            take_env_assignments(vec!["cargo".into(), "doc".into()]).expect("plain command");
+        assert!(env.is_empty());
+        assert_eq!(args, vec!["cargo", "doc"]);
+
+        // Tokens that merely contain `=` are arguments, not assignments.
+        let (env, args) = take_env_assignments(vec!["=orphan".into(), "git".into()])
+            .expect("non-assignment leading token");
+        assert!(env.is_empty());
+        assert_eq!(args, vec!["=orphan", "git"]);
+
+        // Assignments with nothing to run are a command-authoring mistake.
+        assert!(take_env_assignments(vec!["RUSTDOCFLAGS=-D warnings".into()]).is_err());
+    }
+
+    // #3698: CI's rustdoc gate is a plain `cargo doc` run plus an `env:`
+    // mapping, and `cargo doc` has no `-- -D warnings` equivalent — so a
+    // runner that cannot apply a leading `KEY=value` prefix cannot execute
+    // the gate at all, which is why the derived matrix shipped without it.
+    #[test]
+    fn run_verification_applies_leading_env_assignments() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-env",
+            &[concat!(
+                r#"GIT_AUTHOR_NAME="verify env probe" "#,
+                r#"GIT_AUTHOR_EMAIL=probe@example.com "#,
+                "git var GIT_AUTHOR_IDENT"
+            )
+            .to_string()],
+        )
+        .unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert!(
+            transcript.contains("verify env probe <probe@example.com>"),
+            "leading assignments must reach the child process: {transcript}"
+        );
     }
 
     #[test]
@@ -5083,6 +5207,7 @@ pub(crate) mod tests {
         let request = delegated_spawn_request(
             dir.path(),
             &args,
+            &[],
             false,
             Some(&capture),
             dir.path().join("stdout"),
@@ -5117,6 +5242,7 @@ pub(crate) mod tests {
         let plain = delegated_spawn_request(
             dir.path(),
             &args,
+            &[],
             false,
             None,
             dir.path().join("stdout"),
@@ -5124,6 +5250,44 @@ pub(crate) mod tests {
         );
         assert_eq!(plain.args, vec!["playwright".to_string()]);
         assert!(!plain.env.iter().any(|(existing, _)| *existing == key));
+    }
+
+    /// #3698: a leading `KEY=value` token is the only way to express CI's
+    /// rustdoc gate (`cargo doc` has no `-- -D warnings`), so the delegated
+    /// child has to receive it as environment just like the in-process one
+    /// does. Dropping it here would make the daemon-hosted matrix pass a
+    /// rustdoc gate that never enforced `-D warnings`.
+    #[test]
+    fn a_delegated_command_carries_its_leading_env_assignments() {
+        let dir = tempfile::tempdir().unwrap();
+        let (assignments, args) = take_env_assignments(
+            split_command_line(r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps"#)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let request = delegated_spawn_request(
+            dir.path(),
+            &args,
+            &assignments,
+            false,
+            None,
+            dir.path().join("stdout"),
+            dir.path().join("stderr"),
+        );
+
+        assert_eq!(request.program, "cargo");
+        assert_eq!(
+            request
+                .env
+                .iter()
+                .filter(|(key, _)| key == "RUSTDOCFLAGS")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["-D warnings"],
+            "the delegated child must get the assignment exactly once: {:?}",
+            request.env
+        );
     }
 
     #[test]
