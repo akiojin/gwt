@@ -242,6 +242,92 @@ fn attach_project_store(payload: &mut Value) {
     object.insert("project_store".to_string(), reported);
 }
 
+/// Issue #4581: the `params` keys the operation's parser actually consulted.
+///
+/// The envelope used to drop any key no parser asked for, so an
+/// `issue.close` call that carried `dry_run: true` as a safety net closed the
+/// Issue for real. The fix cannot be a hand-kept allowlist per operation —
+/// there are hundreds of arms and the list drifts the moment one gains a
+/// parameter — so the accessors below record every key they look at and
+/// [`parse`] refuses whatever the caller sent that nothing read. An alias
+/// records both spellings, because the parser consults both.
+mod param_audit {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+
+    thread_local! {
+        static CONSULTED: RefCell<Option<BTreeSet<String>>> = const { RefCell::new(None) };
+    }
+
+    /// Records consulted keys for as long as it is alive. Parsing is
+    /// synchronous and non-reentrant, so one recording per thread is enough.
+    pub(super) struct Recording;
+
+    impl Recording {
+        pub(super) fn start() -> Self {
+            CONSULTED.with(|consulted| *consulted.borrow_mut() = Some(BTreeSet::new()));
+            Recording
+        }
+
+        pub(super) fn consulted(&self) -> BTreeSet<String> {
+            CONSULTED.with(|consulted| consulted.borrow().clone().unwrap_or_default())
+        }
+    }
+
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            CONSULTED.with(|consulted| *consulted.borrow_mut() = None);
+        }
+    }
+
+    pub(super) fn note(key: &str) {
+        CONSULTED.with(|consulted| {
+            if let Some(keys) = consulted.borrow_mut().as_mut() {
+                keys.insert(key.to_string());
+            }
+        });
+    }
+}
+
+/// Read `params[key]`, recording that this operation understands `key`.
+///
+/// Every parameter accessor goes through here, so "the operation read it" and
+/// "the operation accepts it" cannot drift apart.
+fn lookup<'a>(params: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+    param_audit::note(key);
+    params.get(key)
+}
+
+/// Refuse the `params` keys no accessor read (Issue #4581 AC-1).
+///
+/// Applied to every operation, read-only ones included, so a caller never has
+/// to remember which operations are strict (AC-4).
+fn reject_unconsulted_params(
+    params: &Map<String, Value>,
+    consulted: &std::collections::BTreeSet<String>,
+    operation: &str,
+) -> Result<(), CliParseError> {
+    let unknown: Vec<&str> = params
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !consulted.contains(*key))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let accepted: Vec<&str> = consulted.iter().map(String::as_str).collect();
+    Err(CliParseError::InvalidJson(format!(
+        "{operation} does not accept the parameter{} {}; accepted: {}",
+        if unknown.len() == 1 { "" } else { "s" },
+        unknown.join(", "),
+        if accepted.is_empty() {
+            "(this operation takes no parameters)".to_string()
+        } else {
+            accepted.join(", ")
+        }
+    )))
+}
+
 fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     if input.trim().is_empty() {
         return Err(CliParseError::InvalidJson(
@@ -256,12 +342,19 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         ));
     }
     let params = params_object(&envelope.params)?;
+    let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
         "concern.create" | "concern.update" | "concern.list" | "concern.measure"
-        | "concern.resolve" => CliCommand::Concern(Box::new(super::concern::parse(
-            &envelope.operation,
-            params,
-        )?)),
+        | "concern.resolve" => {
+            // These decode the whole `params` object through serde with
+            // `deny_unknown_fields`, so the parser already refuses a key it
+            // does not know and the audit below has nothing to add.
+            params.keys().for_each(|key| param_audit::note(key));
+            CliCommand::Concern(Box::new(super::concern::parse(
+                &envelope.operation,
+                params,
+            )?))
+        }
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
@@ -427,8 +520,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             body: optional_string(params, "body")?,
             // Absent or `null` means "leave labels alone"; only an explicit
             // empty array clears them.
-            labels: params
-                .get("labels")
+            labels: lookup(params, "labels")
                 .filter(|value| !value.is_null())
                 .map(|_| optional_string_vec(params, "labels"))
                 .transpose()?,
@@ -630,7 +722,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
         }),
         "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
-            let Some(profiles) = params.get("profiles") else {
+            let Some(profiles) = lookup(params, "profiles") else {
                 return Err(CliParseError::MissingFlag("profiles"));
             };
             // Issue #4079 AC-3: keep the caller's element shape. Parsing
@@ -1130,18 +1222,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             return Err(CliParseError::UnknownSubcommand(other.to_string()));
         }
     };
-    let declared_block = match (
-        envelope.operation.as_str(),
-        optional_string(params, "reason"),
-    ) {
-        ("execution.blocked", Ok(Some(reason))) => Some(DeclaredBlock {
-            reason,
-            missing_verification: optional_string(params, "missing_verification")
-                .ok()
-                .flatten(),
-        }),
+    // Matched on the operation first so `reason` is only consulted where it
+    // means something. Reading it for every operation would mark it accepted
+    // everywhere and hide a misplaced `reason` from the audit below.
+    let declared_block = match envelope.operation.as_str() {
+        "execution.blocked" => match optional_string(params, "reason") {
+            Ok(Some(reason)) => Some(DeclaredBlock {
+                reason,
+                missing_verification: optional_string(params, "missing_verification")
+                    .ok()
+                    .flatten(),
+            }),
+            _ => None,
+        },
         _ => None,
     };
+    reject_unconsulted_params(params, &recording.consulted(), &envelope.operation)?;
     Ok(ParsedEnvelope {
         operation: envelope.operation,
         command,
@@ -1230,8 +1326,10 @@ fn workspace_join(params: &Map<String, Value>) -> Result<CliCommand, CliParseErr
     Ok(CliCommand::Workspace(WorkspaceCommand::Join {
         agent_session: agent_session_or_env(params)?
             .ok_or(CliParseError::MissingFlag("agent_session"))?,
+        // Both spellings are read unconditionally so the alias is never
+        // mistaken for an unknown parameter (Issue #4581 AC-3).
         workspace_id: optional_string(params, "workspace_id")?
-            .or_else(|| optional_string(params, "workspace").ok().flatten())
+            .or(optional_string(params, "workspace")?)
             .ok_or(CliParseError::MissingFlag("workspace_id"))?,
         current_focus: optional_string(params, "current_focus")?,
         title_summary: purpose,
@@ -1674,6 +1772,8 @@ fn reject_key(
     key: &'static str,
     reason: &'static str,
 ) -> Result<(), CliParseError> {
+    // Not recorded as consulted: a key this operation refuses outright must
+    // not turn up in the "accepted" list of an unknown-parameter refusal.
     if params.contains_key(key) {
         return Err(CliParseError::InvalidValue { flag: key, reason });
     }
@@ -1691,7 +1791,7 @@ fn required_json_or_string(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<String, CliParseError> {
-    let Some(value) = params.get(key) else {
+    let Some(value) = lookup(params, key) else {
         return Err(CliParseError::MissingFlag(key));
     };
     match value {
@@ -1710,7 +1810,7 @@ fn optional_string(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<Option<String>, CliParseError> {
-    let Some(value) = params.get(key) else {
+    let Some(value) = lookup(params, key) else {
         return Ok(None);
     };
     match value {
@@ -1739,6 +1839,9 @@ fn reject_unknown_params(
     allowed: &[&str],
     operation: &str,
 ) -> Result<(), CliParseError> {
+    for key in allowed {
+        param_audit::note(key);
+    }
     for key in params.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(CliParseError::InvalidJson(format!(
@@ -1787,7 +1890,7 @@ fn optional_u64(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<Option<u64>, CliParseError> {
-    let Some(value) = params.get(key) else {
+    let Some(value) = lookup(params, key) else {
         return Ok(None);
     };
     match value {
@@ -1821,7 +1924,7 @@ fn optional_u64_vec(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<Vec<u64>, CliParseError> {
-    let Some(value) = params.get(key) else {
+    let Some(value) = lookup(params, key) else {
         return Ok(Vec::new());
     };
     match value {
@@ -1864,7 +1967,7 @@ fn required_u64_vec(
 fn issue_monitor_priority_position(
     params: &Map<String, Value>,
 ) -> Result<super::IssueMonitorPriorityPosition, CliParseError> {
-    let Some(value) = params.get("position") else {
+    let Some(value) = lookup(params, "position") else {
         return Ok(super::IssueMonitorPriorityPosition::Head);
     };
     match value {
@@ -1908,7 +2011,7 @@ fn issue_close_reason(
 fn optional_update_drain_control(
     params: &Map<String, Value>,
 ) -> Result<Option<crate::IssueMonitorUpdateDrainControl>, CliParseError> {
-    match params.get("update_drain") {
+    match lookup(params, "update_drain") {
         None | Some(Value::Null) => Ok(None),
         Some(value) => serde_json::from_value(value.clone()).map(Some).map_err(|_| {
             CliParseError::InvalidJson(
@@ -1923,7 +2026,7 @@ fn optional_bool(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<Option<bool>, CliParseError> {
-    let Some(value) = params.get(key) else {
+    let Some(value) = lookup(params, key) else {
         return Ok(None);
     };
     match value {
@@ -1961,7 +2064,7 @@ fn optional_string_vec(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<Vec<String>, CliParseError> {
-    let Some(value) = params.get(key) else {
+    let Some(value) = lookup(params, key) else {
         return Ok(Vec::new());
     };
     match value {
@@ -1990,7 +2093,7 @@ fn optional_string_or_string_vec(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<Vec<String>, CliParseError> {
-    match params.get(key) {
+    match lookup(params, key) {
         Some(Value::String(text)) if !text.trim().is_empty() => Ok(vec![text.clone()]),
         Some(Value::String(_)) => Err(CliParseError::InvalidJson(format!(
             "{key} must not be an empty string"
@@ -2003,7 +2106,7 @@ fn optional_json_array(
     params: &Map<String, Value>,
     key: &'static str,
 ) -> Result<Vec<Value>, CliParseError> {
-    let Some(value) = params.get(key) else {
+    let Some(value) = lookup(params, key) else {
         return Ok(Vec::new());
     };
     match value {
@@ -5918,5 +6021,154 @@ mod tests {
                 scope: IndexScope::All
             })
         ));
+    }
+
+    /// Issue #4581: a `params` key no operation reads used to be dropped in
+    /// silence, so a caller that added `dry_run` as a safety net had its
+    /// Issue closed for real. Refusal is uniform across every operation, so
+    /// no caller has to remember which ones are strict.
+    mod unknown_params {
+        use super::super::parse;
+        use super::{envelope, err, ok};
+        use crate::cli::{CliCommand, CliParseError, IssueCommand, WorkspaceCommand};
+        use serde_json::json;
+
+        fn refusal(operation: &str, params: serde_json::Value) -> String {
+            match err(operation, params) {
+                CliParseError::InvalidJson(message) => message,
+                other => panic!("expected an InvalidJson refusal for {operation}, got {other}"),
+            }
+        }
+
+        #[test]
+        fn issue_close_refuses_dry_run_instead_of_closing_the_issue() {
+            // The exact call from the report: a confirmation-shaped flag that
+            // `issue.close` does not implement.
+            let envelope = envelope("issue.close", json!({"number": 3699, "dry_run": true}));
+            let Err(CliParseError::InvalidJson(message)) = parse(&envelope) else {
+                panic!("issue.close must refuse an unknown dry_run instead of closing #3699");
+            };
+            assert!(
+                message.contains("dry_run"),
+                "the refusal must name the unknown key: {message}"
+            );
+            for accepted in ["number", "reason", "comment"] {
+                assert!(
+                    message.contains(accepted),
+                    "the refusal must list the accepted key {accepted}: {message}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_refusal_names_the_unknown_key_and_the_accepted_ones() {
+            let message = refusal("issue.view", json!({"number": 1, "dryrun": true}));
+            assert!(message.contains("dryrun"), "{message}");
+            assert!(message.contains("number"), "{message}");
+        }
+
+        #[test]
+        fn read_only_operations_refuse_unknown_keys_too() {
+            // AC-4: strictness does not depend on whether the operation
+            // mutates anything.
+            let message = refusal("issue.spec.read", json!({"number": 1, "dry_run": true}));
+            assert!(message.contains("dry_run"), "{message}");
+        }
+
+        #[test]
+        fn correct_keys_still_parse() {
+            assert!(matches!(
+                ok(
+                    "issue.close",
+                    json!({"number": 3699, "reason": "completed"})
+                ),
+                CliCommand::Issue(IssueCommand::Close { number: 3699, .. })
+            ));
+        }
+
+        /// AC-3/AC-4: refusing unknown keys only helps if the calls the fleet
+        /// is told to make are not themselves carrying dropped keys. Every
+        /// JSON envelope printed by a managed skill or by generated guidance
+        /// is parsed here, and an unknown-parameter refusal fails the test —
+        /// other refusals do not, because guidance legitimately shows
+        /// placeholder values.
+        #[test]
+        fn shipped_guidance_envelopes_carry_no_unknown_params() {
+            use std::path::{Path, PathBuf};
+
+            fn collect(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        collect(&path, extension, out);
+                    } else if path.extension().is_some_and(|ext| ext == extension) {
+                        out.push(path);
+                    }
+                }
+            }
+
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let mut sources = Vec::new();
+            collect(&root.join(".claude/skills"), "md", &mut sources);
+            collect(&root.join(".claude/commands"), "md", &mut sources);
+            collect(&root.join(".codex/skills"), "md", &mut sources);
+            collect(&root.join(".codex/commands"), "md", &mut sources);
+            collect(&root.join("crates/gwt-skills/src"), "rs", &mut sources);
+
+            let mut offenders = Vec::new();
+            let mut examined = 0usize;
+            for path in sources {
+                let text = std::fs::read_to_string(&path).expect("read guidance");
+                for line in text.lines() {
+                    let Some(start) = line.find(r#"{"schema_version""#) else {
+                        continue;
+                    };
+                    let Some(end) = line.rfind('}') else {
+                        continue;
+                    };
+                    let candidate = &line[start..=end];
+                    examined += 1;
+                    let Err(CliParseError::InvalidJson(message)) = parse(candidate) else {
+                        continue;
+                    };
+                    if message.contains("does not accept the parameter") {
+                        offenders.push(format!("{}: {message}", path.display()));
+                    }
+                }
+            }
+            // A scan that found nothing proves nothing.
+            assert!(
+                examined >= 20,
+                "expected the guidance sources to carry JSON envelopes, found {examined}"
+            );
+            assert!(
+                offenders.is_empty(),
+                "shipped guidance tells agents to pass parameters no operation reads:\n{}",
+                offenders.join("\n")
+            );
+        }
+
+        #[test]
+        fn accepted_aliases_are_not_unknown() {
+            // `workspace.join` takes `workspace` as an alias of `workspace_id`.
+            let _guard = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+                gwt_agent::session::GWT_SESSION_ID_ENV,
+                "s",
+            );
+            assert!(matches!(
+                ok("workspace.join", json!({"workspace": "w-1"})),
+                CliCommand::Workspace(WorkspaceCommand::Join { .. })
+            ));
+            assert!(matches!(
+                ok("workspace.join", json!({"workspace_id": "w-1"})),
+                CliCommand::Workspace(WorkspaceCommand::Join { .. })
+            ));
+        }
     }
 }
