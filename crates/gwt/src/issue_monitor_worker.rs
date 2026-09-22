@@ -1904,12 +1904,10 @@ fn advance_one_autonomous_issue(
             // the retry counter for the agent's own failures.
             let mut routed = crate::issue_monitor_gate::route_autonomous_gate(&inputs);
             if matches!(routed, crate::issue_monitor_gate::GateAction::Deliver) {
-                if let Some(reason) =
-                    crate::cli::permission_readiness::owner_settlement_refusal(
-                        repo_path,
-                        issue_number,
-                    )
-                {
+                if let Some(reason) = crate::cli::permission_readiness::owner_settlement_refusal(
+                    repo_path,
+                    issue_number,
+                ) {
                     routed = crate::issue_monitor_gate::GateAction::Hold(reason);
                 }
             }

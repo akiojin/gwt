@@ -11728,8 +11728,7 @@ pub struct ExecutionDiagnosisSnapshot {
     /// not settle?" without reading a pane. Absent when the execution is
     /// clear, which is the ordinary case.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub permission_readiness:
-        Option<crate::cli::permission_readiness::PermissionReadinessRecord>,
+    pub permission_readiness: Option<crate::cli::permission_readiness::PermissionReadinessRecord>,
 }
 
 fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus) -> &'static str {
@@ -29600,7 +29599,9 @@ exit 1
             assert_eq!(readiness["provider"], "codex");
             assert_eq!(readiness["owner_number"], 4544);
             assert_eq!(readiness["session_id"], "sess-4544");
-            assert!(readiness["gate_id"].as_str().is_some_and(|id| !id.is_empty()));
+            assert!(readiness["gate_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()));
             assert!(readiness["expected_permission_mode"]
                 .as_str()
                 .is_some_and(|mode| !mode.is_empty()));
@@ -29612,7 +29613,9 @@ exit 1
                 .is_some_and(|action| !action.is_empty()));
 
             // AC-4: the rendering must not imply that anything was attempted.
-            let rendered = serde_json::to_string(readiness).unwrap().to_ascii_lowercase();
+            let rendered = serde_json::to_string(readiness)
+                .unwrap()
+                .to_ascii_lowercase();
             for misleading in ["tests ran", "tests passed", "verification passed"] {
                 assert!(!rendered.contains(misleading), "{rendered}");
             }

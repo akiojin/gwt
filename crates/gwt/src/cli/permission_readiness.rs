@@ -327,9 +327,9 @@ pub fn block_launch_if_unready(
     capture_self_improvement(worktree, &record);
     // Best effort: the refusal is the contract, and a store that cannot be
     // written must not turn a refused launch into an accepted one.
-    if let Err(error) = crate::cli::trusted_store::with_write_lease(worktree, || {
-        save(worktree, &record)
-    }) {
+    if let Err(error) =
+        crate::cli::trusted_store::with_write_lease(worktree, || save(worktree, &record))
+    {
         tracing::warn!(%error, owner = owner_number, "could not record the permission readiness block");
     }
     Err(format!("launch refused: {}", record.describe()))
@@ -451,7 +451,9 @@ mod tests {
         assert_eq!(loaded.owner_number, 4544);
         assert_eq!(loaded.session_id, "sess-4544");
         assert_eq!(loaded.provider, "codex");
-        assert!(loaded.gate_id.starts_with("permission-readiness:permission_prompt_regression:4544:"));
+        assert!(loaded
+            .gate_id
+            .starts_with("permission-readiness:permission_prompt_regression:4544:"));
         assert!(!loaded.expected_permission_mode.is_empty());
         assert!(!loaded.observed_permission_mode.is_empty());
         assert!(!loaded.recovery_action.is_empty());
@@ -510,8 +512,8 @@ mod tests {
         let dir = fixture();
         record_prompt_regression(dir.path(), "issue", 4544, "sess-4544", "codex", 1).unwrap();
 
-        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path())
-            .expect("trusted dir");
+        let trusted =
+            crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).expect("trusted dir");
         let path = trusted.join(PERMISSION_READINESS_FILE);
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

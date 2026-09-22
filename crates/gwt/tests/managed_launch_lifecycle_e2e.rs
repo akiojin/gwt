@@ -22,9 +22,7 @@
 
 use std::path::Path;
 
-use gwt::cli::permission_readiness::{
-    self, PermissionReadinessKind, PermissionReadinessRecord,
-};
+use gwt::cli::permission_readiness::{self, PermissionReadinessKind, PermissionReadinessRecord};
 use gwt_agent::{
     AgentId, CustomCodingAgent, LaunchRoute, PermissionLaunchSource, PermissionModeDecision,
     PermissionModeInputs, PermissionModeOutcome,
@@ -195,7 +193,9 @@ fn a_supported_launch_leaves_no_gate_decision_and_nothing_is_refused() {
     )
     .expect("a supported launch proceeds");
 
-    assert!(permission_readiness::load(dir.path()).expect("load").is_none());
+    assert!(permission_readiness::load(dir.path())
+        .expect("load")
+        .is_none());
     assert!(permission_readiness::settlement_refusal(dir.path()).is_none());
 }
 
@@ -317,7 +317,10 @@ fn skip_permissions_does_not_exempt_the_pr_or_verification_gates() {
 
     let refusal =
         permission_readiness::settlement_refusal(dir.path()).expect("settlement is refused");
-    assert!(refusal.contains("permission_prompt_regression"), "{refusal}");
+    assert!(
+        refusal.contains("permission_prompt_regression"),
+        "{refusal}"
+    );
     assert!(refusal.contains("Recovery:"), "{refusal}");
 
     assert_gate_text_is_not_misleading(&refusal);

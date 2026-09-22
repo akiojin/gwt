@@ -651,10 +651,7 @@ impl AppRuntime {
         // The prompt stays on screen across many output chunks. Recording it
         // once is the fact; recording it per chunk would take the trusted
         // store write lease in a loop for no added truth.
-        if matches!(
-            gwt::cli::permission_readiness::load(&worktree),
-            Ok(Some(_))
-        ) {
+        if matches!(gwt::cli::permission_readiness::load(&worktree), Ok(Some(_))) {
             return;
         }
         match gwt::cli::permission_readiness::record_prompt_regression(
