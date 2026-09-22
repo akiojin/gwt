@@ -230,8 +230,8 @@ fn load_tray_icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
-fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
+fn logging_dir_for_startup_path(_startup_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_logs_dir()
 }
 
 fn spawn_project_index_status_check(
@@ -638,7 +638,8 @@ fn spawn_gui_exit_backstop(reason: GuiShutdownReason, grace: Duration) {
 /// Issue #1764: on Windows the tray front door runs under
 /// `windows_subsystem = "windows"` and never attaches a console, so `eprintln!`
 /// alone leaves a user whose gwt "just disappeared" with nothing to inspect.
-/// The message therefore also goes to the canonical project log.
+/// The message therefore also goes to the machine diagnostics log used before
+/// a project has been resolved.
 ///
 /// The log writer is non-blocking and only flushes when its `WorkerGuard`
 /// drops, while `std::process::exit` skips destructors — so the handles are
@@ -2991,41 +2992,17 @@ mod tests {
     }
 
     #[test]
-    fn logging_dir_for_startup_path_uses_project_scoped_fallback() {
+    fn logging_dir_for_startup_path_uses_machine_diagnostics_sink() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
-        let log_dir = logging_dir_for_startup_path(temp.path());
-        let project_hash = gwt_core::repo_hash::compute_path_hash(temp.path());
-
-        assert!(log_dir.ends_with(
-            Path::new("projects")
-                .join(project_hash.as_str())
-                .join("logs")
-        ));
-    }
-
-    #[test]
-    fn logging_initialization_sources_do_not_use_legacy_log_dir() {
-        let legacy_helper = ["gwt_core::paths::", "gwt_logs_dir", "()"].concat();
-        let forbidden_init = [
-            "LoggingConfig::new(",
-            "gwt_core::paths::",
-            "gwt_logs_dir",
-            "()",
-        ]
-        .concat();
-
-        let main_source = include_str!("main.rs");
-        let runtime_source = include_str!("app_runtime/mod.rs");
-
-        assert!(
-            !main_source.contains(&forbidden_init),
-            "main logging initialization must use the project-scoped canonical resolver"
-        );
-        assert!(
-            !runtime_source.contains(&legacy_helper),
-            "AppRuntime log snapshots must use the project-scoped canonical resolver"
-        );
+        for startup_path in [temp.path(), Path::new("/")] {
+            let log_dir = logging_dir_for_startup_path(startup_path);
+            assert_eq!(log_dir, gwt_core::paths::gwt_logs_dir());
+            assert_ne!(
+                log_dir,
+                gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
+            );
+        }
     }
 
     #[test]
@@ -3476,12 +3453,13 @@ mod tests {
     // frontend は両フィールドの存在を前提に modal 表示判定を行うため、
     // shape を test で固定する。
     #[test]
-    fn project_tab_view_serializes_running_agents_fields() {
+    fn project_tab_view_serializes_running_agents_and_log_scope_fields() {
         let view = gwt::ProjectTabView {
             id: "tab-1".to_string(),
             project_key: "0123456789abcdef".to_string(),
             title: "Repo".to_string(),
             project_root: "/tmp/repo".to_string(),
+            project_scope: "0123456789abcdef".to_string(),
             kind: gwt::ProjectKind::Git,
             workspace: gwt::WorkspaceView {
                 viewport: CanvasViewport {
@@ -3499,6 +3477,10 @@ mod tests {
             }],
         };
         let serialized = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(
+            serialized["project_scope"],
+            serde_json::json!("0123456789abcdef")
+        );
         assert_eq!(serialized["project_key"], "0123456789abcdef");
         assert_eq!(serialized["running_agent_count"], serde_json::json!(1));
         assert_eq!(
@@ -3690,6 +3672,8 @@ mod tests {
             recovery_center_generation: 0,
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
+            project_log_router: None,
+            project_log_scopes: HashMap::new(),
             proxy,
             blocking_tasks,
             sessions_dir,
@@ -9020,11 +9004,11 @@ fn main() -> std::io::Result<()> {
     // terminate the front door. Windows builds use
     // `windows_subsystem = "windows"` and the tray route deliberately never
     // attaches a console, so the `eprintln!` diagnostics below reach nobody
-    // there — the project log is the only post-mortem surface left once the
-    // process is gone. Initialising after the single-instance lock (as this
-    // used to) meant a stale Windows lock killed gwt with no trace anywhere,
-    // and even the `GWT_FORCE_NEW_INSTANCE` recovery hint was discarded for
-    // want of a subscriber.
+    // there — the machine diagnostics log is the only post-mortem surface left
+    // before a project has been resolved. Initialising after the
+    // single-instance lock (as this used to) meant a stale Windows lock killed
+    // gwt with no trace anywhere, and even the `GWT_FORCE_NEW_INSTANCE`
+    // recovery hint was discarded for want of a subscriber.
     //
     // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
     // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
@@ -9199,6 +9183,9 @@ fn main() -> std::io::Result<()> {
         BlockingTaskSpawner::tokio(runtime.handle().clone()),
     )
     .expect("app runtime");
+    if let Some(handles) = log_handles.as_ref() {
+        app.set_project_log_router(handles.router());
+    }
     app.bootstrap();
     let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
     board_projection_watchers.sync(&app, proxy.clone());
@@ -9384,12 +9371,20 @@ fn main() -> std::io::Result<()> {
         .active_project_root()
         .map(|root| root.display().to_string());
     let startup_worktree_inventory = app.take_startup_worktree_inventory();
-    spawn_project_index_status_check(
-        &runtime,
-        proxy.clone(),
-        app.active_project_root().map(Path::to_path_buf),
-        startup_worktree_inventory,
-    );
+    {
+        let scope = app
+            .active_tab_id
+            .as_deref()
+            .and_then(|id| app.project_log_scope_for_tab(id))
+            .cloned();
+        let _scope = scope.as_ref().map(|scope| scope.enter());
+        spawn_project_index_status_check(
+            &runtime,
+            proxy.clone(),
+            app.active_project_root().map(Path::to_path_buf),
+            startup_worktree_inventory,
+        );
+    }
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
     // native WebView path is removed; instead we build a tray-icon menu
@@ -9642,6 +9637,9 @@ fn main() -> std::io::Result<()> {
                 }
                 clients.dispatch(events);
                 if refresh_index_status {
+                    let scope = app.active_tab_id.as_deref()
+                        .and_then(|id| app.project_log_scope_for_tab(id)).cloned();
+                    let _scope = scope.as_ref().map(|scope| scope.enter());
                     spawn_project_index_status_check(
                         &runtime,
                         proxy.clone(),

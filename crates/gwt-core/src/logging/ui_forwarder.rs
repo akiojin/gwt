@@ -24,21 +24,58 @@ pub type UiEventSender = Arc<UnboundedSender<LogEvent>>;
 /// Layer that forwards tracing events into an `UnboundedSender<LogEvent>`.
 pub struct UiForwarderLayer {
     sender: UiEventSender,
+    router: Option<super::ProjectLogRouter>,
 }
 
 impl UiForwarderLayer {
+    pub(crate) fn with_router(
+        sender: UnboundedSender<LogEvent>,
+        router: super::ProjectLogRouter,
+    ) -> Self {
+        Self {
+            sender: Arc::new(sender),
+            router: Some(router),
+        }
+    }
     pub fn new(sender: UnboundedSender<LogEvent>) -> Self {
         Self {
             sender: Arc::new(sender),
+            router: None,
         }
     }
 }
 
 impl<S> Layer<S> for UiForwarderLayer
 where
-    S: Subscriber,
+    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        if let Some(span) = ctx.span(id) {
+            let mut scope = super::writer::ScopeField::default();
+            attrs.record(&mut scope);
+            span.extensions_mut().insert(scope);
+        }
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, S>,
+    ) {
+        if let Some(span) = ctx.span(id) {
+            if let Some(scope) = span.extensions_mut().get_mut::<super::writer::ScopeField>() {
+                values.record(scope);
+            }
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
         let severity = LogLevel::from_tracing(*event.metadata().level());
         if severity == LogLevel::Debug {
             // Debug events are only persisted to the file; they are not
@@ -65,6 +102,10 @@ where
             log_event = log_event.with_detail(detail);
         }
         log_event.fields = fields;
+        log_event.project_scope = self
+            .router
+            .as_ref()
+            .and_then(|router| router.resolve(event, ctx.event_scope(event)));
 
         // Ignore send errors: during shutdown the receiver may have been
         // dropped and we do not want `tracing::error!` in a `Drop` to

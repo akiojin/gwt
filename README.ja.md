@@ -869,8 +869,14 @@ JSON
 
 ## ログ
 
+Logs サーフェスの **Project** でそのプロジェクトのイベント、**Global** で
+起動時およびプロジェクトに属さない診断を表示します。プロジェクトを切り替えても、
+バックグラウンド処理のログは発生元プロジェクトに残ります。
+
 - アプリログ:
   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
+- 起動時および共通の診断ログ:
+  `~/.gwt/logs/gwt.log.YYYY-MM-DD`
 - セッション状態:
   `~/.gwt/session.json`
 - プロジェクト単位のワークスペース状態:

@@ -29,12 +29,13 @@ pub type ReloadHandle = TracingReloadHandle<EnvFilter, Registry>;
 /// All runtime handles produced by `init`.
 ///
 /// The caller **must** keep this struct alive for the lifetime of the
-/// process. Dropping it shuts down the non-blocking writer thread and
-/// silently discards any remaining in-flight events.
+/// process. Dropping it flushes all project writers and then the machine writer
+/// before shutting down their worker threads.
 pub struct LoggingHandles {
     /// Keeps the non-blocking writer thread alive. Do not drop until
     /// shutdown.
     pub guard: WorkerGuard,
+    router: super::ProjectLogRouter,
     /// Handle for live level changes (Settings UI).
     pub reload_handle: ReloadHandle,
     /// Receiver side of the UI forwarder channel. `None` after the
@@ -52,7 +53,16 @@ pub struct LoggingHandles {
     pub process_console_hub: Arc<ProcessConsoleHub>,
 }
 
+impl Drop for LoggingHandles {
+    fn drop(&mut self) {
+        self.router.shutdown();
+    }
+}
+
 impl LoggingHandles {
+    pub fn router(&self) -> super::ProjectLogRouter {
+        self.router.clone()
+    }
     /// Take the UI receiver. Subsequent calls return `None`.
     pub fn take_ui_rx(&mut self) -> Option<UnboundedReceiver<LogEvent>> {
         self.ui_rx.take()
@@ -79,11 +89,25 @@ impl LoggingHandles {
 /// change was ignored.
 pub fn apply_log_level_to_handle(handle: &ReloadHandle, level: LogLevel) -> Result<(), String> {
     let directive = level.to_env_directive();
-    let filter = EnvFilter::try_new(directive)
+    let filter = filter_with_scope_spans(directive)
         .map_err(|err| format!("invalid filter directive {directive:?}: {err}"))?;
     handle
         .reload(filter)
         .map_err(|err| format!("reload failed: {err}"))
+}
+
+// Scope spans carry routing metadata, not user-visible log events. Keep this
+// reserved target enabled even when RUST_LOG selects only one application target.
+fn filter_with_scope_spans(
+    directive: &str,
+) -> Result<EnvFilter, tracing_subscriber::filter::ParseError> {
+    EnvFilter::try_new(directive).map(|filter| {
+        filter.add_directive(
+            "gwt_log_scope=trace"
+                .parse()
+                .expect("static scope directive"),
+        )
+    })
 }
 
 /// Initialize the global `tracing` subscriber.
@@ -124,10 +148,10 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     // otherwise a malformed `RUST_LOG` / `config.toml` value silently
     // falls back to `default_level` and the user has no signal that
     // their override was ignored.
-    let (env_filter, invalid_directive_error) = match EnvFilter::try_new(&directive) {
+    let (env_filter, invalid_directive_error) = match filter_with_scope_spans(&directive) {
         Ok(filter) => (filter, None),
         Err(err) => {
-            let fallback = EnvFilter::try_new(config.default_level.to_env_directive())
+            let fallback = filter_with_scope_spans(config.default_level.to_env_directive())
                 .map_err(|fallback_err| format!("env filter init failed: {fallback_err}"))?;
             (fallback, Some(err.to_string()))
         }
@@ -139,10 +163,12 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     // and (via spawn_logged) to the ProcessConsoleHub. The filter is
     // applied to the file writer layer only, so the UI layer still
     // observes the line events for live forwarding hooks.
-    let fmt = fmt_layer::build(non_blocking).with_filter(FilterFn::new(|metadata| {
+    let router =
+        super::ProjectLogRouter::new(non_blocking, config.retention_days, config.log_dir.clone());
+    let fmt = fmt_layer::build_routed(router.clone()).with_filter(FilterFn::new(|metadata| {
         !metadata.target().starts_with("gwt.process.line")
     }));
-    let ui = UiForwarderLayer::new(ui_tx.clone());
+    let ui = UiForwarderLayer::with_router(ui_tx.clone(), router.clone());
 
     // Install the hub before the subscriber so any caller invoking
     // `spawn_logged` / `run_git_logged` during early startup pushes to
@@ -179,6 +205,7 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
 
     Ok(LoggingHandles {
         guard,
+        router,
         reload_handle,
         ui_rx: Some(ui_rx),
         ui_tx,

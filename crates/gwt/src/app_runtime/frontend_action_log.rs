@@ -370,7 +370,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .profile(profile_name)
         }
-        FrontendEvent::LoadLogs { id } => {
+        FrontendEvent::LoadLogs { id, .. } => {
             FrontendUserActionLog::new("load_logs", "logs").window(id)
         }
         FrontendEvent::LoadKnowledgeBridge {

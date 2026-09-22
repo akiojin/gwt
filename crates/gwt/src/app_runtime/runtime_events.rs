@@ -539,6 +539,7 @@ impl AppRuntime {
         publish_to_daemon: bool,
         stream_seq: Option<u64>,
     ) -> Vec<OutboundEvent> {
+        let _project_scope = self.enter_window_log_scope(&id);
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             return Vec::new();
         };
@@ -1012,6 +1013,7 @@ impl AppRuntime {
         exit_confirmed: bool,
         exact_runtime_incarnation: bool,
     ) -> Vec<OutboundEvent> {
+        let _project_scope = self.enter_window_log_scope(&id);
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             if !exit_confirmed {
                 return Vec::new();
@@ -1410,6 +1412,7 @@ impl AppRuntime {
         screen: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<OutboundEvent> {
+        let _project_scope = self.enter_window_log_scope(window_id);
         if self.provider_quota_holds.contains_key(window_id) {
             return Vec::new();
         }
@@ -1563,6 +1566,7 @@ impl AppRuntime {
         window_id: &str,
         screen: Option<&str>,
     ) -> Vec<OutboundEvent> {
+        let _project_scope = self.enter_window_log_scope(window_id);
         if !matches!(
             self.window_preset(window_id),
             Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
@@ -1750,6 +1754,26 @@ impl AppRuntime {
         event: gwt::RuntimeHookEvent,
         publish_to_daemon: bool,
     ) -> Vec<OutboundEvent> {
+        let project_scope = self
+            .active_window_for_runtime_event(&event)
+            .as_deref()
+            .and_then(|id| self.project_log_scope_for_window(id))
+            .or_else(|| {
+                event.project_root.as_deref().and_then(|root| {
+                    self.tabs
+                        .iter()
+                        .find(|tab| tab.project_root == Path::new(root))
+                        .and_then(|tab| self.project_log_scope_for_tab(&tab.id))
+                })
+            })
+            .cloned();
+        let _project_scope = project_scope
+            .as_ref()
+            .map(|scope| scope.enter())
+            .unwrap_or_else(|| {
+                tracing::trace_span!(target: "gwt_log_scope", parent: None, "machine_runtime_hook")
+                    .entered()
+            });
         let started = std::time::Instant::now();
         let source_event = runtime_hook_source_event_profile_label(event.source_event.as_deref());
         let mut stages = RuntimeHookStageTimings::default();
