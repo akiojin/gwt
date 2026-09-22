@@ -36,7 +36,7 @@ struct FrontDoorExit {
 /// regression that lets startup succeed would hang the suite inside the `tao`
 /// event loop instead of failing.
 fn run_front_door(home: &Path, workspace: &Path, extra_args: &[&str]) -> FrontDoorExit {
-    let stderr_path = workspace.join("front-door-stderr.log");
+    let stderr_path = home.join("front-door-stderr.log");
     let stderr = std::fs::File::create(&stderr_path).expect("create stderr capture");
 
     let mut command = hidden_command(env!("CARGO_BIN_EXE_gwt"));

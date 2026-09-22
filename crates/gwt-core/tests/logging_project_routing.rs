@@ -95,9 +95,13 @@ fn register_concurrently(
 
 #[test]
 fn events_route_by_emission_scope_without_following_the_active_project() {
-    std::env::remove_var("RUST_LOG");
+    let _env = gwt_core::test_support::env_lock().lock().unwrap();
     let fixture = tempfile::tempdir().expect("routing fixture");
     let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(fixture.path());
+    let _rust_log = gwt_core::test_support::ScopedEnvVar::set(
+        "RUST_LOG",
+        "logging_project_routing=info,gwt_core::logging::routing_test=info",
+    );
     let machine_dir = fixture.path().join("machine-logs");
     let project_a = fixture.path().join("project-a");
     let project_b = fixture.path().join("project-b");
@@ -108,7 +112,7 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
         log_dir: machine_dir.clone(),
         default_level: LogLevel::Debug,
         config_file_level: None,
-        retention_days: 0,
+        retention_days: 1,
     };
     let mut handles = init(config).expect("machine logging init");
     let mut ui_rx = handles.take_ui_rx().expect("live log receiver");
@@ -125,6 +129,14 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
         gwt_core::paths::gwt_project_logs_dir_for_project_path(&project_a),
         "registration must use the canonical project store"
     );
+
+    assert!(
+        !scope_a.log_dir().exists(),
+        "registration must not open a writer"
+    );
+    std::fs::create_dir_all(scope_a.log_dir()).unwrap();
+    let stale = scope_a.log_dir().join("gwt.log.2000-01-01");
+    std::fs::write(&stale, "old").unwrap();
 
     // Race the first write as well as registration. A registry that opens one
     // appender per caller can split, duplicate, or lose these records even if
@@ -152,6 +164,8 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
         write.join().expect("concurrent first project write");
     }
 
+    assert!(!stale.exists(), "first write applies per-store retention");
+
     let scope_b = router
         .register_project(&project_b)
         .expect("register project B");
@@ -176,6 +190,15 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
             gwt_project_scope = scope_b.as_str()
         );
         let _entered = span.enter();
+        {
+            let child = tracing::info_span!("unscoped_child");
+            let _child = child.enter();
+            tracing::info!("marker-b-nested-child");
+        }
+        tracing::info!(
+            gwt_project_scope = "unregistered",
+            "marker-machine-direct-unknown-in-b"
+        );
         tracing::info!(
             target: "gwt_core::logging::routing_test",
             "marker-b-span"
@@ -185,6 +208,15 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
             gwt_project_scope = scope_a.as_str(),
             "marker-a-direct-overrides-b-span"
         );
+    }
+
+    {
+        let span = tracing::info_span!("updated_scope", gwt_project_scope = tracing::field::Empty);
+        span.record("gwt_project_scope", scope_a.as_str());
+        let _entered = span.enter();
+        tracing::info!("marker-a-recorded-span");
+        span.record("gwt_project_scope", scope_b.as_str());
+        tracing::info!("marker-b-updated-span");
     }
 
     let background_scope = scope_a.clone();
@@ -197,6 +229,7 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
     });
     {
         let _scope = scope_b.enter();
+        tracing::debug!(target: "gwt_core::logging::routing_test", "marker-debug-disabled");
         tracing::info!(
             target: "gwt_core::logging::routing_test",
             "marker-b-foreground"
@@ -204,6 +237,16 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
     }
     background.join().expect("project A background event");
 
+    let broken_project = fixture.path().join("broken-project");
+    std::fs::create_dir_all(&broken_project).unwrap();
+    let broken_scope = router.register_project(&broken_project).unwrap();
+    std::fs::create_dir_all(broken_scope.log_dir()).unwrap();
+    std::fs::create_dir_all(gwt_core::logging::current_log_file(broken_scope.log_dir())).unwrap();
+    {
+        let _scope = broken_scope.enter();
+        tracing::info!("marker-machine-writer-failure");
+        tracing::info!("marker-machine-writer-failure-again");
+    }
     tracing::info!(
         target: "gwt_core::logging::routing_test",
         "marker-machine-unscoped"
@@ -243,6 +286,11 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
         event.message == "marker-machine-unknown-scope" && event.project_scope.is_none()
     }));
 
+    assert!(live
+        .iter()
+        .any(|event| event.message == "marker-machine-writer-failure"
+            && event.project_scope.is_none()));
+
     let project_a_dir = scope_a.log_dir().to_path_buf();
     let project_b_dir = scope_b.log_dir().to_path_buf();
     drop(registrations);
@@ -264,6 +312,39 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
     let machine = read_messages(&machine_dir);
     let project_a = read_messages(&project_a_dir);
     let project_b = read_messages(&project_b_dir);
+    assert!(!machine
+        .iter()
+        .chain(&project_a)
+        .chain(&project_b)
+        .any(|message| message == "marker-debug-disabled"));
+    assert_eq!(
+        machine
+            .iter()
+            .filter(|message| message.as_str()
+                == "project log writer unavailable; using machine diagnostics")
+            .count(),
+        1,
+        "one non-recursive diagnostic per failed store"
+    );
+    for dir in [&machine_dir, &project_a_dir, &project_b_dir] {
+        let records =
+            gwt_core::logging::read_log_file(&gwt_core::logging::current_log_file(dir)).unwrap();
+        for record in records
+            .entries
+            .iter()
+            .filter(|record| record.message.starts_with("marker-"))
+        {
+            let matching = live
+                .iter()
+                .find(|event| event.message == record.message)
+                .unwrap();
+            assert_eq!(
+                record.project_scope, matching.project_scope,
+                "file/live scope mismatch for {}",
+                record.message
+            );
+        }
+    }
     assert_eq!(
         project_a
             .iter()
@@ -275,16 +356,28 @@ fn events_route_by_emission_scope_without_following_the_active_project() {
     for marker in [
         "marker-a-concurrent-first-write",
         "marker-a-direct",
+        "marker-a-recorded-span",
         "marker-a-direct-overrides-b-span",
         "marker-a-background-after-b-selected",
         "marker-a-after-filter-reload",
     ] {
         assert_exact_destination(marker, "project-a", &machine, &project_a, &project_b);
     }
-    for marker in ["marker-b-span", "marker-b-foreground"] {
+    for marker in [
+        "marker-b-span",
+        "marker-b-foreground",
+        "marker-b-nested-child",
+        "marker-b-updated-span",
+    ] {
         assert_exact_destination(marker, "project-b", &machine, &project_a, &project_b);
     }
-    for marker in ["marker-machine-unscoped", "marker-machine-unknown-scope"] {
+    for marker in [
+        "marker-machine-unscoped",
+        "marker-machine-unknown-scope",
+        "marker-machine-direct-unknown-in-b",
+        "marker-machine-writer-failure",
+        "marker-machine-writer-failure-again",
+    ] {
         assert_exact_destination(marker, "machine", &machine, &project_a, &project_b);
     }
 }

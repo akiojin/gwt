@@ -67,6 +67,7 @@ function createFixture(createBoardLogsSurface) {
   const body = windowElement.querySelector(".window-body");
   const sent = [];
   let activeProjectScope = "project-alpha";
+  let windowProjectScope = "project-alpha";
   const surface = createBoardLogsSurface({
     send(message) {
       sent.push(message);
@@ -83,6 +84,7 @@ function createFixture(createBoardLogsSurface) {
     focusOrSpawnPreset() {},
     activeWorkspace: () => ({ windows: [] }),
     activeProjectTab: () => ({ project_scope: activeProjectScope }),
+    projectWindowContextById: () => ({ tab: { project_scope: windowProjectScope } }),
     visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     getActiveWorkProjection: () => null,
   });
@@ -93,6 +95,9 @@ function createFixture(createBoardLogsSurface) {
     window,
     setActiveProjectScope(value) {
       activeProjectScope = value;
+    },
+    setWindowProjectScope(value) {
+      windowProjectScope = value;
     },
   };
 }
@@ -189,18 +194,60 @@ test("Project and Global modes accept mutually exclusive live log scopes", async
 
 test("a Project reload refreshes the window scope after project migration", async () => {
   const { createBoardLogsSurface } = await importBoardLogsSurface();
-  const { body, sent, surface, setActiveProjectScope } = createFixture(
+  const { body, sent, surface, setWindowProjectScope } = createFixture(
     createBoardLogsSurface,
   );
   surface.mountLogsWindow({ id: "logs-1", preset: "logs" }, body);
   const state = surface.ensureLogState("logs-1");
   assert.equal(state.projectScope, "project-alpha");
 
-  setActiveProjectScope("project-migrated");
+  setWindowProjectScope("project-migrated");
   surface.requestLogs("logs-1");
 
   assert.equal(state.projectScope, "project-migrated");
   assert.equal(sent.at(-1)?.scope, "project");
+});
+
+for (const responseKind of ["log_entries", "log_error"]) {
+  test(`scope changes during an in-flight request discard stale ${responseKind} and reload`, async () => {
+    const { createBoardLogsSurface } = await importBoardLogsSurface();
+    const { body, sent, surface, window } = createFixture(createBoardLogsSurface);
+    surface.mountLogsWindow({ id: "logs-1", preset: "logs" }, body);
+    const selector = body.querySelector(".logs-scope-select");
+    selector.value = "global";
+    selector.dispatchEvent(new window.Event("change", { bubbles: true }));
+    assert.equal(sent.length, 1, "keep one request in flight");
+
+    surface.applyBoardLogsReceiveEvent({
+      kind: responseKind, id: "logs-1", message: "stale project error",
+      entries: [{ id: 1, project_scope: "project-alpha", severity: "info", message: "stale project snapshot" }],
+    });
+    assert.equal(sent.length, 2, "the latest selection must be requested after the old response");
+    assert.equal(sent.at(-1).scope, "global");
+    const state = surface.ensureLogState("logs-1");
+    assert.deepEqual(state.entries, []);
+    assert.equal(state.error, "");
+    assert.equal(state.loading, true);
+
+    surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries: [] });
+    assert.equal(state.loading, false);
+  });
+}
+
+test("pending Project reload uses its owning window scope after another tab becomes active", async () => {
+  const { createBoardLogsSurface } = await importBoardLogsSurface();
+  const { body, sent, surface, window, setActiveProjectScope } = createFixture(createBoardLogsSurface);
+  surface.mountLogsWindow({ id: "logs-1", preset: "logs" }, body);
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries: [] });
+  const selector = body.querySelector(".logs-scope-select");
+  for (const scope of ["global", "project"]) {
+    selector.value = scope;
+    selector.dispatchEvent(new window.Event("change", { bubbles: true }));
+  }
+  setActiveProjectScope("project-beta");
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries: [] });
+  assert.equal(sent.at(-1).scope, "project");
+  assert.equal(surface.ensureLogState("logs-1").projectScope, "project-alpha");
 });
 
 test("scope composes with severity, query, and process filters", async () => {

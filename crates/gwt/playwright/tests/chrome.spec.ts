@@ -14,7 +14,7 @@ import { gotoLiveGwt } from "./_helpers/live-gwt";
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 
 test.beforeEach(async ({ page }) => {
-  await gotoLiveGwt(page, BASE);
+  await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
 });
 
 test.describe("Operator chrome smoke", () => {

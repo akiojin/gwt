@@ -174,6 +174,30 @@ impl BoardEscalationStore {
         changed
     }
 
+    /// Put a historical `blocked` post back into the index without replaying
+    /// the rest of the stream.
+    ///
+    /// A hot-window rebuild (`from_entries` on the 500-entry projection)
+    /// drops overflowed unblock requests. The next `params.resolves` still
+    /// names those ids, and closing them must not depend on folding every
+    /// later Board post — or on `superseded_by`, which would treat a
+    /// recovered older row as a restatement of a newer one.
+    pub fn restore_lost_blocked(&mut self, entry: &BoardEntry) -> bool {
+        if entry.kind != BoardEntryKind::Blocked {
+            return false;
+        }
+        if self
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == entry.id)
+        {
+            return false;
+        }
+        self.escalations.push(BoardEscalation::from_entry(entry));
+        self.updated_at = Utc::now();
+        true
+    }
+
     /// Replay a whole event stream. Entries must already be ordered oldest
     /// first, which is the order both the segment loader and the hot
     /// projection produce.
@@ -311,7 +335,8 @@ fn body_has_section(body: &str, aliases: &[&str]) -> bool {
 
 /// Why an operation was refused in a way the agent cannot work around
 /// (Issue #3655 AC-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationRefusalKind {
     /// The target is terminal and can never accept this operation again.
     Immutability,
@@ -320,6 +345,8 @@ pub enum OperationRefusalKind {
     /// The operation is not permitted here, or reaches a surface that refuses
     /// to act at all.
     Permission,
+    /// Durable authority or evidence failed its integrity contract.
+    Integrity,
 }
 
 impl OperationRefusalKind {
@@ -328,6 +355,7 @@ impl OperationRefusalKind {
             Self::Immutability => "immutability",
             Self::Authority => "authority",
             Self::Permission => "permission",
+            Self::Integrity => "integrity",
         }
     }
 
@@ -340,7 +368,10 @@ impl OperationRefusalKind {
                 "この session には権限がありません。正しい authority を持つ session を割り当てるか、authority の不整合を解消してください。"
             }
             Self::Permission => {
-                "この操作はこの surface では拒否されます。PM 側での代行、または設定・ツール側の修正が必要です。"
+                "この操作はこの surface で拒否されました。まず拒否メッセージが示す順序・前提の不足を担当が解消して再試行し、それでも通らなければ PM 側での代行、または設定・ツール側の修正が必要です。"
+            }
+            Self::Integrity => {
+                "durable authority の整合性を回復する必要があります。監査可能な repair 経路を確認してから再実行してください。"
             }
         }
     }
@@ -361,17 +392,43 @@ impl OperationRefusalKind {
 ///   and a refused authority is contractually forbidden from writing anything
 ///   locally — an escalation there would itself be the mutation the refusal
 ///   promises not to make.
-fn refusal_eligible_operation(operation: &str) -> bool {
-    const FAMILIES: &[&str] = &[
-        "execution.",
-        "workspace.ensure",
-        "pane.close",
-        "pane.stop",
-        "pane.send",
-    ];
+fn legacy_refusal_eligible_operation(operation: &str) -> bool {
+    const FAMILIES: &[&str] = &["workspace.ensure", "pane.close", "pane.stop", "pane.send"];
     FAMILIES
         .iter()
         .any(|family| operation.starts_with(family) || operation == family.trim_end_matches('.'))
+}
+
+/// Operations allowed to auto-escalate when their producer supplies a typed
+/// human-required disposition. Scope eligibility is stable operation data; it
+/// does not inspect display prose.
+///
+/// # Disposition table (Issue #3696 AC-2, absorbing #3710)
+///
+/// `execution.*` used to reach [`classify_operation_refusal`], where the
+/// substring `refused` alone decided the verdict. That filed the agent's own
+/// next step as "PM 側での代行が必要" — the misfire this Issue was opened for.
+/// The family now escalates only on a typed disposition the refusing operation
+/// itself supplies, so the table below is the whole contract:
+///
+/// | Refusal | Disposition | Escalates |
+/// | --- | --- | --- |
+/// | Work event store dirty / unpushed (`work_event_delivery_unsettled`) | agent-recoverable → commit and push the events | no |
+/// | Verification evidence missing / stale / failing / plan changed (`verification_*`) | agent-recoverable → `verify.run` | no |
+/// | Open action obligations (`open_action_obligations`) | agent-recoverable → `execution.blocked` | no |
+/// | Trusted store busy (`*_store_busy`) | agent-recoverable → retry the same operation | no |
+/// | Host bridge transport down / `workspace.ensure` required | agent-recoverable → retry / `workspace.ensure` | no |
+/// | Terminal record (`execution_record_terminal`) | human-required, [`OperationRefusalKind::Immutability`] | yes |
+/// | Foreign owner / binding mismatch (`execution_owner_mismatch`, `execution_binding_mismatch`) | human-required, [`OperationRefusalKind::Authority`] | yes |
+/// | Record integrity failed (`execution_record_integrity_failed`) | human-required, [`OperationRefusalKind::Integrity`] | yes |
+/// | Host bridge structurally rejected the operation | human-required, [`OperationRefusalKind::Permission`] | yes |
+///
+/// An `execution.*` refusal that supplies no disposition escalates nothing.
+/// That direction is deliberate: the failure this Issue records is an alarm
+/// nobody could act on, and a missing disposition is a gap in the producer,
+/// not evidence that the owner must intervene.
+pub fn structured_refusal_eligible_operation(operation: &str) -> bool {
+    operation.starts_with("execution.") || legacy_refusal_eligible_operation(operation)
 }
 
 /// Decide whether a failed operation is a governance refusal worth escalating.
@@ -382,10 +439,25 @@ fn refusal_eligible_operation(operation: &str) -> bool {
 /// lifecycle operation would raise an alarm, and every unrelated command that
 /// happens to say "unavailable" would too.
 pub fn classify_operation_refusal(operation: &str, error: &str) -> Option<OperationRefusalKind> {
-    if !refusal_eligible_operation(operation) {
+    if !legacy_refusal_eligible_operation(operation) {
         return None;
     }
     let lowered = error.to_lowercase();
+    // Issue #3868 AC-24: a refusal that names the agent's own next step is not
+    // a governance refusal, whatever family emitted it. These phrases come from
+    // the obligation gate (T-247), the evidence gate, and the receipt gate;
+    // escalating them told agents that their input could not fix the problem
+    // when it could.
+    for self_resolvable in [
+        "open action obligations",
+        "stale evidence",
+        "rerun `verify.run`",
+        "commit it, and push it",
+    ] {
+        if lowered.contains(self_resolvable) {
+            return None;
+        }
+    }
     // The needle lists are the refusal vocabulary these surfaces actually
     // emit, not an attempt to anticipate English. When a surface starts
     // refusing with new wording, extend the list — over-broad matching would
@@ -445,7 +517,8 @@ pub fn render_operation_refusal_body(
     format!(
         "事象: JSON operation `{operation}` が拒否されました。\n\
          ```\n{error}\n```\n\
-         原因: {kind} 由来の拒否です。agent 側の入力の作り直しでは解消しません。\n\
+         原因: 未判定。拒否メッセージ本文を読んで判断してください（機械分類の候補: {kind}）。\
+         担当 agent 側の順序・前提・入力の修正で解消できる場合があります。\n\
          依頼: {request}\n\
          再開条件: 上記が解消され、`{operation}` 相当の操作が通る状態になること。\n\
          \n\
@@ -453,6 +526,44 @@ pub fn render_operation_refusal_body(
          事象・原因を補足してください。",
         kind = kind.as_str(),
         request = kind.request_hint(),
+    )
+}
+
+/// Render the four-section body for a refusal that arrived with a typed
+/// disposition (Issue #3696, absorbing #3710).
+///
+/// Unlike [`render_operation_refusal_body`], the 原因 line names the cause
+/// outright instead of hedging with `未判定`. It can: the refusing operation
+/// declared this cause itself, and an inconsistent declaration is dropped
+/// before it reaches here. The hedge exists in the untyped renderer precisely
+/// because a substring match is not evidence of anything — that guess is what
+/// filed agent-recoverable refusals as owner work.
+///
+/// The display text still travels, as evidence rather than as the verdict, so
+/// later audits survive a wording change.
+pub fn render_structured_operation_refusal_body(
+    operation: &str,
+    error: &str,
+    kind: OperationRefusalKind,
+    reason_code: &str,
+    cause: &str,
+    recovery_action: Option<&str>,
+) -> String {
+    format!(
+        "事象: JSON operation `{operation}` が拒否されました。\n\
+         ```\n{error}\n```\n\
+         原因: {kind}（cause=`{cause}`、reason_code=`{reason_code}`）。この拒否は担当 agent の \
+         入力・順序の修正では解消できないと、操作自身が宣言しています。\n\
+         依頼: {request}\n\
+         再開条件: 上記が解消され、`{operation}` 相当の操作が通る状態になること。\n\
+         \n\
+         構造化拒否: reason_code=`{reason_code}`, cause=`{cause}`, recovery_action=`{recovery}`\n\
+         \n\
+         この投稿は gwt が自動起票しました（Issue #3655 AC-2 / Issue #3696）。担当 agent は \
+         必要に応じて事象・原因を補足してください。",
+        kind = kind.as_str(),
+        request = kind.request_hint(),
+        recovery = recovery_action.unwrap_or("none"),
     )
 }
 
@@ -641,6 +752,41 @@ mod tests {
             .unwrap();
         assert_eq!(closed.resolved_by_entry_id.as_deref(), Some("r1"));
         assert!(closed.resolved_at.is_some());
+    }
+
+    #[test]
+    fn restore_lost_blocked_reinserts_a_historical_row_without_superseding_others() {
+        let mut first = blocked("b1", &["2338"]);
+        first.origin_session_id = Some("session-a".to_string());
+        let mut later = blocked("b2", &["2338"]);
+        later.origin_session_id = Some("session-a".to_string());
+
+        let mut store = BoardEscalationStore::default();
+        store.apply_entry(&later);
+        assert!(store.restore_lost_blocked(&first));
+        assert!(!store.restore_lost_blocked(&first), "restore is idempotent");
+
+        assert_eq!(
+            store.open().count(),
+            2,
+            "repair must not replay superseded_by"
+        );
+        assert!(store
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == "b1" && escalation.is_open()));
+        assert!(store
+            .escalations
+            .iter()
+            .any(|escalation| escalation.entry_id == "b2" && escalation.is_open()));
+    }
+
+    #[test]
+    fn restore_lost_blocked_ignores_non_blocked_history() {
+        let mut store = BoardEscalationStore::default();
+        let status = entry("s1", BoardEntryKind::Status, &["2338"], "noise");
+        assert!(!store.restore_lost_blocked(&status));
+        assert!(store.escalations.is_empty());
     }
 
     #[test]
@@ -873,13 +1019,14 @@ mod tests {
     }
 
     #[test]
-    fn the_three_production_refusals_from_the_issue_are_all_classified() {
+    fn execution_refusals_require_typed_disposition_while_legacy_families_remain_classified() {
         assert_eq!(
             classify_operation_refusal(
                 "execution.reopen",
                 "Completed issue #2338 is immutable; use a fresh launch for new work"
             ),
-            Some(OperationRefusalKind::Immutability)
+            None,
+            "execution refusals require operation-local typed disposition"
         );
         assert_eq!(
             classify_operation_refusal(
@@ -944,6 +1091,27 @@ mod tests {
                 "workspace.update",
                 "workspace.update refused: workspace_ensure_required",
             ),
+            // Issue #3868 AC-24: the T-247 obligation refusal and the
+            // stale-evidence / receipt refusals from `execution.complete` are
+            // the agent's own next step. On 2026-09-01 all four of the day's
+            // auto-filed escalations were this shape, and three were
+            // self-resolvable; the "permission" verdict made the agents stop.
+            (
+                "execution.complete",
+                "execution: completion refused — open action obligations [pr] from this session's \
+                 prompts are unsettled (T-247). Settle them with the operation that is executable in \
+                 the current state",
+            ),
+            (
+                "execution.complete",
+                "execution: completion refused — the worktree changed after the last verification \
+                 run (stale evidence) — rerun `verify.run`",
+            ),
+            (
+                "execution.complete",
+                "execution: completion refused — Work #3832 has no generation-scoped Work event \
+                 receipt. Complete its terminal Work update, commit it, and push it before retrying.",
+            ),
         ] {
             assert_eq!(
                 classify_operation_refusal(operation, error),
@@ -967,6 +1135,19 @@ mod tests {
             "the verbatim error is what tells the PM which lever to pull: {body}"
         );
         assert!(body.contains("fresh launch"), "{body}");
+        // Issue #3868 AC-24: the classifier is a heuristic, so the body must
+        // not assert the cause — that assertion made agents give up on
+        // refusals they could resolve themselves.
+        assert!(body.contains("原因: 未判定"), "{body}");
+        assert!(body.contains("拒否メッセージ本文を読んで"), "{body}");
+        assert!(!body.contains("由来の拒否です"), "{body}");
+        assert!(!body.contains("入力の作り直しでは解消しません"), "{body}");
+        let permission = render_operation_refusal_body(
+            "pr.ready",
+            "PR handoff refused: verification record is stale",
+            OperationRefusalKind::Permission,
+        );
+        assert!(permission.contains("担当が解消して再試行"), "{permission}");
     }
 
     #[test]

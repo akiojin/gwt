@@ -335,7 +335,13 @@ impl AppRuntime {
         client_id: ClientId,
         trace: UiTracePayload,
     ) -> Vec<OutboundEvent> {
-        let event = match save_ui_trace_to_log_dir(&self.log_dir, trace) {
+        let log_dir = self
+            .active_tab_id
+            .as_deref()
+            .and_then(|id| self.project_log_scope_for_tab(id))
+            .map(|scope| scope.log_dir())
+            .unwrap_or(&self.log_dir);
+        let event = match save_ui_trace_to_log_dir(log_dir, trace) {
             Ok(result) => BackendEvent::UiTraceSaved {
                 path: result.path.display().to_string(),
                 entries: result.entries,
@@ -567,6 +573,7 @@ impl AppRuntime {
         language: String,
         codex_trust_managed_hooks: Option<bool>,
         board_provider: Option<String>,
+        agent_resource: Option<gwt::protocol::AgentResourceSettings>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -587,6 +594,7 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                agent_resource,
             ),
         )]
     }
@@ -774,11 +782,11 @@ impl AppRuntime {
         }
     }
 
-    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend
-    /// commits the prepared payload via the helper subprocess and exits the
-    /// parent. Falls back to the legacy `apply_update_state_and_exit` path
-    /// when no prepared payload exists yet (e.g. user manually re-clicked CTA
-    /// before download completed).
+    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. The event
+    /// loop resolves the prepared payload (persisted manifest, or a download
+    /// when the user re-clicked the CTA before it persisted) and commits it
+    /// through the graceful `ApplyUpdateGraceful` route (Issue #4038), which
+    /// quits via `QuitApp` instead of exiting from a worker thread.
     pub(super) fn apply_update_restart_now_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         match self.pending_update.clone() {
             Some(

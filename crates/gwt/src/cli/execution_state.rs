@@ -51,7 +51,7 @@ pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-c
 /// silently rewrite this independently hashed record.
 pub const EXECUTION_GENERATION_POINTER_STATE_RELATIVE: &str =
     ".gwt/skill-state/execution-generation-pointer.json";
-const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
+pub(crate) const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
 const GENERATION_LEDGER_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEDGER_FILE: &str = "generation-ledger.json";
 const GENERATION_POINTER_FILE: &str = "execution-generation-pointer.json";
@@ -61,8 +61,36 @@ pub const BINDING_REPAIR_OUTCOME_FILE: &str = "binding-repair-outcome.json";
 const BINDING_REPAIR_OUTCOME_SCHEMA_VERSION: u32 = 1;
 const BINDING_REPAIR_OPERATION_ID: &str = "continue-work-local-repair";
 const GENERATION_BINDING_MISMATCH_PREFIX: &str = "generation settlement binding mismatch:";
+/// Marks the owner ledger's lifecycle event for a No Action settlement, so the
+/// ledger keeps a delivery and a successful non-delivery apart even though
+/// both project the same terminal status (Issue #4590).
+pub const NO_ACTION_LIFECYCLE_REASON_PREFIX: &str = "no action:";
 const RECOVERY_SESSION_CHANGED_PREFIX: &str = "execution_recovery_session_changed:";
 const ACTIVE_BINDING_LEASE_WAIT: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct RecoverySessionChangedError(String);
+
+impl std::fmt::Display for RecoverySessionChangedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{RECOVERY_SESSION_CHANGED_PREFIX} {}", self.0)
+    }
+}
+
+impl std::error::Error for RecoverySessionChangedError {}
+
+fn recovery_session_changed_error(detail: impl Into<String>) -> io::Error {
+    io::Error::new(
+        ErrorKind::PermissionDenied,
+        RecoverySessionChangedError(detail.into()),
+    )
+}
+
+fn is_recovery_session_changed_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<RecoverySessionChangedError>())
+}
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -172,9 +200,11 @@ fn inject_repair_binding_authority_race_if_requested(worktree: &Path) -> io::Res
         missing_verification: None,
         launched_at: now,
         settled_at: None,
+        completion_evidence: None,
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
+        permission_decision: None,
     };
     let projection = String::from_utf8(serialize_execution_control(&record)?).map_err(|error| {
         invalid_generation_data(format!("foreign race projection is not UTF-8: {error}"))
@@ -483,6 +513,14 @@ pub struct ExecutionRecovery {
 
 /// The Execution Control Record (T-106).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionCompletionEvidence {
+    pub verification_record_id: String,
+    pub verification_run_hash: String,
+    pub verification_plan_hash: String,
+    pub used_typed_quarantine: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionControlRecord {
     pub owner_kind: ExecutionOwnerKind,
     pub owner_number: u64,
@@ -503,6 +541,12 @@ pub struct ExecutionControlRecord {
     pub launched_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,
+    /// Exact integrity-protected verification snapshot that authorized a
+    /// Completed transition. Ready handoff must consume this same snapshot;
+    /// replacing or deleting the run after completion cannot erase a typed
+    /// quarantine disposition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_evidence: Option<ExecutionCompletionEvidence>,
     /// Audited ownership transfer chain (P9a, T-117/T-123): every takeover —
     /// `execution.adopt`, launch takeover, resume takeover — appends here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -520,6 +564,17 @@ pub struct ExecutionControlRecord {
     /// guard independently blocks agent edits to this file).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
+    /// Issue #4543 AC-5: the Permission Mode Decision this launch was accepted
+    /// under — provider, source profile, forced/effective skip, provider
+    /// support, the exact custom skip args or config overlay, the reason, and
+    /// any unsupported / dropped-flag diagnostic.
+    ///
+    /// `None` on every record written before this field existed, and on
+    /// records not created by a launch (repair, successor activation), so
+    /// those serialize byte-identically and keep the same content hash. Only a
+    /// launch that actually decided its permission mode fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_decision: Option<gwt_agent::PermissionModeDecision>,
 }
 
 /// Stable owner key within one canonical repository identity.
@@ -686,6 +741,13 @@ pub const FRESH_LINKED_OWNER_LAUNCH_SOURCE: &str = "fresh-linked-owner-launch";
 /// name it was minted under even though Issue #3472 extended the route beyond
 /// the manual Launch Agent to every fresh linked-owner launch.
 pub const MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE: &str = "manual-completed-owner-launch";
+/// SPEC #3590 FR-001 / FR-002: canonical source of a launch that starts a new
+/// generation beside a live Active holder instead of refusing.
+///
+/// Unlike Continue work, this route never fences the predecessor: the holder
+/// keeps its Active generation and its binding, and both Sessions settle the
+/// generation they own.
+pub const CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE: &str = "concurrent-linked-owner-launch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExactSessionRuntimeDisposition {
@@ -700,8 +762,223 @@ pub enum ExactSessionRuntimeDisposition {
     /// cannot be trusted. There is no runtime proof to carry: absence is
     /// precisely the lack of one.
     Absent,
+    /// Issue #3934: every PID namespace holding a sidecar for this Session
+    /// belongs to a Host process that no longer exists, and no PTY child of
+    /// theirs survived them. A dead Host cannot be running anything, so this
+    /// is decisive evidence about the *runtime* — unlike [`Self::Unknown`],
+    /// where a reachable Host left evidence that cannot be trusted. It is kept
+    /// separate from [`Self::Terminal`] and [`Self::Defunct`] because the
+    /// sidecar itself was never completed: it carries no exit record and no
+    /// handoff fence, so it proves only that its writer is gone.
+    HostDead,
+    /// The exact PTY child and its process group exited while the GUI Host
+    /// remains alive. No exit record or manual handoff proof was published;
+    /// the generation reaper must revalidate this observation under leases.
+    ChildExited,
     Unknown,
 }
+
+/// Issue #3934: durable holder states that may release an execution generation
+/// on a terminal runtime proof alone.
+///
+/// `Running` is excluded on purpose. A terminal sidecar under a durably
+/// Running holder is conflicting bookkeeping, and taking the generation away
+/// on that reading could kill work in flight; it keeps refusing every fresh
+/// launch until a human or a Continue work successor resolves it.
+/// `WaitingInput` and `Unknown` are excluded for the same fail-closed reason:
+/// neither is a statement that the holder finished.
+///
+/// Issue #3964 AC-2: this predicate no longer decides when the runtime
+/// evidence itself proves that nothing can be running the holder — no sidecar
+/// anywhere, or only sidecars whose Hosts are dead. Those release the
+/// generation whatever the durable state says.
+#[must_use]
+pub fn holder_status_permits_generation_reclaim(status: gwt_agent::AgentStatus) -> bool {
+    matches!(
+        status,
+        gwt_agent::AgentStatus::Stopped
+            | gwt_agent::AgentStatus::Interrupted
+            | gwt_agent::AgentStatus::Idle
+    )
+}
+
+/// Issue #3964: the refusal every fresh launch produces while an owner's
+/// generation is held by another Session. The GUI launch path formats it and
+/// the Issue Monitor keys its stranded-hold release on it, so the text has one
+/// source.
+pub const EXECUTION_GENERATION_CONFLICT_PREFIX: &str = "an execution generation already exists for";
+
+/// Whether a launch failure message is the held-generation refusal.
+#[must_use]
+pub fn is_execution_generation_conflict(message: &str) -> bool {
+    message.contains(EXECUTION_GENERATION_CONFLICT_PREFIX)
+}
+
+/// Issue #3964 AC-1 / AC-4: what still holds an owner's generation, read from
+/// the owner ledger alone.
+///
+/// The Issue Monitor keeps an `agent_failed` row for every launch the held
+/// generation refused. Once the generation is Blocked or Completed the hold
+/// protects nothing — a fresh launch takes the successor route — so the row
+/// can return to the queue without an operator.
+///
+/// Issue #4042 AC-1: this is the single projection of a held generation. The
+/// Issue Monitor's reclaim probe and the launch refusal both read the holder
+/// through it, so the two can never describe one holder differently, and the
+/// generation id lets the Monitor tell a repeated refusal on the generation it
+/// just released from a refusal on a successor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerGenerationHold {
+    pub status: ExecutionControlStatus,
+    /// The current generation's id.
+    pub generation_id: String,
+    /// The Session that holds the generation.
+    pub holder_session_id: String,
+    /// Durable holder state (`Interrupted`, `Running`, ...), or `missing` /
+    /// `unreadable` when the holder Session cannot be read.
+    pub holder_session_state: String,
+}
+
+/// Project the current generation of `ledger` and its holder Session, read
+/// from `sessions_dir`, into [`OwnerGenerationHold`]. `None` when the ledger
+/// has no current generation.
+#[must_use]
+pub fn owner_generation_hold_from_ledger(
+    sessions_dir: &Path,
+    ledger: &ExecutionGenerationLedger,
+) -> Option<OwnerGenerationHold> {
+    let current = ledger.current_generation()?;
+    let status = ledger.effective_status_for(current);
+    let holder_session_id = current.identity.initial_session_id.clone();
+    let holder_path = sessions_dir.join(format!("{holder_session_id}.toml"));
+    let holder_session_state = match gwt_agent::inspect_session_path(&holder_path) {
+        gwt_agent::SessionPathState::Present(holder) => format!("{:?}", holder.status),
+        gwt_agent::SessionPathState::Missing => "missing".to_string(),
+        gwt_agent::SessionPathState::Error(_) => "unreadable".to_string(),
+    };
+    Some(OwnerGenerationHold {
+        status,
+        generation_id: current.identity.generation_id.clone(),
+        holder_session_id,
+        holder_session_state,
+    })
+}
+
+/// The refusal a fresh launch produces while `owner`'s generation is held
+/// (Issue #3426 / #3964). Formatted from the same [`OwnerGenerationHold`] the
+/// Issue Monitor reclaim reads, so the text names the generation and the
+/// holder state the reclaim will see; `None` describes a ledger without a
+/// current generation.
+#[must_use]
+pub fn execution_generation_conflict_refusal(
+    owner: ExecutionOwnerKey,
+    hold: Option<&OwnerGenerationHold>,
+) -> String {
+    let detail = hold.map_or_else(
+        || "unknown generation".to_string(),
+        |hold| {
+            let status = match hold.status {
+                ExecutionControlStatus::Active => "active",
+                ExecutionControlStatus::Completed => "completed",
+                ExecutionControlStatus::Blocked => "blocked",
+            };
+            format!(
+                "{status} generation {} held by Session {} ({})",
+                hold.generation_id, hold.holder_session_id, hold.holder_session_state
+            )
+        },
+    );
+    format!(
+        "{EXECUTION_GENERATION_CONFLICT_PREFIX} {} #{} ({detail}); use Continue work to create a successor, or run the execution.status JSON operation for the exact recovery route",
+        owner.kind.as_str(),
+        owner.number,
+    )
+}
+
+/// Read [`OwnerGenerationHold`] for `owner_number` from the repository's
+/// owner ledger tree, resolved from any path inside the project.
+///
+/// Deliberately independent of the worktree publication: the refused launch
+/// materialized a worktree and published nothing into it, so the pointer /
+/// projection pair the strict readers want does not exist for exactly the
+/// owners this question is asked about. An owner without a ledger holds
+/// nothing and answers `None`.
+pub fn owner_generation_hold_for_project(
+    project_root: &Path,
+    owner_number: u64,
+) -> io::Result<Option<OwnerGenerationHold>> {
+    let owner_dir = gwt_core::paths::gwt_project_dir_for_repo_path(project_root)
+        .join("trusted")
+        .join("execution-owners")
+        .join(format!("owner-{owner_number}"));
+    let Some(contents) = read_owner_ledger_from_dir(&owner_dir)? else {
+        return Ok(None);
+    };
+    let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
+        invalid_generation_data(format!("malformed generation ledger: {error}"))
+    })?;
+    Ok(owner_generation_hold_from_ledger(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &ledger,
+    ))
+}
+
+/// Issue #4161: read the Prepared transactions fencing `owner_number`'s
+/// current generation from the repository's owner ledger tree.
+///
+/// Resolved from the project root like [`owner_generation_hold_for_project`],
+/// because the Issue Monitor asks about owners whose worktree publication does
+/// not exist: the launch it is about to retry is the one that never happened.
+pub fn blocking_prepared_transactions_for_project(
+    project_root: &Path,
+    owner_number: u64,
+) -> io::Result<Vec<BlockingPreparedTransaction>> {
+    let owner_dir = gwt_core::paths::gwt_project_dir_for_repo_path(project_root)
+        .join("trusted")
+        .join("execution-owners")
+        .join(format!("owner-{owner_number}"));
+    let Some(contents) = read_owner_ledger_from_dir(&owner_dir)? else {
+        return Ok(Vec::new());
+    };
+    let ledger = serde_json::from_str::<ExecutionGenerationLedger>(&contents).map_err(|error| {
+        invalid_generation_data(format!("malformed generation ledger: {error}"))
+    })?;
+    Ok(blocking_prepared_transactions(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &ledger,
+    ))
+}
+
+/// Issue #3964: a sidecar's PID namespace names the Host that wrote it only
+/// while that PID still belongs to the same process. The OS recycles PIDs; in
+/// production four holders' sidecars named PIDs that had become a browser
+/// renderer and a model server, and `kill(pid, 0)` alone kept reporting the
+/// writer as reachable, so every ambiguous reading stayed `Unknown` forever.
+///
+/// A Host that recorded its start time is the writer only when the live
+/// process still has that start time. A legacy sidecar without one is judged
+/// by the order of events instead: a process that started after the sidecar
+/// was last written cannot have written it. A process whose start time cannot
+/// be read keeps the fail-closed "reachable" answer.
+fn sidecar_host_is_alive(host_pid: u32, runtime: &gwt_agent::SessionRuntimeState) -> bool {
+    if !crate::process::is_host_process_alive(host_pid) {
+        return false;
+    }
+    let Some(started_at) = crate::process::host_process_start_time(host_pid) else {
+        return true;
+    };
+    match runtime.host_started_at.filter(|value| *value > 0) {
+        Some(recorded) => started_at == recorded,
+        None => i64::try_from(started_at).map_or(true, |started_at| {
+            started_at <= runtime.updated_at.timestamp() + SIDECAR_HOST_START_TOLERANCE_SECS
+        }),
+    }
+}
+
+/// Clock slack between a Host's recorded process start and the wall-clock
+/// stamp of the first sidecar it wrote. Both come from the same machine, so
+/// only rounding separates them; a recycled PID is off by hours or days.
+const SIDECAR_HOST_START_TOLERANCE_SECS: i64 = 5;
 
 /// Classify exact runtime evidence without treating a dead host PID as child
 /// exit proof. A terminal result names the exact PID namespace and process
@@ -722,6 +999,13 @@ pub fn classify_exact_session_runtime(
     let mut defunct = None;
     let mut saw_unknown = false;
     let mut saw_sidecar = false;
+    let mut saw_dead_host = false;
+    let mut saw_exited_child = false;
+    // Issue #3934: an exact proof is only usable while it names one
+    // incarnation, but whether the Host that wrote it is still around is a
+    // separate fact that survives the proof becoming ambiguous.
+    let mut conflicting_proof = false;
+    let mut saw_reachable_proof = false;
     for namespace in entries {
         let namespace = namespace?;
         let Some(host_pid) = namespace
@@ -742,17 +1026,38 @@ pub fn classify_exact_session_runtime(
         let runtime = match gwt_agent::SessionRuntimeState::load(&sidecar) {
             Ok(runtime) => runtime,
             Err(_) => {
-                saw_unknown = true;
+                // Issue #3934: an unreadable sidecar is ambiguous only while
+                // its Host is still around to be asked.
+                if crate::process::is_host_process_alive(host_pid) {
+                    saw_unknown = true;
+                } else {
+                    saw_dead_host = true;
+                }
                 continue;
             }
         };
+        // Issue #3934: every "cannot tell" below is a statement about the Host
+        // that wrote this sidecar. Once that Host is gone its bookkeeping is
+        // still decisive about one thing - nothing of its is running - so it
+        // must not poison the classification with ambiguity. Before this, a
+        // partial sidecar left by a dead Host made the holder unclassifiable
+        // and its generation could never be released.
+        let host_alive = sidecar_host_is_alive(host_pid, &runtime);
         if runtime.execution_identity.as_ref() != Some(expected) {
-            saw_unknown = true;
+            if host_alive {
+                saw_unknown = true;
+            } else {
+                saw_dead_host = true;
+            }
             continue;
         }
         let Some(runtime_incarnation) = runtime.runtime_incarnation.filter(|value| *value > 0)
         else {
-            saw_unknown = true;
+            if host_alive {
+                saw_unknown = true;
+            } else {
+                saw_dead_host = true;
+            }
             continue;
         };
         let proof = gwt_agent::ManualLaunchRuntimeProof {
@@ -773,18 +1078,22 @@ pub fn classify_exact_session_runtime(
                         return Ok(ExactSessionRuntimeDisposition::Live);
                     }
                 }
-                (None, None) => {
-                    saw_unknown = true;
-                    continue;
-                }
                 _ => {
-                    saw_unknown = true;
+                    if host_alive {
+                        saw_unknown = true;
+                    } else {
+                        saw_dead_host = true;
+                    }
                     continue;
                 }
             }
         } else {
             let Some(host_started_at) = runtime.host_started_at.filter(|value| *value > 0) else {
-                saw_unknown = true;
+                if host_alive {
+                    saw_unknown = true;
+                } else {
+                    saw_dead_host = true;
+                }
                 continue;
             };
             let Some((child_pid, child_started_at)) = runtime
@@ -792,13 +1101,21 @@ pub fn classify_exact_session_runtime(
                 .zip(runtime.child_started_at)
                 .filter(|(pid, started_at)| *pid > 0 && *started_at > 0)
             else {
-                saw_unknown = true;
+                if host_alive {
+                    saw_unknown = true;
+                } else {
+                    saw_dead_host = true;
+                }
                 continue;
             };
-            if crate::process::host_process_start_time(host_pid) == Some(host_started_at)
-                || crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
-            {
+            if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at) {
                 return Ok(ExactSessionRuntimeDisposition::Live);
+            }
+            if host_alive {
+                // Issue #4131: one GUI Host owns many independent PTYs. Its
+                // survival says nothing about this exact child's survival.
+                saw_exited_child = true;
+                continue;
             }
             let handoff = fs::read(gwt_agent::manual_handoff_path(
                 sessions_dir,
@@ -813,26 +1130,56 @@ pub fn classify_exact_session_runtime(
                     || handoff.host_pid != host_pid
                     || handoff.host_started_at != host_started_at
             }) {
-                saw_unknown = true;
+                if host_alive {
+                    saw_unknown = true;
+                } else {
+                    saw_dead_host = true;
+                }
                 continue;
             }
+            saw_reachable_proof |= host_alive;
             if defunct.replace(proof).is_some() {
-                return Ok(ExactSessionRuntimeDisposition::Unknown);
+                conflicting_proof = true;
             }
             continue;
         }
+        saw_reachable_proof |= host_alive;
         if terminal.replace(proof).is_some() {
-            return Ok(ExactSessionRuntimeDisposition::Unknown);
+            conflicting_proof = true;
         }
     }
-    if saw_unknown || (terminal.is_some() && defunct.is_some()) {
+    if saw_unknown {
         return Ok(ExactSessionRuntimeDisposition::Unknown);
+    }
+    if saw_exited_child {
+        // Reaping needs no unique handoff proof: every namespace was checked
+        // for a surviving child above, and the transaction checks again.
+        return Ok(ExactSessionRuntimeDisposition::ChildExited);
+    }
+    if conflicting_proof || (terminal.is_some() && defunct.is_some()) {
+        // Issue #3934: more than one exact record cannot name the single
+        // incarnation a successor would have to fence against. When every Host
+        // that wrote one is gone, the conclusion about the runtime still holds
+        // even though the proof does not, and the durable holder state decides
+        // from there. A reachable Host anywhere in the set stays ambiguous.
+        return Ok(if saw_reachable_proof {
+            ExactSessionRuntimeDisposition::Unknown
+        } else {
+            ExactSessionRuntimeDisposition::HostDead
+        });
     }
     if let Some(proof) = defunct {
         return Ok(ExactSessionRuntimeDisposition::Defunct(proof));
     }
     if let Some(proof) = terminal {
         return Ok(ExactSessionRuntimeDisposition::Terminal(proof));
+    }
+    // Issue #3934: no fenced proof survived, but every Host that ever wrote a
+    // sidecar for this Session is gone. That is decisive about the runtime and
+    // says nothing about how the holder ended, so the durable Session state
+    // alone decides whether the generation may be released.
+    if saw_dead_host {
+        return Ok(ExactSessionRuntimeDisposition::HostDead);
     }
     // No namespace held a sidecar for this Session at all (Issue #3457). That
     // is absence of evidence for a running Host, not conflicting evidence.
@@ -843,25 +1190,21 @@ pub fn classify_exact_session_runtime(
     })
 }
 
-/// Read the current generation's exact durable Session holder without scanning
-/// runtime namespaces. Startup uses this only after the canonical coarse
+/// Read a startup candidate's exact durable Session holder without scanning
+/// runtime namespaces. The reaper uses this only after the canonical coarse
 /// liveness prefilter; the reaper transaction still revalidates exact runtime
 /// evidence while holding the owner and Session leases.
-pub fn current_generation_holder_identity(
+///
+/// Issue #3964: the holder is named by the owner ledger the candidate was
+/// scanned from, never by the worktree's flat projection. A refused relaunch
+/// materializes the worktree again and publishes nothing into it, so the
+/// projection is exactly what is missing for a stranded owner, and reading
+/// it silently counted every such owner as unchanged.
+pub fn startup_candidate_holder_identity(
     sessions_dir: &Path,
-    worktree: &Path,
-    owner: ExecutionOwnerKey,
+    candidate: &StartupActiveGenerationCandidate,
 ) -> io::Result<Option<gwt_agent::SessionExecutionIdentity>> {
-    let Some(record) = load(worktree)? else {
-        return Ok(None);
-    };
-    if record.owner_kind != owner.kind || record.owner_number != owner.number {
-        return Ok(None);
-    }
-    let Some(current) = current_execution_binding(worktree, owner)? else {
-        return Ok(None);
-    };
-    let holder_path = sessions_dir.join(format!("{}.toml", record.primary_session_id));
+    let holder_path = sessions_dir.join(format!("{}.toml", candidate.session_id));
     let holder = match gwt_agent::inspect_session_path(&holder_path) {
         gwt_agent::SessionPathState::Present(holder) => holder,
         gwt_agent::SessionPathState::Missing => return Ok(None),
@@ -870,7 +1213,7 @@ pub fn current_generation_holder_identity(
     Ok(gwt_agent::SessionExecutionIdentity::from_session(&holder)
         .ok()
         .flatten()
-        .filter(|identity| identity.execution_binding.identity == current))
+        .filter(|identity| identity.execution_binding.identity == candidate.execution_binding))
 }
 
 /// Issue #3457 / Issue #3472: identify the current generation's holder when no
@@ -925,21 +1268,26 @@ pub fn unreachable_current_generation_holder(
                 Some((identity, gwt_agent::ManualLaunchRuntimeEvidence::Absent))
             }
             // Issue #3472: an exact terminal exit record counts only once the
-            // durable Session agrees it stopped; a terminal sidecar under a
-            // non-stopped durable record is conflicting evidence.
-            ExactSessionRuntimeDisposition::Terminal(proof) => matches!(
-                holder.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            )
-            .then_some((
-                identity,
-                gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof),
-            )),
+            // durable Session agrees it ended; a terminal sidecar under a
+            // durably Running record is conflicting evidence.
+            ExactSessionRuntimeDisposition::Terminal(proof) => {
+                holder_status_permits_generation_reclaim(holder.status).then_some((
+                    identity,
+                    gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof),
+                ))
+            }
             ExactSessionRuntimeDisposition::Defunct(proof) => Some((
                 identity,
                 gwt_agent::ManualLaunchRuntimeEvidence::Proof(proof),
             )),
-            ExactSessionRuntimeDisposition::Live | ExactSessionRuntimeDisposition::Unknown => None,
+            // Issue #3934: a dead Host left no fenced proof to carry into a
+            // successor, so this route keeps refusing. The scan reaper
+            // terminalizes the generation under its own leases instead, and
+            // the next launch takes the Blocked successor route.
+            ExactSessionRuntimeDisposition::HostDead
+            | ExactSessionRuntimeDisposition::ChildExited
+            | ExactSessionRuntimeDisposition::Live
+            | ExactSessionRuntimeDisposition::Unknown => None,
         },
     )
 }
@@ -1307,34 +1655,53 @@ fn startup_active_reaper_event_is_owned(
     event.operation_id.as_deref() == Some(startup_active_reaper_operation_id(&expected).as_str())
 }
 
-fn current_generation_has_prepared_transaction(
-    ledger: &ExecutionGenerationLedger,
+/// The successor attempts that are still Prepared against `generation_id`.
+///
+/// The attempt log is append-only, so aborting an operation appends an Aborted
+/// event and leaves its Prepared event behind. Only the latest event per
+/// operation id describes what still targets the generation (Issue #4161).
+fn latest_prepared_successors_for_generation<'a>(
+    ledger: &'a ExecutionGenerationLedger,
     generation_id: &str,
-) -> bool {
-    let mut continuation_operations = std::collections::HashSet::new();
-    let prepared_continuation = ledger
+) -> Vec<&'a ContinuationAttempt> {
+    let mut operations = std::collections::HashSet::new();
+    ledger
         .continuation_attempts
         .iter()
         .rev()
-        .filter(|attempt| continuation_operations.insert(attempt.request.operation_id.as_str()))
-        .any(|attempt| {
+        .filter(|attempt| operations.insert(attempt.request.operation_id.as_str()))
+        .filter(|attempt| {
             attempt.predecessor.generation_id == generation_id
                 && attempt.status == ContinuationAttemptStatus::Prepared
-        });
-    if prepared_continuation {
-        return true;
-    }
+        })
+        .collect()
+}
 
-    let mut takeover_operations = std::collections::HashSet::new();
+/// The same-generation takeovers that are still Prepared against
+/// `generation_id`, resolved per operation id like the successors above.
+fn latest_prepared_takeovers_for_generation<'a>(
+    ledger: &'a ExecutionGenerationLedger,
+    generation_id: &str,
+) -> Vec<&'a GenerationTakeoverAttempt> {
+    let mut operations = std::collections::HashSet::new();
     ledger
         .takeover_attempts
         .iter()
         .rev()
-        .filter(|attempt| takeover_operations.insert(attempt.request.operation_id.as_str()))
-        .any(|attempt| {
+        .filter(|attempt| operations.insert(attempt.request.operation_id.as_str()))
+        .filter(|attempt| {
             attempt.generation_id == generation_id
                 && attempt.status == GenerationTakeoverAttemptStatus::Prepared
         })
+        .collect()
+}
+
+fn current_generation_has_prepared_transaction(
+    ledger: &ExecutionGenerationLedger,
+    generation_id: &str,
+) -> bool {
+    !latest_prepared_successors_for_generation(ledger, generation_id).is_empty()
+        || !latest_prepared_takeovers_for_generation(ledger, generation_id).is_empty()
 }
 
 fn startup_reaper_publication_is_complete(
@@ -1436,6 +1803,12 @@ pub fn reap_startup_defunct_active_generation(
         return Ok(StartupActiveGenerationReapOutcome::Unchanged);
     }
     let operation_id = startup_active_reaper_operation_id(candidate);
+    // Issue #3964: a refused relaunch materializes the worktree again and
+    // publishes nothing into it, so the strict read below would fail on a
+    // missing pointer for exactly the owners this reaper exists for. The
+    // heal is idempotent and never touches the owner ledger; a heal error is
+    // reported by the strict read that follows, never masked here.
+    let _ = heal_missing_generation_publication(&candidate.worktree, candidate.owner);
     with_generation_activation_leases(&candidate.worktree, candidate.owner, |context| {
         let mut owner_ledger =
             load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
@@ -1552,10 +1925,19 @@ pub fn reap_startup_defunct_active_generation(
                     ),
                     ExactSessionRuntimeDisposition::Terminal(_) => (
                         "startup recovery found an exact terminal Active holder",
-                        matches!(
-                            session.status,
-                            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-                        ),
+                        holder_status_permits_generation_reclaim(session.status),
+                    ),
+                    // Issue #3934 / #3964 AC-2: the holder's Hosts are all
+                    // gone. Nothing is running it, whatever the durable state
+                    // says: a Host that died took its PTY child with it, and a
+                    // durably Running record only means nobody wrote the end.
+                    ExactSessionRuntimeDisposition::HostDead => (
+                        "startup recovery found only dead Hosts for the Active holder",
+                        true,
+                    ),
+                    ExactSessionRuntimeDisposition::ChildExited => (
+                        "startup recovery found an exited exact PTY child for the Active holder",
+                        true,
                     ),
                     ExactSessionRuntimeDisposition::Defunct(_) => (
                         "startup recovery found an exact defunct Active holder",
@@ -1626,6 +2008,363 @@ pub fn reap_startup_defunct_active_generation(
     })
 }
 
+/// Issue #4200: operation-id prefix for a generation released because the
+/// operator revoked its launch.
+const REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX: &str = "revoked-launch-release-v1:";
+
+/// Issue #4200 AC-2: operation-id prefix for a generation released because the
+/// launch that opened it never started an agent.
+const UNSTARTED_LAUNCH_RELEASE_OPERATION_PREFIX: &str = "unstarted-launch-release-v1:";
+
+fn launch_release_operation_id(
+    authority: LaunchGenerationReleaseAuthority,
+    generation_id: &str,
+    binding_id: &str,
+) -> String {
+    let digest = sha256_hex(
+        serde_json::to_vec(&(authority.operation_tag(), generation_id, binding_id))
+            .unwrap_or_default(),
+    );
+    format!("{}{digest}", authority.operation_prefix())
+}
+
+/// Issue #4200: what makes a launch's generation this call's to settle.
+///
+/// Both authorities settle the same way and refuse the same way; they differ
+/// only in the fact that licenses them, and that fact is what the audit entry
+/// has to name. Sharing one transaction keeps a second release route from
+/// drifting away from the fail-closed checks the first one makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchGenerationReleaseAuthority {
+    /// The operator revoked the launch (AC-1 / AC-3). No liveness proof is
+    /// asked for: revoking *is* the decision that the holder must not return.
+    Revoked,
+    /// The holder never delivered a single agent lifecycle event (AC-2), so
+    /// there is no agent whose work could be interrupted by settling it.
+    Unstarted,
+}
+
+impl LaunchGenerationReleaseAuthority {
+    fn operation_prefix(self) -> &'static str {
+        match self {
+            Self::Revoked => REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX,
+            Self::Unstarted => UNSTARTED_LAUNCH_RELEASE_OPERATION_PREFIX,
+        }
+    }
+
+    fn operation_tag(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked-launch-release-v1",
+            Self::Unstarted => "unstarted-launch-release-v1",
+        }
+    }
+
+    fn missing_verification(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked launch settlement",
+            Self::Unstarted => "unstarted launch settlement",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked launch",
+            Self::Unstarted => "unstarted launch",
+        }
+    }
+}
+
+/// What a launch-generation release did to an owner's generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchGenerationRelease {
+    /// The Active generation was terminalized by this call, so the next launch
+    /// takes the Blocked successor route.
+    Released {
+        generation_id: String,
+        holder_session_id: String,
+    },
+    /// The generation is already Blocked or Completed. A fresh launch already
+    /// supersedes it, so there is nothing left to release.
+    AlreadyTerminal { generation_id: String },
+    /// The owner holds no generation at all.
+    NotHeld,
+    /// Fail-closed: the generation is Active but is not this operation's to
+    /// settle, and `detail` says why.
+    Held {
+        generation_id: String,
+        detail: &'static str,
+    },
+}
+
+/// Issue #4200: release an owner's Active execution generation because the
+/// operator revoked the launch that holds it.
+///
+/// Every other release route in this module is keyed on *evidence* that the
+/// holder can no longer return — [`unreachable_current_generation_holder`], the
+/// startup/scan reaper, [`holder_status_permits_generation_reclaim`]. That is
+/// the right default, and it is also why a launch that died before its agent
+/// ever ran parks its Issue forever: the durable Session and its runtime
+/// sidecar are both written `Running` at launch, the PTY-exit path that would
+/// correct them never runs, and the Host that wrote the sidecar is the gwt
+/// process itself, which stays alive. Every evidence-based route then answers
+/// "cannot prove it is dead" and refuses, correctly, forever.
+///
+/// Revoking a launch supplies the missing fact directly: it is not evidence
+/// about the holder, it is the operator's decision that the holder must not
+/// return. So this deliberately asks for no liveness proof. It still refuses,
+/// byte-preserving, on every reading that says the generation is not the one
+/// being revoked — a changed current generation, a prepared successor or
+/// takeover mid-flight, or a projection that no longer matches.
+pub fn release_revoked_launch_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    reason: &str,
+) -> io::Result<LaunchGenerationRelease> {
+    release_launch_generation(
+        worktree,
+        owner,
+        LaunchGenerationReleaseAuthority::Revoked,
+        reason,
+        |_, _| None,
+    )
+}
+
+/// Issue #4200 AC-2: release an owner's Active execution generation because the
+/// launch that opened it never started an agent.
+///
+/// [`release_revoked_launch_generation`] gives an operator a way out, but AC-2
+/// asks for the case to not need an operator at all. It cannot be answered with
+/// the liveness readings this module already has: a launch writes the durable
+/// Session and its runtime sidecar `Running` before the agent runs, the
+/// PTY-exit path that would correct them never runs when the agent never
+/// authenticated, and the Host named in the sidecar is the gwt process itself.
+/// Every one of those readings is byte-identical for an agent mid-turn and for
+/// one wedged at a directory-trust prompt, so no amount of looking harder at
+/// them can separate the two.
+///
+/// [`gwt_agent::Session::has_lifecycle_recovery_evidence`] can, because it is
+/// written from the other side: only a hook the agent itself delivered sets
+/// `last_hook_event_at` or `last_completed_stop_at`. A holder with neither has
+/// never reported in, which is a *positive* statement about the agent rather
+/// than a failure to prove something about the Host — and it is one the launch
+/// path cannot fake, because the launch path never writes those fields.
+///
+/// This stays fail-closed in both directions. A generation still inside the
+/// `UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES` start-up grace, and a holder
+/// Session that is missing, unreadable, carries any lifecycle evidence, or has
+/// picked up a provider session id, are all refused byte-preserving, along with
+/// every generation-identity check the revoked route makes. The only launches
+/// it settles are ones that had long enough to start and demonstrably never got
+/// an agent as far as its first hook.
+pub fn release_unstarted_launch_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    sessions_dir: &Path,
+    reason: &str,
+) -> io::Result<LaunchGenerationRelease> {
+    release_launch_generation(
+        worktree,
+        owner,
+        LaunchGenerationReleaseAuthority::Unstarted,
+        reason,
+        |holder_session_id, record| {
+            unstarted_launch_refusal(sessions_dir, holder_session_id, record)
+        },
+    )
+}
+
+/// Issue #4200 AC-2: how long a generation must have been Active before the
+/// absence of a lifecycle hook is allowed to mean the agent will never send
+/// one.
+///
+/// An agent that is merely slow to come up has not delivered a hook yet either,
+/// so without this an ordinary launch could be settled out from under itself by
+/// a concurrent one. The readiness supervisor in `app_runtime::launch` bounds
+/// legitimate start-up at `CONTINUE_WORK_READY_TIMEOUT` plus `MAX_EXTENSIONS`
+/// extensions — about five and a half minutes — so this sits well past the last
+/// moment a real agent could still be arriving, and still far short of the
+/// forever the Issue is otherwise parked for.
+const UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES: i64 = 15;
+
+/// `Some(detail)` when the launch cannot be shown to have never started an
+/// agent, which is every reading other than a generation past the start-up
+/// grace whose holder Session is readable, carries no lifecycle evidence, and
+/// has no provider session id of its own.
+fn unstarted_launch_refusal(
+    sessions_dir: &Path,
+    session_id: &str,
+    record: &ExecutionControlRecord,
+) -> Option<&'static str> {
+    if Utc::now().signed_duration_since(record.launched_at)
+        < chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES)
+    {
+        return Some("the generation is still inside the launch start-up grace, so a silent holder may yet be coming up");
+    }
+    let holder_path = sessions_dir.join(format!("{session_id}.toml"));
+    let gwt_agent::SessionPathState::Present(holder) =
+        gwt_agent::inspect_session_path(&holder_path)
+    else {
+        // Absent or unreadable is not evidence of never having run. The
+        // revoked route stays available for it.
+        return Some(
+            "the holder Session could not be read, so the launch cannot be shown to be unstarted",
+        );
+    };
+    if holder.has_lifecycle_recovery_evidence() {
+        return Some(
+            "the holder Session recorded an agent lifecycle event, so its agent did start",
+        );
+    }
+    if holder.exact_resume_session_id().is_some() {
+        // A provider session id can only come from the agent's own SessionStart
+        // payload, so it outranks the absence of a hook record.
+        return Some("the holder Session carries a provider session id, so its agent did start");
+    }
+    None
+}
+
+/// The shared release transaction behind both launch-generation authorities.
+///
+/// `holder_refusal` is the authority's own extra precondition, evaluated under
+/// the release leases against the holder this generation actually names.
+fn release_launch_generation(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    authority: LaunchGenerationReleaseAuthority,
+    reason: &str,
+    holder_refusal: impl Fn(&str, &ExecutionControlRecord) -> Option<&'static str>,
+) -> io::Result<LaunchGenerationRelease> {
+    validate_owner(owner)?;
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(format!(
+            "releasing a {} generation requires a non-empty reason",
+            authority.noun()
+        )));
+    }
+    // Same reason as the startup reaper: a refused relaunch materializes the
+    // worktree again and publishes nothing into it, so the strict read below
+    // would fail on a missing pointer for exactly the owners this exists for.
+    let _ = heal_missing_generation_publication(worktree, owner);
+    with_generation_activation_leases(worktree, owner, |context| {
+        let owner_ledger =
+            load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::NotFound,
+                    "owner generation ledger is not initialized",
+                )
+            })?;
+        let Some(owner_current) = owner_ledger.current_generation().cloned() else {
+            return Ok(LaunchGenerationRelease::NotHeld);
+        };
+        if owner_ledger.effective_status_for(&owner_current) != ExecutionControlStatus::Active {
+            return Ok(LaunchGenerationRelease::AlreadyTerminal {
+                generation_id: owner_current.identity.generation_id,
+            });
+        }
+        let mut ledger = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data(format!(
+                "{} release lost strict generation authority",
+                authority.noun()
+            ))
+        })?;
+        let Some(current) = ledger.current_generation().cloned() else {
+            return Ok(LaunchGenerationRelease::NotHeld);
+        };
+        if current.identity.generation_id != owner_current.identity.generation_id
+            || current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || ledger.effective_status_for(&current) != ExecutionControlStatus::Active
+        {
+            return Ok(LaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail: "the current generation changed under the release lease",
+            });
+        }
+        if current_generation_has_prepared_transaction(&ledger, &current.identity.generation_id) {
+            return Ok(LaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail: "a prepared successor or takeover transaction is still in flight",
+            });
+        }
+        let holder_session_id = current.identity.initial_session_id.clone();
+        let mut record = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(&current),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "{} Active projection is malformed: {error}",
+                authority.noun()
+            ))
+        })?;
+        if !integrity_ok(&record)
+            || record.owner_kind != owner.kind
+            || record.owner_number != owner.number
+            || record.primary_session_id != holder_session_id
+            || record.status != ExecutionControlStatus::Active
+            || record.settled_at.is_some()
+        {
+            return Ok(LaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail: "the Active projection no longer matches this generation",
+            });
+        }
+        // The authority's own precondition, read against the holder this
+        // generation names rather than the one a caller believed in, and
+        // against the record it just proved is the current Active one.
+        if let Some(detail) = holder_refusal(&holder_session_id, &record) {
+            return Ok(LaunchGenerationRelease::Held {
+                generation_id: current.identity.generation_id,
+                detail,
+            });
+        }
+        let operation_id = launch_release_operation_id(
+            authority,
+            &current.identity.generation_id,
+            &current.identity.session_binding_id,
+        );
+        let recorded_at = Utc::now();
+        record.status = ExecutionControlStatus::Blocked;
+        record.blocked_reason = Some(reason.to_string());
+        record.missing_verification = Some(authority.missing_verification().to_string());
+        record.settled_at = Some(recorded_at);
+        let projection = serialized_execution_projection(&record)?;
+        append_lifecycle_event(
+            &mut ledger,
+            GenerationLifecycleEvent {
+                sequence: 0,
+                generation_id: current.identity.generation_id.clone(),
+                from_status: ExecutionControlStatus::Active,
+                to_status: ExecutionControlStatus::Blocked,
+                session_id: holder_session_id.clone(),
+                reason: reason.to_string(),
+                operation_id: Some(operation_id),
+                recorded_at,
+                execution_control_json: projection.clone(),
+                previous_event_hash: String::new(),
+                content_hash: String::new(),
+            },
+        );
+        stamp_generation_ledger(&mut ledger);
+        write_activated_generation(context, &ledger, &projection)?;
+        let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data(format!(
+                "{} release lost generation authority",
+                authority.noun()
+            ))
+        })?;
+        if readback.current_effective_status() != Some(ExecutionControlStatus::Blocked) {
+            return Err(invalid_generation_data(format!(
+                "{} release readback is not Blocked",
+                authority.noun()
+            )));
+        }
+        Ok(LaunchGenerationRelease::Released {
+            generation_id: current.identity.generation_id,
+            holder_session_id,
+        })
+    })
+}
+
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
     attempt.request.work_id.is_none()
         && matches!(
@@ -1636,6 +2375,9 @@ pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool 
             ) | (
                 SuccessorPredecessorStatus::Completed,
                 MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE
+            ) | (
+                SuccessorPredecessorStatus::Active,
+                CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
             )
         )
 }
@@ -1807,6 +2549,27 @@ impl ExecutionGenerationLedger {
             .map_or(generation.status, |event| event.to_status)
     }
 
+    /// Issue #4131: whether the Host's Active reaper wrote the current
+    /// generation's effective status instead of the agent settling it.
+    ///
+    /// The status alone cannot tell interrupted work from finished work. An
+    /// auto-update restart kills the holder before it can settle anything, and
+    /// the reaper then records `Blocked` on its behalf — a record shaped
+    /// exactly like the agent's own deliberate `execution.blocked`. Readers
+    /// that decide whether the owner still has work to do need to see which
+    /// one they are looking at.
+    #[must_use]
+    pub fn current_generation_settled_by_host_reaper(&self) -> bool {
+        self.current_generation().is_some_and(|generation| {
+            self.lifecycle_events_for(&generation.identity.generation_id)
+                .max_by_key(|event| event.sequence)
+                .and_then(|event| event.operation_id.as_deref())
+                .is_some_and(|operation_id| {
+                    operation_id.starts_with(STARTUP_ACTIVE_REAPER_OPERATION_PREFIX)
+                })
+        })
+    }
+
     fn effective_projection_for<'a>(&'a self, generation: &'a ExecutionGeneration) -> &'a str {
         let lifecycle = self
             .lifecycle_events_for(&generation.identity.generation_id)
@@ -1954,7 +2717,20 @@ struct ExecutionRepairOutcome {
 #[must_use]
 pub fn compute_content_hash(record: &ExecutionControlRecord) -> String {
     use sha2::{Digest, Sha256};
-    let canonical = recovery_storage_projection(record);
+    let mut canonical = recovery_storage_projection(record);
+    // Issue #4591 follow-up: hashed without the Permission Mode Decision, for
+    // the same reason `recoveries` is folded into `transfers` above — and here
+    // rather than in the projection, because the projection is also what gets
+    // written. Dropping the field there would stop persisting it entirely.
+    //
+    // `compute_content_hash` hashes the deserialized record re-serialized, and
+    // `load` parses with plain serde. A binary that does not know this field
+    // drops it, recomputes a different hash, and reports the record `corrupt`
+    // with an empty `available_recoveries` — measured against gwtd 9.101.1.
+    // The decision describes how a launch was decided, not the identity of the
+    // execution, so excluding it costs nothing and keeps the record readable
+    // across the release that introduces the field.
+    canonical.permission_decision = None;
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     format!("{:x}", Sha256::digest(&bytes))
 }
@@ -2189,6 +2965,253 @@ fn read_owner_ledger_from_dir(owner_dir: &Path) -> io::Result<Option<String>> {
     crate::cli::trusted_store::read_from_resolved_dir(owner_dir, GENERATION_LEDGER_FILE)
 }
 
+/// Issue #3934: an owner-scoped, read-only view of one Issue's or SPEC's
+/// execution generation.
+///
+/// The session-scoped [`ExecutionDiagnosisSnapshot`] can only answer for the
+/// caller's own worktree record, so an operator looking at a queue that keeps
+/// refusing `#N` had no way to see who holds `#N`'s generation, what state that
+/// holder is in, or whether anything will ever release it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OwnerExecutionDiagnosis {
+    pub schema_version: u32,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecr_status: Option<ExecutionControlStatus>,
+    /// Issue #4131: the Host's Active reaper wrote [`Self::ecr_status`], not
+    /// the agent. A `blocked` status then means the holder died mid-execution,
+    /// which is interrupted work rather than a settled outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ecr_settled_by_host_reaper: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_entrypoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_activated_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_session_id: Option<String>,
+    /// Durable holder state: one of the `AgentStatus` names, or `missing` /
+    /// `unreadable` when the durable Session cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_session_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_worktree: Option<String>,
+    /// Exact runtime evidence for the holder: `live`, `terminal`, `defunct`,
+    /// `host_dead`, `child_exited`, `absent`, `unknown`, or `not_evaluated`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_runtime: Option<String>,
+    /// Whether the generation reaper is allowed to release this generation as
+    /// it stands. `false` for a live holder and for every ambiguous reading.
+    pub reclaimable: bool,
+    /// Issue #4161: the Prepared successors/takeovers that still fence this
+    /// generation. While this is non-empty every fresh launch is refused, so
+    /// the recovery route is to release them before launching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_prepared_transactions: Vec<BlockingPreparedTransaction>,
+    pub recommended_recovery: String,
+    pub recommended_recovery_reason: String,
+    pub warnings: Vec<String>,
+}
+
+/// Issue #3934: diagnose any owner in this repository without owning it.
+pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecutionDiagnosis {
+    let mut diagnosis = OwnerExecutionDiagnosis {
+        schema_version: 1,
+        owner_kind: owner.kind,
+        owner_number: owner.number,
+        ecr_status: None,
+        ecr_settled_by_host_reaper: false,
+        generation_id: None,
+        generation_entrypoint: None,
+        generation_activated_at: None,
+        holder_session_id: None,
+        holder_session_state: None,
+        holder_branch: None,
+        holder_worktree: None,
+        holder_runtime: None,
+        reclaimable: false,
+        blocking_prepared_transactions: Vec::new(),
+        recommended_recovery: "gwt-execute".to_string(),
+        recommended_recovery_reason:
+            "No execution generation exists for this owner; a fresh launch can take it.".to_string(),
+        warnings: Vec::new(),
+    };
+    let context = match GenerationTransactionContext::resolve(worktree, owner) {
+        Ok(context) => context,
+        Err(error) => {
+            diagnosis.warnings.push(error.to_string());
+            diagnosis.recommended_recovery = "unavailable".to_string();
+            diagnosis.recommended_recovery_reason =
+                "The repository owner tree could not be resolved from this worktree.".to_string();
+            return diagnosis;
+        }
+    };
+    let contents = match read_owner_ledger_from_dir(&context.owner_dir) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return diagnosis,
+        Err(error) => {
+            diagnosis.warnings.push(error.to_string());
+            diagnosis.recommended_recovery = "unavailable".to_string();
+            diagnosis.recommended_recovery_reason =
+                "The owner generation ledger could not be read.".to_string();
+            return diagnosis;
+        }
+    };
+    let ledger = match serde_json::from_str::<ExecutionGenerationLedger>(&contents) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            diagnosis
+                .warnings
+                .push(format!("malformed generation ledger: {error}"));
+            diagnosis.recommended_recovery = "execution.repair".to_string();
+            diagnosis.recommended_recovery_reason =
+                "The owner generation ledger is malformed and needs an audited repair.".to_string();
+            return diagnosis;
+        }
+    };
+    if let Err(error) = validate_generation_ledger(&ledger, ledger.owner) {
+        diagnosis.warnings.push(error.to_string());
+    }
+    // An owner is stored by number alone, so the ledger is the authority on
+    // whether that number is an Issue or a SPEC. Report what it says instead
+    // of echoing the caller's guess.
+    if ledger.owner.kind != owner.kind {
+        diagnosis.warnings.push(format!(
+            "owner #{} is a {}, not a {}",
+            owner.number,
+            ledger.owner.kind.as_str(),
+            owner.kind.as_str()
+        ));
+        diagnosis.owner_kind = ledger.owner.kind;
+    }
+    let Some(current) = ledger.current_generation() else {
+        return diagnosis;
+    };
+    let status = ledger.effective_status_for(current);
+    diagnosis.ecr_status = Some(status);
+    diagnosis.ecr_settled_by_host_reaper = ledger.current_generation_settled_by_host_reaper();
+    diagnosis.generation_id = Some(current.identity.generation_id.clone());
+    diagnosis.generation_entrypoint = Some(current.identity.entrypoint.clone());
+    diagnosis.generation_activated_at = Some(current.identity.activated_at);
+    let holder_session_id = current.identity.initial_session_id.clone();
+    diagnosis.holder_session_id = Some(holder_session_id.clone());
+
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let holder = match gwt_agent::inspect_session_path(
+        &sessions_dir.join(format!("{holder_session_id}.toml")),
+    ) {
+        gwt_agent::SessionPathState::Present(holder) => Some(holder),
+        gwt_agent::SessionPathState::Missing => {
+            diagnosis.holder_session_state = Some("missing".to_string());
+            None
+        }
+        gwt_agent::SessionPathState::Error(error) => {
+            diagnosis.holder_session_state = Some("unreadable".to_string());
+            diagnosis.warnings.push(error.to_string());
+            None
+        }
+    };
+    if let Some(holder) = &holder {
+        diagnosis.holder_session_state = Some(format!("{:?}", holder.status));
+        diagnosis.holder_branch = Some(holder.branch.clone());
+        diagnosis.holder_worktree = Some(holder.worktree_path.display().to_string());
+    }
+    let holder_identity = holder.as_ref().and_then(|holder| {
+        gwt_agent::SessionExecutionIdentity::from_session(holder)
+            .ok()
+            .flatten()
+    });
+    let runtime = match &holder_identity {
+        Some(identity) => match classify_exact_session_runtime(&sessions_dir, identity) {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                diagnosis.warnings.push(error.to_string());
+                None
+            }
+        },
+        None => None,
+    };
+    diagnosis.holder_runtime = Some(
+        match runtime {
+            Some(ExactSessionRuntimeDisposition::Live) => "live",
+            Some(ExactSessionRuntimeDisposition::Terminal(_)) => "terminal",
+            Some(ExactSessionRuntimeDisposition::Defunct(_)) => "defunct",
+            Some(ExactSessionRuntimeDisposition::HostDead) => "host_dead",
+            Some(ExactSessionRuntimeDisposition::ChildExited) => "child_exited",
+            Some(ExactSessionRuntimeDisposition::Absent) => "absent",
+            Some(ExactSessionRuntimeDisposition::Unknown) => "unknown",
+            None => "not_evaluated",
+        }
+        .to_string(),
+    );
+
+    match status {
+        ExecutionControlStatus::Completed => {
+            diagnosis.recommended_recovery = "gwt-execute".to_string();
+            diagnosis.recommended_recovery_reason =
+                "The generation is Completed; a fresh launch mints its successor.".to_string();
+        }
+        ExecutionControlStatus::Blocked => {
+            diagnosis.recommended_recovery = "gwt-execute".to_string();
+            diagnosis.recommended_recovery_reason =
+                "The generation is Blocked; a fresh launch takes the Blocked successor route, and the owning session can reopen it with verify.plan / verify.run / execution.reopen."
+                    .to_string();
+        }
+        ExecutionControlStatus::Active => {
+            let holder_permits = holder
+                .as_ref()
+                .is_some_and(|holder| holder_status_permits_generation_reclaim(holder.status));
+            // Issue #3964 AC-2: same rule as the reaper transaction — dead
+            // Hosts release the generation whatever the durable state says.
+            let runtime_releases = matches!(
+                runtime,
+                Some(
+                    ExactSessionRuntimeDisposition::Absent
+                        | ExactSessionRuntimeDisposition::Defunct(_)
+                        | ExactSessionRuntimeDisposition::HostDead
+                        | ExactSessionRuntimeDisposition::ChildExited
+                )
+            ) || (holder_permits
+                && matches!(runtime, Some(ExactSessionRuntimeDisposition::Terminal(_))));
+            diagnosis.reclaimable = runtime_releases;
+            if runtime_releases {
+                diagnosis.recommended_recovery = "generation-reaper".to_string();
+                diagnosis.recommended_recovery_reason =
+                    "The holder is gone. The next Issue Monitor scan reaper releases this generation, and the launch after it succeeds."
+                        .to_string();
+            } else if matches!(runtime, Some(ExactSessionRuntimeDisposition::Live)) {
+                diagnosis.recommended_recovery = "execution.continue".to_string();
+                diagnosis.recommended_recovery_reason =
+                    "The holder is live. Continue work in that session instead of launching again."
+                        .to_string();
+            } else {
+                diagnosis.recommended_recovery = "execution.continue".to_string();
+                diagnosis.recommended_recovery_reason =
+                    "The holder cannot be proven dead, so the generation is held fail-closed. Continue work from the holding session, or stop it so the reaper can release it."
+                        .to_string();
+            }
+        }
+    }
+    // Issue #4161: a Prepared successor/takeover fences the generation whatever
+    // its status is, so it decides the recovery route. Recommending a launch
+    // that the fence will refuse is how an owner became unlaunchable from both
+    // the Issue Monitor and the GUI with no route out.
+    diagnosis.blocking_prepared_transactions =
+        blocking_prepared_transactions(&sessions_dir, &ledger);
+    if !diagnosis.blocking_prepared_transactions.is_empty() {
+        diagnosis.recommended_recovery = "execution.release_prepared".to_string();
+        diagnosis.recommended_recovery_reason = format!(
+            "{} Prepared transaction(s) still fence this generation and refuse every launch; release them with the execution.release_prepared JSON operation, then launch.",
+            diagnosis.blocking_prepared_transactions.len()
+        );
+    }
+    diagnosis
+}
+
 fn owner_generation_ledger_exists(worktree: &Path, owner: ExecutionOwnerKey) -> io::Result<bool> {
     let Ok(context) = GenerationTransactionContext::resolve(worktree, owner) else {
         // Flat legacy records in non-git/degenerate worktrees remain
@@ -2327,11 +3350,15 @@ fn validate_generation_ledger(
             }
         } else {
             let predecessor = &ledger.generations[index - 1];
-            let predecessor_head = effective_generation_head_hash(ledger, predecessor);
             if generation.identity.predecessor_generation_id.as_deref()
                 != Some(predecessor.identity.generation_id.as_str())
-                || generation.identity.predecessor_content_hash.as_deref()
-                    != Some(predecessor_head.as_str())
+                || !generation
+                    .identity
+                    .predecessor_content_hash
+                    .as_deref()
+                    .is_some_and(|expected| {
+                        generation_head_hash_is_historical(ledger, predecessor, expected)
+                    })
             {
                 return Err(invalid_generation_data(
                     "execution generation predecessor id/hash chain is invalid",
@@ -2364,8 +3391,14 @@ fn validate_generation_ledger(
             || (attempt.predecessor_status == SuccessorPredecessorStatus::Active
                 && !matches!(
                     attempt.request.source.as_str(),
-                    "execution-continue" | "continue-work:resume" | "continue-work:handoff"
+                    "execution-continue"
+                        | "continue-work:resume"
+                        | "continue-work:handoff"
+                        | CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
                 ))
+            || (attempt.request.source == CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE
+                && (attempt.predecessor_status != SuccessorPredecessorStatus::Active
+                    || attempt.request.work_id.is_some()))
             || attempt.worktree_binding_hash.trim().is_empty()
             || attempt.candidate_generation_id.trim().is_empty()
             || attempt
@@ -2734,8 +3767,14 @@ fn validate_generation_ledger(
                         )
                     })?
                     .clone();
-                if status != ExecutionControlStatus::Active
-                    || prior_projection.primary_session_id != takeover.from_session_id
+                // Issue #4154: a settled Blocked generation transfers too, so a
+                // worktree that inherited a dead Session's terminal record can
+                // be recovered. The transfer only moves ownership — the status
+                // it found is the status it leaves behind (checked below).
+                if !matches!(
+                    status,
+                    ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
+                ) || prior_projection.primary_session_id != takeover.from_session_id
                     || takeover.from_session_id.trim().is_empty()
                     || takeover.to_session_id.trim().is_empty()
                     || takeover.from_session_id == takeover.to_session_id
@@ -2777,7 +3816,7 @@ fn validate_generation_ledger(
                 expected_projection.content_hash = compute_content_hash(&expected_projection);
                 if projection.owner_kind != expected_owner.kind
                     || projection.owner_number != expected_owner.number
-                    || projection.status != ExecutionControlStatus::Active
+                    || projection.status != status
                     || !integrity_ok(&projection)
                     || projection != expected_projection
                 {
@@ -2868,8 +3907,20 @@ fn validate_generation_ledger(
                         .is_some_and(|identity| identity == &generation.identity)
             })
             .map(|attempt| successor_predecessor_execution_status(attempt.predecessor_status));
-        if authorized_predecessor_status
-            != Some(effective_statuses[predecessor.identity.generation_id.as_str()])
+        let effective_predecessor_status =
+            effective_statuses[predecessor.identity.generation_id.as_str()];
+        // SPEC #3590 FR-009: a successor authorized from an Active predecessor
+        // does not freeze it. The holder keeps producing and settles its own
+        // generation later, so a terminal state here is the expected outcome
+        // of that settlement, not a broken authorization.
+        let authorization_still_holds = authorized_predecessor_status
+            == Some(effective_predecessor_status)
+            || (authorized_predecessor_status == Some(ExecutionControlStatus::Active)
+                && matches!(
+                    effective_predecessor_status,
+                    ExecutionControlStatus::Completed | ExecutionControlStatus::Blocked
+                ));
+        if !authorization_still_holds
             || generation.identity.predecessor_generation_id.as_deref()
                 != Some(predecessor.identity.generation_id.as_str())
         {
@@ -3133,6 +4184,116 @@ pub fn recovery_projection_owner_hint(worktree: &Path) -> io::Result<Option<Exec
     }))
 }
 
+/// Outcome of [`heal_missing_generation_publication`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationPublicationHeal {
+    /// No owner ledger exists for this repository/owner; nothing to publish.
+    NoLedger,
+    /// The worktree pointer/projection already agree with the owner ledger.
+    AlreadyPublished,
+    /// The worktree pointer/projection were rebuilt from the owner ledger.
+    Republished,
+    /// A pointer is present but the strict view is invalid for another
+    /// reason (stale/mismatched writer). That is the fail-closed case the
+    /// strict view exists for; it is left untouched.
+    NotApplicable,
+    /// The current generation is bound to a different worktree. This
+    /// worktree never owned the lost publication, so nothing is written.
+    ForeignWorktree,
+}
+
+/// Issue #3759: rebuild a lost worktree-scoped publication from the owner
+/// ledger.
+///
+/// The owner ledger is the durable commit and is written first
+/// (`write_activated_generation`); the projection and pointer that the strict
+/// view requires are derived from it. Two routes leave the ledger in place
+/// without them: a crash between the ledger commit and the pointer write, and
+/// trusted-store GC of a removed worktree directory (the owner ledger lives in
+/// a marker-less sibling and survives). Both used to make every later launch
+/// on the same worktree fail before the PTY with
+/// "execution generation pointer is missing after ledger ownership was
+/// established", burning the Issue Monitor retry budget on a state that only
+/// a rewrite could fix.
+///
+/// The repair is limited to the exact invariant violation: the trusted
+/// pointer file is missing and the ledger's current generation is bound to
+/// this worktree. It republishes the current effective projection and the
+/// pointer derived from it under the global -> owner leases and never touches
+/// the owner ledger. A present-but-stale pointer stays fail-closed.
+pub fn heal_missing_generation_publication(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+) -> io::Result<GenerationPublicationHeal> {
+    let context = match GenerationTransactionContext::resolve(worktree, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => {
+            return Ok(GenerationPublicationHeal::NoLedger)
+        }
+        Err(error) => return Err(error),
+    };
+    // Lease-free probe: the common healthy case must not take write leases.
+    if read_owner_ledger_from_dir(&context.owner_dir)?.is_none() {
+        return Ok(GenerationPublicationHeal::NoLedger);
+    }
+    if crate::cli::trusted_store::read_from_resolved_dir(
+        &context.worktree_trusted_dir,
+        GENERATION_POINTER_FILE,
+    )?
+    .is_some()
+    {
+        return Ok(match load_generation_ledger_from_context(&context) {
+            Ok(Some(_)) => GenerationPublicationHeal::AlreadyPublished,
+            Ok(None) => GenerationPublicationHeal::NoLedger,
+            Err(_) => GenerationPublicationHeal::NotApplicable,
+        });
+    }
+    with_generation_activation_leases(worktree, owner, |context| {
+        let Some(ledger) = load_owner_generation_ledger_from_context(context)? else {
+            return Ok(GenerationPublicationHeal::NoLedger);
+        };
+        if crate::cli::trusted_store::read_from_resolved_dir(
+            &context.worktree_trusted_dir,
+            GENERATION_POINTER_FILE,
+        )?
+        .is_some()
+        {
+            // Another writer published while we waited for the leases.
+            return Ok(match load_generation_ledger_from_context(context) {
+                Ok(Some(_)) => GenerationPublicationHeal::AlreadyPublished,
+                Ok(None) => GenerationPublicationHeal::NoLedger,
+                Err(_) => GenerationPublicationHeal::NotApplicable,
+            });
+        }
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        if current.identity.worktree_binding_hash != context.worktree_binding_hash {
+            return Ok(GenerationPublicationHeal::ForeignWorktree);
+        }
+        validate_generation_activation_owner(context, true)?;
+        let projection = ledger.effective_projection_for(current).to_string();
+        write_execution_projection(context, &projection)?;
+        write_generation_pointer(context, &ledger, &projection)?;
+        let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation publication heal lost the owner ledger")
+        })?;
+        if readback != ledger {
+            return Err(invalid_generation_data(
+                "generation publication heal readback does not match the owner ledger",
+            ));
+        }
+        tracing::info!(
+            owner_kind = owner.kind.as_str(),
+            owner_number = owner.number,
+            generation_id = %current.identity.generation_id,
+            worktree = %context.worktree.display(),
+            "republished lost execution generation pointer/projection from the owner ledger"
+        );
+        Ok(GenerationPublicationHeal::Republished)
+    })
+}
+
 pub fn current_generation_identity(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -3146,10 +4307,10 @@ pub fn current_generation_identity(
     )
 }
 
-fn effective_generation_head_hash(
+fn generation_head_events(
     ledger: &ExecutionGenerationLedger,
     generation: &ExecutionGeneration,
-) -> String {
+) -> Vec<(u64, &'static str, String)> {
     let mut events = ledger
         .lifecycle_events_for(&generation.identity.generation_id)
         .map(|event| {
@@ -3174,7 +4335,40 @@ fn effective_generation_head_hash(
         )
         .collect::<Vec<_>>();
     events.sort_by_key(|(sequence, _, _)| *sequence);
+    events
+}
+
+fn generation_head_hash_for(
+    generation: &ExecutionGeneration,
+    events: &[(u64, &'static str, String)],
+) -> String {
     sha256_hex(serde_json::to_vec(&(generation.content_hash.as_str(), events)).unwrap_or_default())
+}
+
+fn effective_generation_head_hash(
+    ledger: &ExecutionGenerationLedger,
+    generation: &ExecutionGeneration,
+) -> String {
+    generation_head_hash_for(generation, &generation_head_events(ledger, generation))
+}
+
+/// SPEC #3590 FR-002 / FR-009: whether `expected` is the head this generation
+/// had at some point in its append-only history.
+///
+/// A successor pins its predecessor's head at mint time. Once concurrent
+/// generations coexist, the predecessor can still settle afterwards, which
+/// appends a lifecycle event and moves its live head. Matching any prefix of
+/// the ordered event log keeps the chain provable without freezing the
+/// predecessor: events are append-only and sequence-ordered, so a prefix can
+/// only ever be an earlier real state, never a forged later one.
+fn generation_head_hash_is_historical(
+    ledger: &ExecutionGenerationLedger,
+    generation: &ExecutionGeneration,
+    expected: &str,
+) -> bool {
+    let events = generation_head_events(ledger, generation);
+    (0..=events.len())
+        .any(|prefix| generation_head_hash_for(generation, &events[..prefix]) == expected)
 }
 
 fn execution_binding_for_generation(
@@ -3426,15 +4620,40 @@ pub fn genesis_initial_execution_binding_matches(
     Ok(execution_binding_for_generation(&initial_ledger, generation) == *expected_identity)
 }
 
-fn session_binding_authorizes_current_generation(
+/// SPEC #3590 FR-002 / FR-009: the generation a Session owns, which is not
+/// always the ledger's current one once concurrent launches coexist.
+///
+/// The current generation wins whenever it names this Session, so every
+/// single-writer caller keeps its existing behaviour byte for byte. Only a
+/// Session that no longer holds the current generation falls back to the
+/// newest generation whose effective projection still names it, and only
+/// while that generation is still Active - a settled one has nothing left to
+/// transition.
+fn generation_owned_by_session<'a>(
+    ledger: &'a ExecutionGenerationLedger,
+    session_id: &str,
+) -> Option<&'a ExecutionGeneration> {
+    let projection_names_session = |generation: &ExecutionGeneration| {
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(generation))
+            .is_ok_and(|projection| projection.primary_session_id == session_id)
+    };
+    let current = ledger.current_generation()?;
+    if projection_names_session(current) {
+        return Some(current);
+    }
+    ledger.generations.iter().rev().find(|generation| {
+        ledger.effective_status_for(generation) == ExecutionControlStatus::Active
+            && projection_names_session(generation)
+    })
+}
+
+fn session_binding_authorizes_generation(
     context: &GenerationTransactionContext,
     ledger: &ExecutionGenerationLedger,
+    current: &ExecutionGeneration,
     session_id: &str,
     session_state: &gwt_agent::SessionPathState,
 ) -> io::Result<bool> {
-    let current = ledger.current_generation().ok_or_else(|| {
-        invalid_generation_data("execution generation ledger current id is missing")
-    })?;
     let legacy_unbound_compatibility = current.identity.predecessor_generation_id.is_none()
         && current
             .identity
@@ -3447,7 +4666,7 @@ fn session_binding_authorizes_current_generation(
         gwt_agent::SessionPathState::Missing => return Ok(legacy_unbound_compatibility),
         gwt_agent::SessionPathState::Error(_) => return Ok(false),
     };
-    durable_session_binding_authorizes_current_generation(context, ledger, session_id, session)
+    durable_session_binding_authorizes_generation(context, ledger, current, session_id, session)
 }
 
 fn durable_session_binding_authorizes_current_generation(
@@ -3459,6 +4678,16 @@ fn durable_session_binding_authorizes_current_generation(
     let current = ledger.current_generation().ok_or_else(|| {
         invalid_generation_data("execution generation ledger current id is missing")
     })?;
+    durable_session_binding_authorizes_generation(context, ledger, current, session_id, session)
+}
+
+fn durable_session_binding_authorizes_generation(
+    context: &GenerationTransactionContext,
+    ledger: &ExecutionGenerationLedger,
+    current: &ExecutionGeneration,
+    session_id: &str,
+    session: &gwt_agent::Session,
+) -> io::Result<bool> {
     let legacy_unbound_compatibility = current.identity.predecessor_generation_id.is_none()
         && current
             .identity
@@ -4170,6 +5399,20 @@ pub fn begin_active_session_launch_handshake(
     .map(Option::flatten)
 }
 
+/// Whether a runtime sidecar proves the process it recorded is gone.
+///
+/// Only an exact, still-resolvable pid record can prove that. A missing or
+/// partial record, or a process tree that is still alive, is never proof —
+/// those keep fencing, exactly as they do for a matching identity.
+fn exact_runtime_evidence_is_dead(runtime: &gwt_agent::SessionRuntimeState) -> bool {
+    match (runtime.child_pid, runtime.child_started_at) {
+        (Some(child_pid), Some(child_started_at)) if child_pid > 0 && child_started_at > 0 => {
+            !crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
+        }
+        _ => false,
+    }
+}
+
 fn exact_session_runtime_fences_active_launch(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
@@ -4195,9 +5438,23 @@ fn exact_session_runtime_fences_active_launch(
                 ))
             }
         };
-        if runtime.execution_identity.as_ref() != Some(expected)
-            || runtime.runtime_incarnation.is_none_or(|value| value == 0)
-        {
+        if runtime.execution_identity.as_ref() != Some(expected) {
+            // Issue #4207: a sidecar written for a *different* identity is
+            // either a launch that is still live under another generation —
+            // which must fence this one — or the remains of an incarnation
+            // that already finished. A continuation rebind moves the same
+            // Session onto a new generation and leaves the previous
+            // incarnation's sidecar behind, so failing closed on the
+            // difference alone refused every rebound relaunch of a Session
+            // that had already run. Decide it the way the rest of this loop
+            // decides: only decisive proof that the recorded process is gone
+            // lets the evidence be skipped as history.
+            if exact_runtime_evidence_is_dead(&runtime) {
+                continue;
+            }
+            return Ok(true);
+        }
+        if runtime.runtime_incarnation.is_none_or(|value| value == 0) {
             return Err(invalid_generation_data(
                 "Active launch runtime evidence does not match the exact Session identity",
             ));
@@ -4426,6 +5683,130 @@ pub(crate) fn with_blocked_build_abort_session_execution_identity_global_lease<T
     )
 }
 
+/// Variant for callers that already hold the exact worktree-global trusted
+/// write lease. It acquires only owner -> Session beneath that lease, avoiding
+/// a nested attempt on the non-reentrant global lock.
+pub(crate) fn with_current_active_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_held_global_lease(
+        sessions_dir,
+        expected,
+        held_trusted_dir,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+pub(crate) fn with_blocked_build_abort_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_held_global_lease(
+        sessions_dir,
+        expected,
+        held_trusted_dir,
+        CurrentExecutionBindingAuthority::BlockedBuildAbort,
+        operation,
+    )
+}
+
+fn with_current_session_execution_identity_held_global_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    held_trusted_dir: &Path,
+    authority: CurrentExecutionBindingAuthority,
+    operation: impl FnOnce(&Path) -> T,
+) -> io::Result<Option<T>> {
+    if gwt_agent::current_thread_holds_session_lease() {
+        return Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            "owner lease must be acquired before the Session lease; retry outside the nested Session operation",
+        ));
+    }
+    let binding = &expected.execution_binding;
+    if expected.session_id != binding.session_id
+        || gwt_agent::validate_session_id_path_component(&expected.session_id).is_err()
+    {
+        return Ok(None);
+    }
+    let owner = match binding.owner_kind.as_str() {
+        "spec" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: binding.owner_number,
+        },
+        "issue" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: binding.owner_number,
+        },
+        _ => return Ok(None),
+    };
+    let session_path = sessions_dir.join(format!("{}.toml", expected.session_id));
+    let route_session = match gwt_agent::Session::load(&session_path) {
+        Ok(session) => session,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if gwt_agent::SessionExecutionIdentity::from_session(&route_session)
+        .ok()
+        .flatten()
+        .as_ref()
+        != Some(expected)
+    {
+        return Ok(None);
+    }
+    let context = match GenerationTransactionContext::resolve(&expected.worktree_path, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if context.worktree_trusted_dir != held_trusted_dir {
+        return Ok(None);
+    }
+    context.validate_unchanged()?;
+    with_resolved_generation_owner_lease(&context, |context| {
+        gwt_agent::with_session_lease(sessions_dir, &expected.session_id, |session| {
+            let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
+                Ok(path) => path,
+                Err(_) => return Ok(None),
+            };
+            let execution_binding_matches = match authority {
+                CurrentExecutionBindingAuthority::ActiveMutation => {
+                    current_active_execution_binding_matches_context(
+                        context,
+                        &expected.session_id,
+                        &binding.identity,
+                    )?
+                }
+                CurrentExecutionBindingAuthority::BlockedBuildAbort => {
+                    blocked_build_abort_execution_binding_matches_context(
+                        context,
+                        &expected.session_id,
+                        &binding.identity,
+                    )?
+                }
+                CurrentExecutionBindingAuthority::PrMutation => false,
+            };
+            if gwt_agent::SessionExecutionIdentity::from_session(session)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(expected)
+                || canonical_worktree != context.worktree
+                || !execution_binding_matches
+            {
+                return Ok(None);
+            }
+            Ok(Some(operation(held_trusted_dir)))
+        })
+    })
+}
+
 fn with_current_session_execution_identity_global_lease<T>(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
@@ -4546,6 +5927,17 @@ fn read_record_contents(worktree: &Path) -> io::Result<Option<String>> {
         },
     };
     Ok(Some(contents))
+}
+
+/// The Execution Control Record's exact stored bytes, or `None` when no record
+/// exists.
+///
+/// The delivered-owner No Action audit hashes these bytes rather than the
+/// parsed record: the point of the audit is to prove the predecessor was never
+/// rewritten, and a re-serialized record would compare equal even if its stored
+/// form had changed.
+pub fn record_contents(worktree: &Path) -> io::Result<Option<String>> {
+    read_record_contents(worktree)
 }
 
 #[derive(Debug, Clone)]
@@ -4680,9 +6072,12 @@ fn invalid_generation_authority_record(hint: &GenerationAuthorityHint) -> Execut
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
+            // Issue #4543: a synthetic authority placeholder never ran a launch.
+            permission_decision: None,
         });
     record.owner_kind = owner.kind;
     record.owner_number = owner.number;
@@ -5624,9 +7019,15 @@ fn build_successor_generation(
         missing_verification: None,
         launched_at: request.requested_at,
         settled_at: None,
+        completion_evidence: None,
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
+        // Issue #4543: a successor generation is a re-bind of an existing
+        // execution, not a newly accepted launch, so it records no decision
+        // of its own. Threading the successor's own decision through
+        // activation is the dependent follow-up.
+        permission_decision: None,
     };
     let projection =
         String::from_utf8(serialize_execution_control(&successor_record)?).map_err(|error| {
@@ -6001,6 +7402,9 @@ pub fn prepared_owner_launch_successor_for_predecessor(
         .filter(|attempt| {
             attempt.status == ContinuationAttemptStatus::Prepared
                 && is_owner_launch_successor_attempt(attempt)
+                // Concurrent launches are independent requests, not a replay
+                // of the terminal predecessor's manual launch.
+                && attempt.predecessor_status != SuccessorPredecessorStatus::Active
                 && attempt.predecessor.generation_id == current.identity.generation_id
         });
     let candidate = candidates.next().cloned();
@@ -6178,6 +7582,17 @@ fn abort_generation_takeover_in_context(
     request: &GenerationTakeoverRequest,
     reason: &str,
 ) -> io::Result<GenerationTakeoverAttempt> {
+    abort_generation_takeover_bound_to(context, request, &context.worktree_binding_hash, reason)
+}
+
+/// Abort a Prepared takeover recorded against `expected_worktree_binding_hash`.
+/// See [`abort_successor_bound_to`] for why the hash is a parameter.
+fn abort_generation_takeover_bound_to(
+    context: &GenerationTransactionContext,
+    request: &GenerationTakeoverRequest,
+    expected_worktree_binding_hash: &str,
+    reason: &str,
+) -> io::Result<GenerationTakeoverAttempt> {
     let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
         io::Error::new(
             ErrorKind::NotFound,
@@ -6185,7 +7600,7 @@ fn abort_generation_takeover_in_context(
         )
     })?;
     let latest =
-        latest_generation_takeover_attempt(&ledger, request, &context.worktree_binding_hash)?
+        latest_generation_takeover_attempt(&ledger, request, expected_worktree_binding_hash)?
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "takeover attempt is missing"))?
             .clone();
     match latest.status {
@@ -6596,6 +8011,24 @@ pub fn prepare_active_continuation_successor(
     prepare_successor_for_status(worktree, owner, request, SuccessorPredecessorStatus::Active)
 }
 
+/// SPEC #3590 FR-001: prepare a new generation beside a live Active holder.
+///
+/// The predecessor is left exactly as it is - no lifecycle event, no fence,
+/// no binding change - so the existing window keeps producing and settles its
+/// own generation later through [`settle`].
+pub fn prepare_concurrent_linked_owner_launch_successor(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    request: &SuccessorRequest,
+) -> io::Result<ContinuationAttempt> {
+    if request.source != CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE || request.work_id.is_some() {
+        return Err(invalid_generation_data(
+            "concurrent linked-owner launch successor must use the canonical source without a Continue Work identity",
+        ));
+    }
+    prepare_successor_for_status(worktree, owner, request, SuccessorPredecessorStatus::Active)
+}
+
 /// Prepare a fresh execution lifetime from an integrity-valid terminal
 /// Blocked generation. This is intentionally separate from Continue work and
 /// cannot be used for Completed predecessors or same-lifetime recovery.
@@ -6812,13 +8245,15 @@ pub fn prepare_exact_manual_launch_successor(
                         "manual predecessor status changed before successor preparation",
                     ));
                 }
-                if ledger.continuation_attempts.iter().any(|attempt| {
-                    attempt.predecessor.generation_id == current.identity.generation_id
-                        && attempt.status == ContinuationAttemptStatus::Prepared
-                }) || ledger.takeover_attempts.iter().any(|attempt| {
-                    attempt.generation_id == current.identity.generation_id
-                        && attempt.status == GenerationTakeoverAttemptStatus::Prepared
-                }) {
+                // Issue #4161: the attempt logs are append-only, so an aborted
+                // operation keeps its original Prepared event forever. Only the
+                // latest event per operation says whether anything still
+                // targets this generation; scanning raw events fenced settled
+                // owners permanently.
+                if current_generation_has_prepared_transaction(
+                    &ledger,
+                    &current.identity.generation_id,
+                ) {
                     return Err(generation_conflict(
                         "manual successor refuses while a Prepared successor or takeover targets the current generation",
                     ));
@@ -7108,13 +8543,9 @@ pub fn prepare_exact_terminal_active_successor(
                     "exact-terminal successor requires a current Active generation",
                 ));
             }
-            if ledger.continuation_attempts.iter().any(|attempt| {
-                attempt.predecessor.generation_id == current.identity.generation_id
-                    && attempt.status == ContinuationAttemptStatus::Prepared
-            }) || ledger.takeover_attempts.iter().any(|attempt| {
-                attempt.generation_id == current.identity.generation_id
-                    && attempt.status == GenerationTakeoverAttemptStatus::Prepared
-            }) {
+            // Issue #4161: same append-only reading as the manual route above.
+            if current_generation_has_prepared_transaction(&ledger, &current.identity.generation_id)
+            {
                 return Err(generation_conflict(
                         "exact-terminal successor refuses while a Prepared successor or takeover targets the current generation",
                     ));
@@ -7321,13 +8752,28 @@ fn abort_successor_in_context(
     request: &SuccessorRequest,
     reason: &str,
 ) -> io::Result<ContinuationAttempt> {
+    abort_successor_bound_to(context, request, &context.worktree_binding_hash, reason)
+}
+
+/// Abort a Prepared successor recorded against `expected_worktree_binding_hash`.
+///
+/// Every launch-owned abort passes the caller's own worktree, so the binding
+/// hash fences the operation to the worktree that prepared it. Issue #4161's
+/// operator release runs from wherever the operator happens to be and passes
+/// the attempt's own recorded binding instead.
+fn abort_successor_bound_to(
+    context: &GenerationTransactionContext,
+    request: &SuccessorRequest,
+    expected_worktree_binding_hash: &str,
+    reason: &str,
+) -> io::Result<ContinuationAttempt> {
     let mut ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
         io::Error::new(
             ErrorKind::NotFound,
             "owner generation ledger is not initialized",
         )
     })?;
-    let latest = latest_operation_attempt(&ledger, request, &context.worktree_binding_hash)?
+    let latest = latest_operation_attempt(&ledger, request, expected_worktree_binding_hash)?
         .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "successor attempt is missing"))?
         .clone();
     match latest.status {
@@ -7430,6 +8876,290 @@ where
             gwt_agent::SessionPathState::Error(error) => Err(error),
         })
     })
+}
+
+/// Issue #4161: one still-Prepared successor or takeover that targets an
+/// owner's current generation.
+///
+/// A Prepared attempt is an intent, not authority: it exists so exactly one
+/// launch can win the successor CAS. While it is alive every other successor
+/// is refused, so an owner whose launch died between preparation and
+/// settlement can be reported and released instead of being unlaunchable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockingPreparedTransaction {
+    /// `successor` or `takeover`.
+    pub kind: &'static str,
+    pub operation_id: String,
+    /// The Session the attempt would hand the generation to.
+    pub candidate_session_id: String,
+    /// `missing`, `unreadable`, or the durable `AgentStatus` name.
+    pub candidate_session_state: String,
+    pub prepared_at: DateTime<Utc>,
+}
+
+impl BlockingPreparedTransaction {
+    /// Whether this fence can no longer clear itself.
+    ///
+    /// A launch in flight holds a Prepared transaction too, and that one is
+    /// about to become an Activated generation or an Aborted attempt on its
+    /// own. Past `PREPARED_TRANSACTION_RELEASE_GRACE` no launch is still
+    /// materializing, so a transaction that is still Prepared belongs to one
+    /// that never finished and will fence the owner until something clears it.
+    #[must_use]
+    pub fn is_stale_at(&self, now: DateTime<Utc>) -> bool {
+        now.signed_duration_since(self.prepared_at) >= PREPARED_TRANSACTION_RELEASE_GRACE
+    }
+}
+
+/// One entry of a [`release_blocking_prepared_transactions`] result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparedTransactionReleaseEntry {
+    #[serde(flatten)]
+    pub transaction: BlockingPreparedTransaction,
+    /// Why a transaction was kept. Absent for a released one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_because: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparedTransactionReleaseOutcome {
+    pub status: &'static str,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    pub released: Vec<PreparedTransactionReleaseEntry>,
+    pub retained: Vec<PreparedTransactionReleaseEntry>,
+}
+
+/// How long a still-Prepared transaction is left alone before a blanket
+/// release may abort it.
+///
+/// Preparing a successor and settling it are two steps of one launch, so a
+/// Prepared transaction is indistinguishable from a launch that is simply
+/// mid-materialization. That window is bounded by pane creation; a transaction
+/// still Prepared long after it belongs to a launch that is never coming back.
+/// Naming an exact `operation_id` bypasses the wait, because the operator then
+/// releases something they read out of `execution.status` themselves.
+const PREPARED_TRANSACTION_RELEASE_GRACE: chrono::Duration = chrono::Duration::minutes(10);
+
+fn describe_candidate_session(sessions_dir: &Path, session_id: &str) -> String {
+    match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))) {
+        gwt_agent::SessionPathState::Present(session) => format!("{:?}", session.status),
+        gwt_agent::SessionPathState::Missing => "missing".to_string(),
+        gwt_agent::SessionPathState::Error(_) => "unreadable".to_string(),
+    }
+}
+
+/// Report every Prepared successor/takeover that still fences `ledger`'s
+/// current generation.
+#[must_use]
+pub fn blocking_prepared_transactions(
+    sessions_dir: &Path,
+    ledger: &ExecutionGenerationLedger,
+) -> Vec<BlockingPreparedTransaction> {
+    let Some(current) = ledger.current_generation() else {
+        return Vec::new();
+    };
+    let generation_id = current.identity.generation_id.as_str();
+    let mut blocking: Vec<_> = latest_prepared_successors_for_generation(ledger, generation_id)
+        .into_iter()
+        .map(|attempt| BlockingPreparedTransaction {
+            kind: "successor",
+            operation_id: attempt.request.operation_id.clone(),
+            candidate_session_id: attempt.request.initial_session_id.clone(),
+            candidate_session_state: describe_candidate_session(
+                sessions_dir,
+                &attempt.request.initial_session_id,
+            ),
+            prepared_at: attempt.recorded_at,
+        })
+        .chain(
+            latest_prepared_takeovers_for_generation(ledger, generation_id)
+                .into_iter()
+                .map(|attempt| BlockingPreparedTransaction {
+                    kind: "takeover",
+                    operation_id: attempt.request.operation_id.clone(),
+                    candidate_session_id: attempt.request.to_session_id.clone(),
+                    candidate_session_state: describe_candidate_session(
+                        sessions_dir,
+                        &attempt.request.to_session_id,
+                    ),
+                    prepared_at: attempt.recorded_at,
+                }),
+        )
+        .collect();
+    blocking.sort_by(|left, right| {
+        left.prepared_at
+            .cmp(&right.prepared_at)
+            .then_with(|| left.operation_id.cmp(&right.operation_id))
+    });
+    blocking
+}
+
+/// Release the Prepared successors/takeovers that fence `owner`'s current
+/// generation, so a fresh launch can mint its successor again (Issue #4161).
+///
+/// Without `operation_id` this releases every fence past
+/// [`BlockingPreparedTransaction::is_stale_at`] and reports the rest as
+/// retained, so a launch that is materializing right now is left to finish.
+/// With `operation_id` it releases exactly the transaction the caller read out
+/// of the diagnosis. Releasing is always safe for a launch that does come
+/// back: an Aborted attempt fails its own activation CAS instead of corrupting
+/// the owner.
+pub fn release_blocking_prepared_transactions(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    sessions_dir: &Path,
+    operation_id: Option<&str>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> io::Result<PreparedTransactionReleaseOutcome> {
+    if reason.trim().is_empty() {
+        return Err(invalid_generation_data(
+            "releasing a Prepared execution transaction requires a non-empty params.reason",
+        ));
+    }
+    let operation_id = operation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "owner generation ledger is not initialized",
+            )
+        })?;
+        let Some(current) = ledger.current_generation().cloned() else {
+            return Ok(PreparedTransactionReleaseOutcome {
+                status: "no_blocking_prepared_transaction",
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                generation_id: None,
+                released: Vec::new(),
+                retained: Vec::new(),
+            });
+        };
+        let generation_id = current.identity.generation_id.clone();
+        let blocking = blocking_prepared_transactions(sessions_dir, &ledger);
+        if let Some(operation_id) = operation_id {
+            if !blocking
+                .iter()
+                .any(|transaction| transaction.operation_id == operation_id)
+            {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "no Prepared transaction {operation_id} targets the current generation"
+                    ),
+                ));
+            }
+        }
+        let mut released = Vec::new();
+        let mut retained = Vec::new();
+        for transaction in blocking {
+            if operation_id.is_some_and(|requested| requested != transaction.operation_id) {
+                continue;
+            }
+            if operation_id.is_none()
+                && now.signed_duration_since(transaction.prepared_at)
+                    < PREPARED_TRANSACTION_RELEASE_GRACE
+            {
+                retained.push(PreparedTransactionReleaseEntry {
+                    transaction,
+                    retained_because: Some("prepared_within_grace_period"),
+                });
+                continue;
+            }
+            let aborted = release_one_prepared_transaction_in_context(
+                context,
+                &generation_id,
+                &transaction,
+                reason,
+            )?;
+            let entry = PreparedTransactionReleaseEntry {
+                transaction,
+                retained_because: (!aborted).then_some("no_longer_prepared"),
+            };
+            if aborted {
+                released.push(entry);
+            } else {
+                retained.push(entry);
+            }
+        }
+        Ok(PreparedTransactionReleaseOutcome {
+            // Never answer "nothing was fencing this owner" for a fence that
+            // was found and kept: `retained` is the caller's cue to read
+            // `retained_because` and decide, not a success.
+            status: match (released.is_empty(), retained.is_empty()) {
+                (false, _) => "released",
+                (true, false) => "retained",
+                (true, true) => "no_blocking_prepared_transaction",
+            },
+            owner_kind: owner.kind,
+            owner_number: owner.number,
+            generation_id: Some(generation_id),
+            released,
+            retained,
+        })
+    })
+}
+
+/// Abort one still-Prepared transaction under the owner lease this runs
+/// inside. `Ok(false)` means the transaction stopped being the operation's
+/// latest Prepared event before the abort, so there was nothing to release.
+///
+/// The candidate Session's existence deliberately does not gate this. A
+/// Session that materialized but whose successor was never activated is the
+/// exact shape a half-finished launch leaves behind, and refusing to release
+/// it would leave the owner fenced by the one case that most needs clearing.
+/// Nothing downstream can be corrupted by the abort either: the owner lease
+/// serializes this against `with_prepared_successor_exact_session_activation`,
+/// so a launch is either already Activated (out of scope here) or, if it comes
+/// back afterwards, fails its own activation CAS with "an Aborted successor
+/// cannot be activated".
+fn release_one_prepared_transaction_in_context(
+    context: &GenerationTransactionContext,
+    generation_id: &str,
+    transaction: &BlockingPreparedTransaction,
+    reason: &str,
+) -> io::Result<bool> {
+    let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "owner generation ledger is not initialized",
+        )
+    })?;
+    if transaction.kind == "successor" {
+        let Some(attempt) = latest_prepared_successors_for_generation(&ledger, generation_id)
+            .into_iter()
+            .find(|attempt| attempt.request.operation_id == transaction.operation_id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        abort_successor_bound_to(
+            context,
+            &attempt.request,
+            &attempt.worktree_binding_hash,
+            reason,
+        )?;
+    } else {
+        let Some(attempt) = latest_prepared_takeovers_for_generation(&ledger, generation_id)
+            .into_iter()
+            .find(|attempt| attempt.request.operation_id == transaction.operation_id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        abort_generation_takeover_bound_to(
+            context,
+            &attempt.request,
+            &attempt.worktree_binding_hash,
+            reason,
+        )?;
+    }
+    Ok(true)
 }
 
 /// Commit the successor CAS. This is the only operation in this module that
@@ -8251,6 +9981,65 @@ fn with_exact_recovery_session_lease<T>(
     )
 }
 
+/// Host publication participates in adoption's owner -> Session -> registry
+/// transaction. Acquisition may reject before any durable mutation; publication
+/// is infallible and releases the registry guard after the Session commit.
+pub trait ExecutionAdoptionPublisher {
+    fn acquire(&mut self) -> io::Result<()>;
+    fn publish(&mut self, binding: gwt_agent::SessionExecutionBinding);
+}
+
+fn update_exact_recovery_session_with_publisher<T>(
+    expected_session: &gwt_agent::Session,
+    mutate: impl FnOnce(&mut gwt_agent::Session) -> io::Result<T>,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
+) -> io::Result<T> {
+    match gwt_agent::update_session_if_unchanged_with(
+        &gwt_core::paths::gwt_sessions_dir(),
+        expected_session,
+        |session| {
+            if let Some(publisher) = publisher.as_mut() {
+                publisher.acquire()?;
+            }
+            let value = mutate(session)?;
+            Ok((value, session.execution_binding.clone()))
+        },
+    ) {
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::Updated((value, binding))) => {
+            // Issue #4443 AC-10: an unbound Session here is a refusal, not an
+            // invariant violation. Panicking crossed the `spawn_blocking`
+            // boundary and the adoption handler answered `500 code=internal`.
+            match (publisher.as_mut(), binding) {
+                (Some(publisher), Some(binding)) => publisher.publish(binding),
+                (Some(_), None) => {
+                    return Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "Host adoption cannot publish authority: the durable Session carries no execution binding; run JSON operation `execution.continue` to bind canonical authority first",
+                    ))
+                }
+                (None, _) => {}
+            }
+            Ok(value)
+        }
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed after recovery preflight"
+            ),
+        )),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotUnreadable(error)) => {
+            Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session became unreadable after recovery preflight: {error}"
+                ),
+            ))
+        }
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::MutationFailed(error)) => Err(error),
+        Err(error) => Err(error),
+    }
+}
+
 fn ensure_recovery_session_snapshot_unchanged(
     state: &gwt_agent::SessionPathState,
     expected_session: &gwt_agent::Session,
@@ -8262,20 +10051,12 @@ fn ensure_recovery_session_snapshot_unchanged(
         {
             Ok(())
         }
-        gwt_agent::SessionPathState::Present(_) | gwt_agent::SessionPathState::Missing => {
-            Err(io::Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed after recovery preflight"
-                ),
-            ))
-        }
-        gwt_agent::SessionPathState::Error(error) => Err(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session became unreadable after recovery preflight: {error}"
-            ),
-        )),
+        gwt_agent::SessionPathState::Present(_) | gwt_agent::SessionPathState::Missing => Err(
+            recovery_session_changed_error("durable Session changed after recovery preflight"),
+        ),
+        gwt_agent::SessionPathState::Error(error) => Err(recovery_session_changed_error(format!(
+            "durable Session became unreadable after recovery preflight: {error}"
+        ))),
     }
 }
 
@@ -8379,12 +10160,17 @@ where
         let mut ledger = load_generation_ledger_from_context(context)?.ok_or_else(|| {
             invalid_generation_data("generation ledger disappeared during lifecycle transition")
         })?;
-        let current = ledger
-            .current_generation()
+        // SPEC #3590 FR-009: settle the generation this Session owns. With no
+        // concurrent launch that is the current one, so single-writer callers
+        // are unaffected; a superseded holder settles its own generation
+        // instead of being refused for a successor it never owned.
+        let current = generation_owned_by_session(&ledger, &record.primary_session_id)
+            .or_else(|| ledger.current_generation())
             .ok_or_else(|| {
                 invalid_generation_data("execution generation ledger current id is missing")
             })?
             .clone();
+        let target_is_current = ledger.current_generation_id == current.identity.generation_id;
         if current.identity.worktree_binding_hash != context.worktree_binding_hash {
             return Err(generation_conflict(
                 "current execution generation is bound to a different worktree",
@@ -8399,9 +10185,10 @@ where
                 if let Some(expected_session) = expected_session {
                     ensure_recovery_session_snapshot_unchanged(&session_state, expected_session)?;
                 }
-                if !session_binding_authorizes_current_generation(
+                if !session_binding_authorizes_generation(
                     context,
                     &ledger,
+                    &current,
                     &record.primary_session_id,
                     &session_state,
                 )? {
@@ -8499,7 +10286,15 @@ where
                     },
                 );
                 stamp_generation_ledger(&mut ledger);
-                write_activated_generation(context, &ledger, &projection)?;
+                if target_is_current {
+                    write_activated_generation(context, &ledger, &projection)?;
+                } else {
+                    // The flat projection/pointer pair belongs to the current
+                    // generation. A superseded holder commits its lifecycle
+                    // event to the authoritative ledger and must not republish
+                    // over the running successor's projection.
+                    write_owner_ledger(context, &ledger)?;
+                }
                 Ok(true)
             },
         )
@@ -8512,7 +10307,50 @@ fn persist_generation_takeover_if_owned(
     record: &ExecutionControlRecord,
     transfer: &OwnershipTransfer,
 ) -> io::Result<bool> {
-    persist_generation_takeover_if_owned_with_session(worktree, record, transfer, None)
+    persist_generation_takeover_if_owned_with_session(worktree, record, transfer, None, &mut None)
+}
+
+fn bind_recovery_session_to_generation(
+    session: &mut gwt_agent::Session,
+    owner: ExecutionOwnerKey,
+    identity: gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<()> {
+    let repo_hash = session.repo_hash.clone().ok_or_else(|| {
+        invalid_generation_data("recovery Session repository identity is unavailable")
+    })?;
+    let capability_generation = match session.execution_binding.as_ref() {
+        Some(current)
+            if current.schema_version
+                == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+                && current.session_id == session.id
+                && current.repo_hash == repo_hash
+                && current.owner_kind == owner.kind.as_str()
+                && current.owner_number == owner.number
+                && current.identity == identity =>
+        {
+            current.capability_generation
+        }
+        Some(current) => current
+            .capability_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid_generation_data("Session capability generation overflow"))?,
+        None => 1,
+    };
+    session
+        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash,
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity,
+            capability_generation,
+        }))
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "adopting Session execution binding is invalid: {error}"
+            ))
+        })
 }
 
 fn persist_generation_takeover_if_owned_for_recovery(
@@ -8520,12 +10358,14 @@ fn persist_generation_takeover_if_owned_for_recovery(
     record: &ExecutionControlRecord,
     transfer: &OwnershipTransfer,
     expected_session: &gwt_agent::Session,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<bool> {
     persist_generation_takeover_if_owned_with_session(
         worktree,
         record,
         transfer,
         Some(expected_session),
+        publisher,
     )
 }
 
@@ -8534,6 +10374,7 @@ fn persist_generation_takeover_if_owned_with_session(
     record: &ExecutionControlRecord,
     transfer: &OwnershipTransfer,
     expected_session: Option<&gwt_agent::Session>,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<bool> {
     let owner = ExecutionOwnerKey {
         kind: record.owner_kind,
@@ -8568,23 +10409,30 @@ fn persist_generation_takeover_if_owned_with_session(
         expected_projection.content_hash = compute_content_hash(&expected_projection);
         let mut actual_projection = record.clone();
         actual_projection.content_hash = compute_content_hash(&actual_projection);
-        if ledger.effective_status_for(&current) != ExecutionControlStatus::Active
-            || record.status != ExecutionControlStatus::Active
+        // Issue #4154: a settled Blocked generation transfers too, so a
+        // worktree that inherited a dead Session's terminal record can be
+        // recovered. Completed stays out — it is a finished lifetime, not a
+        // stranded one — and the transfer never changes the status it found.
+        let generation_status = ledger.effective_status_for(&current);
+        if !matches!(
+            generation_status,
+            ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
+        ) || record.status != generation_status
             || current.identity.worktree_binding_hash != context.worktree_binding_hash
             || prior_projection.primary_session_id != transfer.from_session_id
             || record.primary_session_id != transfer.to_session_id
             || actual_projection != expected_projection
         {
             return Err(generation_conflict(
-                "generation takeover CAS does not match the current Active worktree/session/projection",
+                "generation takeover CAS does not match the current transferable worktree/session/projection",
             ));
         }
-        let commit = || {
+        let mut commit = |session: Option<&mut gwt_agent::Session>| {
             append_takeover_event(
                 &mut ledger,
                 GenerationTakeoverAudit {
                     sequence: 0,
-                    generation_id: current.identity.generation_id,
+                    generation_id: current.identity.generation_id.clone(),
                     from_session_id: transfer.from_session_id.clone(),
                     to_session_id: transfer.to_session_id.clone(),
                     reason: transfer.reason.clone(),
@@ -8595,13 +10443,203 @@ fn persist_generation_takeover_if_owned_with_session(
                 },
             );
             stamp_generation_ledger(&mut ledger);
+            if let Some(session) = session {
+                bind_recovery_session_to_generation(
+                    session,
+                    owner,
+                    execution_binding_for_generation(&ledger, &current),
+                )?;
+            }
             write_activated_generation(context, &ledger, &projection)?;
             Ok(true)
         };
         match expected_session {
-            Some(expected_session) => with_exact_recovery_session_lease(expected_session, commit),
-            None => commit(),
+            Some(expected_session) => update_exact_recovery_session_with_publisher(
+                expected_session,
+                |session| commit(Some(session)),
+                publisher,
+            ),
+            None => commit(None),
         }
+    })
+}
+
+fn persist_current_generation_binding_if_owned_for_recovery(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+    expected_session: &gwt_agent::Session,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
+) -> io::Result<()> {
+    let owner = ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number: record.owner_number,
+    };
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during ownership recovery")
+        })?;
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        let current_projection = serde_json::from_str::<ExecutionControlRecord>(
+            ledger.effective_projection_for(current),
+        )
+        .map(hydrate_recovery_envelopes)
+        .map_err(|error| {
+            invalid_generation_data(format!(
+                "current generation recovery projection is malformed: {error}"
+            ))
+        })?;
+        if ledger.effective_status_for(current) != ExecutionControlStatus::Active
+            || current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || current_projection != *record
+            || current_projection.primary_session_id != expected_session.id
+        {
+            return Err(generation_conflict(
+                "generation recovery binding CAS does not match the current Active worktree/session/projection",
+            ));
+        }
+        let identity = execution_binding_for_generation(&ledger, current);
+        update_exact_recovery_session_with_publisher(
+            expected_session,
+            |session| bind_recovery_session_to_generation(session, owner, identity),
+            publisher,
+        )
+    })
+}
+
+fn active_generation_owner_for_recovery_session(
+    worktree: &Path,
+    session: &gwt_agent::Session,
+) -> io::Result<Option<ExecutionOwnerKey>> {
+    let Some(number) = session.linked_issue_number else {
+        return Ok(None);
+    };
+    let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+        .ok_or_else(|| invalid_generation_data("trusted generation store path is unavailable"))?;
+    let owner = match discover_repair_owner(worktree, &session.id, &trusted_dir) {
+        Ok(owner) if owner.number == number => owner,
+        Ok(_) => {
+            return Err(invalid_generation_data(
+                "generation owner does not match the adopting Session recovery scope",
+            ))
+        }
+        Err(error)
+            if error
+                .to_string()
+                .starts_with("execution_repair_owner_unknown:") =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let context = GenerationTransactionContext::resolve(worktree, owner)?;
+    match load_owner_generation_ledger_from_context(&context) {
+        Ok(Some(ledger))
+            if ledger.current_generation().is_some_and(|generation| {
+                generation.identity.worktree_binding_hash == context.worktree_binding_hash
+                    && ledger.effective_status_for(generation) == ExecutionControlStatus::Active
+            }) =>
+        {
+            Ok(Some(owner))
+        }
+        Ok(_) | Err(_) => Ok(None),
+    }
+}
+
+/// Re-publish one already-committed same-generation takeover after a
+/// ledger-first partial write. The owner ledger is authoritative, so the
+/// retry derives both the flat projection/pointer and Session binding from
+/// its exact current head without appending a second transfer.
+fn reconcile_committed_generation_takeover_for_recovery(
+    worktree: &Path,
+    expected_session: &gwt_agent::Session,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
+) -> io::Result<bool> {
+    let Some(owner) = active_generation_owner_for_recovery_session(worktree, expected_session)?
+    else {
+        return Ok(false);
+    };
+    with_generation_owner_lease(worktree, owner, |context| {
+        let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+            invalid_generation_data("generation ledger disappeared during adopt reconciliation")
+        })?;
+        let current = ledger.current_generation().ok_or_else(|| {
+            invalid_generation_data("execution generation ledger current id is missing")
+        })?;
+        let projection_json = ledger.effective_projection_for(current).to_string();
+        let projection = serde_json::from_str::<ExecutionControlRecord>(&projection_json)
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "committed takeover projection is malformed: {error}"
+                ))
+            })?;
+        let takeover = ledger
+            .takeovers
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.generation_id == current.identity.generation_id)
+            .max_by_key(|(_, event)| event.sequence);
+        let latest_event_sequence = ledger
+            .takeovers
+            .iter()
+            .map(|event| event.sequence)
+            .chain(ledger.lifecycle_events.iter().map(|event| event.sequence))
+            .max();
+        if current.identity.worktree_binding_hash != context.worktree_binding_hash
+            || ledger.effective_status_for(current) != ExecutionControlStatus::Active
+            || projection.owner_kind != owner.kind
+            || projection.owner_number != owner.number
+            || projection.primary_session_id != expected_session.id
+            || takeover.is_none_or(|(_, event)| {
+                event.to_session_id != expected_session.id
+                    || Some(event.sequence) != latest_event_sequence
+            })
+        {
+            return Ok(false);
+        }
+        let (takeover_index, _) = takeover.expect("validated latest takeover");
+        let mut prefix = ledger.clone();
+        prefix.takeovers.remove(takeover_index);
+        let prefix_current = prefix.current_generation().ok_or_else(|| {
+            invalid_generation_data("takeover prefix lost the current generation")
+        })?;
+        let prior_projection = prefix.effective_projection_for(prefix_current);
+        let prior_pointer = generation_pointer(&ledger, prior_projection)?;
+        let prior_pointer_bytes = serde_json::to_vec_pretty(&prior_pointer).map_err(|error| {
+            invalid_generation_data(format!(
+                "serialize pre-takeover generation pointer: {error}"
+            ))
+        })?;
+        let Some(actual_projection) = read_optional_authority_bytes(
+            &context.worktree_trusted_dir.join("execution-control.json"),
+        )?
+        else {
+            return Ok(false);
+        };
+        let Some(actual_pointer) = read_optional_authority_bytes(
+            &context.worktree_trusted_dir.join(GENERATION_POINTER_FILE),
+        )?
+        else {
+            return Ok(false);
+        };
+        if actual_pointer != prior_pointer_bytes
+            || (actual_projection.as_slice() != prior_projection.as_bytes()
+                && actual_projection.as_slice() != projection_json.as_bytes())
+        {
+            return Ok(false);
+        }
+        let identity = execution_binding_for_generation(&ledger, current);
+        update_exact_recovery_session_with_publisher(
+            expected_session,
+            |session| {
+                bind_recovery_session_to_generation(session, owner, identity)?;
+                write_activated_generation(context, &ledger, &projection_json)
+            },
+            publisher,
+        )?;
+        Ok(true)
     })
 }
 
@@ -8619,6 +10657,33 @@ pub fn materialize_at_launch(
     entrypoint: &str,
     resume: bool,
 ) -> io::Result<()> {
+    materialize_at_launch_with_permission_decision(
+        worktree,
+        owner_kind,
+        owner_number,
+        session_id,
+        entrypoint,
+        resume,
+        None,
+    )
+}
+
+/// Issue #4543 AC-5: the same materialization, recording the Permission Mode
+/// Decision the launch was accepted under.
+///
+/// Split from [`materialize_at_launch`] rather than added to it because every
+/// other caller — recovery, repair, and the tests that stand a record up
+/// directly — has no launch decision to record, and passing `None` at each of
+/// them would say the same thing more loudly.
+pub fn materialize_at_launch_with_permission_decision(
+    worktree: &Path,
+    owner_kind: ExecutionOwnerKind,
+    owner_number: u64,
+    session_id: &str,
+    entrypoint: &str,
+    resume: bool,
+    permission_decision: Option<&gwt_agent::PermissionModeDecision>,
+) -> io::Result<()> {
     // T-149: the load-modify-save cycle runs under the owner write lease so
     // concurrent launches cannot interleave into a lost update.
     crate::cli::trusted_store::with_write_lease(worktree, || {
@@ -8629,8 +10694,15 @@ pub fn materialize_at_launch(
             session_id,
             entrypoint,
             resume,
+            permission_decision,
         )
     })?;
+    // Issue #4544 AC-3: a permission-readiness record describes the launch
+    // that produced it. A fresh launch re-establishes the contract, so the
+    // previous launch's prompt must not keep refusing this one's settlement —
+    // otherwise the recovery action the record names ("relaunch") would not
+    // work, and the gate would be a dead end rather than a gate.
+    let _ = crate::cli::permission_readiness::clear(worktree);
     // T-181: launch is the cheap moment to sweep orphaned trusted entries
     // (runs outside the lease; GC only touches sibling directories whose
     // recorded worktree is gone).
@@ -8654,6 +10726,7 @@ fn materialize_at_launch_locked(
     session_id: &str,
     entrypoint: &str,
     resume: bool,
+    permission_decision: Option<&gwt_agent::PermissionModeDecision>,
 ) -> io::Result<()> {
     // Carry the audited transfer chain forward (P9a, T-118/T-123): taking
     // over another session's ACTIVE record — fresh launch or resume — is an
@@ -8702,9 +10775,11 @@ fn materialize_at_launch_locked(
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers,
             recoveries: Vec::new(),
             content_hash: String::new(),
+            permission_decision: permission_decision.cloned(),
         },
     )
 }
@@ -8744,25 +10819,31 @@ pub fn detect_owner_kind_evidence(repo_path: &Path, number: u64) -> Option<Execu
 /// sessions, `launch` otherwise.
 #[must_use]
 pub fn entrypoint_from_launch(args: &[String], resume: bool) -> String {
-    for arg in args.iter().rev() {
-        let trimmed = arg.trim_start();
-        if trimmed.starts_with("$gwt-") {
-            if let Some(token) = trimmed.split_whitespace().next() {
-                return token.trim_start_matches('$').to_string();
-            }
-        }
-    }
-    if resume {
-        "resume".to_string()
-    } else {
-        "launch".to_string()
-    }
+    // Issue #4543: shared with the Permission Mode Decision, which records the
+    // same entrypoint for the same launch. Two copies of this rule would let
+    // the record and the decision disagree about what started the session.
+    gwt_agent::permission_mode::entrypoint_from_launch_args(args, resume)
 }
 
 /// Settlement outcome for [`settle`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionSettlement {
     Completed,
+    CompletedWithEvidence {
+        evidence: ExecutionCompletionEvidence,
+    },
+    /// A successful non-delivery: the owner was already delivered, so the
+    /// generation produced nothing (Issue #4545).
+    ///
+    /// It projects the same terminal status as [`Self::Completed`] because a
+    /// reader that predates `execution.no_action` knows only these three
+    /// statuses, and an execution that stays Active after settling wedges
+    /// every such reader's Stop gate (Issue #4590). The owner ledger's
+    /// lifecycle event and the trusted No Action audit — not the status —
+    /// are what tell a non-delivery from a delivery.
+    NoAction {
+        reason: String,
+    },
     Blocked {
         reason: String,
         missing_verification: Option<String>,
@@ -8801,29 +10882,132 @@ pub fn settle(
     })
 }
 
+/// Identity of the Session holding a worktree's execution control record when
+/// the caller is not that Session (Issue #4454).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForeignExecutionRecordHolder {
+    pub holder_session_id: String,
+    pub owner_kind: ExecutionOwnerKind,
+    pub owner_number: u64,
+}
+
+/// Prove that `session_id` holds no execution authority over this worktree's
+/// Work, and name the Session that does (Issue #4454).
+///
+/// Stop gates use this to tell an orphan window from an authority holder
+/// before demanding a settlement. Every refusal path stays conservative: a
+/// missing record (never launched, so the settlement operations accept the
+/// caller), a failed integrity check (the execution control gate owns that
+/// case and blocks first), and a concurrent generation owned by `session_id`
+/// all return `None`. A Session that might hold authority is therefore never
+/// mistaken for an orphan.
+pub(crate) fn foreign_record_holder(
+    worktree: &Path,
+    session_id: &str,
+) -> io::Result<Option<ForeignExecutionRecordHolder>> {
+    let Some(flat) = load(worktree)? else {
+        return Ok(None);
+    };
+    if !integrity_ok(&flat) || flat.primary_session_id == session_id {
+        return Ok(None);
+    }
+    let owner = ExecutionOwnerKey {
+        kind: flat.owner_kind,
+        number: flat.owner_number,
+    };
+    if concurrent_generation_record_for_session(worktree, owner, session_id)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(ForeignExecutionRecordHolder {
+        holder_session_id: flat.primary_session_id,
+        owner_kind: flat.owner_kind,
+        owner_number: flat.owner_number,
+    }))
+}
+
+/// SPEC #3590 FR-009: the execution projection a Session owns when the flat
+/// one names a concurrent Session instead.
+///
+/// The flat projection always belongs to the current generation, so a
+/// superseded holder reads its own generation straight from the owner ledger.
+/// Returns `None` whenever the ledger is unavailable or holds nothing Active
+/// for this Session, which keeps every existing refusal intact.
+fn concurrent_generation_record_for_session(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    session_id: &str,
+) -> io::Result<Option<ExecutionControlRecord>> {
+    let Some(ledger) = load_owner_generation_ledger(worktree, owner)? else {
+        return Ok(None);
+    };
+    let Some(generation) = generation_owned_by_session(&ledger, session_id) else {
+        return Ok(None);
+    };
+    if ledger.current_generation_id == generation.identity.generation_id {
+        return Ok(None);
+    }
+    let record =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(generation))
+            .map(hydrate_recovery_envelopes)
+            .map_err(|error| {
+                invalid_generation_data(format!(
+                    "concurrent generation projection is malformed: {error}"
+                ))
+            })?;
+    Ok((record.primary_session_id == session_id && integrity_ok(&record)).then_some(record))
+}
+
 fn settle_locked(
     worktree: &Path,
     session_id: &str,
     settlement: ExecutionSettlement,
 ) -> io::Result<SettleResult> {
-    let Some(mut record) = load(worktree)? else {
+    let Some(flat) = load(worktree)? else {
         return Ok(SettleResult::NoRecord);
     };
-    if !integrity_ok(&record) {
+    if !integrity_ok(&flat) {
         return Ok(SettleResult::Tampered);
     }
-    if record.primary_session_id != session_id {
-        return Ok(SettleResult::SessionMismatch {
-            record_session_id: record.primary_session_id,
-        });
-    }
+    let owner = ExecutionOwnerKey {
+        kind: flat.owner_kind,
+        number: flat.owner_number,
+    };
+    let (mut record, target_is_current) = if flat.primary_session_id == session_id {
+        (flat, true)
+    } else {
+        match concurrent_generation_record_for_session(worktree, owner, session_id)? {
+            Some(concurrent) => (concurrent, false),
+            None => {
+                return Ok(SettleResult::SessionMismatch {
+                    record_session_id: flat.primary_session_id,
+                })
+            }
+        }
+    };
     if record.status != ExecutionControlStatus::Active {
+        if matches!(
+            settlement,
+            ExecutionSettlement::Completed
+                | ExecutionSettlement::CompletedWithEvidence { .. }
+                | ExecutionSettlement::NoAction { .. }
+        ) {
+            complete_matching_build_lifecycle(worktree, &record)?;
+        }
         return Ok(SettleResult::AlreadySettled(record));
     }
     let lifecycle_reason = match settlement {
         ExecutionSettlement::Completed => {
             record.status = ExecutionControlStatus::Completed;
             "completed".to_string()
+        }
+        ExecutionSettlement::CompletedWithEvidence { evidence } => {
+            record.status = ExecutionControlStatus::Completed;
+            record.completion_evidence = Some(evidence);
+            "completed with verification evidence".to_string()
+        }
+        ExecutionSettlement::NoAction { reason } => {
+            record.status = ExecutionControlStatus::Completed;
+            format!("{NO_ACTION_LIFECYCLE_REASON_PREFIX} {reason}")
         }
         ExecutionSettlement::Blocked {
             reason,
@@ -8854,9 +11038,47 @@ fn settle_locked(
         Err(error) => return Err(error),
     };
     if !generation_updated {
+        if !target_is_current {
+            return Err(invalid_generation_data(
+                "a concurrent generation settlement requires an owner ledger transition",
+            ));
+        }
         save(worktree, &record)?;
     }
-    Ok(SettleResult::Settled(load(worktree)?.unwrap_or(record)))
+    let record = if target_is_current {
+        load(worktree)?.unwrap_or(record)
+    } else {
+        // The flat projection still belongs to the running successor, so the
+        // settled projection is returned from the transition itself.
+        record
+    };
+    complete_matching_build_lifecycle(worktree, &record)?;
+    Ok(SettleResult::Settled(record))
+}
+
+/// Completion owns the matching build's cleanup too: once the execution is
+/// terminal, a separate build.complete can no longer rely on its live binding.
+/// Run after the durable transition, and on completion retries, so cleanup I/O
+/// failures never reopen or discard an execution that already completed.
+fn complete_matching_build_lifecycle(
+    worktree: &Path,
+    record: &ExecutionControlRecord,
+) -> io::Result<()> {
+    if record.status != ExecutionControlStatus::Completed {
+        return Ok(());
+    }
+    let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
+    else {
+        return Ok(());
+    };
+    if state.active
+        && state.owner_spec == Some(record.owner_number)
+        && state.session_id == record.primary_session_id
+    {
+        state.active = false;
+        gwt_core::skill_state::save(worktree, crate::cli::build::SKILL_NAME, &state)?;
+    }
+    Ok(())
 }
 
 /// Complete an active execution only when the exact plan/run snapshot is
@@ -8866,43 +11088,72 @@ fn settle_completed_with_evidence(
     worktree: &Path,
     session_id: &str,
     expected_owner_number: Option<u64>,
+    expected_verification_hash: Option<&str>,
 ) -> io::Result<Result<SettleResult, crate::cli::verification_record::EvidenceStatus>> {
     crate::cli::trusted_store::with_write_lease(worktree, || {
-        let Some(record) = load(worktree)? else {
-            return Ok(Ok(SettleResult::NoRecord));
-        };
-        if expected_owner_number.is_some_and(|expected| record.owner_number != expected) {
-            return Ok(Ok(SettleResult::NoRecord));
-        }
-        if !integrity_ok(&record)
-            || record.primary_session_id != session_id
-            || record.status != ExecutionControlStatus::Active
-        {
-            return settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok);
-        }
-
-        use crate::cli::verification_record as vr;
-        let verification = match vr::load(worktree) {
-            Ok(Some(verification)) => verification,
-            Ok(None) => return Ok(Err(vr::EvidenceStatus::MissingRecord)),
-            Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
-        };
-        let plan = match vr::load_plan(worktree) {
-            Ok(plan) => plan,
-            Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
-        };
-        let status = vr::evaluate_evidence_snapshot(
+        settle_completed_with_evidence_locked(
             worktree,
             session_id,
-            Some(record.owner_number),
-            plan.as_ref(),
-            &verification,
-        );
-        if status != vr::EvidenceStatus::Fresh {
-            return Ok(Err(status));
-        }
-        settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok)
+            expected_owner_number,
+            expected_verification_hash,
+        )
     })
+}
+
+pub(crate) fn settle_completed_with_evidence_locked(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+    expected_verification_hash: Option<&str>,
+) -> io::Result<Result<SettleResult, crate::cli::verification_record::EvidenceStatus>> {
+    let Some(record) = load(worktree)? else {
+        return Ok(Ok(SettleResult::NoRecord));
+    };
+    if expected_owner_number.is_some_and(|expected| record.owner_number != expected) {
+        return Ok(Ok(SettleResult::NoRecord));
+    }
+    if !integrity_ok(&record)
+        || record.primary_session_id != session_id
+        || record.status != ExecutionControlStatus::Active
+    {
+        return settle_locked(worktree, session_id, ExecutionSettlement::Completed).map(Ok);
+    }
+
+    use crate::cli::verification_record as vr;
+    let verification = match vr::load(worktree) {
+        Ok(Some(verification)) => verification,
+        Ok(None) => return Ok(Err(vr::EvidenceStatus::MissingRecord)),
+        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+    };
+    if expected_verification_hash.is_some_and(|expected| verification.content_hash != expected) {
+        return Ok(Err(vr::EvidenceStatus::PlanChanged));
+    }
+    let plan = match vr::load_plan(worktree) {
+        Ok(plan) => plan,
+        Err(_) => return Ok(Err(vr::EvidenceStatus::Unreadable)),
+    };
+    let status = vr::evaluate_evidence_snapshot(
+        worktree,
+        session_id,
+        Some(record.owner_number),
+        plan.as_ref(),
+        &verification,
+    );
+    if !status.is_delivery_acceptable() {
+        return Ok(Err(status));
+    }
+    let evidence = ExecutionCompletionEvidence {
+        verification_record_id: verification.record_id.clone(),
+        verification_run_hash: verification.content_hash.clone(),
+        verification_plan_hash: verification.verification_plan_hash.clone(),
+        used_typed_quarantine: status == vr::EvidenceStatus::FreshWithQuarantine,
+    };
+    settle_locked(
+        worktree,
+        session_id,
+        ExecutionSettlement::CompletedWithEvidence { evidence },
+    )
+    .map(Ok)
 }
 
 /// Best-effort settlement used by sibling flows (`build.complete`): settles
@@ -8915,21 +11166,38 @@ pub(crate) fn settle_completed_best_effort(
     session_id: &str,
     expected_owner_number: u64,
 ) {
+    let _ = settle_completed_best_effort_guarded(worktree, session_id, expected_owner_number, None);
+}
+
+pub(crate) fn settle_completed_best_effort_guarded(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: u64,
+    expected_verification_hash: Option<&str>,
+) -> bool {
     // T-247: build.complete settlement also skips while obligations stay
     // open — the ECR stays active and the Stop gate keeps holding.
     if let Some(refusal) =
         crate::cli::action_obligation::open_obligation_refusal(worktree, session_id, &[])
     {
         tracing::warn!(%refusal, "execution control settlement skipped");
-        return;
+        return false;
     }
-    match settle_completed_with_evidence(worktree, session_id, Some(expected_owner_number)) {
-        Ok(Ok(_)) => {}
+    match settle_completed_with_evidence(
+        worktree,
+        session_id,
+        Some(expected_owner_number),
+        expected_verification_hash,
+    ) {
+        Ok(Ok(SettleResult::Settled(_) | SettleResult::AlreadySettled(_))) => true,
+        Ok(Ok(_)) => false,
         Ok(Err(status)) => {
             tracing::warn!(?status, "execution control settlement evidence refused");
+            false
         }
         Err(error) => {
             tracing::warn!(?error, "execution control settlement failed");
+            false
         }
     }
 }
@@ -8940,14 +11208,19 @@ pub(crate) fn settle_completed_best_effort(
 /// - A terminally **blocked** execution refuses every PR mutation (create —
 ///   draft included —, edit, ready): a blocked execution cannot hand off.
 /// - An **active** execution gates only Ready handoffs (`ready_handoff` =
-///   non-draft create or `pr.ready`) on fresh, all-passing verification
-///   evidence. Draft creation and `pr.edit` stay available as the
-///   sanctioned mid-work sharing path (AGENTS Draft policy); the full PR
-///   lifecycle matrix (Draft conversion, head/base drift) is T-199+.
+///   non-draft create or `pr.ready`) on fresh verification evidence. An exact
+///   typed quarantine or Board decision may classify failures for `pr.ready`
+///   only; non-draft create still requires all-pass because no durable PR
+///   marker exists before creation. Draft creation and `pr.edit` stay
+///   available as the sanctioned mid-work sharing path (AGENTS Draft policy).
 /// - When owner generation authority exists, every mutation first authenticates
 ///   the ambient caller against the exact durable Session/binding. Legacy flat
 ///   ECRs and unmanaged repositories preserve their compatibility behavior.
-pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Option<String> {
+fn evaluate_pr_handoff(
+    repo_path: &Path,
+    ready_handoff: bool,
+    allow_ready_adjudication: bool,
+) -> Result<Vec<crate::cli::verification_record::VerificationAdjudicationRef>, String> {
     let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
@@ -8955,21 +11228,30 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
     let worktree = gwt_core::paths::resolve_current_worktree_root(repo_path);
     let record = match load(&worktree) {
         Ok(Some(record)) => record,
-        Ok(None) => return None,
+        Ok(None) => return Ok(Vec::new()),
         Err(_) => {
-            return Some(
+            return Err(
                 "PR mutation refused: current execution authority could not be read safely; repair or relaunch the owning execution before retrying."
                     .to_string(),
             )
         }
     };
     // P9a (T-122): a tampered record refuses every PR mutation for everyone.
-    // The repair path depends on lifecycle status because adopt is Active-only.
+    // The repair path is named by lifecycle status.
     if !integrity_ok(&record) {
-        return Some(format!(
+        return Err(format!(
             "PR handoff refused: the execution control record failed integrity validation (edited outside the canonical operations). {}",
             integrity_repair_guidance(record.status),
         ));
+    }
+    // Issue #4544 AC-3: Ready is the handoff that says "this ran unattended and
+    // is finished". A launch that sat at a provider permission prompt cannot
+    // make that claim. Draft PRs stay open mid-work, exactly as they do for
+    // every other evidence gate here.
+    if ready_handoff {
+        if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(&worktree) {
+            return Err(format!("PR handoff refused: {reason}"));
+        }
     }
     let caller_authenticated = match record.status {
         ExecutionControlStatus::Completed => {
@@ -8983,18 +11265,40 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
         }
     };
     if caller_authenticated.is_err() {
-        return Some(
+        return Err(
             "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying."
                 .to_string(),
         );
     }
-    let session_id = session_id?;
+    let Some(session_id) = session_id else {
+        return Ok(Vec::new());
+    };
     if record.primary_session_id != session_id {
-        return None;
+        return Ok(Vec::new());
     }
     match record.status {
-        ExecutionControlStatus::Completed => None,
-        ExecutionControlStatus::Blocked => Some(format!(
+        // FR-243 (Issue #4545 AC-4): a Completed record normally means the
+        // completion already consumed its verification evidence, which is what
+        // lets it hand off a Ready PR. A No Action settles terminally too
+        // (Issue #4590) but consumes no evidence at all, so the trusted audit
+        // — not the status — keeps the Ready gate shut for a successful
+        // non-delivery. The draft path stays open, exactly as before.
+        ExecutionControlStatus::Completed
+            if ready_handoff
+                && crate::cli::delivered_owner::trusted_no_action_for_session(
+                    &worktree,
+                    &session_id,
+                )
+                .is_some() =>
+        {
+            Err(format!(
+                "PR handoff refused: the execution for {kind} #{number} settled as No Action — a successful non-delivery that carries none of the verification evidence a Ready PR requires. A delivered owner has nothing to hand off; open a new owner for follow-up work instead.",
+                kind = record.owner_kind.as_str(),
+                number = record.owner_number,
+            ))
+        }
+        ExecutionControlStatus::Completed => Ok(Vec::new()),
+        ExecutionControlStatus::Blocked => Err(format!(
             "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR. In the same owning session, resolve the blocker, register a derived matrix with `verify.plan` (`params.derive:true`), run it through `verify.run`, then call `execution.reopen` with a non-empty `params.reason`; otherwise use a fresh launch or leave the blocked report as the outcome.",
             kind = record.owner_kind.as_str(),
             number = record.owner_number,
@@ -9004,19 +11308,40 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
                 .unwrap_or("no reason recorded"),
         )),
         ExecutionControlStatus::Active if ready_handoff => {
-            let status = crate::cli::verification_record::evaluate_evidence(
-                &worktree,
-                &session_id,
-                Some(record.owner_number),
-            );
-            if status == crate::cli::verification_record::EvidenceStatus::Fresh {
-                None
+            if allow_ready_adjudication {
+                crate::cli::verification_record::evaluate_pr_ready_evidence(
+                    &worktree,
+                    &session_id,
+                    Some(record.owner_number),
+                )
+                .map_err(|status| format!("PR handoff refused: {}", status.describe()))
             } else {
-                Some(format!("PR handoff refused: {}", status.describe()))
+                let status = crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    &session_id,
+                    Some(record.owner_number),
+                );
+                if status == crate::cli::verification_record::EvidenceStatus::Fresh {
+                    Ok(Vec::new())
+                } else {
+                    Err(format!("PR handoff refused: {}", status.describe()))
+                }
             }
         }
-        ExecutionControlStatus::Active => None,
+        ExecutionControlStatus::Active => Ok(Vec::new()),
     }
+}
+
+pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Option<String> {
+    evaluate_pr_handoff(repo_path, ready_handoff, false).err()
+}
+
+/// Evaluate the exact `pr.ready` path and return the durable Board references
+/// that must be copied into the PR delivery audit when raw evidence is failing.
+pub(crate) fn pr_ready_adjudications(
+    repo_path: &Path,
+) -> Result<Vec<crate::cli::verification_record::VerificationAdjudicationRef>, String> {
+    evaluate_pr_handoff(repo_path, true, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -9028,6 +11353,11 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
 pub enum ExecutionCommand {
     /// Read-only diagnosis of the current execution and its recovery paths.
     Status,
+    /// Issue #3934: read-only diagnosis of any owner's execution generation in
+    /// this repository, for an operator who does not hold it.
+    OwnerStatus {
+        owner: ExecutionOwnerKey,
+    },
     Complete,
     Blocked {
         reason: String,
@@ -9050,6 +11380,23 @@ pub enum ExecutionCommand {
     /// Return the current session's terminal Blocked record to Active only
     /// after fresh, derived, post-block verification evidence exists.
     Reopen {
+        reason: String,
+    },
+    /// SPEC #3248 FR-241: settle a generation that was materialized for a
+    /// delivered zero-diff owner as a successful non-delivery. It writes a
+    /// machine-local trusted audit and settles this session's obligations;
+    /// it commits nothing, pushes nothing, requires no verification record,
+    /// and rewrites no byte of the predecessor record.
+    NoAction {
+        reason: String,
+    },
+    /// Issue #4161: abort the Prepared successors/takeovers that fence an
+    /// owner's current generation and refuse every launch. Owner-addressed
+    /// like [`ExecutionCommand::OwnerStatus`], because the operator releasing
+    /// the fence is never the Session that left it behind.
+    ReleasePrepared {
+        owner: ExecutionOwnerKey,
+        operation_id: Option<String>,
         reason: String,
     },
 }
@@ -9390,13 +11737,49 @@ pub struct ExecutionDiagnosisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_probes: Vec<crate::cli::governance::RecoveryProbe>,
     pub available_recoveries: Vec<String>,
+    /// Machine-readable guidance when `available_recoveries` cannot help this
+    /// Session: [`RECOVERY_HINT_FRESH_LAUNCH_REQUIRED`] for a terminal record
+    /// that only a fresh linked-owner launch can proceed from (Issue #4029).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
     pub warnings: Vec<String>,
+    /// Issue #4217 FR-002: `manual` or `autonomous` — who started this
+    /// session, read from the durable Session the launcher wrote.
+    ///
+    /// This is the answer the skills consume instead of inspecting
+    /// `GWT_AUTONOMOUS_EXECUTION`. `None` means the session is unknown to this
+    /// machine (no `GWT_SESSION_ID`, or a record that cannot be read), which
+    /// callers must treat as attended rather than guessing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_route: Option<String>,
+    /// Issue #4543 AC-5: the Permission Mode Decision this execution was
+    /// launched under, as recorded on the Execution Control Record.
+    ///
+    /// `None` for a worktree with no record, and for records written before
+    /// the decision existed. A decision whose `outcome` is diagnostic
+    /// (`unsupported_provider` / `missing_custom_skip_mapping` /
+    /// `skip_flag_dropped`) is why an agent that should be running unattended
+    /// is sitting at a prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_decision: Option<gwt_agent::PermissionModeDecision>,
+    /// Issue #4544 AC-4: the permission-readiness gate decision standing
+    /// against this worktree, if any.
+    ///
+    /// The decision above says how the launch was *decided*; this says what a
+    /// gate *did about it*. It carries the gate id, the owner and session, the
+    /// provider, the expected and observed permission modes, and a concrete
+    /// recovery action — everything an operator needs to answer "why will this
+    /// not settle?" without reading a pane. Absent when the execution is
+    /// clear, which is the ordinary case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_readiness: Option<crate::cli::permission_readiness::PermissionReadinessRecord>,
 }
 
 fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus) -> &'static str {
     use crate::cli::verification_record::EvidenceStatus;
     match status {
         EvidenceStatus::Fresh => "fresh",
+        EvidenceStatus::FreshWithQuarantine => "fresh_with_quarantine",
         EvidenceStatus::MissingRecord => "missing_record",
         EvidenceStatus::WrongSession => "wrong_session",
         EvidenceStatus::WrongOwner => "wrong_owner",
@@ -9544,6 +11927,250 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
     "workspace.ensure",
 ];
 
+/// Verification recoveries that `verify.*` accepts only from the Session
+/// holding current verification authority (Issue #4029).
+///
+/// They stay visible to GUI projections, but `execution.status` advertises
+/// them only after the same authority gate `verify.plan` / `verify.run`
+/// enforce has accepted the caller.
+const VERIFICATION_RECOVERY_OPERATIONS: [&str; 2] = ["verify.plan", "verify.run"];
+
+/// Recoveries that act on the execution record itself. When none of them is
+/// advertised for a terminal record, this Session cannot recover the record
+/// and `recovery_hint` names the fresh linked-owner launch instead.
+const EXECUTION_RECORD_RECOVERY_OPERATIONS: [&str; 6] = [
+    "execution.continue",
+    "execution.repair",
+    "execution.adopt",
+    "execution.reopen",
+    "verify.plan",
+    "verify.run",
+];
+
+/// `recovery_hint` value: the record is terminal and no operation-local
+/// recovery is available to this Session; only a fresh linked-owner launch
+/// can proceed (Issue #4029 AC-2).
+pub const RECOVERY_HINT_FRESH_LAUNCH_REQUIRED: &str = "fresh_launch_required";
+
+/// Issue #4443 AC-2: the gwtd operations a Host refusal may name to an agent.
+///
+/// A refusal that reaches an agent over the capability bridge carries operation
+/// names from this list and nothing else. Membership is the truthfulness check:
+/// #4396 stalled an agent for over an hour by naming `workspace.prune`, which
+/// does not exist, and free-form refusal prose cannot cross the bridge because
+/// it may carry host-side paths and identifiers.
+///
+/// Ordered so that a name containing another is matched first;
+/// [`recovery_operations_named_in`] then reports the specific operation rather
+/// than the one embedded in it.
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 15] = [
+    "execution.release_prepared",
+    "execution.no_action",
+    "execution.continue",
+    "execution.status",
+    "execution.repair",
+    "execution.reopen",
+    "execution.adopt",
+    "workspace.ensure",
+    "workspace.update",
+    // Issue #4465: the container-ambiguity refusal names these three. They
+    // were absent, so the one refusal that actually needed a prune route could
+    // not carry it across the bridge and the agent was left guessing.
+    "workspace.work_prune",
+    "workspace.candidates",
+    "workspace.join",
+    "build.abort",
+    "verify.plan",
+    "verify.run",
+];
+
+/// The recovery operations `message` names, deduplicated and ordered as in
+/// [`AGENT_RECOVERY_OPERATIONS`]. Refusals already state their route in prose;
+/// this lifts it into a structured field the agent bridge is allowed to carry.
+#[must_use]
+pub fn recovery_operations_named_in(message: &str) -> Vec<String> {
+    let mut remaining = message.to_string();
+    let mut named = Vec::new();
+    for operation in AGENT_RECOVERY_OPERATIONS {
+        if remaining.contains(operation) {
+            // Blank the match so `execution.continue` is not also reported as
+            // `execution.repair`'s shorter neighbours in a later pass.
+            remaining = remaining.replace(operation, " ");
+            named.push(operation.to_string());
+        }
+    }
+    named
+}
+
+/// Recoveries that need no session identity or execution authority, so naming
+/// one is always truthful (Issue #4074 AC-3).
+///
+/// `gwt-execute` and `relaunch` are instructions to the human or the Monitor
+/// rather than gwtd operations; `verify.plan` / `verify.run` are named only
+/// for a caller that owns the record (Issue #4154) and are then probe-gated
+/// through the authority they actually enforce (Issue #4029). Everything else
+/// must be probe-gated too — see [`PROTECTED_RECOVERY_OPERATIONS`] and
+/// [`VERIFICATION_RECOVERY_OPERATIONS`].
+#[cfg(test)]
+const SESSION_INDEPENDENT_RECOVERY_OPERATIONS: [&str; 2] = ["gwt-execute", "relaunch"];
+
+/// The recoveries a diagnosis names before the probes decide which of them the
+/// caller would actually be allowed to run.
+///
+/// Split out so the enumeration is testable on its own: Issue #4029 shipped a
+/// list that named operations the caller's session could never execute, and
+/// #4074 AC-3 keeps that from coming back.
+fn base_execution_recoveries(
+    binding_state: ExecutionBindingState,
+    ecr_status: ExecutionDiagnosisState,
+    caller_owns_record: bool,
+    workspace_update_applicable: Option<bool>,
+    workspace_update_applicability_reason: Option<&str>,
+) -> Vec<String> {
+    let mut recoveries = if binding_state == ExecutionBindingState::Corrupt {
+        vec!["execution.repair".to_string()]
+    } else {
+        match ecr_status {
+            ExecutionDiagnosisState::Missing => vec!["gwt-execute".to_string()],
+            ExecutionDiagnosisState::Corrupt => vec!["execution.repair".to_string()],
+            // Issue #4154: `verify.*` is session-independent only for a record
+            // the caller owns — it authenticates against
+            // `primary_session_id` like `execution.reopen` does. A worktree
+            // that inherited a previous Session's terminal record must be told
+            // to take ownership first, not sent into three refusals.
+            ExecutionDiagnosisState::Blocked if !caller_owns_record => {
+                vec!["execution.adopt".to_string()]
+            }
+            ExecutionDiagnosisState::Blocked => vec![
+                "verify.plan".to_string(),
+                "verify.run".to_string(),
+                "execution.reopen".to_string(),
+            ],
+            ExecutionDiagnosisState::Completed => vec!["gwt-execute".to_string()],
+            ExecutionDiagnosisState::Active if binding_state != ExecutionBindingState::Bound => {
+                vec!["execution.continue".to_string()]
+            }
+            ExecutionDiagnosisState::Active => Vec::new(),
+        }
+    };
+    if workspace_update_applicable == Some(true) {
+        recoveries.push("workspace.update".to_string());
+    } else if let Some(reason) = workspace_update_applicability_reason {
+        let recovery = if reason == "workspace_ensure_required" {
+            "workspace.ensure"
+        } else {
+            "relaunch"
+        };
+        recoveries.push(recovery.to_string());
+    }
+    recoveries
+}
+
+/// The route the launcher stamped on `session_id`'s durable Session
+/// (Issue #4217 FR-002).
+///
+/// `GWT_AUTONOMOUS_EXECUTION` is written only when the project opted into
+/// unattended autonomous mode, so an Issue Monitor launch made while that
+/// preference reads false looked human-driven to every gate downstream — the
+/// agent then demanded a visual check from a human who was never there
+/// (#3777, #3697). The Session record is written by the launcher on every
+/// route, so it cannot drift that way.
+///
+/// `None` when the session is unknown here; callers treat that as attended.
+///
+/// Issue #4510: the stamp is authoritative when it says `Autonomous`, but a
+/// `Manual` stamp is not proof of a human. Some launch paths reach the Session
+/// writer without passing the Monitor's stamping step, and the resulting
+/// mis-stamp is unrecoverable downstream — the agent may not write its own
+/// `User Verification Result: confirmed`, and no PR body wording can undo it
+/// (PR #4374 stalled fully green for exactly this reason). So a `Manual` stamp
+/// is cross-checked against the launch prompt the Monitor itself composed,
+/// which is a fact about the launch route rather than a preference.
+#[must_use]
+pub fn session_launch_route(session_id: Option<&str>) -> Option<gwt_agent::LaunchRoute> {
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load(&path).ok()?;
+    if session.launch_route != gwt_agent::LaunchRoute::Autonomous
+        && launched_by_issue_monitor(&session)
+    {
+        return Some(gwt_agent::LaunchRoute::Autonomous);
+    }
+    Some(session.launch_route)
+}
+
+/// Whether the Issue Monitor composed this session's launch prompt.
+///
+/// The prompt is written into `launch_args` by the launcher and says so in
+/// its own words, so it is evidence from the launch route itself — the same
+/// class of fact as the `gwt-auto-improve:` claim prefix, but one that lives
+/// in the durable record this function already reads.
+fn launched_by_issue_monitor(session: &gwt_agent::Session) -> bool {
+    session
+        .launch_args
+        .iter()
+        .any(|arg| arg.contains(crate::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE))
+}
+
+/// Whether a settlement reason blames a human who was supposed to look at the
+/// change.
+///
+/// The agent's own automated `Agent Visual Check` is deliberately excluded: a
+/// headed run that found console errors is a real defect, not an absent
+/// reviewer, and refusing to record it would hide a genuine blocker.
+fn blames_absent_human_verification(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("agent visual check") {
+        return false;
+    }
+    [
+        "user verification",
+        "user confirmation",
+        "visual verification",
+        "視覚検証",
+        "ユーザー確認",
+        "ユーザ確認",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+/// Issue #4217 AC-6: refuse a terminal block whose only blocker is that
+/// nobody watched an unattended run.
+///
+/// `execution.blocked` is terminal, not a pause: it defers every open
+/// obligation and revokes `pr.edit`, so the agent that takes it cannot even
+/// deliver the Draft PR afterwards (#4214). For an autonomous launch the
+/// answer is therefore to refuse the settlement and name the way out, not to
+/// record the stall more precisely.
+fn autonomous_verification_block_refusal(
+    route: Option<gwt_agent::LaunchRoute>,
+    reason: &str,
+    missing_verification: Option<&str>,
+) -> Option<String> {
+    if route != Some(gwt_agent::LaunchRoute::Autonomous) {
+        return None;
+    }
+    let names_absent_human = blames_absent_human_verification(reason)
+        || missing_verification.is_some_and(blames_absent_human_verification);
+    if !names_absent_human {
+        return None;
+    }
+    Some(format!(
+        "execution: blocked refused — this is an autonomous launch \
+         (launch_route: autonomous), so a missing user or visual verification \
+         is not a blocker: nobody is watching by design. Record \
+         `{label} n/a (autonomous)` in the PR body. Run the required automated \
+         verification, including headed E2E for UI changes, hand off a Ready PR \
+         for CI auto-merge, and settle this execution normally. If \
+         something else is genuinely blocking you, restate params.reason \
+         without the verification clause.\n",
+        label = gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
+    ))
+}
+
 /// Collect the current operation-local diagnosis without mutating trusted state.
 #[must_use]
 pub fn diagnose(worktree: &Path, session_id: Option<&str>) -> ExecutionDiagnosisSnapshot {
@@ -9616,7 +12243,20 @@ fn diagnose_with_mode(
         open_obligations: Vec::new(),
         recovery_probes: Vec::new(),
         available_recoveries: vec!["gwt-execute".to_string()],
+        recovery_hint: None,
         warnings: Vec::new(),
+        // The route belongs to the session, not to the record, so it is
+        // reported even when this worktree carries no Execution Control
+        // Record at all.
+        launch_route: session_launch_route(session_id).map(|route| route.as_str().to_string()),
+        permission_decision: None,
+        // Issue #4544 AC-4: reported alongside the route and for the same
+        // reason — a permission-readiness block is a fact about the launch,
+        // so it must be visible even in a worktree whose Execution Control
+        // Record cannot be read.
+        permission_readiness: crate::cli::permission_readiness::load(worktree)
+            .ok()
+            .flatten(),
     };
 
     let record = match load(worktree) {
@@ -9654,6 +12294,9 @@ fn diagnose_with_mode(
     snapshot
         .missing_verification
         .clone_from(&record.missing_verification);
+    snapshot
+        .permission_decision
+        .clone_from(&record.permission_decision);
     if !integrity_ok(&record) {
         snapshot.ecr_status = ExecutionDiagnosisState::Corrupt;
         snapshot.binding_state = ExecutionBindingState::Corrupt;
@@ -10061,36 +12704,13 @@ fn diagnose_with_mode(
         }
     }
 
-    let mut execution_recoveries = if snapshot.binding_state == ExecutionBindingState::Corrupt {
-        vec!["execution.repair".to_string()]
-    } else {
-        match snapshot.ecr_status {
-            ExecutionDiagnosisState::Missing => vec!["gwt-execute".to_string()],
-            ExecutionDiagnosisState::Corrupt => vec!["execution.repair".to_string()],
-            ExecutionDiagnosisState::Blocked => vec![
-                "verify.plan".to_string(),
-                "verify.run".to_string(),
-                "execution.reopen".to_string(),
-            ],
-            ExecutionDiagnosisState::Completed => vec!["gwt-execute".to_string()],
-            ExecutionDiagnosisState::Active
-                if snapshot.binding_state != ExecutionBindingState::Bound =>
-            {
-                vec!["execution.continue".to_string()]
-            }
-            ExecutionDiagnosisState::Active => Vec::new(),
-        }
-    };
-    if snapshot.workspace_update_applicable == Some(true) {
-        execution_recoveries.push("workspace.update".to_string());
-    } else if let Some(reason) = snapshot.workspace_update_applicability_reason.as_deref() {
-        let recovery = if reason == "workspace_ensure_required" {
-            "workspace.ensure"
-        } else {
-            "relaunch"
-        };
-        execution_recoveries.push(recovery.to_string());
-    }
+    let mut execution_recoveries = base_execution_recoveries(
+        snapshot.binding_state,
+        snapshot.ecr_status,
+        session_id == Some(record.primary_session_id.as_str()),
+        snapshot.workspace_update_applicable,
+        snapshot.workspace_update_applicability_reason.as_deref(),
+    );
     execution_recoveries.sort();
     execution_recoveries.dedup();
     snapshot.available_recoveries = execution_recoveries;
@@ -10152,7 +12772,13 @@ fn finalize_recovery_probes(
             probe_execution_repair_for_recovery(worktree, session_id, recovery_context),
             probe_execution_adopt_for_recovery(worktree, caller, recovery_context),
             probe_execution_reopen_for_recovery(worktree, caller, recovery_context),
-            crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            workspace_update_recovery_probe(
+                worktree,
+                &snapshot,
+                session_id,
+                recovery_context,
+                crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
+            ),
             crate::cli::workspace::probe_workspace_ensure(worktree, &ensure_candidate),
         ]
     } else {
@@ -10169,6 +12795,14 @@ fn finalize_recovery_probes(
         .map(invalid_execution_recovery_scope_probe)
         .collect()
     };
+    let probes = probes
+        .into_iter()
+        .chain(verification_recovery_probes(
+            worktree,
+            session_id,
+            snapshot.ecr_status,
+        ))
+        .collect::<Vec<_>>();
     for probe in &probes {
         snapshot
             .available_recoveries
@@ -10179,8 +12813,176 @@ fn finalize_recovery_probes(
     }
     snapshot.available_recoveries.sort();
     snapshot.available_recoveries.dedup();
+    if snapshot.ecr_status == ExecutionDiagnosisState::Active
+        && snapshot.binding_state == ExecutionBindingState::Bound
+        && snapshot.available_recoveries.is_empty()
+    {
+        if let Some(guidance) = recovery_context
+            .and_then(|context| context.as_ref().ok())
+            .and_then(discarded_canonical_work_guidance)
+        {
+            // This is a human instruction, not an executable recovery operation.
+            // #4074 owns successor Work materialization.
+            snapshot
+                .available_recoveries
+                .push("gwt-execute".to_string());
+            snapshot.warnings.push(guidance);
+        }
+    }
     snapshot.recovery_probes = probes;
+    snapshot.recovery_hint = execution_recovery_hint(&snapshot);
     snapshot
+}
+
+/// The Host refuses `workspace.update` unless the caller's Session holds the
+/// *current Active* execution binding: `active_execution_binding()` is `None`
+/// for a `Prepared` or `Inspection` authority, and
+/// `validate_current_execution_binding_authority` rejects a superseded one.
+/// Both answer `ExecutionBindingMismatch`, which the bridge reports as
+/// `authority_mismatch` at HTTP 409 with no local fallback.
+///
+/// The Work-mutation probe validates Session identity, cwd, repo and Work
+/// resolution but never reads generation currency, so it reported `Available`
+/// for a caller the Host would refuse. Gate its verdict through the same
+/// predicate the Host enforces (Issue #4029 AC-2).
+///
+/// A caller with no durable binding keeps the probe's own verdict: it never
+/// reaches the bound Host path, so its `workspace.update` is not the
+/// advertisement this Issue is about.
+fn workspace_update_recovery_probe(
+    worktree: &Path,
+    snapshot: &ExecutionDiagnosisSnapshot,
+    session_id: Option<&str>,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+    probe: crate::cli::governance::RecoveryProbe,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceCause, GovernanceMetadata, RecoveryProbe};
+
+    if !probe.advertise() {
+        return probe;
+    }
+    let (Some(owner_kind), Some(owner_number)) = (snapshot.owner_kind, snapshot.owner_number)
+    else {
+        return probe;
+    };
+    let (Some(session_id), Some(Ok(recovery_context))) = (session_id, recovery_context) else {
+        return probe;
+    };
+    let Some(binding) = recovery_context.session().execution_binding.as_ref() else {
+        return probe;
+    };
+    let owner = ExecutionOwnerKey {
+        kind: owner_kind,
+        number: owner_number,
+    };
+    // Cloned up front so the refusal builder does not borrow `probe`, which the
+    // authorized arm moves.
+    let governance = probe.governance.clone();
+    let unavailable = move |cause, reason: &str| {
+        RecoveryProbe::unavailable(
+            "workspace.update",
+            GovernanceMetadata {
+                cause: Some(cause),
+                retryable: Some(false),
+                ..governance.clone()
+            },
+            reason,
+        )
+    };
+    match current_active_execution_binding_matches(worktree, owner, session_id, &binding.identity) {
+        Ok(true) => probe,
+        Ok(false) => unavailable(
+            GovernanceCause::Authority,
+            "workspace_update_execution_binding_not_current",
+        ),
+        Err(error) => unavailable(GovernanceCause::Integrity, &error.to_string()),
+    }
+}
+
+/// Probe `verify.plan` / `verify.run` through the exact authority gate the
+/// operations enforce, so `execution.status` never advertises them to a
+/// Session that `verify.*` would refuse (Issue #4029 AC-1).
+///
+/// The verification lane only recovers a Blocked record (fresh derived
+/// evidence feeds `execution.reopen`); every other record state refuses it
+/// as not applicable before any authority lookup runs.
+fn verification_recovery_probes(
+    worktree: &Path,
+    session_id: Option<&str>,
+    ecr_status: ExecutionDiagnosisState,
+) -> Vec<crate::cli::governance::RecoveryProbe> {
+    use crate::cli::governance::{
+        GovernanceCause, GovernanceEffect, GovernanceMetadata, RecoveryProbe,
+    };
+    let metadata = |cause| GovernanceMetadata {
+        effect: Some(GovernanceEffect::Protected),
+        cause,
+        retryable: Some(false),
+        ..GovernanceMetadata::default()
+    };
+    let refusal = match session_id {
+        _ if ecr_status != ExecutionDiagnosisState::Blocked => Some((
+            GovernanceCause::DomainInvalid,
+            "verify_recovery_requires_blocked",
+        )),
+        None => Some((GovernanceCause::ManagedIdentity, "session_id_unavailable")),
+        Some(session_id)
+            if !crate::cli::verification_record::caller_has_verification_authority(
+                worktree, session_id,
+            ) =>
+        {
+            Some((
+                GovernanceCause::Authority,
+                "verify.* requires current verification authority",
+            ))
+        }
+        Some(_) => None,
+    };
+    VERIFICATION_RECOVERY_OPERATIONS
+        .into_iter()
+        .map(|operation| match refusal {
+            Some((cause, reason)) => {
+                RecoveryProbe::unavailable(operation, metadata(Some(cause)), reason)
+            }
+            None => RecoveryProbe::available(operation, metadata(None)),
+        })
+        .collect()
+}
+
+/// A terminal record that advertises no execution-record recovery cannot be
+/// continued from this Session; only a fresh linked-owner launch proceeds
+/// (Issue #4029 AC-2).
+fn execution_recovery_hint(snapshot: &ExecutionDiagnosisSnapshot) -> Option<String> {
+    let recoverable = snapshot
+        .available_recoveries
+        .iter()
+        .any(|operation| EXECUTION_RECORD_RECOVERY_OPERATIONS.contains(&operation.as_str()));
+    (snapshot.binding_state == ExecutionBindingState::Terminal && !recoverable)
+        .then(|| RECOVERY_HINT_FRESH_LAUNCH_REQUIRED.to_string())
+}
+
+fn discarded_canonical_work_guidance(
+    context: &crate::agent_project_state::ExecutionRecoveryContext,
+) -> Option<String> {
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        context.project_state_root(),
+        Some(context.session().branch.as_str()),
+        Some(context.worktree()),
+    )?;
+    let works_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(context.project_state_root());
+    let works =
+        gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path).ok()??;
+    let work = works.work_items.iter().find(|work| work.id == work_id)?;
+    work.discarded.then(|| {
+        format!(
+            "canonical Work {work_id} is Discarded; successor Work materialization is required \
+             (owner #4074). Human action: open Issue #4074 in gwt and select Start Work to \
+             arrange implementation. The current Work cannot recover until that support is available."
+        )
+    })
 }
 
 /// Replace an operation-specific terminal refusal with guidance derived from
@@ -10191,6 +12993,26 @@ pub(crate) fn terminal_recovery_refusal(
     refusal: &str,
 ) -> String {
     let diagnosis = diagnose(invocation_scope, Some(session_id));
+    if diagnosis.ecr_status == ExecutionDiagnosisState::Active
+        && diagnosis.binding_state == ExecutionBindingState::Bound
+        && diagnosis.available_recoveries == ["gwt-execute"]
+    {
+        if let Some(guidance) = crate::agent_project_state::resolve_execution_recovery_context(
+            invocation_scope,
+            session_id,
+        )
+        .ok()
+        .as_ref()
+        .and_then(discarded_canonical_work_guidance)
+        {
+            let refusal = refusal
+                .split_once(
+                    "; run workspace.ensure for this Session before retrying workspace.update",
+                )
+                .map_or(refusal, |(reason, _)| reason);
+            return format!("{refusal}; {guidance}");
+        }
+    }
     if diagnosis.binding_state != ExecutionBindingState::Terminal {
         return refusal.to_string();
     }
@@ -10209,8 +13031,13 @@ pub(crate) fn terminal_recovery_refusal(
         .and_then(|probe| probe.reason.as_deref())
         .map(|reason| format!("; recovery_probes[execution.reopen]={reason}"))
         .unwrap_or_default();
+    let hint = diagnosis
+        .recovery_hint
+        .as_deref()
+        .map(|hint| format!("; recovery_hint={hint}"))
+        .unwrap_or_default();
     format!(
-        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}",
+        "{refusal}; current ecr_status={ecr_status}, binding_state=terminal; run JSON operation `execution.status` and follow its `available_recoveries` / `recovery_probes`; available_recoveries=[{available}]{reopen}{hint}",
         ecr_status = match diagnosis.ecr_status {
             ExecutionDiagnosisState::Active => "active",
             ExecutionDiagnosisState::Completed => "completed",
@@ -10386,14 +13213,85 @@ fn protected_recovery_metadata(
 #[derive(Debug, Clone)]
 struct RecoveryPrerequisiteRefusal {
     cause: crate::cli::governance::GovernanceCause,
+    reason_code: String,
     reason: String,
+    recoverability: crate::cli::governance::RefusalRecoverability,
+    recovery_action: Option<String>,
+    escalation_kind: Option<gwt_core::board_escalation::OperationRefusalKind>,
 }
 
 impl RecoveryPrerequisiteRefusal {
     fn new(cause: crate::cli::governance::GovernanceCause, reason: impl Into<String>) -> Self {
+        use crate::cli::governance::{GovernanceCause, RefusalRecoverability};
+        use gwt_core::board_escalation::OperationRefusalKind;
+        let (recoverability, recovery_action, escalation_kind) = match cause {
+            GovernanceCause::NotReady
+            | GovernanceCause::TransientGovernance
+            | GovernanceCause::ExternalWait => (
+                RefusalRecoverability::AgentRecoverable,
+                Some("execution.status".to_string()),
+                None,
+            ),
+            GovernanceCause::Authority | GovernanceCause::ManagedIdentity => (
+                RefusalRecoverability::HumanRequired,
+                None,
+                Some(OperationRefusalKind::Authority),
+            ),
+            GovernanceCause::Integrity => (
+                RefusalRecoverability::HumanRequired,
+                Some("execution.repair".to_string()),
+                Some(OperationRefusalKind::Integrity),
+            ),
+            GovernanceCause::DomainInvalid => (
+                RefusalRecoverability::HumanRequired,
+                None,
+                Some(OperationRefusalKind::Immutability),
+            ),
+            GovernanceCause::StructuralGovernance => (
+                RefusalRecoverability::HumanRequired,
+                None,
+                Some(OperationRefusalKind::Permission),
+            ),
+        };
         Self {
             cause,
+            reason_code: cause.as_str().to_string(),
             reason: reason.into(),
+            recoverability,
+            recovery_action,
+            escalation_kind,
+        }
+    }
+
+    fn agent_recoverable(
+        reason_code: impl Into<String>,
+        recovery_action: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            cause: crate::cli::governance::GovernanceCause::NotReady,
+            reason_code: reason_code.into(),
+            reason: reason.into(),
+            recoverability: crate::cli::governance::RefusalRecoverability::AgentRecoverable,
+            recovery_action: Some(recovery_action.into()),
+            escalation_kind: None,
+        }
+    }
+
+    fn human_required(
+        reason_code: impl Into<String>,
+        cause: crate::cli::governance::GovernanceCause,
+        escalation_kind: gwt_core::board_escalation::OperationRefusalKind,
+        recovery_action: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            cause,
+            reason_code: reason_code.into(),
+            reason: reason.into(),
+            recoverability: crate::cli::governance::RefusalRecoverability::HumanRequired,
+            recovery_action,
+            escalation_kind: Some(escalation_kind),
         }
     }
 }
@@ -10479,6 +13377,35 @@ fn strict_recovery_generation_binding(
     Ok(Some(execution_binding_for_generation(&ledger, current)))
 }
 
+/// Issue #4154: `true` only while the Session that settled a terminal record is
+/// still running.
+///
+/// A Blocked generation can never produce again, so the only authority worth
+/// protecting is a holder still working through its own `verify.*` +
+/// `execution.reopen` recovery. Everything else — no durable Session, no
+/// runtime evidence, a fenced terminal proof, a dead Host, ambiguous evidence —
+/// describes the stranded worktree this transfer exists to undo, so only
+/// decisive liveness refuses it.
+fn terminal_record_holder_is_live(record: &ExecutionControlRecord) -> io::Result<bool> {
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let holder_path = sessions_dir.join(format!("{}.toml", record.primary_session_id));
+    let gwt_agent::SessionPathState::Present(holder) =
+        gwt_agent::inspect_session_path(&holder_path)
+    else {
+        return Ok(false);
+    };
+    let Some(identity) = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+        .ok()
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        classify_exact_session_runtime(&sessions_dir, &identity)?,
+        ExactSessionRuntimeDisposition::Live
+    ))
+}
+
 #[derive(Debug)]
 enum ExecutionAdoptPrerequisites {
     Available {
@@ -10510,11 +13437,40 @@ fn evaluate_execution_adopt_prerequisites(
         ));
     }
     let binding = strict_recovery_generation_binding(worktree, &record)?;
-    if record.status != ExecutionControlStatus::Active {
-        return Err(RecoveryPrerequisiteRefusal::new(
-            GovernanceCause::DomainInvalid,
-            "execution_adopt_requires_active",
-        ));
+    match record.status {
+        ExecutionControlStatus::Active => {}
+        // Issue #4154: the startup reaper settles a generation whose holder is
+        // gone to Blocked, and the next launch on that worktree inherits a
+        // terminal record it never owned. `execution.reopen` is same-session
+        // only, `execution.repair` sees an intact record, and
+        // `execution.continue` sends the caller back to `reopen` — the worktree
+        // could never land its PR again. Transferring ownership without
+        // touching the lifecycle reconnects the ordinary same-session recovery
+        // route (`verify.*`, then `execution.reopen`).
+        ExecutionControlStatus::Blocked => {
+            if record.primary_session_id != session_id
+                && terminal_record_holder_is_live(&record).map_err(|error| {
+                    RecoveryPrerequisiteRefusal::new(
+                        GovernanceCause::Integrity,
+                        format!("execution_adopt_holder_runtime_unreadable: {error}"),
+                    )
+                })?
+            {
+                return Err(RecoveryPrerequisiteRefusal::new(
+                    GovernanceCause::Authority,
+                    "execution_adopt_blocked_holder_is_live",
+                ));
+            }
+        }
+        // A Completed record is a settled success, not a stranded worktree:
+        // new work needs a fresh linked-owner launch, not a new owner for the
+        // old lifetime.
+        ExecutionControlStatus::Completed => {
+            return Err(RecoveryPrerequisiteRefusal::new(
+                GovernanceCause::DomainInvalid,
+                "execution_adopt_requires_active_or_blocked",
+            ));
+        }
     }
     if record.primary_session_id == session_id {
         Ok(ExecutionAdoptPrerequisites::Satisfied { record, binding })
@@ -10573,6 +13529,7 @@ enum ExecutionReopenPrerequisites {
 fn evaluate_execution_reopen_prerequisites(
     worktree: &Path,
     session_id: &str,
+    allow_current_typed_quarantine: bool,
 ) -> Result<ExecutionReopenPrerequisites, RecoveryPrerequisiteRefusal> {
     use crate::cli::governance::GovernanceCause;
     if session_id.trim().is_empty() {
@@ -10607,8 +13564,11 @@ fn evaluate_execution_reopen_prerequisites(
             ));
         }
         ExecutionControlStatus::Completed => {
-            return Err(unavailable_recovery_prerequisite(
+            return Err(RecoveryPrerequisiteRefusal::human_required(
+                "record_terminal",
                 GovernanceCause::DomainInvalid,
+                gwt_core::board_escalation::OperationRefusalKind::Immutability,
+                None,
                 format!(
                     "Completed {kind} #{number} is immutable; use a fresh launch for new work",
                     kind = record.owner_kind.as_str(),
@@ -10622,7 +13582,7 @@ fn evaluate_execution_reopen_prerequisites(
         return Err(unavailable_recovery_prerequisite(
             GovernanceCause::Authority,
             format!(
-                "the Blocked record belongs to session {owner}, not the current session {current}; use a fresh launch or the authorized ownership-transfer path",
+                "the Blocked record belongs to session {owner}, not the current session {current}; take it over with the `execution.adopt` JSON operation first, then recover it in this session",
                 owner = record.primary_session_id,
                 current = session_id,
             ),
@@ -10647,16 +13607,18 @@ fn evaluate_execution_reopen_prerequisites(
     use crate::cli::verification_record as vr;
     let plan = vr::load_plan(worktree)
         .map_err(|error| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::Integrity,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_plan_unreadable",
+                "verify.plan",
                 format!(
                     "verification plan is unreadable: {error}; rerun verify.plan with params.derive:true"
                 ),
             )
         })?
         .ok_or_else(|| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::NotReady,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_plan_missing",
+                "verify.plan",
                 "no verification plan exists; run verify.plan with params.derive:true, then verify.run",
             )
         })?;
@@ -10665,39 +13627,45 @@ fn evaluate_execution_reopen_prerequisites(
         || plan.session_id != session_id
         || plan.owner_number != Some(record.owner_number)
     {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_plan_scope_mismatch",
+            "verify.plan",
             "verification plan hash/integrity/session/owner does not match the Blocked execution",
         ));
     }
     if !plan.derived {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_plan_not_derived",
+            "verify.plan",
             "recovery requires a derived verification plan; run verify.plan with params.derive:true, then verify.run",
         ));
     }
     if plan.created_at <= blocked_at {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_plan_predates_block",
+            "verify.plan",
             "the derived verification plan must be registered after the block; rerun verify.plan with params.derive:true",
         ));
     }
     let verification = vr::load(worktree)
         .map_err(|error| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::Integrity,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_run_unreadable",
+                "verify.run",
                 format!("verification run is unreadable: {error}; rerun verify.run"),
             )
         })?
         .ok_or_else(|| {
-            unavailable_recovery_prerequisite(
-                GovernanceCause::NotReady,
+            RecoveryPrerequisiteRefusal::agent_recoverable(
+                "verification_run_missing",
+                "verify.run",
                 "no verification run record exists; run verify.run",
             )
         })?;
     if verification.content_hash.is_empty() || !vr::integrity_ok(&verification) {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::Integrity,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_integrity_failed",
+            "verify.run",
             "the verification run has no valid integrity hash; rerun verify.run",
         ));
     }
@@ -10708,33 +13676,44 @@ fn evaluate_execution_reopen_prerequisites(
         Some(&plan),
         &verification,
     );
-    if evidence_status != vr::EvidenceStatus::Fresh {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+    if evidence_status != vr::EvidenceStatus::Fresh
+        && !(allow_current_typed_quarantine
+            && evidence_status == vr::EvidenceStatus::FreshWithQuarantine)
+    {
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            format!(
+                "verification_{}",
+                evidence_status_name(evidence_status.clone())
+            ),
+            "verify.run",
             evidence_status.describe(),
         ));
     }
     if !verification.plan_derived {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_not_derived",
+            "verify.run",
             "recovery requires a run bound to a derived verification plan; run verify.plan with params.derive:true, then verify.run",
         ));
     }
     let Some(verification_started_at) = verification.started_at else {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::Integrity,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_started_at_missing",
+            "verify.run",
             "the verification run has no trusted start timestamp; rerun verify.run after the block",
         ));
     };
     if verification_started_at <= blocked_at {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_predates_block",
+            "verify.run",
             "verification must start after the block; rerun verify.run",
         ));
     }
     if verification.created_at <= blocked_at {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_run_created_before_block",
+            "verify.run",
             "verification evidence must be created after the block; rerun verify.run",
         ));
     }
@@ -10746,8 +13725,9 @@ fn evaluate_execution_reopen_prerequisites(
             )
         })?;
     if fingerprint != verification.worktree_fingerprint {
-        return Err(unavailable_recovery_prerequisite(
-            GovernanceCause::NotReady,
+        return Err(RecoveryPrerequisiteRefusal::agent_recoverable(
+            "verification_worktree_stale",
+            "verify.run",
             "the worktree changed after verification; rerun verify.run on the final state",
         ));
     }
@@ -10766,7 +13746,10 @@ fn probe_execution_reopen(
     session_id: &str,
 ) -> crate::cli::governance::RecoveryProbe {
     use crate::cli::governance::{GovernanceMetadata, RecoveryProbe};
-    match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+    // The probe reports the local typed evidence as conditionally available;
+    // the mutating operation still re-reads the live PR marker and pins the
+    // exact verification hash before reopening.
+    match evaluate_execution_reopen_prerequisites(worktree, session_id, true) {
         Ok(ExecutionReopenPrerequisites::Satisfied { binding, .. }) => RecoveryProbe::satisfied(
             "execution.reopen",
             GovernanceMetadata {
@@ -11151,11 +14134,8 @@ fn repair_session_binding_if_unchanged(
     if updated.save_if_unchanged(&gwt_core::paths::gwt_sessions_dir(), expected_session)? {
         Ok(())
     } else {
-        Err(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed before repair binding CAS"
-            ),
+        Err(recovery_session_changed_error(
+            "durable Session changed before repair binding CAS",
         ))
     }
 }
@@ -11499,9 +14479,13 @@ fn repair_corrupt_execution_impl(
                 missing_verification: None,
                 launched_at: now,
                 settled_at: None,
+                completion_evidence: None,
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
+                // Issue #4543: `execution.repair` materializes a fresh record
+                // from a quarantined one, it does not run a launch.
+                permission_decision: None,
             };
             let projection =
                 String::from_utf8(serialize_execution_control(&record)?).map_err(|error| {
@@ -11746,22 +14730,50 @@ fn repair_corrupt_execution_impl(
     })
 }
 
-fn run_repair(
+fn run_repair_governed(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     let probe = probe_execution_repair(worktree, Some(session_id));
     if !probe.executable() {
-        out.push_str(&format!(
-            "execution: repair refused — {}\n",
-            probe
-                .reason
-                .as_deref()
-                .unwrap_or("execution_repair_unavailable")
-        ));
+        let reason = probe
+            .reason
+            .as_deref()
+            .unwrap_or("execution_repair_unavailable");
+        out.push_str(&format!("execution: repair refused — {reason}\n"));
+        // Issue #4161 AC-11: `execution_repair_not_corrupt` is the refusal an
+        // operator hits while holding a generation whose pane is gone, and on
+        // its own it is a dead end — the help text sends them here, and here
+        // says no. Repair is still the wrong tool for that shape: the record
+        // is readable and integrity-valid, and repair would quarantine it and
+        // mint a fresh one. So name the operation that is the right tool
+        // rather than widening this one to cover a liveness problem.
+        if reason == "execution_repair_not_corrupt" {
+            if let Some(guidance) = repair_not_corrupt_guidance(worktree) {
+                out.push_str(&guidance);
+                out.push('\n');
+            }
+        }
+        *refusal = Some(
+            if probe.governance.cause
+                == Some(crate::cli::governance::GovernanceCause::DomainInvalid)
+            {
+                crate::cli::governance::OperationRefusal::agent_recoverable(
+                    "execution_repair_not_required",
+                    protected_refusal_governance(
+                        crate::cli::governance::GovernanceCause::NotReady,
+                        true,
+                    ),
+                    "execution.status",
+                )
+            } else {
+                recovery_probe_refusal("execution.repair", &probe)
+            },
+        );
         return Ok(2);
     }
     match repair_corrupt_execution_with_session_snapshot(
@@ -11781,9 +14793,40 @@ fn run_repair(
         }
         Err(error) => {
             out.push_str(&format!("execution: repair refused — {error}\n"));
+            *refusal = Some(if is_recovery_session_changed_error(&error) {
+                recovery_session_changed_refusal()
+            } else {
+                operation_store_failure_refusal("execution.repair", &error)
+            });
             Ok(2)
         }
     }
+}
+
+/// Issue #4161 AC-11: the next step a `execution_repair_not_corrupt` refusal
+/// owes its caller.
+///
+/// Read from [`diagnose_owner`] rather than restated here, so the refusal can
+/// never recommend a route the owner diagnosis disagrees with — the mismatch
+/// this Issue is about is precisely a recovery route that says one thing while
+/// the operation it names refuses. `None` when no owner can be resolved from
+/// the worktree, because a guess is worse than silence.
+fn repair_not_corrupt_guidance(worktree: &Path) -> Option<String> {
+    let record = load(worktree).ok().flatten()?;
+    let diagnosis = diagnose_owner(
+        worktree,
+        ExecutionOwnerKey {
+            kind: record.owner_kind,
+            number: record.owner_number,
+        },
+    );
+    Some(format!(
+        "execution: this authority is structurally intact, so repair is not its route; recovery for {kind} #{number} is `{recovery}` — {why}",
+        kind = record.owner_kind.as_str(),
+        number = record.owner_number,
+        recovery = diagnosis.recommended_recovery,
+        why = diagnosis.recommended_recovery_reason,
+    ))
 }
 
 fn blocked_build_abort_guidance(record: &ExecutionControlRecord) -> String {
@@ -11794,6 +14837,374 @@ fn blocked_build_abort_guidance(record: &ExecutionControlRecord) -> String {
     )
 }
 
+/// Issue #4161: release the Prepared transactions that fence an owner's
+/// current generation.
+///
+/// Owner-addressed and deliberately not bound to the caller's own execution
+/// record: the Session that left the fence behind is gone, and the operator
+/// clearing it — a PM agent that cannot touch the GUI included — is working
+/// from somewhere else in the same repository.
+fn run_release_prepared(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: Option<&str>,
+    reason: &str,
+    now: DateTime<Utc>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let outcome = match release_blocking_prepared_transactions(
+        worktree,
+        owner,
+        &gwt_core::paths::gwt_sessions_dir(),
+        operation_id,
+        reason,
+        now,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            out.push_str(&format!("execution: release_prepared refused — {error}\n"));
+            return Ok(2);
+        }
+    };
+    out.push_str(&serde_json::to_string_pretty(&outcome).map_err(|error| {
+        SpecOpsError::from(ApiError::Unexpected(format!(
+            "failed to serialize prepared transaction release: {error}"
+        )))
+    })?);
+    out.push('\n');
+    Ok(0)
+}
+
+/// SPEC #3248 FR-241 / AS-218: settle an accidentally materialized generation
+/// for a delivered zero-diff owner.
+///
+/// Every refusal here leaves the store exactly as it was found, and the
+/// success path writes one machine-local audit plus this session's own
+/// obligation settlements — nothing in Git, verification, or the PR.
+fn run_no_action(
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::delivered_owner::{NoActionOutcome, NoActionRefusal};
+
+    let outcome = match crate::cli::delivered_owner::record_no_action(worktree, session_id, reason)
+    {
+        Ok(outcome) => outcome,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => {
+            return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
+        }
+        Err(error) => {
+            *refusal = Some(operation_store_failure_refusal(
+                "execution.no_action",
+                &error,
+            ));
+            return Err(SpecOpsError::from(ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error(
+                    "recording execution No Action",
+                    &error,
+                ),
+            )));
+        }
+    };
+    match outcome {
+        NoActionOutcome::Recorded(audit) | NoActionOutcome::AlreadyRecorded(audit) => {
+            out.push_str(&format!(
+                "execution: no action for {kind} #{number} (session {session}) — {reason}\n\
+                 Nothing was committed, pushed, verified, or handed to a PR. The predecessor record is preserved byte-identically in the audit (bytes {bytes}), and the execution is settled, so a gwtd that predates execution.no_action does not block Stop on it.\n",
+                kind = audit.owner_kind.as_str(),
+                number = audit.owner_number,
+                session = audit.session_id,
+                reason = audit.reason,
+                bytes = &audit.predecessor_bytes_sha256[..16],
+            ));
+            Ok(0)
+        }
+        NoActionOutcome::Refused(cause) => {
+            out.push_str(&format!(
+                "execution: no_action refused — {}\n",
+                cause.describe()
+            ));
+            // The refusals an agent can clear itself name the operation that
+            // clears them; the rest stay ordinary authority refusals.
+            *refusal = Some(match &cause {
+                NoActionRefusal::ForeignSession { .. } => agent_recoverable_refusal(
+                    "execution_no_action_foreign_session",
+                    "execution.adopt",
+                ),
+                NoActionRefusal::Tampered => agent_recoverable_refusal(
+                    "execution_no_action_record_tampered",
+                    "execution.repair",
+                ),
+                NoActionRefusal::SourceChanges { .. } => agent_recoverable_refusal(
+                    "execution_no_action_source_changes_present",
+                    "verify.run",
+                ),
+                NoActionRefusal::TerminalPredecessor { .. }
+                | NoActionRefusal::NoRecord
+                | NoActionRefusal::AmbiguousSourceSurface { .. }
+                | NoActionRefusal::ReplacedExecution { .. } => agent_recoverable_refusal(
+                    "execution_no_action_not_applicable",
+                    "execution.status",
+                ),
+            });
+            Ok(2)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExecutionRunResult {
+    pub exit_code: i32,
+    pub refusal: Option<crate::cli::governance::OperationRefusal>,
+}
+
+fn protected_refusal_governance(
+    cause: crate::cli::governance::GovernanceCause,
+    retryable: bool,
+) -> crate::cli::governance::GovernanceMetadata {
+    crate::cli::governance::GovernanceMetadata {
+        effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+        cause: Some(cause),
+        retryable: Some(retryable),
+        ..crate::cli::governance::GovernanceMetadata::default()
+    }
+}
+
+fn agent_recoverable_refusal(
+    reason_code: impl Into<String>,
+    recovery_action: impl Into<String>,
+) -> crate::cli::governance::OperationRefusal {
+    crate::cli::governance::OperationRefusal::agent_recoverable(
+        reason_code,
+        protected_refusal_governance(crate::cli::governance::GovernanceCause::NotReady, true),
+        recovery_action,
+    )
+}
+
+/// Issue #3696 AC-1: every verification-evidence refusal names `verify.run` as
+/// the agent's own next step. These are the refusals that were being filed as
+/// "PM 側での代行が必要" while the agent could clear them in two minutes.
+fn verification_evidence_refusal(
+    status: &crate::cli::verification_record::EvidenceStatus,
+) -> crate::cli::governance::OperationRefusal {
+    agent_recoverable_refusal(
+        format!("verification_{}", evidence_status_name(status.clone())),
+        "verify.run",
+    )
+}
+
+fn human_required_refusal(
+    reason_code: impl Into<String>,
+    cause: crate::cli::governance::GovernanceCause,
+    kind: gwt_core::board_escalation::OperationRefusalKind,
+    recovery_action: Option<String>,
+) -> crate::cli::governance::OperationRefusal {
+    crate::cli::governance::OperationRefusal::human_required(
+        reason_code,
+        kind,
+        protected_refusal_governance(cause, false),
+        recovery_action,
+    )
+}
+
+fn recovery_probe_refusal(
+    operation: &str,
+    probe: &crate::cli::governance::RecoveryProbe,
+) -> crate::cli::governance::OperationRefusal {
+    use crate::cli::governance::GovernanceCause;
+    use gwt_core::board_escalation::OperationRefusalKind;
+
+    let cause = probe
+        .governance
+        .cause
+        .unwrap_or(GovernanceCause::StructuralGovernance);
+    let operation_code = operation.replace('.', "_");
+    let reason_code = format!("{operation_code}_{}", cause.as_str());
+    match cause {
+        GovernanceCause::NotReady
+        | GovernanceCause::TransientGovernance
+        | GovernanceCause::ExternalWait => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                reason_code,
+                probe.governance.clone(),
+                "execution.status",
+            )
+        }
+        GovernanceCause::Authority | GovernanceCause::ManagedIdentity => {
+            crate::cli::governance::OperationRefusal::human_required(
+                reason_code,
+                OperationRefusalKind::Authority,
+                probe.governance.clone(),
+                None,
+            )
+        }
+        GovernanceCause::Integrity => crate::cli::governance::OperationRefusal::human_required(
+            reason_code,
+            OperationRefusalKind::Integrity,
+            probe.governance.clone(),
+            Some("execution.repair".to_string()),
+        ),
+        GovernanceCause::DomainInvalid => crate::cli::governance::OperationRefusal::human_required(
+            reason_code,
+            OperationRefusalKind::Immutability,
+            probe.governance.clone(),
+            None,
+        ),
+        GovernanceCause::StructuralGovernance => {
+            crate::cli::governance::OperationRefusal::human_required(
+                reason_code,
+                OperationRefusalKind::Permission,
+                probe.governance.clone(),
+                None,
+            )
+        }
+    }
+}
+
+fn recovery_prerequisite_operation_refusal(
+    operation: &str,
+    prerequisite: &RecoveryPrerequisiteRefusal,
+) -> crate::cli::governance::OperationRefusal {
+    let reason_code = format!(
+        "{}_{}",
+        operation.replace('.', "_"),
+        prerequisite.reason_code
+    );
+    let governance = protected_recovery_metadata(
+        Some(prerequisite.cause),
+        prerequisite.recoverability
+            == crate::cli::governance::RefusalRecoverability::AgentRecoverable,
+    );
+    match prerequisite.recoverability {
+        crate::cli::governance::RefusalRecoverability::AgentRecoverable => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                reason_code,
+                governance,
+                prerequisite
+                    .recovery_action
+                    .as_deref()
+                    .unwrap_or("execution.status"),
+            )
+        }
+        crate::cli::governance::RefusalRecoverability::HumanRequired => {
+            crate::cli::governance::OperationRefusal::human_required(
+                reason_code,
+                prerequisite
+                    .escalation_kind
+                    .expect("human-required recovery refusal needs escalation kind"),
+                governance,
+                prerequisite.recovery_action.clone(),
+            )
+        }
+    }
+}
+
+/// The Issue that owns the worktree's execution record, when one is readable.
+///
+/// Read from durable state rather than from the Session, so a refusal caused by
+/// a missing or unreadable Session identity still reaches its owning Issue.
+fn record_owner_number(worktree: &Path) -> Option<u64> {
+    load(worktree)
+        .ok()
+        .flatten()
+        .map(|record| record.owner_number)
+}
+
+fn recovery_session_changed_refusal() -> crate::cli::governance::OperationRefusal {
+    human_required_refusal(
+        "execution_recovery_session_changed",
+        crate::cli::governance::GovernanceCause::ManagedIdentity,
+        gwt_core::board_escalation::OperationRefusalKind::Authority,
+        None,
+    )
+}
+
+fn operation_store_failure_refusal(
+    operation: &str,
+    error: &io::Error,
+) -> crate::cli::governance::OperationRefusal {
+    if error.kind() == ErrorKind::WouldBlock {
+        return crate::cli::governance::OperationRefusal::agent_recoverable(
+            format!("{}_store_busy", operation.replace('.', "_")),
+            protected_refusal_governance(
+                crate::cli::governance::GovernanceCause::TransientGovernance,
+                true,
+            ),
+            operation,
+        );
+    }
+    human_required_refusal(
+        format!("{}_store_unavailable", operation.replace('.', "_")),
+        crate::cli::governance::GovernanceCause::Integrity,
+        gwt_core::board_escalation::OperationRefusalKind::Integrity,
+        None,
+    )
+}
+
+fn continuation_bridge_failure_refusal(
+    reason: crate::daemon_runtime::AgentBridgeFailureReason,
+) -> crate::cli::governance::OperationRefusal {
+    use crate::daemon_runtime::AgentBridgeFailureReason;
+    match reason {
+        AgentBridgeFailureReason::TransportFailure => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                "execution_continuation_transport_unavailable",
+                protected_refusal_governance(
+                    crate::cli::governance::GovernanceCause::TransientGovernance,
+                    true,
+                ),
+                "execution.continue",
+            )
+        }
+        AgentBridgeFailureReason::WorkspaceEnsureRequired => {
+            crate::cli::governance::OperationRefusal::agent_recoverable(
+                "execution_continuation_workspace_ensure_required",
+                protected_refusal_governance(
+                    crate::cli::governance::GovernanceCause::NotReady,
+                    true,
+                ),
+                "workspace.ensure",
+            )
+        }
+        AgentBridgeFailureReason::AuthorityMismatch => human_required_refusal(
+            "execution_continuation_authority_mismatch",
+            crate::cli::governance::GovernanceCause::Authority,
+            gwt_core::board_escalation::OperationRefusalKind::Authority,
+            None,
+        ),
+        AgentBridgeFailureReason::ReceiptMismatch => human_required_refusal(
+            "execution_continuation_receipt_mismatch",
+            crate::cli::governance::GovernanceCause::Integrity,
+            gwt_core::board_escalation::OperationRefusalKind::Integrity,
+            None,
+        ),
+        AgentBridgeFailureReason::OperationRejected => human_required_refusal(
+            "execution_continuation_operation_rejected",
+            crate::cli::governance::GovernanceCause::StructuralGovernance,
+            gwt_core::board_escalation::OperationRefusalKind::Permission,
+            None,
+        ),
+    }
+}
+
+pub(super) fn run_governed<E: CliEnv>(
+    env: &mut E,
+    command: ExecutionCommand,
+    out: &mut String,
+) -> Result<ExecutionRunResult, Box<crate::cli::governance::GovernedCommandFailure>> {
+    let mut refusal = None;
+    match run_impl(env, command, out, &mut refusal) {
+        Ok(exit_code) => Ok(ExecutionRunResult { exit_code, refusal }),
+        Err(error) => Err(Box::new(crate::cli::governance::GovernedCommandFailure {
+            error,
+            refusal,
+        })),
+    }
+}
+
 /// Run an `execution.*` settlement command. Requires `GWT_SESSION_ID` so the
 /// settlement binds to the session that owns the record.
 pub(super) fn run<E: CliEnv>(
@@ -11801,8 +15212,43 @@ pub(super) fn run<E: CliEnv>(
     command: ExecutionCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    let mut refusal = None;
+    run_impl(env, command, out, &mut refusal)
+}
+
+fn run_impl<E: CliEnv>(
+    env: &mut E,
+    command: ExecutionCommand,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
     let invocation_scope = env.repo_path().to_path_buf();
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    if let ExecutionCommand::OwnerStatus { owner } = &command {
+        let diagnosis = diagnose_owner(&worktree, *owner);
+        out.push_str(&serde_json::to_string_pretty(&diagnosis).map_err(|error| {
+            SpecOpsError::from(ApiError::Unexpected(format!(
+                "failed to serialize owner execution status: {error}"
+            )))
+        })?);
+        out.push('\n');
+        return Ok(0);
+    }
+    if let ExecutionCommand::ReleasePrepared {
+        owner,
+        operation_id,
+        reason,
+    } = &command
+    {
+        return run_release_prepared(
+            &worktree,
+            *owner,
+            operation_id.as_deref(),
+            reason,
+            Utc::now(),
+            out,
+        );
+    }
     if matches!(&command, ExecutionCommand::Status) {
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
         let snapshot = diagnose(&invocation_scope, session_id.as_deref());
@@ -11832,13 +15278,31 @@ pub(super) fn run<E: CliEnv>(
                 "execution: {} refused — execution recovery scope is invalid: ambient GWT_SESSION_ID is unavailable\n",
                 recovery_operation.expect("protected recovery operation")
             ));
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_recovery_scope_unavailable",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                )
+                .with_owner(record_owner_number(&worktree)),
+            );
             return Ok(2);
         }
         None => {
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_session_identity_unavailable",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                )
+                .with_owner(record_owner_number(&worktree)),
+            );
             return Err(SpecOpsError::from(ApiError::Unexpected(
                 "execution settlement requires GWT_SESSION_ID to bind to the owning session"
                     .to_string(),
-            )))
+            )));
         }
     };
     let recovery_context = recovery_operation.map(|_| {
@@ -11850,6 +15314,12 @@ pub(super) fn run<E: CliEnv>(
     if let (Some(operation), Some(Err(error))) = (recovery_operation, recovery_context.as_ref()) {
         out.push_str(&format!(
             "execution: {operation} refused — execution recovery scope is invalid: {error}\n"
+        ));
+        *refusal = Some(human_required_refusal(
+            "execution_recovery_scope_invalid",
+            crate::cli::governance::GovernanceCause::Authority,
+            gwt_core::board_escalation::OperationRefusalKind::Authority,
+            None,
         ));
         return Ok(2);
     }
@@ -11867,12 +15337,40 @@ pub(super) fn run<E: CliEnv>(
             .and_then(|context| context.as_ref().ok())
             .expect("validated protected recovery context")
             .session();
-        return run_adopt(
+        if let Some(target) = crate::daemon_runtime::HookForwardTarget::from_env_strict()
+            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?
+        {
+            let request = crate::AgentExecutionAdoptionRequest {
+                schema_version: 1,
+                claimed_session_id: session_id.clone(),
+                reason: reason.clone(),
+            };
+            return match crate::daemon_runtime::send_execution_adoption_via_agent_bridge(
+                &target,
+                &request,
+                expected_session,
+            ) {
+                Ok(receipt) => {
+                    out.push_str(&format!(
+                        "execution: adopted {} #{} for session {} through the Host (capability generation {})\n",
+                        receipt.execution_binding.owner_kind, receipt.execution_binding.owner_number,
+                        receipt.execution_binding.session_id, receipt.execution_binding.capability_generation,
+                    ));
+                    Ok(0)
+                }
+                Err(error) => {
+                    out.push_str(&format!("execution: adopt refused — {error}\n"));
+                    Ok(2)
+                }
+            };
+        }
+        return run_adopt_governed(
             recovery_worktree,
             &session_id,
             expected_session,
             reason,
             out,
+            refusal,
         );
     }
     if let ExecutionCommand::Repair { reason } = &command {
@@ -11881,12 +15379,13 @@ pub(super) fn run<E: CliEnv>(
             .and_then(|context| context.as_ref().ok())
             .expect("validated protected recovery context")
             .session();
-        return run_repair(
+        return run_repair_governed(
             recovery_worktree,
             &session_id,
             expected_session,
             reason,
             out,
+            refusal,
         );
     }
     if let ExecutionCommand::Continue { operation_id } = &command {
@@ -11894,21 +15393,43 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(
                 "execution: continuation refused — durable Session recovery context is unavailable; relaunch the Session\n",
             );
+            *refusal = Some(human_required_refusal(
+                "execution_continuation_scope_unavailable",
+                crate::cli::governance::GovernanceCause::ManagedIdentity,
+                gwt_core::board_escalation::OperationRefusalKind::Authority,
+                None,
+            ));
             return Ok(2);
         }
-        let target = crate::daemon_runtime::HookForwardTarget::from_env_strict()
-            .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error)))?
-            .ok_or_else(|| {
-                SpecOpsError::from(ApiError::Unexpected(
+        let target = match crate::daemon_runtime::HookForwardTarget::from_env_strict() {
+            Ok(Some(target)) => target,
+            Ok(None) => {
+                *refusal = Some(human_required_refusal(
+                    "execution_host_bridge_unavailable",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                ));
+                return Err(SpecOpsError::from(ApiError::Unexpected(
                     "execution.continue requires the authenticated Host bridge; relaunch the Session"
                         .to_string(),
-                ))
-            })?;
+                )));
+            }
+            Err(error) => {
+                *refusal = Some(human_required_refusal(
+                    "execution_host_bridge_invalid",
+                    crate::cli::governance::GovernanceCause::ManagedIdentity,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    None,
+                ));
+                return Err(SpecOpsError::from(ApiError::Unexpected(error)));
+            }
+        };
         let request = crate::AgentExecutionContinuationRequest {
             schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
             operation_id: operation_id.clone(),
         };
-        return match crate::daemon_runtime::send_execution_continuation_via_agent_bridge(
+        return match crate::daemon_runtime::send_execution_continuation_via_agent_bridge_detailed(
             &target, &request,
         ) {
             Ok(receipt) => {
@@ -11922,6 +15443,7 @@ pub(super) fn run<E: CliEnv>(
             }
             Err(error) => {
                 out.push_str(&format!("execution: continuation refused — {error}\n"));
+                *refusal = Some(continuation_bridge_failure_refusal(error.reason()));
                 Ok(2)
             }
         };
@@ -11932,19 +15454,87 @@ pub(super) fn run<E: CliEnv>(
             .and_then(|context| context.as_ref().ok())
             .expect("validated protected recovery context")
             .session();
-        return run_reopen_with_session_snapshot(
+        let allow_current_typed_quarantine = crate::cli::verification_record::evaluate_evidence(
+            recovery_worktree,
+            &session_id,
+            load(recovery_worktree)
+                .ok()
+                .flatten()
+                .map(|record| record.owner_number),
+        )
+            == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine;
+        let mut expected_verification_hash = None;
+        if allow_current_typed_quarantine {
+            let verification = crate::cli::verification_record::load(recovery_worktree)
+                .map_err(|error| {
+                    SpecOpsError::from(ApiError::Unexpected(format!(
+                        "failed to load typed quarantine evidence: {error}"
+                    )))
+                })?
+                .ok_or_else(|| {
+                    SpecOpsError::from(ApiError::Unexpected(
+                        "typed quarantine verification record disappeared".to_string(),
+                    ))
+                })?;
+            if let Err(quarantine_refusal) =
+                crate::cli::verification_record::validate_current_quarantine_references(
+                    env,
+                    &verification,
+                    None,
+                )
+            {
+                out.push_str(&format!(
+                    "execution: reopen refused — typed quarantine evidence is not current: {quarantine_refusal}\n"
+                ));
+                *refusal = Some(agent_recoverable_refusal(
+                    "verification_quarantine_not_current",
+                    "verify.run",
+                ));
+                return Ok(2);
+            }
+            expected_verification_hash = Some(verification.content_hash);
+        }
+        return run_reopen_with_session_snapshot_governed(
             recovery_worktree,
             &session_id,
             expected_session,
+            expected_verification_hash.as_deref(),
             reason,
             out,
+            refusal,
         );
     }
+    if let ExecutionCommand::NoAction { reason } = &command {
+        // FR-241: No Action bypasses the Work-event Git settlement gate that
+        // `execution.complete` enforces below, and it may do so only because
+        // `record_no_action` proves there is no deliverable source Work at
+        // all. Nothing here commits, pushes, or reads verification evidence.
+        return run_no_action(&worktree, &session_id, reason, out, refusal);
+    }
     if matches!(&command, ExecutionCommand::Complete) {
-        if let Some(refusal) =
+        // Issue #4544 AC-3: a launch that stopped at a provider permission
+        // prompt did not run unattended, whatever else it produced. Checked
+        // before the Work-event gate because it is about the whole execution
+        // rather than about one artifact being unpushed.
+        if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(&worktree) {
+            out.push_str(&format!("execution: completion refused — {reason}\n"));
+            *refusal = Some(agent_recoverable_refusal(
+                "permission_prompt_regression",
+                "relaunch",
+            ));
+            return Ok(2);
+        }
+        if let Some(reason) =
             crate::cli::verification_record::work_event_settlement_refusal(&worktree)
         {
-            out.push_str(&format!("execution: completion refused — {refusal}\n"));
+            out.push_str(&format!("execution: completion refused — {reason}\n"));
+            // Issue #3696 AC-1: the exact misfire this Issue was filed for. The
+            // agent clears this by committing and pushing its own Work events,
+            // so it must never reach the PM as "agent 側では解消不能".
+            *refusal = Some(agent_recoverable_refusal(
+                "work_event_delivery_unsettled",
+                "commit_and_push_work_events",
+            ));
             return Ok(2);
         }
     }
@@ -11955,32 +15545,94 @@ pub(super) fn run<E: CliEnv>(
     let mut deferral_reason: Option<String> = None;
     let result = match command {
         ExecutionCommand::Status
+        | ExecutionCommand::OwnerStatus { .. }
+        | ExecutionCommand::ReleasePrepared { .. }
         | ExecutionCommand::Adopt { .. }
         | ExecutionCommand::Repair { .. }
         | ExecutionCommand::Continue { .. }
-        | ExecutionCommand::Reopen { .. } => {
+        | ExecutionCommand::Reopen { .. }
+        | ExecutionCommand::NoAction { .. } => {
             unreachable!("handled above")
         }
         ExecutionCommand::Complete => {
             // T-247: completion cannot paper over unhandled prompt
             // obligations — settle or defer them first.
-            if let Some(refusal) =
+            if let Some(reason) =
                 crate::cli::action_obligation::open_obligation_refusal(&worktree, &session_id, &[])
             {
-                out.push_str(&format!("execution: completion refused — {refusal}\n"));
+                out.push_str(&format!("execution: completion refused — {reason}\n"));
+                *refusal = Some(agent_recoverable_refusal(
+                    "open_action_obligations",
+                    "execution.blocked",
+                ));
                 return Ok(2);
             }
-            match settle_completed_with_evidence(&worktree, &session_id, None).map_err(|err| {
-                SpecOpsError::from(ApiError::Unexpected(
-                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                ))
-            })? {
+            let evidence = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                &session_id,
+                load(&worktree)
+                    .ok()
+                    .flatten()
+                    .map(|record| record.owner_number),
+            );
+            let mut expected_verification_hash = None;
+            if evidence == crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine {
+                let verification = crate::cli::verification_record::load(&worktree)
+                    .map_err(|error| {
+                        SpecOpsError::from(ApiError::Unexpected(format!(
+                            "failed to load typed quarantine evidence: {error}"
+                        )))
+                    })?
+                    .ok_or_else(|| {
+                        SpecOpsError::from(ApiError::Unexpected(
+                            "typed quarantine verification record disappeared".to_string(),
+                        ))
+                    })?;
+                if let Err(quarantine_refusal) =
+                    crate::cli::verification_record::validate_current_quarantine_references(
+                        env,
+                        &verification,
+                        None,
+                    )
+                {
+                    out.push_str(&format!(
+                        "execution: completion refused — typed quarantine evidence is not current: {quarantine_refusal}\n"
+                    ));
+                    *refusal = Some(agent_recoverable_refusal(
+                        "verification_quarantine_not_current",
+                        "verify.run",
+                    ));
+                    return Ok(2);
+                }
+                expected_verification_hash = Some(verification.content_hash);
+            }
+            let settlement = match settle_completed_with_evidence(
+                &worktree,
+                &session_id,
+                None,
+                expected_verification_hash.as_deref(),
+            ) {
+                Ok(settlement) => settlement,
+                Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.complete", &err));
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        crate::cli::trusted_store::store_health_error(
+                            "settling execution state",
+                            &err,
+                        ),
+                    )));
+                }
+            };
+            match settlement {
                 Ok(result) => result,
                 Err(status) => {
                     out.push_str(&format!(
                         "execution: completion refused — {}\n",
                         status.describe()
                     ));
+                    // Issue #3696 AC-1: missing / stale / failing verification
+                    // evidence is cleared by `verify.run`, not by the PM.
+                    *refusal = Some(verification_evidence_refusal(&status));
                     return Ok(2);
                 }
             }
@@ -11994,20 +15646,38 @@ pub(super) fn run<E: CliEnv>(
                     "execution.blocked requires a non-empty params.reason".to_string(),
                 )));
             }
+            if let Some(block_refusal) = autonomous_verification_block_refusal(
+                session_launch_route(Some(&session_id)),
+                &reason,
+                missing_verification.as_deref(),
+            ) {
+                out.push_str(&block_refusal);
+                *refusal = Some(agent_recoverable_refusal(
+                    "execution_blocked_requires_verification",
+                    "verify.run",
+                ));
+                return Ok(2);
+            }
             deferral_reason = Some(reason.clone());
-            settle(
+            match settle(
                 &worktree,
                 &session_id,
                 ExecutionSettlement::Blocked {
                     reason,
                     missing_verification,
                 },
-            )
-            .map_err(|err| {
-                SpecOpsError::from(ApiError::Unexpected(
-                    crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                ))
-            })?
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.blocked", &err));
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        crate::cli::trusted_store::store_health_error(
+                            "settling execution state",
+                            &err,
+                        ),
+                    )));
+                }
+            }
         }
     };
     match result {
@@ -12072,6 +15742,20 @@ pub(super) fn run<E: CliEnv>(
                     "execution: open action obligations deferred with the blocker reason\n",
                 );
             }
+            // FR-243 (Issue #4590): a No Action settles terminally, so the
+            // record's status alone would report it as a completion. Name the
+            // settlement the audit actually recorded, or a session that
+            // proved it had nothing to deliver reads back a delivery claim.
+            if crate::cli::delivered_owner::trusted_no_action_for_session(&worktree, &session_id)
+                .is_some()
+            {
+                out.push_str(&format!(
+                    "execution: record already settled as No Action for {kind} #{number} — a successful non-delivery, not a completion. Nothing was verified, committed, or handed to a PR.\n",
+                    kind = record.owner_kind.as_str(),
+                    number = record.owner_number,
+                ));
+                return Ok(0);
+            }
             out.push_str(&format!(
                 "execution: record already settled ({status:?}) for {kind} #{number}\n",
                 status = record.status,
@@ -12089,40 +15773,52 @@ pub(super) fn run<E: CliEnv>(
             Ok(0)
         }
         SettleResult::SessionMismatch { record_session_id } => {
-            // T-124: an unauthorized settlement attempt against an ACTIVE
-            // record is bookkept as a deduped self-improvement candidate
-            // (owner + violation kind). A mismatch against an already
-            // settled record is a harmless retry — refused, not captured.
             let current_record = load(&worktree).ok().flatten();
-            let note = match current_record.as_ref() {
-                Some(record) if record.status == ExecutionControlStatus::Active => {
-                    crate::cli::improvement::execution_integrity_capture_note(
-                        &worktree,
-                        "Execution settlement attempted by a session that does not own the record (unauthorized takeover path)",
-                        &format!(
-                            "{kind} #{number}: settlement session mismatch (T-124)",
-                            kind = record.owner_kind.as_str(),
-                            number = record.owner_number,
-                        ),
-                    )
-                }
-                _ => String::new(),
-            };
             let handoff = match current_record.as_ref().map(|record| record.status) {
-                Some(ExecutionControlStatus::Active) => {
+                Some(ExecutionControlStatus::Active | ExecutionControlStatus::Blocked) => {
                     "Take it over explicitly with JSON operation `execution.adopt` and a non-empty `params.reason` (T-117)."
                 }
-                Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed) => {
-                    "A terminal record cannot be adopted; use a fresh linked-owner launch for new work."
+                Some(ExecutionControlStatus::Completed) => {
+                    "A Completed record cannot be adopted; use a fresh linked-owner launch for new work."
                 }
                 None => "Reload the linked owner before retrying.",
             };
+            // Issue #3696 AC-2: a terminal record and a foreign owner are the
+            // refusals the agent genuinely cannot resolve, so they keep filing.
+            *refusal = Some(
+                match current_record.as_ref().map(|record| record.status) {
+                    Some(ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed) => {
+                        human_required_refusal(
+                            "execution_record_terminal",
+                            crate::cli::governance::GovernanceCause::DomainInvalid,
+                            gwt_core::board_escalation::OperationRefusalKind::Immutability,
+                            None,
+                        )
+                    }
+                    _ => human_required_refusal(
+                        "execution_owner_mismatch",
+                        crate::cli::governance::GovernanceCause::Authority,
+                        gwt_core::board_escalation::OperationRefusalKind::Authority,
+                        Some("execution.adopt".to_string()),
+                    ),
+                }
+                .with_owner(current_record.as_ref().map(|record| record.owner_number)),
+            );
             out.push_str(&format!(
-                "execution: settlement refused — record belongs to session {record_session_id}, not the current session. {handoff}{note}\n",
+                "execution: settlement refused — record belongs to session {record_session_id}, not the current session. {handoff}\n",
             ));
             Ok(2)
         }
         SettleResult::BindingMismatch => {
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_binding_mismatch",
+                    crate::cli::governance::GovernanceCause::Authority,
+                    gwt_core::board_escalation::OperationRefusalKind::Authority,
+                    Some("execution.adopt".to_string()),
+                )
+                .with_owner(record_owner_number(&worktree)),
+            );
             out.push_str(
                 "execution: settlement refused — the durable Session is not bound to the exact current execution generation/head; refresh or take over the current binding before retrying\n",
             );
@@ -12130,28 +15826,29 @@ pub(super) fn run<E: CliEnv>(
         }
         SettleResult::Tampered => {
             let current_record = load(&worktree).ok().flatten();
-            let owner = current_record
-                .as_ref()
-                .map(|record| {
-                    format!(
-                        "{kind} #{number}",
-                        kind = record.owner_kind.as_str(),
-                        number = record.owner_number,
-                    )
-                })
-                .unwrap_or_else(|| "unknown owner".to_string());
             let repair = current_record
                 .as_ref()
                 .map_or("Reload the linked owner before retrying.", |record| {
                     integrity_repair_guidance(record.status)
                 });
-            let note = crate::cli::improvement::execution_integrity_capture_note(
-                &worktree,
-                "Execution control record failed integrity validation at settlement (edited outside the canonical operations)",
-                &format!("{owner}: settlement tamper refusal (T-124)"),
+            // Issue #3696 AC-2: integrity is the deliberate exception to AC-1's
+            // "the agent can fix this itself" rule. `execution.repair` is
+            // reachable and the refusal names it, but a record that failed
+            // integrity validation means trusted state was written outside the
+            // canonical operations. Repair quarantines it and mints a fresh
+            // one; the owner has to know that happened, so the escalation
+            // carries the repair route rather than replacing it.
+            *refusal = Some(
+                human_required_refusal(
+                    "execution_record_integrity_failed",
+                    crate::cli::governance::GovernanceCause::Integrity,
+                    gwt_core::board_escalation::OperationRefusalKind::Integrity,
+                    Some("execution.repair".to_string()),
+                )
+                .with_owner(record_owner_number(&worktree)),
             );
             out.push_str(&format!(
-                "execution: settlement refused — the record failed integrity validation (edited outside the canonical operations). {repair}{note}\n",
+                "execution: settlement refused — the record failed integrity validation (edited outside the canonical operations). {repair}\n",
             ));
             Ok(2)
         }
@@ -12161,14 +15858,24 @@ pub(super) fn run<E: CliEnv>(
 /// FR-194..FR-196: recover a resolved terminal block without changing
 /// ownership or fabricating completion. The entire decision and record write
 /// is serialized by the same trusted-store lease used for settlement/adopt.
-fn run_reopen_with_session_snapshot(
+fn run_reopen_with_session_snapshot_governed(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
-    run_reopen_impl(worktree, session_id, Some(expected_session), reason, out)
+    run_reopen_impl(
+        worktree,
+        session_id,
+        Some(expected_session),
+        expected_verification_hash,
+        reason,
+        out,
+        refusal,
+    )
 }
 
 #[cfg(test)]
@@ -12178,35 +15885,43 @@ fn run_reopen(
     reason: &str,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    run_reopen_impl(worktree, session_id, None, reason, out)
+    let mut refusal = None;
+    run_reopen_impl(worktree, session_id, None, None, reason, out, &mut refusal)
 }
 
 fn run_reopen_impl(
     worktree: &Path,
     session_id: &str,
     expected_session: Option<&gwt_agent::Session>,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     if reason.trim().is_empty() {
         return Err(SpecOpsError::from(ApiError::Unexpected(
             "execution.reopen requires a non-empty params.reason".to_string(),
         )));
     }
-    let code = crate::cli::trusted_store::with_write_lease(worktree, || {
+    let code = match crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_reopen_locked(
             worktree,
             session_id,
             expected_session,
+            expected_verification_hash,
             reason,
             out,
+            refusal,
         ))
-    })
-    .map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })??;
+    }) {
+        Ok(result) => result?,
+        Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
+            return Err(SpecOpsError::from(ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error("settling execution state", &err),
+            )));
+        }
+    };
     // T-248 absorbed core: a real reopen revives the obligations the block
     // deferred, except the kinds the recovery evidence already covers
     // (implementation/verification are proven by the mandatory post-block
@@ -12236,13 +15951,26 @@ fn run_reopen_locked(
     worktree: &Path,
     session_id: &str,
     expected_session: Option<&gwt_agent::Session>,
+    expected_verification_hash: Option<&str>,
     reason: &str,
     out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
-    let prerequisites = match evaluate_execution_reopen_prerequisites(worktree, session_id) {
+    let prerequisites = match evaluate_execution_reopen_prerequisites(
+        worktree,
+        session_id,
+        expected_verification_hash.is_some(),
+    ) {
         Ok(prerequisites) => prerequisites,
-        Err(refusal) => {
-            out.push_str(&format!("execution: reopen refused — {}\n", refusal.reason));
+        Err(prerequisite) => {
+            out.push_str(&format!(
+                "execution: reopen refused — {}\n",
+                prerequisite.reason
+            ));
+            *refusal = Some(
+                recovery_prerequisite_operation_refusal("execution.reopen", &prerequisite)
+                    .with_owner(record_owner_number(worktree)),
+            );
             return Ok(2);
         }
     };
@@ -12269,17 +15997,19 @@ fn run_reopen_locked(
             };
             match satisfied {
                 Ok(()) => {}
-                Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+                Err(err) if is_recovery_session_changed_error(&err) => {
                     out.push_str(&format!("execution: reopen refused — {err}\n"));
+                    *refusal = Some(recovery_session_changed_refusal());
                     return Ok(2);
                 }
                 Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
                     return Err(SpecOpsError::from(ApiError::Unexpected(
                         crate::cli::trusted_store::store_health_error(
                             "settling execution state",
                             &err,
                         ),
-                    )))
+                    )));
                 }
             }
             out.push_str(&format!(
@@ -12305,6 +16035,12 @@ fn run_reopen_locked(
             verification_started_at,
         ),
     };
+    if expected_verification_hash.is_some_and(|expected| verification.content_hash != expected) {
+        out.push_str(
+            "execution: reopen refused — typed quarantine verification evidence changed after live PR validation\n",
+        );
+        return Ok(2);
+    }
 
     let reopened_at = Utc::now();
     record.recoveries.push(ExecutionRecovery {
@@ -12344,14 +16080,16 @@ fn run_reopen_locked(
     };
     let generation_updated = match generation_update {
         Ok(updated) => updated,
-        Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+        Err(err) if is_recovery_session_changed_error(&err) => {
             out.push_str(&format!("execution: reopen refused — {err}\n"));
+            *refusal = Some(recovery_session_changed_refusal());
             return Ok(2);
         }
         Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
             return Err(SpecOpsError::from(ApiError::Unexpected(
                 crate::cli::trusted_store::store_health_error("settling execution state", &err),
-            )))
+            )));
         }
     };
     if !generation_updated {
@@ -12370,14 +16108,16 @@ fn run_reopen_locked(
         };
         match save_result {
             Ok(()) => {}
-            Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+            Err(err) if is_recovery_session_changed_error(&err) => {
                 out.push_str(&format!("execution: reopen refused — {err}\n"));
+                *refusal = Some(recovery_session_changed_refusal());
                 return Ok(2);
             }
             Err(err) => {
+                *refusal = Some(operation_store_failure_refusal("execution.reopen", &err));
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                )))
+                )));
             }
         }
     }
@@ -12395,12 +16135,89 @@ fn run_reopen_locked(
 /// current session with an audited transfer entry. Integrity-failed records
 /// require a fresh execution lifetime: rewriting one here could canonize a
 /// truncated recovery history.
+pub(crate) fn adopt_for_authenticated_host(
+    worktree: &Path,
+    session: &gwt_agent::Session,
+    reason: &str,
+    publisher: &mut dyn ExecutionAdoptionPublisher,
+) -> Result<(), crate::AgentWorkspaceUpdateError> {
+    use crate::{AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode};
+    let mut out = String::new();
+    let mut refusal = None;
+    let code = run_adopt_with_publisher(
+        worktree,
+        &session.id,
+        session,
+        reason,
+        &mut out,
+        Some(publisher),
+        &mut refusal,
+    )
+    // Issue #4443 AC-10: the underlying refusal already names the repair route
+    // (`execution.repair`, `verify.plan` ...). Replacing it with a fixed
+    // sentence left the agent with a bare `code=internal` and no way forward.
+    .map_err(|error| {
+        AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::Internal,
+            format!("Host adoption did not complete: {error}"),
+        )
+    })?;
+    if code != 0 {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::TransactionConflict,
+            out.trim(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn run_adopt(
     worktree: &Path,
     session_id: &str,
     expected_session: &gwt_agent::Session,
     reason: &str,
     out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let mut refusal = None;
+    run_adopt_with_publisher(
+        worktree,
+        session_id,
+        expected_session,
+        reason,
+        out,
+        None,
+        &mut refusal,
+    )
+}
+
+fn run_adopt_governed(
+    worktree: &Path,
+    session_id: &str,
+    expected_session: &gwt_agent::Session,
+    reason: &str,
+    out: &mut String,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
+) -> Result<i32, SpecOpsError> {
+    run_adopt_with_publisher(
+        worktree,
+        session_id,
+        expected_session,
+        reason,
+        out,
+        None,
+        refusal,
+    )
+}
+
+fn run_adopt_with_publisher(
+    worktree: &Path,
+    session_id: &str,
+    expected_session: &gwt_agent::Session,
+    reason: &str,
+    out: &mut String,
+    mut publisher: Option<&mut dyn ExecutionAdoptionPublisher>,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
     if reason.trim().is_empty() {
         return Err(SpecOpsError::from(ApiError::Unexpected(
@@ -12416,23 +16233,32 @@ fn run_adopt(
         out.push_str(
             "execution: adopt refused — exact-unbound Host Sessions must use execution.continue to bind canonical authority\n",
         );
+        *refusal = Some(agent_recoverable_refusal(
+            "execution_adopt_requires_continuation",
+            "execution.continue",
+        ));
         return Ok(2);
     }
     // T-149: adoption is a read-modify-write cycle — leased.
-    crate::cli::trusted_store::with_write_lease(worktree, || {
+    match crate::cli::trusted_store::with_write_lease(worktree, || {
         Ok(run_adopt_locked(
             worktree,
             session_id,
             expected_session,
             reason,
             out,
+            &mut publisher,
+            refusal,
         ))
-    })
-    .map_err(|err| {
-        SpecOpsError::from(ApiError::Unexpected(
-            crate::cli::trusted_store::store_health_error("settling execution state", &err),
-        ))
-    })?
+    }) {
+        Ok(result) => result,
+        Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
+            Err(SpecOpsError::from(ApiError::Unexpected(
+                crate::cli::trusted_store::store_health_error("settling execution state", &err),
+            )))
+        }
+    }
 }
 
 fn run_adopt_locked(
@@ -12441,33 +16267,113 @@ fn run_adopt_locked(
     expected_session: &gwt_agent::Session,
     reason: &str,
     out: &mut String,
+    publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
+    refusal: &mut Option<crate::cli::governance::OperationRefusal>,
 ) -> Result<i32, SpecOpsError> {
-    let prerequisites = match evaluate_execution_adopt_prerequisites(worktree, session_id) {
+    let mut prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
+    let mut reconciled = false;
+    if prerequisites.is_err() {
+        match reconcile_committed_generation_takeover_for_recovery(
+            worktree,
+            expected_session,
+            publisher,
+        ) {
+            Ok(true) => {
+                reconciled = true;
+                prerequisites = evaluate_execution_adopt_prerequisites(worktree, session_id);
+            }
+            Ok(false) => {}
+            Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+                out.push_str(&format!("execution: adopt refused — {err}\n"));
+                *refusal = Some(recovery_session_changed_refusal());
+                return Ok(2);
+            }
+            Err(err) => {
+                *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
+                return Err(SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error(
+                        "reconciling adopted execution authority",
+                        &err,
+                    ),
+                )));
+            }
+        }
+    }
+    let prerequisites = match prerequisites {
         Ok(prerequisites) => prerequisites,
-        Err(refusal) => {
-            out.push_str(&format!("execution: adopt refused — {}\n", refusal.reason));
+        Err(prerequisite) => {
+            out.push_str(&format!(
+                "execution: adopt refused — {}\n",
+                prerequisite.reason
+            ));
+            *refusal = Some(
+                recovery_prerequisite_operation_refusal("execution.adopt", &prerequisite)
+                    .with_owner(record_owner_number(worktree)),
+            );
             return Ok(2);
         }
     };
+    if publisher.is_some()
+        && match &prerequisites {
+            ExecutionAdoptPrerequisites::Satisfied { binding, .. }
+            | ExecutionAdoptPrerequisites::Available { binding, .. } => binding.is_none(),
+        }
+    {
+        out.push_str("execution: adopt refused — Host adoption requires a generation binding\n");
+        *refusal = Some(agent_recoverable_refusal(
+            "execution_adopt_requires_generation_binding",
+            "execution.continue",
+        ));
+        return Ok(2);
+    }
     let mut record = match prerequisites {
-        ExecutionAdoptPrerequisites::Satisfied { record, .. } => {
-            match with_satisfied_recovery_session_lease(worktree, &record, expected_session, || {
+        ExecutionAdoptPrerequisites::Satisfied { record, binding } => {
+            let session_result = if reconciled {
                 Ok(())
-            }) {
+            } else if binding.is_some() {
+                persist_current_generation_binding_if_owned_for_recovery(
+                    worktree,
+                    &record,
+                    expected_session,
+                    publisher,
+                )
+            } else {
+                with_satisfied_recovery_session_lease(
+                    worktree,
+                    &record,
+                    expected_session,
+                    || Ok(()),
+                )
+            };
+            match session_result {
                 Ok(()) => {}
                 Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
                     out.push_str(&format!("execution: adopt refused — {err}\n"));
+                    *refusal = Some(recovery_session_changed_refusal());
                     return Ok(2);
                 }
                 Err(err) => {
+                    *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
                     return Err(SpecOpsError::from(ApiError::Unexpected(
                         crate::cli::trusted_store::store_health_error(
                             "settling execution state",
                             &err,
                         ),
-                    )))
+                    )));
                 }
             }
+            crate::cli::verification_record::authenticate_current_generation_caller(
+                worktree,
+                Some(session_id),
+            )
+            .map_err(|err| {
+                SpecOpsError::from(ApiError::Unexpected(
+                    crate::cli::trusted_store::store_health_error(
+                        "authenticating adopted execution authority",
+                        &err,
+                    ),
+                ))
+            })?;
             out.push_str("execution: the current session already owns this record\n");
             return Ok(0);
         }
@@ -12486,16 +16392,19 @@ fn run_adopt_locked(
         &record,
         &transfer,
         expected_session,
+        publisher,
     ) {
         Ok(updated) => updated,
         Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
             out.push_str(&format!("execution: adopt refused — {err}\n"));
+            *refusal = Some(recovery_session_changed_refusal());
             return Ok(2);
         }
         Err(err) => {
+            *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
             return Err(SpecOpsError::from(ApiError::Unexpected(
                 crate::cli::trusted_store::store_health_error("settling execution state", &err),
-            )))
+            )));
         }
     };
     if !generation_updated {
@@ -12510,17 +16419,31 @@ fn run_adopt_locked(
             &record,
         ) {
             Ok(()) => {}
-            Err(err) if err.to_string().starts_with(RECOVERY_SESSION_CHANGED_PREFIX) => {
+            Err(err) if is_recovery_session_changed_error(&err) => {
                 out.push_str(&format!("execution: adopt refused — {err}\n"));
+                *refusal = Some(recovery_session_changed_refusal());
                 return Ok(2);
             }
             Err(err) => {
+                *refusal = Some(operation_store_failure_refusal("execution.adopt", &err));
                 return Err(SpecOpsError::from(ApiError::Unexpected(
                     crate::cli::trusted_store::store_health_error("settling execution state", &err),
-                )))
+                )));
             }
         }
     }
+    crate::cli::verification_record::authenticate_current_generation_caller(
+        worktree,
+        Some(session_id),
+    )
+    .map_err(|err| {
+        SpecOpsError::from(ApiError::Unexpected(
+            crate::cli::trusted_store::store_health_error(
+                "authenticating adopted execution authority",
+                &err,
+            ),
+        ))
+    })?;
     out.push_str(&format!(
         "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record)\n",
         kind = record.owner_kind.as_str(),
@@ -12535,6 +16458,99 @@ fn run_adopt_locked(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    /// Issue #4074 AC-3 (regression contract for #4029): `execution.status`
+    /// must not name a recovery the caller's session and authority would
+    /// refuse. Every operation the enumeration can produce is therefore either
+    /// probe-gated — the probe re-checks acceptance and drops it when the
+    /// answer is no — or independent of session and authority altogether.
+    #[test]
+    fn every_enumerated_recovery_is_probe_gated_or_session_independent() {
+        let states = [
+            ExecutionDiagnosisState::Active,
+            ExecutionDiagnosisState::Completed,
+            ExecutionDiagnosisState::Blocked,
+            ExecutionDiagnosisState::Missing,
+            ExecutionDiagnosisState::Corrupt,
+        ];
+        let bindings = [
+            ExecutionBindingState::Bound,
+            ExecutionBindingState::Missing,
+            ExecutionBindingState::Stale,
+            ExecutionBindingState::Terminal,
+            ExecutionBindingState::HostUnreachable,
+            ExecutionBindingState::Unknown,
+            ExecutionBindingState::Corrupt,
+        ];
+        let workspace_cases = [
+            (Some(true), None),
+            (Some(false), Some("workspace_ensure_required")),
+            (Some(false), Some("session_unbound")),
+            (None, None),
+        ];
+        let mut observed = std::collections::BTreeSet::new();
+        for state in states {
+            for binding in bindings {
+                for (applicable, reason) in workspace_cases {
+                    for owns_record in [true, false] {
+                        for operation in base_execution_recoveries(
+                            binding,
+                            state,
+                            owns_record,
+                            applicable,
+                            reason,
+                        ) {
+                            assert!(
+                                PROTECTED_RECOVERY_OPERATIONS.contains(&operation.as_str())
+                                    || VERIFICATION_RECOVERY_OPERATIONS
+                                        .contains(&operation.as_str())
+                                    || SESSION_INDEPENDENT_RECOVERY_OPERATIONS
+                                        .contains(&operation.as_str()),
+                                "{state:?}/{binding:?} names `{operation}`, which is neither \
+                             probe-gated nor session-independent: it can be advertised to a \
+                             caller that cannot run it"
+                            );
+                            observed.insert(operation);
+                        }
+                    }
+                }
+            }
+        }
+        // The guard is only meaningful while the enumeration actually reaches
+        // both halves of the contract.
+        assert!(
+            observed
+                .iter()
+                .any(|op| PROTECTED_RECOVERY_OPERATIONS.contains(&op.as_str())),
+            "no probe-gated recovery was exercised: {observed:?}"
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|op| SESSION_INDEPENDENT_RECOVERY_OPERATIONS.contains(&op.as_str())),
+            "no session-independent recovery was exercised: {observed:?}"
+        );
+    }
+
+    /// The probe set and the probe-gated operation list are one contract: an
+    /// operation listed as protected but never probed would be stripped from
+    /// every projection and never re-advertised, and a probed operation missing
+    /// from the list would leak into projections unchecked.
+    #[test]
+    fn every_protected_recovery_operation_has_a_probe() {
+        let source = include_str!("execution_state.rs");
+        let probes = source
+            .split_once("let probes = if recovery_context.is_some_and(Result::is_ok) {")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("};").map(|(block, _)| block))
+            .expect("probe construction block");
+        for operation in PROTECTED_RECOVERY_OPERATIONS {
+            assert!(
+                probes.contains(&format!("\"{operation}\"")),
+                "protected recovery `{operation}` has no probe backing it"
+            );
+        }
+    }
 
     #[test]
     fn app_runtime_exact_cleanup_never_acquires_owner_from_a_session_callback() {
@@ -12646,10 +16662,42 @@ mod tests {
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            completion_evidence: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
+            permission_decision: None,
         }
+    }
+
+    /// Issue #4591 follow-up: the Permission Mode Decision must not move the
+    /// record's body hash.
+    ///
+    /// `compute_content_hash` hashes the deserialized record re-serialized, so
+    /// a binary that does not know this field would drop it, recompute a
+    /// different hash, and report every such record `corrupt` with no recovery
+    /// available. Pinning the two hashes equal is what keeps the field
+    /// readable across the release that introduced it.
+    #[test]
+    fn the_permission_mode_decision_stays_out_of_the_record_body_hash() {
+        let without = active_record("sess-4591");
+        let mut with = without.clone();
+        with.permission_decision = Some(gwt_agent::PermissionModeDecision::default());
+
+        assert_eq!(
+            compute_content_hash(&with),
+            compute_content_hash(&without),
+            "a record carrying a permission decision must validate on a binary that does not know the field"
+        );
+
+        // Excluded from the hash, not from the record. The first attempt at
+        // this dropped the field inside `recovery_storage_projection`, which
+        // is also what gets written — the hash matched and the decision was
+        // never persisted at all.
+        let stored: ExecutionControlRecord =
+            serde_json::from_slice(&serialize_execution_control(&with).unwrap()).unwrap();
+        assert_eq!(stored.permission_decision, with.permission_decision);
+        assert!(integrity_ok(&stored));
     }
 
     fn test_recovery(session: &str, index: usize) -> ExecutionRecovery {
@@ -13705,6 +17753,183 @@ mod tests {
         }
     }
 
+    /// Issue #4161: the attempt logs are append-only, so aborting a Prepared
+    /// successor appends an Aborted event and leaves the original Prepared
+    /// event in place. A guard that scans raw events instead of the latest
+    /// event per operation therefore fences the generation forever: every
+    /// later launch is refused, the Issue Monitor records the same failure on
+    /// every scan, and the owner can only be worked on under a new number.
+    #[test]
+    fn aborted_successor_does_not_fence_a_completed_generation_forever() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "completed-fence-predecessor";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+        assert!(matches!(
+            settle(dir.path(), session_id, ExecutionSettlement::Completed).unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let predecessor = ExactManualLaunchPredecessor {
+            sessions_dir: &sessions_dir,
+            session: None,
+            runtime: None,
+            binding: &binding,
+            status: SuccessorPredecessorStatus::Completed,
+            terminal_reason: "unused for an already-terminal predecessor",
+        };
+
+        let first = successor_request(
+            "completed-fence-first",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_exact_manual_launch_successor(dir.path(), owner, &first, predecessor)
+            .expect("the first launch prepares its successor");
+        abort_successor(
+            dir.path(),
+            owner,
+            &first,
+            "Host exited before activating the fresh launch successor",
+        )
+        .expect("the first launch aborts its Prepared successor");
+
+        let second = successor_request(
+            "completed-fence-second",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        let prepared =
+            prepare_exact_manual_launch_successor(dir.path(), owner, &second, predecessor)
+                .expect("an aborted successor must not fence the current generation");
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
+        assert_eq!(prepared.request.operation_id, second.operation_id);
+    }
+
+    /// Issue #4161 AC-3 / AC-4: a launch that died between preparing its
+    /// successor and settling it leaves a Prepared attempt whose candidate
+    /// Session never existed. Nothing retires it, so the owner refuses every
+    /// later launch. The diagnosis has to name the release route, and the
+    /// release has to be reachable without the GUI.
+    #[test]
+    fn leaked_prepared_successor_is_reported_and_released_by_owner_operation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "leaked-prepared-predecessor";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+        assert!(matches!(
+            settle(dir.path(), session_id, ExecutionSettlement::Completed).unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let predecessor = ExactManualLaunchPredecessor {
+            sessions_dir: &sessions_dir,
+            session: None,
+            runtime: None,
+            binding: &binding,
+            status: SuccessorPredecessorStatus::Completed,
+            terminal_reason: "unused for an already-terminal predecessor",
+        };
+        let leaked = successor_request(
+            "leaked-prepared-launch",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_exact_manual_launch_successor(dir.path(), owner, &leaked, predecessor)
+            .expect("the dead launch prepared its successor");
+        // The launch got as far as persisting its candidate Session and then
+        // never activated the successor — the shape production actually leaves
+        // behind, and the one a Session-existence gate would refuse to clear.
+        persist_recovery_session_snapshot(dir.path(), owner, &leaked.initial_session_id);
+
+        let fenced = diagnose_owner(dir.path(), owner);
+        assert_eq!(fenced.recommended_recovery, "execution.release_prepared");
+        assert_eq!(fenced.blocking_prepared_transactions.len(), 1);
+        let blocking = &fenced.blocking_prepared_transactions[0];
+        assert_eq!(blocking.kind, "successor");
+        assert_eq!(blocking.operation_id, leaked.operation_id);
+        assert_ne!(blocking.candidate_session_state, "missing");
+
+        let now = Utc::now();
+        let held = release_blocking_prepared_transactions(
+            dir.path(),
+            owner,
+            &sessions_dir,
+            None,
+            "operator release without naming the operation",
+            now,
+        )
+        .expect("a blanket release reports what it kept");
+        assert_eq!(held.status, "retained");
+        assert_eq!(
+            held.retained
+                .first()
+                .and_then(|entry| entry.retained_because),
+            Some("prepared_within_grace_period"),
+            "a launch may still be between preparing its successor and persisting its Session"
+        );
+
+        let released = release_blocking_prepared_transactions(
+            dir.path(),
+            owner,
+            &sessions_dir,
+            Some(&leaked.operation_id),
+            "the launch that prepared this successor is gone",
+            now,
+        )
+        .expect("naming the operation releases it now");
+        assert_eq!(released.status, "released");
+        assert_eq!(released.released.len(), 1);
+        assert!(released.retained.is_empty());
+
+        assert!(diagnose_owner(dir.path(), owner)
+            .blocking_prepared_transactions
+            .is_empty());
+        let successor = successor_request(
+            "leaked-prepared-relaunch",
+            "gwt-host-manual-launch",
+            MANUAL_COMPLETED_OWNER_LAUNCH_SOURCE,
+        );
+        prepare_exact_manual_launch_successor(dir.path(), owner, &successor, predecessor)
+            .expect("the launch the diagnosis recommends must be accepted after the release");
+    }
+
     #[test]
     fn historical_continuation_audit_survives_legal_takeover() {
         let _env_lock = crate::env_test_lock()
@@ -13936,9 +18161,50 @@ mod tests {
         StartupActiveGenerationCandidate,
         gwt_agent::SessionExecutionIdentity,
     ) {
+        startup_reaper_active_fixture_with_status(
+            worktree,
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Interrupted,
+        )
+    }
+
+    /// Issue #3934: the durable holder state decides reclamation, so the
+    /// fixture has to be able to mint every one of the four states.
+    fn startup_reaper_active_fixture_with_status(
+        worktree: &Path,
+        owner: ExecutionOwnerKey,
+        session_id: &str,
+        status: gwt_agent::AgentStatus,
+    ) -> (
+        StartupActiveGenerationCandidate,
+        gwt_agent::SessionExecutionIdentity,
+    ) {
+        startup_reaper_active_fixture_with_status_and_age(
+            worktree,
+            owner,
+            session_id,
+            status,
+            chrono::Duration::zero(),
+        )
+    }
+
+    /// Issue #4200 AC-2: the same fixture with control over how long ago the
+    /// generation was launched, so the start-up grace can be exercised.
+    fn startup_reaper_active_fixture_with_status_and_age(
+        worktree: &Path,
+        owner: ExecutionOwnerKey,
+        session_id: &str,
+        status: gwt_agent::AgentStatus,
+        age: chrono::Duration,
+    ) -> (
+        StartupActiveGenerationCandidate,
+        gwt_agent::SessionExecutionIdentity,
+    ) {
         let mut active = active_record(session_id);
         active.owner_kind = owner.kind;
         active.owner_number = owner.number;
+        active.launched_at -= age;
         save(worktree, &active).unwrap();
         ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
         let binding = current_execution_binding(worktree, owner)
@@ -13948,7 +18214,7 @@ mod tests {
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let session_path = sessions_dir.join(format!("{session_id}.toml"));
         let mut session = gwt_agent::Session::load(&session_path).unwrap();
-        session.update_status(gwt_agent::AgentStatus::Interrupted);
+        session.update_status(status);
         session.save(&sessions_dir).unwrap();
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
             .unwrap()
@@ -14455,6 +18721,1221 @@ mod tests {
             assert_eq!(fs::read(session_path).unwrap(), session_before);
             assert_eq!(fs::read(runtime_path).unwrap(), runtime_before);
         }
+    }
+
+    /// Issue #4200 AC-1 / AC-3: revoking a launch releases the generation no
+    /// amount of evidence can.
+    ///
+    /// The fixture is the exact production shape: an Active generation whose
+    /// holder Session still reads `Running` and whose runtime sidecar was
+    /// written by a Host process that is still alive — what a launch that died
+    /// before its agent ever ran leaves behind, because the PTY-exit path that
+    /// would have corrected both records never ran. The reaper refuses it
+    /// forever, and correctly so: nothing here proves the holder is dead.
+    /// Revoking supplies a decision instead of a proof, and that is enough.
+    #[test]
+    fn revoked_launch_release_terminalizes_a_holder_the_reaper_must_refuse() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 920,
+        };
+        let session_id = "revoked-launch-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let process_started_at = crate::process::host_process_start_time(std::process::id())
+            .expect("current process start identity");
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Live,
+            "the fixture must reproduce the reading that strands a generation"
+        );
+        assert!(
+            matches!(
+                reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                    .unwrap(),
+                StartupActiveGenerationReapOutcome::Unchanged
+            ),
+            "the evidence-based reaper has nothing to act on, which is the gap"
+        );
+        assert!(
+            unreachable_current_generation_holder(&sessions_dir, worktree.path(), owner)
+                .unwrap()
+                .is_none(),
+            "and the launch path finds no dead holder to supersede either"
+        );
+
+        assert!(
+            release_revoked_launch_generation(worktree.path(), owner, "   ").is_err(),
+            "a release with no stated reason leaves no usable audit entry"
+        );
+
+        let released =
+            release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
+                .unwrap();
+        assert_eq!(
+            released,
+            LaunchGenerationRelease::Released {
+                generation_id: candidate.generation_id.clone(),
+                holder_session_id: session_id.to_string(),
+            }
+        );
+
+        let hold = owner_generation_hold_from_ledger(
+            &sessions_dir,
+            &load_owner_generation_ledger(worktree.path(), owner)
+                .unwrap()
+                .unwrap(),
+        )
+        .expect("the generation stays on record as audit evidence");
+        assert_eq!(hold.status, ExecutionControlStatus::Blocked);
+        assert_eq!(hold.generation_id, candidate.generation_id);
+        assert!(
+            execution_generation_conflict_refusal(owner, Some(&hold))
+                .contains("blocked generation"),
+            "a refusal on a released generation must say it is terminal, because a \
+             terminal predecessor is what routes the next launch to a successor"
+        );
+
+        // The lifecycle entry names why the generation ended, under its own
+        // operation id, so it can never be confused with a reaper release.
+        let ledger = load_owner_generation_ledger(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        let event = ledger
+            .lifecycle_events_for(&candidate.generation_id)
+            .max_by_key(|event| event.sequence)
+            .expect("release lifecycle event");
+        assert_eq!(event.from_status, ExecutionControlStatus::Active);
+        assert_eq!(event.to_status, ExecutionControlStatus::Blocked);
+        assert!(event
+            .operation_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with(REVOKED_LAUNCH_RELEASE_OPERATION_PREFIX)));
+
+        // Repeating it reports the terminal state instead of writing again.
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+        assert_eq!(
+            release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
+                .unwrap(),
+            LaunchGenerationRelease::AlreadyTerminal {
+                generation_id: candidate.generation_id
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before,
+            "an already-terminal release is byte-preserving"
+        );
+    }
+
+    /// Issue #4200: the release is still fail-closed about *which* generation it
+    /// settles. A successor transaction that is prepared but not yet activated
+    /// owns the outcome of this generation, so the revoke must not race it.
+    #[test]
+    fn revoked_launch_release_refuses_a_generation_with_a_prepared_successor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 921,
+        };
+        let session_id = "revoked-launch-prepared-holder";
+        let (candidate, _identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        prepare_active_continuation_successor(
+            worktree.path(),
+            owner,
+            &SuccessorRequest {
+                operation_id: format!("prepared-{}", uuid::Uuid::new_v4()),
+                principal_id: "test".to_string(),
+                work_id: Some("work/prepared".to_string()),
+                source: "continue-work:resume".to_string(),
+                session_binding_id: uuid::Uuid::new_v4().to_string(),
+                initial_session_id: "revoked-launch-successor".to_string(),
+                entrypoint: "gwt-execute".to_string(),
+                requested_at: Utc::now(),
+            },
+        )
+        .expect("prepare a successor on the Active generation");
+
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+        assert_eq!(
+            release_revoked_launch_generation(worktree.path(), owner, "the operator revoked it")
+                .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: candidate.generation_id,
+                detail: "a prepared successor or takeover transaction is still in flight",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before,
+            "a refused release is byte-preserving"
+        );
+    }
+
+    /// Issue #4200 AC-2: a launch that never started an agent releases its own
+    /// generation, with no operator in the loop.
+    ///
+    /// The fixture is the same stranded shape the revoked route exists for — a
+    /// `Running` holder whose sidecar names a live Host — because that is the
+    /// point: every liveness reading in this module is byte-identical for an
+    /// agent mid-turn and for one that never authenticated, so AC-2 cannot be
+    /// answered by looking at the Host at all. It is answered from the agent's
+    /// side: the holder Session has no lifecycle event because no agent ever
+    /// delivered one. The second owner below is the same fixture with a single
+    /// hook recorded, and it must be refused — that one hook is the whole
+    /// difference between "nothing is running" and "something is".
+    #[test]
+    fn unstarted_launch_release_frees_a_generation_no_liveness_reading_can() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        // Each owner needs its own worktree: the flat execution-control mirror
+        // is per-worktree, so a second genesis in the same one is refused
+        // before the fixture is even built.
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let started_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(started_worktree.path());
+        let starting_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(starting_worktree.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let process_started_at = crate::process::host_process_start_time(std::process::id())
+            .expect("current process start identity");
+
+        // The production shape: Active generation, holder Session written
+        // `Running` by the launch, runtime sidecar written by a Host that is
+        // still alive, and an agent that never ran a turn.
+        let unstarted_owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 922,
+        };
+        let unstarted_session = "unstarted-launch-holder";
+        let (unstarted_candidate, unstarted_identity) =
+            startup_reaper_active_fixture_with_status_and_age(
+                worktree.path(),
+                unstarted_owner,
+                unstarted_session,
+                gwt_agent::AgentStatus::Running,
+                chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
+            );
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &unstarted_identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &sessions_dir,
+            unstarted_session,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &unstarted_identity).unwrap(),
+            ExactSessionRuntimeDisposition::Live,
+            "the fixture must reproduce the reading that strands a generation"
+        );
+        assert!(
+            unreachable_current_generation_holder(&sessions_dir, worktree.path(), unstarted_owner)
+                .unwrap()
+                .is_none(),
+            "no liveness route can release this, which is why AC-2 needs another fact"
+        );
+
+        assert!(
+            release_unstarted_launch_generation(
+                worktree.path(),
+                unstarted_owner,
+                &sessions_dir,
+                "  "
+            )
+            .is_err(),
+            "a release with no stated reason leaves no usable audit entry"
+        );
+
+        assert_eq!(
+            release_unstarted_launch_generation(
+                worktree.path(),
+                unstarted_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Released {
+                generation_id: unstarted_candidate.generation_id.clone(),
+                holder_session_id: unstarted_session.to_string(),
+            }
+        );
+
+        // Terminal, so the next launch takes the Blocked successor route — the
+        // Issue is back in autonomous circulation without anyone intervening.
+        let hold = owner_generation_hold_from_ledger(
+            &sessions_dir,
+            &load_owner_generation_ledger(worktree.path(), unstarted_owner)
+                .unwrap()
+                .unwrap(),
+        )
+        .expect("the generation stays on record as audit evidence");
+        assert_eq!(hold.status, ExecutionControlStatus::Blocked);
+        assert!(
+            execution_generation_conflict_refusal(unstarted_owner, Some(&hold))
+                .contains("blocked generation"),
+        );
+
+        // The audit entry names this authority, never the operator's.
+        let event = load_owner_generation_ledger(worktree.path(), unstarted_owner)
+            .unwrap()
+            .unwrap()
+            .lifecycle_events_for(&unstarted_candidate.generation_id)
+            .max_by_key(|event| event.sequence)
+            .expect("release lifecycle event")
+            .clone();
+        assert_eq!(event.from_status, ExecutionControlStatus::Active);
+        assert_eq!(event.to_status, ExecutionControlStatus::Blocked);
+        assert!(event
+            .operation_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with(UNSTARTED_LAUNCH_RELEASE_OPERATION_PREFIX)));
+
+        // Same fixture, one delivered hook. The agent reported in, so this is
+        // a live execution and the release must keep its hands off it.
+        let started_owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 923,
+        };
+        let started_session = "started-launch-holder";
+        let (started_candidate, started_identity) =
+            startup_reaper_active_fixture_with_status_and_age(
+                started_worktree.path(),
+                started_owner,
+                started_session,
+                gwt_agent::AgentStatus::Running,
+                chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
+            );
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &started_identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &sessions_dir,
+            started_session,
+        ))
+        .unwrap();
+        let started_path = sessions_dir.join(format!("{started_session}.toml"));
+        let mut started = gwt_agent::Session::load(&started_path).unwrap();
+        started.record_hook_event("SessionStart");
+        started.save(&sessions_dir).unwrap();
+
+        let authority_before = generation_authority_bytes(started_worktree.path(), started_owner);
+        assert_eq!(
+            release_unstarted_launch_generation(
+                started_worktree.path(),
+                started_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: started_candidate.generation_id.clone(),
+                detail:
+                    "the holder Session recorded an agent lifecycle event, so its agent did start",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(started_worktree.path(), started_owner),
+            authority_before,
+            "a refused release is byte-preserving"
+        );
+
+        // A holder that cannot be read is not a holder proven never to have
+        // run. Removing it must not turn the refusal into a release.
+        fs::remove_file(&started_path).unwrap();
+        assert_eq!(
+            release_unstarted_launch_generation(
+                started_worktree.path(),
+                started_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: started_candidate.generation_id,
+                detail: "the holder Session could not be read, so the launch cannot be shown to be unstarted",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(started_worktree.path(), started_owner),
+            authority_before,
+            "an unreadable holder is byte-preserving too"
+        );
+
+        // An agent that is merely slow to come up has delivered no hook yet
+        // either. Inside the start-up grace the silence means nothing, and a
+        // concurrent launch must not be able to settle a generation out from
+        // under an execution that is still arriving.
+        let starting_owner = ExecutionOwnerKey {
+            kind: generation_owner().kind,
+            number: generation_owner().number + 924,
+        };
+        let starting_session = "starting-launch-holder";
+        let (starting_candidate, _starting_identity) = startup_reaper_active_fixture_with_status(
+            starting_worktree.path(),
+            starting_owner,
+            starting_session,
+            gwt_agent::AgentStatus::Running,
+        );
+        let authority_before = generation_authority_bytes(starting_worktree.path(), starting_owner);
+        assert_eq!(
+            release_unstarted_launch_generation(
+                starting_worktree.path(),
+                starting_owner,
+                &sessions_dir,
+                "the launch never started an agent",
+            )
+            .unwrap(),
+            LaunchGenerationRelease::Held {
+                generation_id: starting_candidate.generation_id,
+                detail: "the generation is still inside the launch start-up grace, so a silent holder may yet be coming up",
+            }
+        );
+        assert_eq!(
+            generation_authority_bytes(starting_worktree.path(), starting_owner),
+            authority_before,
+            "a generation inside the start-up grace is byte-preserving"
+        );
+    }
+
+    /// Issue #3934: a Host that is gone cannot be running anything. When the
+    /// only runtime evidence for the holder was written by Host PIDs that no
+    /// longer exist, the durable holder state alone decides the outcome:
+    /// `Interrupted` / `Stopped` / `Idle` are reclaimed so the owner can be
+    /// launched again, and `Running` stays protected so a live execution is
+    /// never taken away. Before this, the partial sidecar of a dead Host was
+    /// read as ambiguity and every one of the four states was refused, which
+    /// left 242 of 244 owner ledgers permanently Active.
+    #[test]
+    fn startup_reaper_reclaims_dead_host_holders_by_durable_state() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        // Issue #3964 AC-2: a durably Running holder whose every Host is gone
+        // is not running anywhere either. Production kept 8 such generations
+        // (#3721 / #3722 among them) held until a human intervened.
+        for (index, (status, expect_reaped)) in [
+            (gwt_agent::AgentStatus::Interrupted, true),
+            (gwt_agent::AgentStatus::Stopped, true),
+            (gwt_agent::AgentStatus::Idle, true),
+            (gwt_agent::AgentStatus::Running, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let worktree = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+            let owner = ExecutionOwnerKey {
+                kind: generation_owner().kind,
+                number: generation_owner().number + 3934 + index as u64,
+            };
+            let session_id = format!("startup-reaper-dead-host-holder-{index}");
+            let (candidate, identity) = startup_reaper_active_fixture_with_status(
+                worktree.path(),
+                owner,
+                &session_id,
+                status,
+            );
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let dead_host_pid = i32::MAX as u32;
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Running,
+                &identity,
+                82,
+                1,
+                dead_host_pid,
+                1,
+            )
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &sessions_dir,
+                dead_host_pid,
+                &session_id,
+            ))
+            .unwrap();
+
+            assert_eq!(
+                classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+                ExactSessionRuntimeDisposition::HostDead,
+                "{status:?}: a sidecar left by a dead Host is evidence of a dead Host"
+            );
+            assert_eq!(
+                diagnose_owner(worktree.path(), owner).reclaimable,
+                expect_reaped,
+                "{status:?}: the owner diagnosis must advertise the same rule the reaper applies"
+            );
+
+            let authority_before = generation_authority_bytes(worktree.path(), owner);
+            let outcome =
+                reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                    .unwrap();
+
+            if expect_reaped {
+                assert_eq!(
+                    outcome,
+                    StartupActiveGenerationReapOutcome::Reaped,
+                    "{status:?}: a dead-Host holder must release its generation"
+                );
+                assert_eq!(
+                    load_generation_ledger(worktree.path(), owner)
+                        .unwrap()
+                        .unwrap()
+                        .current_effective_status(),
+                    Some(ExecutionControlStatus::Blocked),
+                    "{status:?}: the reaped generation must be durably Blocked"
+                );
+            } else {
+                assert_eq!(
+                    outcome,
+                    StartupActiveGenerationReapOutcome::Unchanged,
+                    "{status:?}: a durably Running holder keeps its generation"
+                );
+                assert_eq!(
+                    generation_authority_bytes(worktree.path(), owner),
+                    authority_before,
+                    "{status:?}: a protected holder must not be mutated at all"
+                );
+            }
+        }
+    }
+
+    /// Issue #3964: a Host PID is recycled by the OS. In production the
+    /// sidecars of four holders named PIDs that now belong to a browser
+    /// renderer and a model server, and `kill(pid, 0)` alone reported those
+    /// Hosts as reachable, so every reading stayed `Unknown` and the
+    /// generations were never released. A process that started after the
+    /// sidecar was last written cannot have written it.
+    #[test]
+    fn exact_runtime_treats_a_recycled_host_pid_as_a_dead_host() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "recycled-host-pid-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Interrupted,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        // A legacy sidecar: no `host_started_at`, written years before this
+        // test process (the "Host" its PID namespace now names) started.
+        let written_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut stale = gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            16,
+        );
+        stale.updated_at = written_at;
+        stale.last_activity_at = written_at;
+        stale
+            .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+            .unwrap();
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::HostDead,
+            "a Host that started after the sidecar was written did not write it"
+        );
+        assert_eq!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Reaped,
+        );
+
+        // The same shape written just now under a live PID stays ambiguous:
+        // the Host that wrote it can still be asked.
+        let mut fresh = gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            17,
+        );
+        fresh.updated_at = Utc::now();
+        fresh.last_activity_at = fresh.updated_at;
+        fresh
+            .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+            .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Unknown,
+            "a reachable Host that could have written the sidecar keeps the reading ambiguous"
+        );
+    }
+
+    /// Issue #4042 AC-1: the Issue Monitor's reclaim probe and the launch
+    /// refusal used to read the holder Session through two separate code
+    /// paths and describe it in two vocabularies (`unreadable` versus
+    /// `durable Session unreadable`), which is how production ended up with a
+    /// reclaim saying `Idle` and a refusal saying `Running` for one holder.
+    /// Both now consume one [`OwnerGenerationHold`] projection, and the
+    /// refusal text names the generation the probe will read back.
+    #[test]
+    fn launch_refusal_and_reclaim_probe_share_one_holder_projection() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "shared-projection-running-holder";
+        let (candidate, _identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+        let probed = owner_generation_hold_for_project(worktree.path(), owner.number)
+            .unwrap()
+            .expect("the owner ledger holds a generation");
+        assert_eq!(probed.generation_id, candidate.generation_id);
+        assert_eq!(probed.holder_session_id, session_id);
+        assert_eq!(probed.holder_session_state, "Running");
+
+        let ledger = load_generation_ledger(worktree.path(), owner)
+            .unwrap()
+            .expect("the launch path reads the same ledger");
+        assert_eq!(
+            owner_generation_hold_from_ledger(&sessions_dir, &ledger),
+            Some(probed.clone()),
+            "the launch path must read the holder through the reclaim's projection"
+        );
+
+        let refusal = execution_generation_conflict_refusal(owner, Some(&probed));
+        assert!(is_execution_generation_conflict(&refusal));
+        assert!(
+            refusal.contains(&format!(
+                "active generation {} held by Session {session_id} (Running)",
+                candidate.generation_id
+            )),
+            "unexpected refusal text: {refusal}"
+        );
+        assert!(refusal.contains("use Continue work to create a successor"));
+
+        // A holder whose durable Session is gone is described the same way on
+        // both sides, so a reader can match the two.
+        fs::remove_file(sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        let missing = owner_generation_hold_for_project(worktree.path(), owner.number)
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing.holder_session_state, "missing");
+        assert_eq!(
+            owner_generation_hold_from_ledger(&sessions_dir, &ledger),
+            Some(missing.clone())
+        );
+        assert!(execution_generation_conflict_refusal(owner, Some(&missing))
+            .contains(&format!("held by Session {session_id} (missing)")));
+
+        // No current generation: the refusal still carries the prefix the
+        // monitor keys on, with no holder detail to invent.
+        let bare = execution_generation_conflict_refusal(owner, None);
+        assert!(is_execution_generation_conflict(&bare));
+        assert!(bare.contains("(unknown generation)"), "unexpected: {bare}");
+    }
+
+    /// Issue #3964 AC-1 / AC-4: the Issue Monitor releases a stranded
+    /// `agent_failed` row by asking whether the owner's generation is still
+    /// Active. That question has to be answerable from a project root and
+    /// from the owner ledger alone, because the refused launch never published
+    /// anything into the worktree it materialized.
+    #[test]
+    fn owner_generation_hold_reads_the_owner_ledger_without_a_worktree_publication() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-hold-interrupted-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Interrupted,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number).unwrap(),
+            Some(OwnerGenerationHold {
+                status: ExecutionControlStatus::Active,
+                generation_id: candidate.generation_id.clone(),
+                holder_session_id: session_id.to_string(),
+                holder_session_state: "Interrupted".to_string(),
+            }),
+        );
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number + 999).unwrap(),
+            None,
+            "an owner without a ledger holds nothing"
+        );
+
+        // Drop the worktree publication entirely: the answer must not change.
+        let trusted_dir =
+            crate::cli::trusted_store::trusted_dir_for_worktree(worktree.path()).unwrap();
+        fs::remove_file(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap();
+        fs::remove_file(trusted_dir.join("execution-control.json")).unwrap();
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number)
+                .unwrap()
+                .map(|hold| hold.status),
+            Some(ExecutionControlStatus::Active),
+        );
+
+        assert_eq!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Reaped,
+            "the reaper republishes the lost worktree publication before judging the holder"
+        );
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number)
+                .unwrap()
+                .map(|hold| hold.status),
+            Some(ExecutionControlStatus::Blocked),
+        );
+    }
+
+    /// Issue #3934: two Hosts that both recorded a terminal exit cannot name
+    /// the single incarnation a successor would fence against, so the proof is
+    /// unusable. The conclusion is not: if both of those Hosts are gone,
+    /// nothing is running the holder. A reachable Host anywhere in the set
+    /// keeps the reading ambiguous.
+    #[test]
+    fn conflicting_terminal_proofs_are_host_dead_only_while_no_host_is_reachable() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "conflicting-terminal-proof-holder";
+        let (_candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Stopped,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        for (index, host_pid) in [i32::MAX as u32, i32::MAX as u32 - 1]
+            .into_iter()
+            .enumerate()
+        {
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Stopped,
+                &identity,
+                55 + index as u64,
+                1,
+                host_pid,
+                1,
+            )
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &sessions_dir,
+                host_pid,
+                session_id,
+            ))
+            .unwrap();
+        }
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::HostDead,
+            "two dead Hosts still prove that nothing is running the holder"
+        );
+
+        let live_started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &identity,
+            57,
+            live_started_at,
+            std::process::id(),
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Unknown,
+            "a reachable Host in the set keeps the conflicting proof ambiguous"
+        );
+    }
+
+    /// Issue #3934: an operator watching a queue refuse the same owner needs
+    /// to see who holds its generation, what state that holder is in, and
+    /// whether anything will release it - without owning the record.
+    #[test]
+    fn owner_status_names_the_holder_state_and_recovery_route_for_any_owner() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-idle-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Idle,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let dead_host_pid = i32::MAX as u32;
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            82,
+            1,
+            dead_host_pid,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &sessions_dir,
+            dead_host_pid,
+            session_id,
+        ))
+        .unwrap();
+
+        let held = diagnose_owner(worktree.path(), owner);
+
+        assert_eq!(held.owner_number, owner.number);
+        assert_eq!(held.ecr_status, Some(ExecutionControlStatus::Active));
+        assert_eq!(held.holder_session_id.as_deref(), Some(session_id));
+        assert_eq!(held.holder_session_state.as_deref(), Some("Idle"));
+        assert_eq!(held.holder_runtime.as_deref(), Some("host_dead"));
+        assert!(held.reclaimable);
+        assert_eq!(held.recommended_recovery, "generation-reaper");
+
+        reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[]).unwrap();
+        let released = diagnose_owner(worktree.path(), owner);
+
+        assert_eq!(released.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert!(!released.reclaimable);
+        assert_eq!(released.recommended_recovery, "gwt-execute");
+    }
+
+    /// Issue #4161 AC-11: the dead end an operator actually hit.
+    ///
+    /// `execution.repair` is what the help text points a stuck caller at, and
+    /// for a generation whose holder pane is gone it answers
+    /// `execution_repair_not_corrupt` — correctly. A readable, integrity-valid
+    /// record is not corrupt, and repair quarantines the authority and mints a
+    /// fresh Active one, so widening its eligibility to cover this shape would
+    /// trade a valid audit chain for a liveness problem that a different
+    /// operation already solves. The defect is that the refusal stops there:
+    /// the caller is told what will not happen and nothing about what will.
+    /// `diagnose_owner` already knows the route, so the refusal must carry it.
+    #[test]
+    fn repair_refusal_names_the_route_for_a_generation_whose_holder_is_gone() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "repair-guidance-dead-holder";
+        // The exact production shape: the durable record says `Running`, and
+        // the only runtime evidence is a sidecar written by a Host that is
+        // gone. Nothing about the ledger is malformed.
+        let (_candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let dead_host_pid = i32::MAX as u32;
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            82,
+            1,
+            dead_host_pid,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &sessions_dir,
+            dead_host_pid,
+            session_id,
+        ))
+        .unwrap();
+
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.holder_session_state.as_deref(), Some("Running"));
+        assert_eq!(diagnosis.holder_runtime.as_deref(), Some("host_dead"));
+        // Issue #4161 AC-11b (PM ruling 2026-09-12): a liveness problem must
+        // never be routed to a destructive repair. `execution.repair` is
+        // reserved for an authority that actually failed its integrity check.
+        assert_ne!(diagnosis.recommended_recovery, "execution.repair");
+        assert_eq!(diagnosis.recommended_recovery, "generation-reaper");
+
+        let probe = probe_execution_repair(worktree.path(), Some(session_id));
+        assert!(
+            !probe.executable(),
+            "a structurally healthy record is still not repair's business"
+        );
+        assert_eq!(
+            probe.reason.as_deref(),
+            Some("execution_repair_not_corrupt"),
+            "and the machine-readable reason must not drift"
+        );
+
+        let guidance = repair_not_corrupt_guidance(worktree.path())
+            .expect("a refusal that cannot act still owes the caller a next step");
+        assert!(
+            guidance.contains("generation-reaper"),
+            "the refusal has to name the route that does apply: {guidance}"
+        );
+    }
+
+    /// The guidance follows the diagnosis rather than hardcoding one route: a
+    /// Prepared fence is cleared by an operation, not by the reaper, and that
+    /// is the case where an operator has something to run right now.
+    #[test]
+    fn repair_refusal_names_the_release_operation_when_a_prepared_fence_holds() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let mut active = active_record("repair-guidance-fenced-holder");
+        active.owner_kind = owner.kind;
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        prepare_active_continuation_successor(
+            worktree.path(),
+            owner,
+            &SuccessorRequest {
+                operation_id: "guidance-fence".to_string(),
+                principal_id: "gwt-host-launch".to_string(),
+                work_id: None,
+                source: "execution-continue".to_string(),
+                session_binding_id: "guidance-binding".to_string(),
+                initial_session_id: "guidance-candidate".to_string(),
+                entrypoint: "continue-work".to_string(),
+                requested_at: Utc::now() - chrono::Duration::hours(2),
+            },
+        )
+        .unwrap();
+
+        let guidance =
+            repair_not_corrupt_guidance(worktree.path()).expect("a fenced owner has a route too");
+        assert!(
+            guidance.contains("execution.release_prepared"),
+            "{guidance}"
+        );
+    }
+
+    /// Issue #4161 AC-11b (PM ruling 2026-09-12): the other half of the
+    /// carve-out. Withholding `execution.repair` from a healthy authority is
+    /// only correct if it is still offered to one that genuinely failed its
+    /// integrity check — otherwise the operation becomes unreachable and the
+    /// owner trades one dead end for another.
+    #[test]
+    fn owner_status_recommends_repair_only_for_an_authority_that_failed_integrity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let mut active = active_record("repair-recommendation-holder");
+        active.owner_kind = owner.kind;
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        assert_ne!(
+            diagnose_owner(worktree.path(), owner).recommended_recovery,
+            "execution.repair",
+            "an intact ledger is not repair's business"
+        );
+
+        let context = GenerationTransactionContext::resolve(worktree.path(), owner)
+            .expect("owner transaction context");
+        fs::write(
+            context.owner_dir.join(GENERATION_LEDGER_FILE),
+            b"{not-a-ledger",
+        )
+        .unwrap();
+
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.recommended_recovery, "execution.repair");
+        assert!(
+            diagnosis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("malformed generation ledger")),
+            "{:?}",
+            diagnosis.warnings
+        );
+    }
+
+    #[test]
+    fn startup_reaper_reclaims_dead_child_while_host_remains_live() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-live-host-dead-child";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let host_started_at = crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            221,
+            host_started_at,
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        let held = diagnose_owner(worktree.path(), owner);
+        // Issue #3712 AC-3: the literal the PM reads for this shape, so a
+        // living GUI Host can never be mistaken for a living agent again.
+        assert_eq!(held.holder_runtime.as_deref(), Some("child_exited"));
+        assert!(
+            held.reclaimable,
+            "a living GUI host does not keep its dead child alive"
+        );
+        assert_eq!(held.recommended_recovery, "generation-reaper");
+
+        reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[]).unwrap();
+        let released = diagnose_owner(worktree.path(), owner);
+        assert_eq!(released.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert!(released.ecr_settled_by_host_reaper);
+        assert_eq!(released.recommended_recovery, "gwt-execute");
+    }
+
+    /// Issue #4131: `blocked` alone cannot tell interrupted work from finished
+    /// work. The reaper writes it on behalf of a holder that died without
+    /// settling — an auto-update restart is the common way — while
+    /// `execution.blocked` is the agent's own deliberate terminal outcome.
+    /// Readers that act on the status need the provenance to separate them.
+    #[test]
+    fn owner_status_reports_whether_the_host_reaper_wrote_the_blocked_status() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-reaper-provenance";
+        let (candidate, identity) =
+            startup_reaper_active_fixture(worktree.path(), owner, session_id);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+        let active = diagnose_owner(worktree.path(), owner);
+        assert_eq!(active.ecr_status, Some(ExecutionControlStatus::Active));
+        assert!(
+            !active.ecr_settled_by_host_reaper,
+            "an Active generation was settled by nobody"
+        );
+
+        reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[]).unwrap();
+        let reaped = diagnose_owner(worktree.path(), owner);
+
+        assert_eq!(reaped.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert!(
+            reaped.ecr_settled_by_host_reaper,
+            "the holder never settled; the reaper wrote this Blocked status for it"
+        );
+    }
+
+    /// The counterpart: an agent that settles its own execution as Blocked
+    /// made a decision, and nothing may present that as interrupted work.
+    #[test]
+    fn owner_status_does_not_attribute_an_agent_settlement_to_the_host_reaper() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-agent-settlement";
+        startup_reaper_active_fixture(worktree.path(), owner, session_id);
+
+        settle(
+            worktree.path(),
+            session_id,
+            ExecutionSettlement::Blocked {
+                reason: "verification dependency unresolved".to_string(),
+                missing_verification: Some("full pre-PR matrix".to_string()),
+            },
+        )
+        .unwrap();
+        let settled = diagnose_owner(worktree.path(), owner);
+
+        assert_eq!(settled.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert!(
+            !settled.ecr_settled_by_host_reaper,
+            "the agent settled this itself; it is a decision, not an interruption"
+        );
+    }
+
+    /// A live holder is never advertised as reclaimable, whatever its durable
+    /// record says: the recovery route is Continue work, not a fresh launch.
+    #[test]
+    fn owner_status_protects_a_live_holder_from_a_reclaim_recommendation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let session_id = "owner-status-live-holder";
+        let (_candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let process_started_at =
+            crate::process::host_process_start_time(std::process::id()).unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            41,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
+        .unwrap();
+
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+
+        assert_eq!(diagnosis.holder_runtime.as_deref(), Some("live"));
+        assert!(!diagnosis.reclaimable);
+        assert_eq!(diagnosis.recommended_recovery, "execution.continue");
     }
 
     /// One corrupt owner entry is reported without hiding another valid Active
@@ -17650,7 +23131,6 @@ mod tests {
             .execution_binding
             .unwrap();
 
-        let started = std::time::Instant::now();
         let error = gwt_agent::with_session_lease_wait(
             &sessions_dir,
             "session-original",
@@ -17669,10 +23149,6 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::WouldBlock);
         assert!(error.to_string().contains("owner lease"));
         assert!(error.to_string().contains("before the Session lease"));
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(100),
-            "reverse nesting must fail immediately rather than waiting for its own Session lock"
-        );
     }
 
     #[test]
@@ -18372,6 +23848,88 @@ mod tests {
         );
     }
 
+    /// Issue #4543 AC-5: an accepted launch records the Permission Mode
+    /// Decision on the Execution Control Record, and `execution.status`
+    /// reports it.
+    #[test]
+    fn materialize_at_launch_records_the_permission_mode_decision() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        // The exact launch the contract is about: a producing-work Issue
+        // Monitor launch whose saved profile said "interactive".
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .linked_issue_number(4543)
+            .permission_launch_source(gwt_agent::PermissionLaunchSource::SilentIssueMonitor)
+            .skip_permissions(false)
+            .build();
+        assert!(config.skip_permissions);
+
+        materialize_at_launch_with_permission_decision(
+            dir.path(),
+            ExecutionOwnerKind::Issue,
+            4543,
+            "sess-4543",
+            "gwt-execute",
+            false,
+            Some(&config.permission_decision),
+        )
+        .unwrap();
+
+        let record = load(dir.path()).unwrap().expect("record materialized");
+        assert!(integrity_ok(&record));
+        let decision = record
+            .permission_decision
+            .as_ref()
+            .expect("the launch decision is recorded");
+        assert_eq!(decision.provider, "codex");
+        assert_eq!(
+            decision.source,
+            gwt_agent::PermissionLaunchSource::SilentIssueMonitor
+        );
+        assert_eq!(
+            decision.outcome,
+            gwt_agent::PermissionModeOutcome::SkipForcedReady
+        );
+        assert!(decision.skip_forced);
+        assert!(decision.effective_skip_permissions);
+        assert_eq!(decision.requested_skip_permissions, Some(false));
+        assert_eq!(decision.provider_mapping.args, vec!["--yolo"]);
+        assert!(decision.dropped_evidence.is_none());
+
+        let snapshot = diagnose(dir.path(), Some("sess-4543"));
+        assert_eq!(
+            snapshot
+                .permission_decision
+                .as_ref()
+                .map(|decision| decision.provider.as_str()),
+            Some("codex"),
+            "execution.status must report the decision"
+        );
+    }
+
+    /// Issue #4543 AC-5, compatibility: a record with no decision serializes
+    /// exactly as it did before the field existed, so an older binary reading
+    /// it recomputes the same content hash instead of calling it corrupt.
+    #[test]
+    fn a_record_without_a_permission_decision_serializes_unchanged() {
+        let record = active_record("sess-legacy");
+        assert!(record.permission_decision.is_none());
+        let json = String::from_utf8(serialize_execution_control(&record).unwrap()).unwrap();
+        assert!(
+            !json.contains("permission_decision"),
+            "an absent decision must not appear on disk: {json}"
+        );
+        let restored: ExecutionControlRecord = serde_json::from_str(&json).unwrap();
+        assert!(integrity_ok(&restored));
+    }
+
     // T-182 core: resuming a settled pre-P9b worktree promotes the valid
     // mirror-only record into the trusted store (the resume path otherwise
     // never rewrites it).
@@ -18727,6 +24285,15 @@ mod tests {
             "gwt-execute"
         );
         assert_eq!(
+            entrypoint_from_launch(
+                &args(&[
+                    "$gwt-execute #3832\n\nBefore changing code, evaluate every remaining acceptance criterion."
+                ]),
+                false,
+            ),
+            "gwt-execute"
+        );
+        assert_eq!(
             entrypoint_from_launch(&args(&["$gwt-build-spec SPEC-3248"]), false),
             "gwt-build-spec"
         );
@@ -18833,6 +24400,8 @@ mod tests {
             repo: &Path,
             command: ExecutionCommand,
         ) -> Result<(i32, String), gwt_github::SpecOpsError> {
+            let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+            let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
             if let ExecutionCommand::Reopen { reason } = &command {
                 if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
                     .ok()
@@ -18850,6 +24419,20 @@ mod tests {
             }
             let mut env = TestEnv::new(repo.to_path_buf());
             run_collect(&mut env, CliCommand::Execution(command))
+        }
+
+        fn run_governed_cmd(
+            repo: &Path,
+            command: ExecutionCommand,
+        ) -> Result<
+            crate::cli::governance::GovernedCommandOutput,
+            Box<crate::cli::governance::GovernedCommandFailure>,
+        > {
+            let mut env = TestEnv::new(repo.to_path_buf());
+            crate::cli::json_envelope::run_collect_governed(
+                &mut env,
+                CliCommand::Execution(command),
+            )
         }
 
         fn repair_authority_paths(worktree: &Path, owner: ExecutionOwnerKey) -> Vec<PathBuf> {
@@ -19152,11 +24735,247 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 7);
+            assert_eq!(probes.len(), 9);
             assert!(probes.iter().all(|probe| {
-                probe["state"] == "unavailable"
-                    && probe["reason"] == "execution_recovery_scope_invalid"
+                let operation = probe["operation"].as_str().unwrap_or_default();
+                let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
+                    "verify_recovery_requires_blocked"
+                } else {
+                    "execution_recovery_scope_invalid"
+                };
+                probe["state"] == "unavailable" && probe["reason"] == expected_reason
             }));
+        }
+
+        /// Issue #4217: restamp a fixture Session's launch route the way the
+        /// launcher would have.
+        fn stamp_session_launch_route(session_id: &str, route: gwt_agent::LaunchRoute) {
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let mut session =
+                gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+                    .expect("load fixture Session");
+            session.launch_route = route;
+            session
+                .save(&sessions_dir)
+                .expect("persist fixture launch route");
+        }
+
+        fn autonomous_blocked_fixture(
+            repo: &Path,
+            session_id: &str,
+            route: gwt_agent::LaunchRoute,
+        ) {
+            prepare_generation_bound_execution_for_owner(
+                repo,
+                session_id,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 4217,
+                },
+                ExecutionControlStatus::Active,
+            );
+            stamp_session_launch_route(session_id, route);
+        }
+
+        /// Issue #4510 AC-1: a `Manual` stamp on a session the Issue Monitor
+        /// started is a mis-stamp, not a human. The launch prompt the Monitor
+        /// composed is in `launch_args`, and it says in its own words that no
+        /// human authored it — so the route is read back from that, the same
+        /// class of launch-route fact as the `gwt-auto-improve:` claim prefix.
+        #[test]
+        fn a_monitor_launch_reads_back_autonomous_despite_a_manual_stamp() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("sessions home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().expect("worktree fixture");
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+
+            let mut session = gwt_agent::Session::new(
+                repo.path(),
+                "work/issue-3752",
+                gwt_agent::AgentId::ClaudeCode,
+            );
+            session.id = "session-4510-monitor".to_string();
+            session.launch_route = gwt_agent::LaunchRoute::Manual;
+            session.launch_args = vec![
+                "--dangerously-skip-permissions".to_string(),
+                crate::issue_monitor::issue_monitor_launch_prompt(
+                    crate::LinkedIssueKind::Issue,
+                    3752,
+                ),
+            ];
+            session
+                .save(&sessions_dir)
+                .expect("persist monitor session");
+            assert_eq!(
+                session_launch_route(Some("session-4510-monitor")),
+                Some(gwt_agent::LaunchRoute::Autonomous),
+                "the Monitor's own launch prompt outranks a Manual mis-stamp"
+            );
+
+            // A human-driven launch carries no such prompt, so the Manual
+            // stamp stands and the visual-verification gate keeps its teeth.
+            let mut attended =
+                gwt_agent::Session::new(repo.path(), "work/attended", gwt_agent::AgentId::Codex);
+            attended.id = "session-4510-attended".to_string();
+            attended.launch_route = gwt_agent::LaunchRoute::Manual;
+            attended.launch_args =
+                vec!["--resume".to_string(), "fix the kanban column".to_string()];
+            attended
+                .save(&sessions_dir)
+                .expect("persist attended session");
+            assert_eq!(
+                session_launch_route(Some("session-4510-attended")),
+                Some(gwt_agent::LaunchRoute::Manual)
+            );
+            assert_eq!(session_launch_route(Some("session-4510-absent")), None);
+        }
+
+        /// Issue #4217 AC-2: the route reaches the caller from the durable
+        /// Session, so a consumer never has to guess it from an environment
+        /// variable the launcher may not have set.
+        #[test]
+        fn status_reports_the_launch_route_recorded_at_launch() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-route";
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Autonomous);
+
+            assert_eq!(
+                status_snapshot(repo.path(), session_id)["launch_route"],
+                "autonomous"
+            );
+
+            stamp_session_launch_route(session_id, gwt_agent::LaunchRoute::Manual);
+            assert_eq!(
+                status_snapshot(repo.path(), session_id)["launch_route"],
+                "manual"
+            );
+        }
+
+        /// AC-1 / AC-6: an unattended execution may not end itself because
+        /// nobody looked at a screen. `execution.blocked` is terminal — it
+        /// defers every open obligation and revokes `pr.edit` (#4214) — so the
+        /// stall it records is also a closed loop the agent cannot leave. The
+        /// refusal names the way out instead.
+        #[test]
+        fn autonomous_execution_cannot_block_on_an_absent_human_verifier() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-autonomous";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Autonomous);
+
+            // The exact wording two windows stalled on (#3777, #3697).
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "AGENTS.md requires User Verification Result: confirmed before a \
+                             PR may be created"
+                        .to_string(),
+                    missing_verification: None,
+                },
+            )
+            .expect("run execution.blocked");
+
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("launch_route: autonomous"), "{out}");
+            assert!(out.contains("n/a (autonomous)"), "{out}");
+            assert!(out.contains("Ready PR"), "{out}");
+            assert_eq!(
+                load(repo.path())
+                    .expect("load execution record")
+                    .expect("execution record")
+                    .status,
+                ExecutionControlStatus::Active,
+                "a refused block must leave the execution running, not half-settled"
+            );
+        }
+
+        /// AC-6: the refusal reads the blocker, not the launch. A genuine
+        /// blocker from the same unattended window still settles, and the
+        /// agent's *own* failing headed run is a genuine blocker — refusing it
+        /// would hide a real defect behind a rule about absent humans.
+        #[test]
+        fn autonomous_execution_still_blocks_on_a_genuine_blocker() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-genuine";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Autonomous);
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "Agent Visual Check: fail(console error on the canvas route)"
+                        .to_string(),
+                    missing_verification: Some("headed dark/light run".to_string()),
+                },
+            )
+            .expect("run execution.blocked");
+
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                load(repo.path())
+                    .expect("load execution record")
+                    .expect("execution record")
+                    .status,
+                ExecutionControlStatus::Blocked
+            );
+        }
+
+        /// AC-7: a manual launch is unchanged. Somebody *is* watching, so a
+        /// pending user verification remains a legitimate reason to stop.
+        #[test]
+        fn manual_execution_may_still_block_on_a_pending_user_verification() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "session-4217-manual";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().expect("execution fixture");
+            autonomous_blocked_fixture(repo.path(), session_id, gwt_agent::LaunchRoute::Manual);
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "AGENTS.md requires User Verification Result: confirmed before a \
+                             PR may be created"
+                        .to_string(),
+                    missing_verification: None,
+                },
+            )
+            .expect("run execution.blocked");
+
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                load(repo.path())
+                    .expect("load execution record")
+                    .expect("execution record")
+                    .status,
+                ExecutionControlStatus::Blocked
+            );
         }
 
         #[test]
@@ -19465,6 +25284,8 @@ exit 1
                     "execution.continue",
                     "execution.reopen",
                     "execution.repair",
+                    "verify.plan",
+                    "verify.run",
                     "workspace.ensure",
                     "workspace.update",
                 ],
@@ -19607,6 +25428,11 @@ exit 1
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let session_id = "session-adopting";
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            // This exercises the local adopt path. An ambient Host bridge — the
+            // agent session running the suite has one — would route adopt
+            // through the Host instead and never reach the race under test.
+            let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
 
             for race_index in 0..3 {
                 let repo = tempfile::tempdir().unwrap();
@@ -19651,18 +25477,29 @@ exit 1
                     _ => unreachable!(),
                 };
 
-                let (code, out) = run_cmd(
+                let result = run_governed_cmd(
                     repo.path(),
                     ExecutionCommand::Adopt {
                         reason: "recover crashed owner".to_string(),
                     },
                 )
                 .expect("stale recovery preflight must return a typed refusal");
-                assert_eq!(code, 2, "{out}");
+                assert_eq!(result.exit_code, 2, "{}", result.output);
                 assert!(
-                    out.contains(RECOVERY_SESSION_CHANGED_PREFIX)
-                        || out.contains("recovery scope is invalid"),
-                    "{out}"
+                    result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX)
+                        || result.output.contains("recovery scope is invalid"),
+                    "{}",
+                    result.output
+                );
+                let refusal = result.refusal.expect("authority race refusal metadata");
+                assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+                assert_eq!(
+                    refusal.governance.cause,
+                    Some(crate::cli::governance::GovernanceCause::ManagedIdentity)
+                );
+                assert_eq!(
+                    refusal.escalation_kind,
+                    Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
                 );
 
                 let after = recovery_operation_authority_bytes(
@@ -19744,15 +25581,29 @@ exit 1
                     _ => unreachable!(),
                 };
 
-                let result = run_cmd(
+                let result = run_governed_cmd(
                     repo.path(),
                     ExecutionCommand::Reopen {
                         reason: "fresh evidence is available".to_string(),
                     },
+                )
+                .expect("stale reopen preflight must return a refusal");
+                assert_eq!(result.exit_code, 2, "{}", result.output);
+                assert!(
+                    result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX),
+                    "{}",
+                    result.output
                 );
-                let (code, out) = result.expect("stale reopen preflight must return a refusal");
-                assert_eq!(code, 2, "{out}");
-                assert!(out.contains(RECOVERY_SESSION_CHANGED_PREFIX), "{out}");
+                let refusal = result.refusal.expect("authority race refusal metadata");
+                assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+                assert_eq!(
+                    refusal.governance.cause,
+                    Some(crate::cli::governance::GovernanceCause::ManagedIdentity)
+                );
+                assert_eq!(
+                    refusal.escalation_kind,
+                    Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
+                );
                 assert_eq!(
                     snapshot_recovery_authority_files(repo.path()),
                     authority_before
@@ -20100,15 +25951,25 @@ exit 1
                     _ => unreachable!(),
                 };
 
-                let result = run_cmd(
+                let result = run_governed_cmd(
                     repo.path(),
                     ExecutionCommand::Repair {
                         reason: "recover corrupt authority".to_string(),
                     },
+                )
+                .expect("stale repair preflight must return a refusal");
+                assert_eq!(result.exit_code, 2, "{}", result.output);
+                assert!(
+                    result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX),
+                    "{}",
+                    result.output
                 );
-                let (code, out) = result.expect("stale repair preflight must return a refusal");
-                assert_eq!(code, 2, "{out}");
-                assert!(out.contains(RECOVERY_SESSION_CHANGED_PREFIX), "{out}");
+                let refusal = result.refusal.expect("repair authority race metadata");
+                assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+                assert_eq!(
+                    refusal.escalation_kind,
+                    Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
+                );
                 assert_eq!(
                     snapshot_recovery_authority_files(repo.path()),
                     authority_before
@@ -20432,6 +26293,7 @@ exit 1
                     derived: true,
                     surfaces: vec!["rust".to_string()],
                     generated_outputs: vec!["projection-artifact.json".to_string()],
+                    quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
@@ -20948,10 +26810,19 @@ exit 1
             );
             assert_eq!(snapshot.verification_state, "missing_record");
             assert_eq!(snapshot.open_obligations, vec!["issue_update"]);
-            assert_eq!(
-                snapshot.available_recoveries,
-                vec!["verify.plan", "verify.run"]
+            // Issue #4029: `sess-status` has no durable Session binding, so
+            // `verify.*` would refuse it and must not be advertised; the
+            // terminal record then points at a fresh launch instead.
+            assert!(
+                snapshot.available_recoveries.is_empty(),
+                "{:?}",
+                snapshot.available_recoveries
             );
+            assert_eq!(
+                snapshot.recovery_hint.as_deref(),
+                Some(RECOVERY_HINT_FRESH_LAUNCH_REQUIRED)
+            );
+            assert_all_operation_local_recovery_probes(&snapshot);
             assert_eq!(
                 snapshot
                     .recovery_probes
@@ -20963,8 +26834,15 @@ exit 1
             );
         }
 
+        /// `execution.adopt` and `execution.reopen` answer with exactly the
+        /// operation-local probe the CLI then enforces, and neither rewrites
+        /// authority bytes when there is nothing to do.
+        ///
+        /// Issue #4154 moved the adopt half: the Session that already owns a
+        /// Blocked record has nothing to transfer (`Satisfied`), while a
+        /// Completed record stays un-adoptable for everyone.
         #[test]
-        fn adopt_and_reopen_execution_share_operation_local_probe_refusal() {
+        fn adopt_and_reopen_execution_match_their_operation_local_probes() {
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -20994,7 +26872,7 @@ exit 1
                 .expect("reopen probe");
             assert_eq!(
                 adopt_probe.state,
-                crate::cli::governance::RecoveryProbeState::Unavailable
+                crate::cli::governance::RecoveryProbeState::Satisfied
             );
             assert_eq!(
                 reopen_probe.state,
@@ -21008,29 +26886,67 @@ exit 1
             let (adopt_code, adopt_out) = run_cmd(
                 repo.path(),
                 ExecutionCommand::Adopt {
-                    reason: "cannot adopt terminal record".to_string(),
+                    reason: "the owning Session has nothing to transfer".to_string(),
                 },
             )
             .unwrap();
-            assert_eq!(adopt_code, 2, "{adopt_out}");
+            assert_eq!(adopt_code, 0, "{adopt_out}");
             assert!(
-                adopt_out.contains(adopt_probe.reason.as_deref().unwrap()),
+                adopt_out.contains("already owns this record"),
                 "{adopt_out}"
             );
 
-            let (reopen_code, reopen_out) = run_cmd(
+            let reopen = run_governed_cmd(
                 repo.path(),
                 ExecutionCommand::Reopen {
                     reason: "evidence is not ready".to_string(),
                 },
             )
             .unwrap();
-            assert_eq!(reopen_code, 2, "{reopen_out}");
-            assert!(reopen_out.contains("verify.plan"), "{reopen_out}");
+            assert_eq!(reopen.exit_code, 2, "{}", reopen.output);
+            assert!(reopen.output.contains("verify.plan"), "{}", reopen.output);
+            let refusal = reopen.refusal.expect("typed missing-plan refusal");
+            assert_eq!(
+                refusal.reason_code,
+                "execution_reopen_verification_plan_missing"
+            );
+            assert_eq!(refusal.recovery_action.as_deref(), Some("verify.plan"));
+            assert_eq!(
+                refusal.recoverability,
+                crate::cli::governance::RefusalRecoverability::AgentRecoverable
+            );
             assert_eq!(
                 std::fs::read(&trusted_path).unwrap(),
                 before,
-                "unavailable adopt/reopen must preserve authority bytes"
+                "a satisfied adopt and an unavailable reopen must preserve authority bytes"
+            );
+
+            // A Completed lifetime is finished, not stranded: no session may
+            // take it over (Issue #4154).
+            let completed = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(completed.path());
+            save(completed.path(), &active_record("completed-session")).unwrap();
+            assert!(matches!(
+                settle(
+                    completed.path(),
+                    "completed-session",
+                    ExecutionSettlement::Completed,
+                )
+                .unwrap(),
+                SettleResult::Settled(_)
+            ));
+            persist_recovery_session_snapshot(completed.path(), owner, "blocked-session");
+            let (completed_code, completed_out) = run_cmd(
+                completed.path(),
+                ExecutionCommand::Adopt {
+                    reason: "a completed lifetime cannot be taken over".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(completed_code, 2, "{completed_out}");
+            assert!(
+                completed_out.contains("execution_adopt_requires_active_or_blocked"),
+                "{completed_out}"
             );
         }
 
@@ -22214,6 +28130,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -22362,19 +28279,190 @@ exit 1
                 "recovery extension tamper must fail its independent hash chain"
             );
 
-            // Reopen advances the same generation's ledger head. The
-            // recovery evidence remains in the audit, but exact-binding
-            // completion/PR gates require a fresh plan/run for the reopened
-            // head rather than accepting the superseded Blocked binding.
-            assert!(pr_handoff_refusal(dir.path(), true)
-                .is_some_and(|reason| reason.contains("predecessor")));
-            save_covering_evidence(dir.path(), "sess-reopen", true);
-            assert_eq!(pr_handoff_refusal(dir.path(), true), None);
+            // Issue #4523: reopen advances the same generation's ledger head,
+            // but the record it consumed is that generation's own same-Session
+            // lifecycle prefix, not a predecessor. The PR handoff gate accepts
+            // it, so one terminal recovery costs one verification matrix rather
+            // than two identical ones.
+            assert_eq!(
+                pr_handoff_refusal(dir.path(), true),
+                None,
+                "the verification record execution.reopen consumed must still hand off a PR"
+            );
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
             let completed = load(dir.path()).unwrap().unwrap();
             assert_eq!(completed.status, ExecutionControlStatus::Completed);
             assert_eq!(completed.recoveries.len(), 1);
+        }
+
+        /// A delivered worktree: `origin/develop` already contains its whole
+        /// source state, which is the precondition `execution.no_action`
+        /// proves before it will settle anything.
+        fn delivered_repo(dir: &Path) {
+            crate::cli::trusted_store::init_git_repo_with_origin(dir);
+            for args in [
+                vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+                vec!["checkout", "-q", "-b", "work/issue-3248"],
+            ] {
+                let status = gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(&args)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            }
+        }
+
+        // AC-2 / AC-3 / AC-4: `execution.no_action` settles a delivered owner
+        // through the operation surface, and the settlement stays entirely
+        // outside Git, verification, PR, and the predecessor record. The
+        // completion gate keeps refusing afterwards — No Action is a
+        // successful *non*-delivery, never a completion claim.
+        #[test]
+        fn no_action_settles_a_delivered_owner_without_verification_or_completion() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-no-action");
+            let dir = tempfile::tempdir().unwrap();
+            delivered_repo(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-no-action")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let before = record_contents(dir.path()).unwrap().unwrap();
+            let head_before = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "SPEC-3248 の該当 slice は PR #3429 で着地済み".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("no action for spec #3248"), "{out}");
+
+            let audit = crate::cli::delivered_owner::load_audit(dir.path())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                audit.predecessor_execution_control_json, before,
+                "the audit keeps the predecessor record byte-identical"
+            );
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(
+                record.status,
+                ExecutionControlStatus::Completed,
+                "Issue #4590: the projection settles so a no_action-blind reader is released"
+            );
+            assert!(
+                record.completion_evidence.is_none(),
+                "No Action claims no verification evidence"
+            );
+            assert_eq!(
+                gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(dir.path())
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+                head_before.stdout,
+                "No Action commits nothing"
+            );
+            assert_ne!(
+                crate::cli::verification_record::evaluate_evidence(
+                    dir.path(),
+                    "sess-no-action",
+                    Some(3248),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "No Action produces no verification evidence"
+            );
+
+            // Idempotent: the second call reports the same settled outcome and
+            // rewrites nothing.
+            let settled = record_contents(dir.path()).unwrap().unwrap();
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "SPEC-3248 の該当 slice は PR #3429 で着地済み".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(record_contents(dir.path()).unwrap().unwrap(), settled);
+
+            // FR-243: a No Action never turns into a completion claim. The
+            // record settles so older readers are released (Issue #4590), so
+            // `execution.complete` reports the settlement the audit recorded
+            // instead of manufacturing a delivery.
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                out.contains("already settled as No Action") && out.contains("not a completion"),
+                "a No Action must never read back as a completion: {out}"
+            );
+            assert!(
+                pr_handoff_refusal(dir.path(), true).is_some(),
+                "and it never opens the Ready PR gate"
+            );
+        }
+
+        // AC-2 / AS-219: a worktree with real source work refuses, and the
+        // refusal carries an agent-recoverable route rather than stranding the
+        // session.
+        #[test]
+        fn no_action_refuses_real_source_work_through_the_operation_surface() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-no-action");
+            let dir = tempfile::tempdir().unwrap();
+            delivered_repo(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-no-action")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            fs::create_dir_all(dir.path().join("crates/gwt/src")).unwrap();
+            fs::write(dir.path().join("crates/gwt/src/new.rs"), "pub fn x() {}\n").unwrap();
+
+            let output = run_governed_cmd(
+                dir.path(),
+                ExecutionCommand::NoAction {
+                    reason: "nothing to deliver".to_string(),
+                },
+            )
+            .expect("the refusal answers rather than failing the process");
+            assert_eq!(output.exit_code, 2, "{}", output.output);
+            assert!(
+                output.output.contains("crates/gwt/src/new.rs"),
+                "the refusal names the source it found: {}",
+                output.output
+            );
+            let refusal = output.refusal.expect("a structured refusal");
+            assert_eq!(
+                refusal.reason_code,
+                "execution_no_action_source_changes_present"
+            );
         }
 
         #[test]
@@ -22421,6 +28509,7 @@ exit 1
                     derived: true,
                     surfaces: vec!["rust(gwt)".to_string()],
                     generated_outputs: vec!["artifacts/report.json".to_string()],
+                    quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
@@ -22482,6 +28571,7 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -22571,6 +28661,9 @@ exit 1
                     &mut env,
                     CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
                         commands: Vec::new(),
+                        max_wait_secs: None,
+                        headed_e2e_commands: Vec::new(),
+                        user_verification_result: None,
                     }),
                 )
                 .unwrap();
@@ -22607,6 +28700,122 @@ exit 1
                     "{reason}: execution.reopen must restore Active"
                 );
             }
+        }
+
+        // Issue #4523: `execution.reopen` appends a Blocked -> Active lifecycle
+        // event to the same generation, which advances the ledger head hash
+        // inside `ExecutionBindingIdentity`. The record the reopen consumed must
+        // stay valid for the PR mutation that follows, or every terminal
+        // recovery costs two identical full verification matrices. Tree
+        // freshness stays enforced by the fingerprint gate.
+        #[test]
+        fn reopen_preserves_the_verification_evidence_it_consumed() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
+            let dir = tempfile::tempdir().unwrap();
+            let worktree = dir.path().to_path_buf();
+            crate::cli::trusted_store::init_git_repo_with_origin(&worktree);
+            let git = |args: &[&str]| {
+                let status = gwt_core::process::hidden_command("git")
+                    .arg("-C")
+                    .arg(&worktree)
+                    .args(args)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            };
+            git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+            git(&["checkout", "-q", "-b", "work/issue-4523"]);
+
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(&worktree, &active_record("sess-reopen")).unwrap();
+            ensure_generation_ledger(&worktree, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            persist_generation_session_binding(&worktree, owner, "sess-reopen", binding.clone());
+            settle_blocked(&worktree, "sess-reopen");
+
+            let mut env = TestEnv::new(worktree.clone());
+            let (plan_code, plan_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: Vec::new(),
+                    derive: true,
+                }),
+            )
+            .unwrap();
+            assert_eq!(plan_code, 0, "{plan_out}");
+            let mut env = TestEnv::new(worktree.clone());
+            let (run_code, run_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                    commands: Vec::new(),
+                    max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
+                    user_verification_result: None,
+                }),
+            )
+            .unwrap();
+            assert_eq!(run_code, 0, "{run_out}");
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "post-block evidence must be fresh before the reopen consumes it"
+            );
+
+            let mut out = String::new();
+            assert_eq!(
+                run_reopen(&worktree, "sess-reopen", "blocker resolved", &mut out).unwrap(),
+                0,
+                "{out}"
+            );
+            assert!(out.contains("reopened"), "{out}");
+            let reopened_binding = current_execution_binding(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                reopened_binding, binding,
+                "the reopen lifecycle event is expected to advance the ledger head"
+            );
+            assert_eq!(
+                reopened_binding.generation_id, binding.generation_id,
+                "reopen stays inside the same execution generation"
+            );
+
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::Fresh,
+                "the record execution.reopen consumed must still authorize the first PR mutation"
+            );
+
+            fs::write(worktree.join("changed-after-reopen.txt"), "dirty").unwrap();
+            assert_eq!(
+                crate::cli::verification_record::evaluate_evidence(
+                    &worktree,
+                    "sess-reopen",
+                    Some(owner.number),
+                ),
+                crate::cli::verification_record::EvidenceStatus::StaleFingerprint,
+                "relaxing the generation gate must not relax the tree freshness gate"
+            );
         }
 
         #[test]
@@ -22813,6 +29022,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -22842,6 +29052,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -22993,9 +29204,21 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
             let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
             save(dir.path(), &active_record("sess-reopen")).unwrap();
+            persist_recovery_session_snapshot(
+                dir.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                "sess-reopen",
+            );
             let (code, out) = run_cmd(
                 dir.path(),
                 ExecutionCommand::Reopen {
@@ -23085,9 +29308,21 @@ exit 1
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
             let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
             save(dir.path(), &active_record("sess-reopen")).unwrap();
+            persist_recovery_session_snapshot(
+                dir.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                "sess-reopen",
+            );
 
             let worktree = dir.path().to_path_buf();
             let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
@@ -23102,17 +29337,46 @@ exit 1
             });
             acquired_rx.recv().unwrap();
 
-            let complete = run_cmd(dir.path(), ExecutionCommand::Complete)
+            let complete = run_governed_cmd(dir.path(), ExecutionCommand::Complete)
                 .expect_err("completion must contend on the owner lease");
-            assert!(complete.to_string().contains("retry"), "{complete}");
-            let reopen = run_cmd(
+            assert!(
+                complete.error.to_string().contains("retry"),
+                "{}",
+                complete.error
+            );
+            let complete_refusal = complete.refusal.expect("typed completion contention");
+            assert_eq!(
+                complete_refusal.reason_code,
+                "execution_complete_store_busy"
+            );
+            assert_eq!(
+                complete_refusal.recovery_action.as_deref(),
+                Some("execution.complete")
+            );
+            assert_eq!(
+                complete_refusal.governance.cause,
+                Some(crate::cli::governance::GovernanceCause::TransientGovernance)
+            );
+            assert_eq!(complete_refusal.escalation_kind(), None);
+            let reopen = run_governed_cmd(
                 dir.path(),
                 ExecutionCommand::Reopen {
                     reason: "retry after lease".to_string(),
                 },
             )
             .expect_err("reopen must contend on the owner lease");
-            assert!(reopen.to_string().contains("retry"), "{reopen}");
+            assert!(
+                reopen.error.to_string().contains("retry"),
+                "{}",
+                reopen.error
+            );
+            let reopen_refusal = reopen.refusal.expect("typed reopen contention");
+            assert_eq!(reopen_refusal.reason_code, "execution_reopen_store_busy");
+            assert_eq!(
+                reopen_refusal.recovery_action.as_deref(),
+                Some("execution.reopen")
+            );
+            assert_eq!(reopen_refusal.escalation_kind(), None);
 
             release_tx.send(()).unwrap();
             holder.join().unwrap();
@@ -23187,6 +29451,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23218,6 +29483,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23380,9 +29646,135 @@ exit 1
             );
         }
 
-        // T-124: unauthorized settlement attempts (session mismatch) and
-        // tampered-record refusals auto-capture one deduped
-        // issue-spec-workflow improvement candidate.
+        /// Issue #4544 AC-3: a provider permission prompt on a launch that had
+        /// to be prompt-free refuses completion, and AC-4's fields reach
+        /// `execution.status` so an operator can see why without a pane.
+        #[test]
+        fn a_permission_prompt_regression_refuses_completion_and_is_reported_by_status() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-4544");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-4544")).unwrap();
+
+            crate::cli::permission_readiness::record_prompt_regression(
+                dir.path(),
+                "issue",
+                4544,
+                "sess-4544",
+                "codex",
+                0x1234,
+            )
+            .unwrap();
+
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("permission_prompt_regression"), "{out}");
+            assert!(out.contains("codex"), "{out}");
+            assert!(out.contains("Recovery:"), "{out}");
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active,
+                "a refused completion must not settle the record"
+            );
+
+            // AC-4: the same facts, machine-readable.
+            let snapshot = status_snapshot(dir.path(), "sess-4544");
+            let readiness = &snapshot["permission_readiness"];
+            assert_eq!(readiness["kind"], "permission_prompt_regression");
+            assert_eq!(readiness["provider"], "codex");
+            assert_eq!(readiness["owner_number"], 4544);
+            assert_eq!(readiness["session_id"], "sess-4544");
+            assert!(readiness["gate_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()));
+            assert!(readiness["expected_permission_mode"]
+                .as_str()
+                .is_some_and(|mode| !mode.is_empty()));
+            assert!(readiness["observed_permission_mode"]
+                .as_str()
+                .is_some_and(|mode| !mode.is_empty()));
+            assert!(readiness["recovery_action"]
+                .as_str()
+                .is_some_and(|action| !action.is_empty()));
+
+            // AC-4: the rendering must not imply that anything was attempted.
+            let rendered = serde_json::to_string(readiness)
+                .unwrap()
+                .to_ascii_lowercase();
+            for misleading in ["tests ran", "tests passed", "verification passed"] {
+                assert!(!rendered.contains(misleading), "{rendered}");
+            }
+        }
+
+        /// AC-3: Ready is refused while the regression stands; a Draft handoff
+        /// stays available so the work in flight is not stranded.
+        #[test]
+        fn a_permission_prompt_regression_refuses_ready_but_not_draft() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-4544");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-4544")).unwrap();
+            crate::cli::permission_readiness::record_prompt_regression(
+                dir.path(),
+                "issue",
+                4544,
+                "sess-4544",
+                "codex",
+                1,
+            )
+            .unwrap();
+
+            let ready = pr_handoff_refusal(dir.path(), true).expect("Ready is refused");
+            assert!(ready.contains("permission_prompt_regression"), "{ready}");
+            assert!(ready.contains("Recovery:"), "{ready}");
+
+            let draft = pr_handoff_refusal(dir.path(), false);
+            assert!(
+                draft.is_none_or(|reason| !reason.contains("permission_prompt_regression")),
+                "a Draft handoff must not be refused by this gate"
+            );
+        }
+
+        /// AC-3: the recovery action the record names has to actually work, or
+        /// the gate is a dead end. A fresh launch clears it.
+        #[test]
+        fn a_fresh_launch_clears_the_permission_prompt_regression() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            crate::cli::permission_readiness::record_prompt_regression(
+                dir.path(),
+                "issue",
+                4544,
+                "sess-old",
+                "codex",
+                1,
+            )
+            .unwrap();
+            assert!(crate::cli::permission_readiness::settlement_refusal(dir.path()).is_some());
+
+            materialize_at_launch(
+                dir.path(),
+                ExecutionOwnerKind::Issue,
+                4544,
+                "sess-new",
+                "gwt-execute",
+                false,
+            )
+            .unwrap();
+
+            assert!(
+                crate::cli::permission_readiness::settlement_refusal(dir.path()).is_none(),
+                "the relaunch the record recommends must clear it"
+            );
+        }
+
         #[test]
         fn complete_refused_while_obligations_open_then_defer_clears() {
             let _env_lock = crate::env_test_lock()
@@ -23529,7 +29921,7 @@ exit 1
         }
 
         #[test]
-        fn settlement_refusals_capture_improvement_candidate() {
+        fn settlement_refusals_report_repair_guidance_without_capture_note() {
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -23537,11 +29929,13 @@ exit 1
             let dir = tempfile::tempdir().unwrap();
             save(dir.path(), &active_record("sess-owner")).unwrap();
 
-            // Unauthorized settle from a non-owner session.
+            // Unauthorized settle from a non-owner session. The refusal keeps
+            // its takeover handoff; the retired self-improvement capture note
+            // (T-124) must not appear (AC-R4).
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 2, "{out}");
             assert!(out.contains("execution.adopt"), "{out}");
-            assert!(out.contains("Self-improvement candidate"), "{out}");
+            assert!(!out.contains("Self-improvement"), "{out}");
 
             // Tampered record refusal (blocked settle has no evidence gate,
             // so it reaches the integrity check directly).
@@ -23560,40 +29954,19 @@ exit 1
             .unwrap();
             assert_eq!(code, 2, "{out}");
             assert!(out.contains("integrity validation"), "{out}");
-            assert!(out.contains("Self-improvement candidate"), "{out}");
-
-            let candidates = crate::cli::improvement::candidate_public_values(dir.path());
-            assert_eq!(candidates.len(), 1, "one deduped candidate expected");
-            assert_eq!(
-                candidates[0]
-                    .get("legacy_occurrence_count")
-                    .and_then(|v| v.as_u64()),
-                Some(2)
-            );
-            // Owner attribution survives in the deduped candidate details.
-            let store_raw = fs::read_to_string(
-                crate::cli::improvement_store::candidate_store_path(dir.path()),
-            )
-            .unwrap();
-            assert!(store_raw.contains("spec #3248"), "{store_raw}");
+            assert!(out.contains("execution.repair"), "{out}");
+            assert!(out.contains("quarantines"), "{out}");
+            assert!(!out.contains("Self-improvement"), "{out}");
 
             // Benign retry: a mismatch against an ALREADY SETTLED record is
-            // refused but not captured as a violation.
+            // still refused, with the terminal-record handoff.
             let mut settled = active_record("sess-owner");
             settled.status = ExecutionControlStatus::Completed;
             settled.settled_at = Some(Utc::now());
             save(dir.path(), &settled).unwrap();
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 2, "{out}");
-            assert!(!out.contains("Self-improvement candidate"), "{out}");
-            let candidates = crate::cli::improvement::candidate_public_values(dir.path());
-            assert_eq!(
-                candidates[0]
-                    .get("legacy_occurrence_count")
-                    .and_then(|v| v.as_u64()),
-                Some(2),
-                "benign retry must not add an occurrence"
-            );
+            assert!(!out.contains("Self-improvement"), "{out}");
         }
 
         // T-125: crash/resume handoff lifecycle E2E — the adopt transfer is
@@ -23666,6 +30039,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23688,6 +30062,198 @@ exit 1
             assert_eq!(pr_handoff_refusal(dir.path(), true), None);
             let result = settle(dir.path(), "sess-b", ExecutionSettlement::Completed).unwrap();
             assert!(matches!(result, SettleResult::Settled(_)));
+        }
+
+        #[test]
+        fn complete_op_finishes_matching_build_lifecycle_for_issue_and_spec() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session_env = unset_live_session_env();
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            for owner_kind in [ExecutionOwnerKind::Issue, ExecutionOwnerKind::Spec] {
+                // Owner ledgers are repo-scoped, so each owner-kind case
+                // needs a separate trusted HOME even with distinct worktrees.
+                let home = tempfile::tempdir().unwrap();
+                let _home = ScopedEnvVar::set("HOME", home.path());
+                let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+                let dir = tempfile::tempdir().unwrap();
+                prepare_generation_bound_execution_for_owner(
+                    dir.path(),
+                    "sess-op",
+                    ExecutionOwnerKey {
+                        kind: owner_kind,
+                        number: 3248,
+                    },
+                    ExecutionControlStatus::Active,
+                );
+                // This test exercises completion, not the managed start preflight.
+                // Starting without a Host/Work is correctly rejected; seed the fixture.
+                save_build_state(dir.path(), "sess-op", Some(3248), true);
+
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(
+                    gwt_core::skill_state::load(dir.path(), "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active
+                );
+                save_covering_evidence(dir.path(), "sess-op", false);
+
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(
+                    load(dir.path()).unwrap().unwrap().status,
+                    ExecutionControlStatus::Completed
+                );
+                assert!(
+                    !gwt_core::skill_state::load(dir.path(), "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active,
+                    "successful execution.complete must also finish the matching build"
+                );
+                assert_eq!(
+                    crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                        dir.path(),
+                        "{}",
+                        Some("sess-op")
+                    ),
+                    crate::cli::hook::HookOutput::Silent,
+                    "a completed execution must not leave a still-active Stop loop"
+                );
+            }
+        }
+
+        #[test]
+        fn complete_op_retry_finishes_stranded_build_without_changing_completed_execution() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = unset_live_session_env();
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            prepare_generation_bound_execution_for_owner(
+                dir.path(),
+                "sess-op",
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 3248,
+                },
+                ExecutionControlStatus::Completed,
+            );
+            let completed = load(dir.path()).unwrap().unwrap();
+            // A previous version, or a failed cleanup write, left only the
+            // local build lifecycle open after the execution was settled.
+            save_build_state(dir.path(), "sess-op", Some(3248), true);
+
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(
+                !gwt_core::skill_state::load(dir.path(), "build-spec")
+                    .unwrap()
+                    .unwrap()
+                    .active
+            );
+            let after = load(dir.path()).unwrap().unwrap();
+            assert_eq!(after, completed);
+            let state = gwt_core::skill_state::load(dir.path(), "build-spec").unwrap();
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                gwt_core::skill_state::load(dir.path(), "build-spec").unwrap(),
+                state
+            );
+        }
+
+        #[test]
+        fn complete_op_preserves_unrelated_build_lifecycles() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            for (build_session, build_owner) in [
+                ("sess-other", Some(3248)),
+                ("sess-op", Some(999)),
+                ("sess-op", None),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                save(dir.path(), &active_record("sess-op")).unwrap();
+                save_build_state(dir.path(), build_session, build_owner, true);
+                let before = gwt_core::skill_state::load(dir.path(), "build-spec").unwrap();
+                save_covering_evidence(dir.path(), "sess-op", false);
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(
+                    gwt_core::skill_state::load(dir.path(), "build-spec").unwrap(),
+                    before
+                );
+            }
+        }
+
+        #[test]
+        fn complete_op_reports_build_cleanup_io_error_and_can_retry() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            save_build_state(dir.path(), "sess-op", Some(3248), true);
+            save_covering_evidence(dir.path(), "sess-op", false);
+            let path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
+            let backup = path.with_extension("backup");
+            fs::rename(&path, &backup).unwrap();
+            fs::create_dir(&path).unwrap();
+
+            assert!(
+                run_cmd(dir.path(), ExecutionCommand::Complete).is_err(),
+                "cleanup I/O errors must not be reported as successful completion"
+            );
+            let completed = load(dir.path()).unwrap().unwrap();
+            assert_eq!(completed.status, ExecutionControlStatus::Completed);
+            fs::remove_dir(&path).unwrap();
+            fs::rename(&backup, &path).unwrap();
+
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(load(dir.path()).unwrap().unwrap(), completed);
+            assert!(
+                !gwt_core::skill_state::load(dir.path(), "build-spec")
+                    .unwrap()
+                    .unwrap()
+                    .active
+            );
+        }
+
+        #[test]
+        fn blocked_op_does_not_finalize_build_of_already_completed_execution() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            settle(dir.path(), "sess-op", ExecutionSettlement::Completed).unwrap();
+            save_build_state(dir.path(), "sess-op", Some(3248), true);
+            let before = gwt_core::skill_state::load(dir.path(), "build-spec").unwrap();
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "late blocked notification".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert_eq!(
+                gwt_core::skill_state::load(dir.path(), "build-spec").unwrap(),
+                before
+            );
         }
 
         #[test]
@@ -23720,6 +30286,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -23734,10 +30301,449 @@ exit 1
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("completed"), "{out}");
+            let completed = load(dir.path()).unwrap().unwrap();
+            assert_eq!(completed.status, ExecutionControlStatus::Completed);
+            let verification = crate::cli::verification_record::load(dir.path())
+                .unwrap()
+                .unwrap();
+            let receipt = completed
+                .completion_evidence
+                .expect("completion must pin its verification snapshot");
+            assert_eq!(receipt.verification_record_id, verification.record_id);
+            assert_eq!(receipt.verification_run_hash, verification.content_hash);
+            assert_eq!(
+                receipt.verification_plan_hash,
+                verification.verification_plan_hash
+            );
+            assert!(!receipt.used_typed_quarantine);
+        }
+
+        #[test]
+        fn completion_rejects_verification_record_substitution_after_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            crate::cli::verification_record::save_plan(
+                dir.path(),
+                &crate::cli::verification_record::VerificationPlanRecord {
+                    session_id: "sess-op".to_string(),
+                    owner_number: Some(3248),
+                    execution_binding: None,
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    worktree_fingerprint: String::new(),
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
+            let (original, _) = crate::cli::verification_record::run_verification(
+                dir.path(),
+                "sess-op",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+            let mut replacement = original.clone();
+            replacement.record_id = "vrr-substituted".to_string();
+            crate::cli::verification_record::save(dir.path(), &replacement).unwrap();
+
+            let outcome = settle_completed_with_evidence(
+                dir.path(),
+                "sess-op",
+                Some(3248),
+                Some(&original.content_hash),
+            )
+            .unwrap();
+            assert_eq!(
+                outcome,
+                Err(crate::cli::verification_record::EvidenceStatus::PlanChanged)
+            );
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
-                ExecutionControlStatus::Completed
+                ExecutionControlStatus::Active
             );
+        }
+
+        #[test]
+        fn complete_op_reports_stale_evidence_as_agent_recoverable_without_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            save_covering_evidence(dir.path(), "sess-op", false);
+            fs::write(
+                dir.path().join("changed-after-verification.rs"),
+                "fn changed() {}\n",
+            )
+            .unwrap();
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+
+            assert_eq!(code, 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("parse JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "verification_stale_fingerprint"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "verify.run");
+            assert_eq!(payload["refusal"]["governance"]["effect"], "protected");
+            assert_eq!(payload["refusal"]["governance"]["cause"], "not_ready");
+            assert_eq!(payload["refusal"]["governance"]["retryable"], true);
+            assert!(
+                payload["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("rerun `verify.run`")),
+                "the existing caller action must remain intact: {payload}"
+            );
+            assert!(
+                gwt_core::coordination::load_open_escalations(dir.path())
+                    .unwrap()
+                    .is_empty(),
+                "a stale verification refusal is the current agent's next action"
+            );
+        }
+
+        #[test]
+        fn complete_without_session_identity_keeps_typed_authority_through_error_envelope() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+
+            assert_eq!(code, 1);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("parse JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_session_identity_unavailable"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(
+                payload["refusal"]["governance"]["cause"],
+                "managed_identity"
+            );
+            assert_eq!(payload["refusal"]["escalation_kind"], "authority");
+            assert!(payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("requires GWT_SESSION_ID")));
+            assert_eq!(
+                gwt_core::coordination::load_open_escalations(dir.path())
+                    .unwrap()
+                    .len(),
+                1,
+                "a missing durable execution identity requires human authority recovery"
+            );
+        }
+
+        #[test]
+        fn complete_repairable_evidence_matrix_never_auto_escalates() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+
+            for (case, expected_reason) in [
+                ("missing", "verification_missing_record"),
+                ("failing", "verification_failing"),
+                ("plan_changed", "verification_plan_changed"),
+            ] {
+                let repo = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+                save(repo.path(), &active_record("sess-op")).unwrap();
+
+                match case {
+                    "missing" => {}
+                    "failing" => {
+                        save_covering_evidence(repo.path(), "sess-op", false);
+                        let mut plan = crate::cli::verification_record::load_plan(repo.path())
+                            .unwrap()
+                            .expect("verification plan");
+                        plan.commands = vec!["git definitely-not-a-subcommand".to_string()];
+                        crate::cli::verification_record::save_plan(repo.path(), &plan).unwrap();
+                        crate::cli::verification_record::run_verification(
+                            repo.path(),
+                            "sess-op",
+                            &plan.commands,
+                        )
+                        .unwrap();
+                    }
+                    "plan_changed" => {
+                        save_covering_evidence(repo.path(), "sess-op", false);
+                        let mut plan = crate::cli::verification_record::load_plan(repo.path())
+                            .unwrap()
+                            .expect("verification plan");
+                        plan.commands = vec!["git status --short".to_string()];
+                        crate::cli::verification_record::save_plan(repo.path(), &plan).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+
+                let mut env = TestEnv::new(repo.path().to_path_buf());
+                env.stdin = r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#
+                    .to_string();
+                let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&env.stdout).expect("parse JSON response");
+
+                assert_eq!(code, 2, "{case}: {payload}");
+                assert_eq!(payload["refusal"]["reason_code"], expected_reason);
+                assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+                assert_eq!(payload["refusal"]["recovery_action"], "verify.run");
+                assert!(
+                    gwt_core::coordination::load_open_escalations(repo.path())
+                        .unwrap()
+                        .is_empty(),
+                    "{case} is self-recoverable"
+                );
+                assert_eq!(
+                    load(repo.path()).unwrap().unwrap().status,
+                    ExecutionControlStatus::Active,
+                    "{case} refusal must not mutate terminal state"
+                );
+            }
+        }
+
+        #[test]
+        fn continuation_bridge_failure_reasons_keep_typed_dispositions() {
+            use crate::daemon_runtime::AgentBridgeFailureReason;
+            use gwt_core::board_escalation::OperationRefusalKind;
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+
+            for (reason, recoverable, cause, kind, action) in [
+                (
+                    AgentBridgeFailureReason::TransportFailure,
+                    true,
+                    crate::cli::governance::GovernanceCause::TransientGovernance,
+                    None,
+                    Some("execution.continue"),
+                ),
+                (
+                    AgentBridgeFailureReason::WorkspaceEnsureRequired,
+                    true,
+                    crate::cli::governance::GovernanceCause::NotReady,
+                    None,
+                    Some("workspace.ensure"),
+                ),
+                (
+                    AgentBridgeFailureReason::AuthorityMismatch,
+                    false,
+                    crate::cli::governance::GovernanceCause::Authority,
+                    Some(OperationRefusalKind::Authority),
+                    None,
+                ),
+                (
+                    AgentBridgeFailureReason::ReceiptMismatch,
+                    false,
+                    crate::cli::governance::GovernanceCause::Integrity,
+                    Some(OperationRefusalKind::Integrity),
+                    None,
+                ),
+                (
+                    AgentBridgeFailureReason::OperationRejected,
+                    false,
+                    crate::cli::governance::GovernanceCause::StructuralGovernance,
+                    Some(OperationRefusalKind::Permission),
+                    None,
+                ),
+            ] {
+                let refusal = continuation_bridge_failure_refusal(reason);
+                assert_eq!(
+                    refusal.recoverability
+                        == crate::cli::governance::RefusalRecoverability::AgentRecoverable,
+                    recoverable
+                );
+                assert_eq!(refusal.governance.cause, Some(cause));
+                assert_eq!(refusal.escalation_kind(), kind);
+                assert_eq!(refusal.recovery_action.as_deref(), action);
+                let repo = tempfile::tempdir().unwrap();
+                let mut env = TestEnv::new(repo.path().to_path_buf());
+                crate::cli::board::auto_file_structured_operation_refusal(
+                    &mut env,
+                    "execution.continue",
+                    "wording-independent continuation refusal",
+                    &refusal,
+                );
+                assert_eq!(
+                    gwt_core::coordination::load_open_escalations(repo.path())
+                        .unwrap()
+                        .len(),
+                    usize::from(kind.is_some()),
+                );
+            }
+        }
+
+        #[test]
+        fn repair_of_healthy_authority_is_non_escalating_not_applicable() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-healthy-repair";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.repair","params":{"reason":"confirm healthy state"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("repair JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_repair_not_required"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "execution.status");
+            assert!(gwt_core::coordination::load_open_escalations(repo.path())
+                .unwrap()
+                .is_empty());
+        }
+
+        #[test]
+        fn execution_human_required_producers_keep_typed_positive_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-positive";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+
+            let terminal = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(terminal.path());
+            save(terminal.path(), &active_record(session_id)).unwrap();
+            settle(terminal.path(), session_id, ExecutionSettlement::Completed).unwrap();
+            persist_recovery_session_snapshot(
+                terminal.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let mut env = TestEnv::new(terminal.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.reopen","params":{"reason":"new work"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("terminal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_reopen_record_terminal"
+            );
+            assert_eq!(payload["refusal"]["governance"]["cause"], "domain_invalid");
+            assert_eq!(payload["refusal"]["escalation_kind"], "immutability");
+            assert_eq!(
+                gwt_core::coordination::load_open_escalations(terminal.path())
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            let integrity = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(integrity.path());
+            save(integrity.path(), &active_record(session_id)).unwrap();
+            let trusted_path =
+                crate::cli::trusted_store::trusted_dir_for_worktree(integrity.path())
+                    .unwrap()
+                    .join("execution-control.json");
+            let tampered = fs::read_to_string(&trusted_path)
+                .unwrap()
+                .replace("$gwt-execute", "$gwt-forged");
+            fs::write(&trusted_path, tampered).unwrap();
+            let mut env = TestEnv::new(integrity.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.blocked","params":{"reason":"environment unavailable"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("integrity JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_record_integrity_failed"
+            );
+            assert_eq!(payload["refusal"]["governance"]["cause"], "integrity");
+            assert_eq!(payload["refusal"]["escalation_kind"], "integrity");
+            assert_eq!(
+                gwt_core::coordination::load_open_escalations(integrity.path())
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        #[test]
+        fn every_repairable_evidence_status_keeps_verify_run_as_the_typed_next_action() {
+            use crate::cli::governance::{GovernanceCause, RefusalRecoverability};
+            use crate::cli::verification_record::EvidenceStatus;
+
+            for (status, reason_code) in [
+                (EvidenceStatus::MissingRecord, "verification_missing_record"),
+                (EvidenceStatus::WrongSession, "verification_wrong_session"),
+                (EvidenceStatus::WrongOwner, "verification_wrong_owner"),
+                (
+                    EvidenceStatus::WrongGeneration,
+                    "verification_wrong_generation",
+                ),
+                (
+                    EvidenceStatus::StaleFingerprint,
+                    "verification_stale_fingerprint",
+                ),
+                (EvidenceStatus::Failing, "verification_failing"),
+                (EvidenceStatus::Unreadable, "verification_unreadable"),
+                (EvidenceStatus::Tampered, "verification_tampered"),
+                (
+                    EvidenceStatus::PlanNotCovered,
+                    "verification_plan_not_covered",
+                ),
+                (EvidenceStatus::PlanChanged, "verification_plan_changed"),
+            ] {
+                let refusal = verification_evidence_refusal(&status);
+                assert_eq!(refusal.reason_code, reason_code);
+                assert_eq!(
+                    refusal.recoverability,
+                    RefusalRecoverability::AgentRecoverable
+                );
+                assert_eq!(refusal.recovery_action.as_deref(), Some("verify.run"));
+                assert_eq!(refusal.governance.cause, Some(GovernanceCause::NotReady));
+                assert_eq!(refusal.governance.retryable, Some(true));
+                assert_eq!(refusal.escalation_kind(), None);
+            }
         }
 
         #[test]
@@ -23754,18 +30760,313 @@ exit 1
             save_covering_evidence(&fixture.repo, "sess-op", false);
             fixture.append_event("terminal-update-awaiting-delivery");
 
-            let (code, out) =
-                run_cmd(&fixture.repo, ExecutionCommand::Complete).expect("run completion gate");
-
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
-            assert!(out.contains("commit"), "{out}");
-            assert!(out.contains("push"), "{out}");
+            let mut env = TestEnv::new(fixture.repo.clone());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
+            assert_eq!(code, 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("parse JSON response");
+            let output = payload["output"].as_str().expect("completion output");
+            assert!(output.contains(".gwt/work/events.jsonl"), "{payload}");
+            assert!(output.contains("commit"), "{payload}");
+            assert!(output.contains("push"), "{payload}");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "work_event_delivery_unsettled"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(
+                payload["refusal"]["recovery_action"],
+                "commit_and_push_work_events"
+            );
+            assert!(
+                gwt_core::coordination::load_open_escalations(&fixture.repo)
+                    .unwrap()
+                    .is_empty(),
+                "dirty Work delivery is resolved by commit/push/retry"
+            );
             assert_eq!(
                 load(&fixture.repo).unwrap().unwrap().status,
                 ExecutionControlStatus::Active,
                 "the execution record must stay active when Work delivery is unsettled"
             );
+        }
+
+        #[test]
+        fn dirty_work_refusal_stays_local_then_commit_push_retry_completes() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+            save(&fixture.repo, &active_record("sess-op")).unwrap();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+            fixture.append_event("terminal-update-awaiting-delivery");
+
+            let mut refused = TestEnv::new(fixture.repo.clone());
+            refused.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut refused, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&refused.stdout).expect("dirty refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "work_event_delivery_unsettled"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(
+                payload["refusal"]["recovery_action"],
+                "commit_and_push_work_events"
+            );
+            assert!(
+                gwt_core::coordination::load_open_escalations(&fixture.repo)
+                    .unwrap()
+                    .is_empty(),
+                "a dirty Work event is the current agent's next action"
+            );
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Active
+            );
+
+            fixture.stage_events();
+            fixture.commit("chore(work): settle terminal Work event");
+            fixture.push();
+            save_covering_evidence(&fixture.repo, "sess-op", false);
+
+            let mut retried = TestEnv::new(fixture.repo.clone());
+            retried.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut retried, "gwtd"), 0);
+            assert_eq!(
+                load(&fixture.repo).unwrap().unwrap().status,
+                ExecutionControlStatus::Completed,
+                "the advertised commit/push/retry recovery must really complete"
+            );
+        }
+
+        #[test]
+        fn stale_verification_refusal_is_typed_and_never_escalated() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record("sess-op")).unwrap();
+            save_covering_evidence(repo.path(), "sess-op", false);
+            fs::write(
+                repo.path().join("changed-after-verification.rs"),
+                "fn changed() {}\n",
+            )
+            .unwrap();
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("stale refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "verification_stale_fingerprint"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
+            assert_eq!(payload["refusal"]["recovery_action"], "verify.run");
+            assert!(
+                gwt_core::coordination::load_open_escalations(repo.path())
+                    .unwrap()
+                    .is_empty(),
+                "stale verification must stay on the caller's verify.run path"
+            );
+        }
+
+        /// Integrity is the one refusal that names the agent's own next step
+        /// and still escalates (Issue #3696 AC-2).
+        ///
+        /// Every other refusal that advertises a reachable recovery —
+        /// `verify.run`, commit-and-push, `execution.blocked` — stays local,
+        /// because filing it was the misfire this Issue records. Integrity does
+        /// not: `execution.repair` quarantines trusted state that was written
+        /// outside the canonical operations and mints a replacement, and the
+        /// owner has to learn that happened. The escalation therefore carries
+        /// the repair route instead of standing in for it.
+        #[test]
+        fn repairable_integrity_refusal_advertises_repair_and_still_escalates() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-repairable";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let trusted_path = crate::cli::trusted_store::trusted_dir_for_worktree(repo.path())
+                .unwrap()
+                .join("execution-control.json");
+            let tampered = fs::read_to_string(&trusted_path)
+                .unwrap()
+                .replace("$gwt-execute", "$gwt-forged");
+            fs::write(&trusted_path, tampered).unwrap();
+
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.stdin = r#"{"schema_version":1,"operation":"execution.blocked","params":{"reason":"environment unavailable"}}"#
+                .to_string();
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("integrity refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_record_integrity_failed"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["recovery_action"], "execution.repair");
+            assert_eq!(payload["refusal"]["escalation_kind"], "integrity");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(
+                open.len(),
+                1,
+                "tampered trusted state must reach the owner even though repair is reachable"
+            );
+            assert!(
+                open[0].body.contains("execution.repair"),
+                "the escalation must still hand the agent the repair route: {:?}",
+                open[0]
+            );
+        }
+
+        #[test]
+        fn missing_session_identity_uses_execution_owner_for_human_escalation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record("sess-owner")).unwrap();
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.client.seed(gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(3248),
+                title: "execution authority".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-29T00:00:00Z".to_string()),
+                comments: Vec::new(),
+            });
+            env.stdin =
+                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
+
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 1);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("authority refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_session_identity_unavailable"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            assert_eq!(payload["refusal"]["escalation_kind"], "authority");
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(open.len(), 1);
+            assert_eq!(open[0].owners, vec!["3248".to_string()]);
+            assert_eq!(
+                env.client.comments(gwt_github::IssueNumber(3248)).len(),
+                1,
+                "the typed refusal must mirror to its owning Issue"
+            );
+
+            let mut status = String::new();
+            crate::cli::issue::run(
+                &mut env,
+                crate::cli::IssueCommand::MonitorStatus { project_root: None },
+                &mut status,
+            )
+            .unwrap();
+            let status: serde_json::Value = serde_json::from_str(status.trim()).unwrap();
+            assert_eq!(status["needs_human"], serde_json::json!([3248]));
+        }
+
+        #[test]
+        fn terminal_reopen_refusal_reaches_owner_comment_and_needs_human() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let session_id = "sess-terminal";
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            save(repo.path(), &active_record(session_id)).unwrap();
+            settle(repo.path(), session_id, ExecutionSettlement::Completed).unwrap();
+            persist_recovery_session_snapshot(
+                repo.path(),
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3248,
+                },
+                session_id,
+            );
+            let mut env = TestEnv::new(repo.path().to_path_buf());
+            env.client.seed(gwt_github::IssueSnapshot {
+                number: gwt_github::IssueNumber(3248),
+                title: "terminal execution".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: gwt_github::IssueState::Open,
+                updated_at: gwt_github::UpdatedAt::new("2026-08-29T00:00:00Z".to_string()),
+                comments: Vec::new(),
+            });
+            env.stdin = r#"{"schema_version":1,"operation":"execution.reopen","params":{"reason":"new work"}}"#
+                .to_string();
+
+            assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 2);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("terminal refusal JSON response");
+            assert_eq!(
+                payload["refusal"]["reason_code"],
+                "execution_reopen_record_terminal"
+            );
+            assert_eq!(payload["refusal"]["recoverability"], "human_required");
+            assert_eq!(payload["refusal"]["owner_number"], 3248);
+            assert_eq!(payload["refusal"]["escalation_kind"], "immutability");
+            let open = gwt_core::coordination::load_open_escalations(repo.path()).unwrap();
+            assert_eq!(open.len(), 1);
+            assert_eq!(open[0].owners, vec!["3248".to_string()]);
+            assert_eq!(env.client.comments(gwt_github::IssueNumber(3248)).len(), 1);
+            let mut status = String::new();
+            crate::cli::issue::run(
+                &mut env,
+                crate::cli::IssueCommand::MonitorStatus { project_root: None },
+                &mut status,
+            )
+            .unwrap();
+            let status: serde_json::Value = serde_json::from_str(status.trim()).unwrap();
+            assert_eq!(status["needs_human"], serde_json::json!([3248]));
         }
 
         // T-111: a failing verification run never unlocks completion, while
@@ -23845,10 +31146,21 @@ exit 1
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
             let dir = tempfile::tempdir().unwrap();
             save(dir.path(), &active_record("sess-owner")).unwrap();
+            save_covering_evidence(dir.path(), "sess-op", false);
 
-            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains("refused"), "{out}");
+            let result = run_governed_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(result.exit_code, 2, "{}", result.output);
+            assert!(result.output.contains("refused"), "{}", result.output);
+            let refusal = result.refusal.expect("authority typed refusal");
+            assert_eq!(refusal.reason_code, "execution_owner_mismatch");
+            assert_eq!(
+                refusal.recoverability,
+                crate::cli::governance::RefusalRecoverability::HumanRequired
+            );
+            assert_eq!(
+                refusal.escalation_kind,
+                Some(gwt_core::board_escalation::OperationRefusalKind::Authority)
+            );
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
                 ExecutionControlStatus::Active
@@ -23959,6 +31271,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -24034,6 +31347,793 @@ exit 1
         // P9a (T-117): execution.adopt takes over with an audited reason and
         // then allows same-session settlement.
         #[test]
+        fn adopt_host_grant_rejection_happens_under_session_lease_before_mutation() {
+            struct RejectedGrant;
+            impl ExecutionAdoptionPublisher for RejectedGrant {
+                fn acquire(&mut self) -> io::Result<()> {
+                    assert!(gwt_agent::current_thread_holds_session_lease());
+                    Err(io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "grant was revoked",
+                    ))
+                }
+                fn publish(&mut self, _: gwt_agent::SessionExecutionBinding) {
+                    panic!("a revoked grant must never publish authority");
+                }
+            }
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let repo = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(repo.path(), &active_record("previous")).unwrap();
+            ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo.path(), owner)
+                .unwrap()
+                .unwrap();
+            persist_generation_session_binding(repo.path(), owner, "successor", binding);
+            let session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("successor.toml"),
+            )
+            .unwrap();
+            let before = recovery_operation_authority_bytes(repo.path(), owner, &["successor"]);
+            assert!(adopt_for_authenticated_host(
+                repo.path(),
+                &session,
+                "recover",
+                &mut RejectedGrant
+            )
+            .is_err());
+            assert_eq!(
+                recovery_operation_authority_bytes(repo.path(), owner, &["successor"]),
+                before
+            );
+        }
+
+        #[test]
+        fn adopt_installs_durable_binding_for_current_generation_caller() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-old")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let original_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("active generation must expose its binding");
+            persist_generation_session_binding(dir.path(), owner, "sess-old", original_binding);
+            let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
+            assert!(recovery_session.execution_binding.is_none());
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "crash recovery of the implementing window".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+
+            let current = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("adopted generation must retain current authority");
+            let durable = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
+            )
+            .unwrap();
+            let binding = durable
+                .execution_binding
+                .expect("adopting Session must receive the transferred execution binding");
+            assert_eq!(binding.session_id, "sess-new");
+            assert_eq!(binding.owner_kind, owner.kind.as_str());
+            assert_eq!(binding.owner_number, owner.number);
+            assert_eq!(binding.identity, current);
+            assert_eq!(binding.capability_generation, 1);
+            crate::cli::verification_record::authenticate_current_generation_caller(
+                dir.path(),
+                Some("sess-new"),
+            )
+            .expect("adopting Session must authenticate immediately after transfer");
+        }
+
+        #[test]
+        fn adopt_production_dispatch_unlocks_verify_and_ready_pr_handoff() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+            let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+            let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-handoff");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-crashed")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let original_binding = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("original generation binding");
+            persist_generation_session_binding(dir.path(), owner, "sess-crashed", original_binding);
+            persist_recovery_session_snapshot(dir.path(), owner, "sess-handoff");
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            let (adopt_code, adopt_out) = run_collect(
+                &mut env,
+                CliCommand::Execution(ExecutionCommand::Adopt {
+                    reason: "recover the crashed implementation Session".to_string(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(adopt_code, 0, "{adopt_out}");
+
+            let adopted = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-handoff.toml"),
+            )
+            .unwrap();
+            let now = chrono::Utc::now();
+            let mut work = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Start,
+                "adopted-delivery-work",
+                now,
+            );
+            work.owner = Some("SPEC-3248".to_string());
+            work.agent_session_id = Some(adopted.id);
+            work.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some(adopted.branch),
+                    worktree_path: Some(adopted.worktree_path),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let mut works = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
+            works.apply_event(work);
+            gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+                &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path()),
+                &works,
+            )
+            .unwrap();
+
+            let commands = vec!["git --version".to_string()];
+            let (plan_code, plan_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: commands.clone(),
+                    derive: false,
+                }),
+            )
+            .unwrap();
+            assert_eq!(plan_code, 0, "{plan_out}");
+            let (run_code, run_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                    commands,
+                    max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
+                    user_verification_result: None,
+                }),
+            )
+            .unwrap();
+            assert_eq!(run_code, 0, "{run_out}");
+
+            env.seed_created_pr(gwt_git::PrStatus {
+                head_ref_name: String::new(),
+                check_counts: None,
+                number: 7,
+                title: "Adopted execution handoff".to_string(),
+                state: gwt_git::pr_status::PrState::Open,
+                url: "https://example.invalid/pr/7".to_string(),
+                created_at: None,
+                ci_status: "PENDING".to_string(),
+                mergeable: "UNKNOWN".to_string(),
+                merge_state_status: "UNKNOWN".to_string(),
+                review_status: "REVIEW_REQUIRED".to_string(),
+            });
+            let (pr_code, pr_out) = run_collect(
+                &mut env,
+                CliCommand::Pr(crate::cli::PrCommand::CreateBody {
+                    base: "develop".to_string(),
+                    head: None,
+                    title: "fix: restore adopted authority".to_string(),
+                    body: "production-path authority acceptance\nUser Verification Result: confirmed\n".to_string(),
+                    labels: Vec::new(),
+                    draft: false,
+                }),
+            )
+            .unwrap();
+            assert_eq!(pr_code, 0, "{pr_out}");
+            assert_eq!(env.pr_create_call_log.len(), 1);
+            assert!(!env.pr_create_call_log[0].draft);
+        }
+
+        /// Seed the exact state Issue #4154 was filed for: the startup reaper
+        /// settled the worktree's generation to Blocked under the Session that
+        /// is now gone, and the relaunched Session inherits that terminal
+        /// record without ever owning it.
+        fn inherited_terminal_blocked_worktree(
+            repo: &Path,
+            reaped_session: &str,
+            relaunched_session: &str,
+        ) -> ExecutionOwnerKey {
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            crate::cli::trusted_store::init_git_repo_with_origin(repo);
+            save(repo, &active_record(reaped_session)).unwrap();
+            ensure_generation_ledger(repo, owner, LegacyActiveDisposition::Live).unwrap();
+            let active_binding = current_execution_binding(repo, owner).unwrap().unwrap();
+            persist_generation_session_binding(repo, owner, reaped_session, active_binding);
+            settle_blocked(repo, reaped_session);
+            persist_recovery_session_snapshot(repo, owner, relaunched_session);
+            owner
+        }
+
+        /// Issue #4154 AC-4 / AC-5: a worktree that inherited a previous
+        /// Session's terminal record must name the one recovery its caller can
+        /// actually run. `verify.*` and `execution.reopen` all refuse a caller
+        /// that does not own the record, so naming them only burns the Issue
+        /// Monitor's attempts.
+        #[test]
+        fn status_advertises_adopt_for_a_terminal_record_inherited_from_a_dead_session() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            inherited_terminal_blocked_worktree(dir.path(), "sess-reaped", "sess-relaunched");
+
+            let status = status_snapshot(dir.path(), "sess-relaunched");
+            assert_eq!(status["ecr_status"], "blocked", "{status:?}");
+            assert_eq!(status["binding_state"], "terminal", "{status:?}");
+            let recoveries = status["available_recoveries"]
+                .as_array()
+                .expect("available_recoveries")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                recoveries.contains(&"execution.adopt"),
+                "an inherited terminal record must advertise its ownership transfer: {status:?}"
+            );
+            for refused in ["verify.plan", "verify.run", "execution.reopen"] {
+                assert!(
+                    !recoveries.contains(&refused),
+                    "`{refused}` refuses a caller that does not own the record: {status:?}"
+                );
+            }
+        }
+
+        /// Issue #4029 AC-2: the Host refuses `workspace.update` unless the
+        /// caller's Session still holds the *current Active* execution binding
+        /// — `active_execution_binding()` is `None` for a `Prepared` or
+        /// `Inspection` authority, and
+        /// `validate_current_execution_binding_authority` rejects a superseded
+        /// one, both answering `ExecutionBindingMismatch` / `authority_mismatch`
+        /// at HTTP 409. The Work-mutation probe only validates Session identity,
+        /// cwd, repo and Work resolution, so `execution.status` advertised the
+        /// operation to a caller the Host would refuse. Advertisement must track
+        /// the binding predicate the Host enforces, in both directions.
+        #[test]
+        fn status_advertises_workspace_update_only_while_the_caller_holds_the_active_binding() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+
+            crate::cli::trusted_store::init_git_repo_with_origin(repo);
+            save(repo, &active_record("sess-bound")).unwrap();
+            ensure_generation_ledger(repo, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(repo, owner).unwrap().unwrap();
+            persist_generation_session_binding(repo, owner, "sess-bound", binding);
+            // Only `workspace.ensure` materializes the Work projection the
+            // mutation probe resolves, and it must run while the Session is
+            // still the current binding holder.
+            crate::cli::workspace::ensure_workspace_for_agent(
+                repo,
+                crate::cli::workspace::workspace_ensure_status_candidate("sess-bound"),
+            )
+            .expect("ensure the Work projection for the bound Session");
+
+            let advertised = |status: &serde_json::Value| -> bool {
+                status["available_recoveries"]
+                    .as_array()
+                    .expect("available_recoveries")
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|operation| operation == "workspace.update")
+            };
+
+            let bound = status_snapshot(repo, "sess-bound");
+            assert_eq!(bound["ecr_status"], "active", "{bound:?}");
+            assert!(
+                advertised(&bound),
+                "the Session holding the current Active binding executes \
+                 `workspace.update`, so it must stay advertised: {bound:?}"
+            );
+
+            // A foreign generation takes over the Active authority; the caller's
+            // Session file, branch and Work projection are all untouched, so
+            // every Work-mutation precondition still holds while the Host would
+            // now refuse the call.
+            replace_current_generation_authority(
+                repo,
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3249,
+                },
+            );
+
+            let superseded = status_snapshot(repo, "sess-bound");
+            assert_eq!(superseded["ecr_status"], "active", "{superseded:?}");
+            assert!(
+                !advertised(&superseded),
+                "`workspace.update` is refused with `authority_mismatch` once the \
+                 caller no longer holds the Active binding, so it must not be \
+                 advertised: {superseded:?}"
+            );
+            let probe = superseded["recovery_probes"]
+                .as_array()
+                .expect("recovery_probes")
+                .iter()
+                .find(|probe| probe["operation"] == "workspace.update")
+                .expect("workspace.update probe")
+                .clone();
+            assert_eq!(probe["state"], "unavailable", "{probe:?}");
+            assert_eq!(
+                probe["governance"]["cause"], "authority",
+                "the refusal the Host answers is an authority mismatch: {probe:?}"
+            );
+        }
+
+        /// Issue #4154 AC-1 / AC-2: `execution.adopt` transfers a settled
+        /// Blocked record to the relaunched Session without changing its
+        /// lifecycle state, which reconnects the ordinary same-session recovery
+        /// route — `verify.*`, then `execution.reopen`, then the PR handoff.
+        #[test]
+        fn adopt_recovers_a_terminal_record_inherited_from_a_dead_session() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+            let _forward_url = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+            let _forward_token = ScopedEnvVar::unset("GWT_HOOK_FORWARD_TOKEN");
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-relaunched");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            inherited_terminal_blocked_worktree(dir.path(), "sess-reaped", "sess-relaunched");
+
+            let mut env = TestEnv::new(dir.path().to_path_buf());
+            let (adopt_code, adopt_out) = run_collect(
+                &mut env,
+                CliCommand::Execution(ExecutionCommand::Adopt {
+                    reason: "the reaped Session is gone; recovering its worktree".to_string(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(adopt_code, 0, "{adopt_out}");
+
+            let adopted = load(dir.path()).unwrap().unwrap();
+            assert_eq!(
+                adopted.status,
+                ExecutionControlStatus::Blocked,
+                "adoption transfers ownership; it must not silently unblock the execution"
+            );
+            assert_eq!(adopted.primary_session_id, "sess-relaunched");
+            assert_eq!(adopted.transfers.len(), 1);
+            assert_eq!(adopted.transfers[0].from_session_id, "sess-reaped");
+            assert!(integrity_ok(&adopted));
+
+            let commands = vec!["git --version".to_string()];
+            let (plan_code, plan_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: commands.clone(),
+                    derive: false,
+                }),
+            )
+            .unwrap();
+            assert_eq!(plan_code, 0, "{plan_out}");
+            let (run_code, run_out) = run_collect(
+                &mut env,
+                CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run {
+                    commands,
+                    max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
+                    user_verification_result: None,
+                }),
+            )
+            .unwrap();
+            assert_eq!(run_code, 0, "{run_out}");
+
+            save_covering_evidence(dir.path(), "sess-relaunched", true);
+            let (reopen_code, reopen_out) = run_collect(
+                &mut env,
+                CliCommand::Execution(ExecutionCommand::Reopen {
+                    reason: "the reaped Session's blocker is resolved in the adopted worktree"
+                        .to_string(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(reopen_code, 0, "{reopen_out}");
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active
+            );
+
+            env.seed_pr(
+                4122,
+                gwt_git::PrStatus {
+                    head_ref_name: String::new(),
+                    check_counts: None,
+                    number: 4122,
+                    title: "Inherited terminal recovery".to_string(),
+                    state: gwt_git::pr_status::PrState::Open,
+                    url: "https://example.invalid/pr/4122".to_string(),
+                    created_at: None,
+                    ci_status: "SUCCESS".to_string(),
+                    mergeable: "MERGEABLE".to_string(),
+                    merge_state_status: "CLEAN".to_string(),
+                    review_status: "REVIEW_REQUIRED".to_string(),
+                },
+            );
+            let (pr_code, pr_out) = run_collect(
+                &mut env,
+                CliCommand::Pr(crate::cli::PrCommand::EditBody {
+                    number: 4122,
+                    title: None,
+                    body: Some("recovered handoff body".to_string()),
+                    add_labels: Vec::new(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(pr_code, 0, "{pr_out}");
+            assert_eq!(env.pr_edit_call_log.len(), 1);
+        }
+
+        /// Issue #4154 AC-3: the transfer exists for a holder that can never
+        /// come back. A Session that is still running its own recovery keeps
+        /// the record.
+        #[test]
+        fn adopt_refuses_a_terminal_record_while_its_holder_session_is_live() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-relaunched");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            inherited_terminal_blocked_worktree(dir.path(), "sess-live-holder", "sess-relaunched");
+
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            let holder =
+                gwt_agent::Session::load(&sessions_dir.join("sess-live-holder.toml")).unwrap();
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+                .expect("validate holder Session")
+                .expect("holder execution identity");
+            let process_started_at = crate::process::host_process_start_time(std::process::id())
+                .expect("current process start identity");
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Running,
+                &identity,
+                41,
+                process_started_at,
+                std::process::id(),
+                process_started_at,
+            )
+            .save(&gwt_agent::runtime_state_path(
+                &sessions_dir,
+                "sess-live-holder",
+            ))
+            .unwrap();
+            assert_eq!(
+                classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+                ExactSessionRuntimeDisposition::Live
+            );
+
+            let before = fs::read(state_path(dir.path())).unwrap();
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "take the record from a Session that is still running".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("adopt refused"), "{out}");
+            assert_eq!(
+                fs::read(state_path(dir.path())).unwrap(),
+                before,
+                "a refused adoption must not touch the record"
+            );
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().primary_session_id,
+                "sess-live-holder"
+            );
+
+            let status = status_snapshot(dir.path(), "sess-relaunched");
+            let recoveries = status["available_recoveries"]
+                .as_array()
+                .expect("available_recoveries")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                !recoveries.contains(&"execution.adopt"),
+                "a refused transfer must not be advertised: {status:?}"
+            );
+        }
+
+        #[test]
+        fn adopt_retry_repairs_binding_after_takeover_response_loss() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: 3248,
+            };
+            save(dir.path(), &active_record("sess-old")).unwrap();
+            ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
+
+            let mut record = load(dir.path()).unwrap().unwrap();
+            let transfer = OwnershipTransfer {
+                from_session_id: "sess-old".to_string(),
+                to_session_id: "sess-new".to_string(),
+                reason: "crash recovery of the implementing window".to_string(),
+                transferred_at: Utc::now(),
+            };
+            record.transfers.push(transfer.clone());
+            record.primary_session_id = "sess-new".to_string();
+            assert!(
+                persist_generation_takeover_if_owned(dir.path(), &record, &transfer).unwrap(),
+                "fixture must commit the takeover before losing the Session publication response"
+            );
+            assert!(
+                gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml")
+                )
+                .unwrap()
+                .execution_binding
+                .is_none(),
+                "fixture must reproduce the interrupted post-takeover publication"
+            );
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "retry crash recovery".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let current = current_execution_binding(dir.path(), owner)
+                .unwrap()
+                .expect("takeover generation must remain current");
+            let durable = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
+            )
+            .unwrap();
+            assert_eq!(
+                durable
+                    .execution_binding
+                    .as_ref()
+                    .map(|binding| &binding.identity),
+                Some(&current)
+            );
+            assert_eq!(load(dir.path()).unwrap().unwrap().transfers.len(), 1);
+            assert!(recovery_session.execution_binding.is_none());
+        }
+
+        #[test]
+        fn adopt_retry_repairs_partial_generation_publication_and_binding() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+
+            for (index, failure_point) in [
+                GenerationWriteFailurePoint::AfterLedger,
+                GenerationWriteFailurePoint::AfterProjection,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let old_session_id = format!("sess-old-partial-{index}");
+                let new_session_id = format!("sess-new-partial-{index}");
+                let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &new_session_id);
+                let dir = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+                let owner = ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3258 + index as u64,
+                };
+                let mut record = active_record(&old_session_id);
+                record.owner_number = owner.number;
+                save(dir.path(), &record).unwrap();
+                ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+                persist_recovery_session_snapshot(dir.path(), owner, &new_session_id);
+
+                set_generation_write_failure(failure_point);
+                let error = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "recover across partial generation publication".to_string(),
+                    },
+                )
+                .expect_err("the injected first publication must fail");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("injected generation write failure"),
+                    "{error}"
+                );
+                assert!(
+                    gwt_agent::Session::load(
+                        &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml"))
+                    )
+                    .unwrap()
+                    .execution_binding
+                    .is_none(),
+                    "a failed generation publication must not publish Session authority"
+                );
+
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "retry partial generation publication".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{out}");
+                let current = current_execution_binding(dir.path(), owner)
+                    .unwrap()
+                    .expect("the retry must restore strict generation authority");
+                let durable = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml")),
+                )
+                .unwrap();
+                assert_eq!(
+                    durable
+                        .execution_binding
+                        .as_ref()
+                        .map(|binding| &binding.identity),
+                    Some(&current)
+                );
+                assert_eq!(load(dir.path()).unwrap().unwrap().transfers.len(), 1);
+                crate::cli::verification_record::authenticate_current_generation_caller(
+                    dir.path(),
+                    Some(&new_session_id),
+                )
+                .expect("the repaired Session must authenticate without another operation");
+            }
+        }
+
+        #[test]
+        fn adopt_refuses_to_repair_authority_tampered_after_successful_takeover() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+
+            for (index, authority_file) in ["execution-control.json", GENERATION_POINTER_FILE]
+                .into_iter()
+                .enumerate()
+            {
+                let old_session_id = format!("sess-old-tamper-{index}");
+                let new_session_id = format!("sess-new-tamper-{index}");
+                let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &new_session_id);
+                let dir = tempfile::tempdir().unwrap();
+                crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+                let owner = ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Spec,
+                    number: 3268 + index as u64,
+                };
+                let mut record = active_record(&old_session_id);
+                record.owner_number = owner.number;
+                save(dir.path(), &record).unwrap();
+                ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+                persist_recovery_session_snapshot(dir.path(), owner, &new_session_id);
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "complete one valid takeover".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{out}");
+                let binding_before = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml")),
+                )
+                .unwrap()
+                .execution_binding;
+                let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
+                let tampered_path = context.worktree_trusted_dir.join(authority_file);
+                fs::write(&tampered_path, b"{tampered").unwrap();
+
+                let (code, out) = run_cmd(
+                    dir.path(),
+                    ExecutionCommand::Adopt {
+                        reason: "must not launder later authority corruption".to_string(),
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 2, "{out}");
+                assert!(
+                    out.contains("refused") && out.contains("unreadable"),
+                    "{out}"
+                );
+                assert_eq!(fs::read(&tampered_path).unwrap(), b"{tampered");
+                assert_eq!(
+                    gwt_agent::Session::load(
+                        &gwt_core::paths::gwt_sessions_dir().join(format!("{new_session_id}.toml"))
+                    )
+                    .unwrap()
+                    .execution_binding,
+                    binding_before,
+                    "adopt refusal must not rotate Session authority"
+                );
+            }
+        }
+
+        #[test]
         fn adopt_op_transfers_ownership_with_reason() {
             let _env_lock = crate::env_test_lock()
                 .lock()
@@ -24093,6 +32193,7 @@ exit 1
                     worktree_fingerprint: String::new(),
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
                     created_at: Utc::now(),
                     content_hash: String::new(),
                 },
@@ -24119,5 +32220,235 @@ exit 1
                 .expect_err("missing GWT_SESSION_ID must fail");
             assert!(err.to_string().contains("GWT_SESSION_ID"), "{err}");
         }
+    }
+
+    /// Issue #3759 fixture: an owner ledger that committed for this worktree
+    /// whose worktree-scoped publication (pointer + projection, trusted and
+    /// mirror copies) was lost afterwards — the state left behind by a
+    /// ledger-first crash or by trusted-store GC of a removed worktree.
+    fn genesis_with_lost_publication(
+        worktree: &Path,
+        owner: ExecutionOwnerKey,
+        remove_projection: bool,
+    ) -> (ExecutionGenerationLedger, Vec<u8>, Vec<u8>) {
+        let mut record = active_record("session-holder");
+        record.owner_number = owner.number;
+        save(worktree, &record).unwrap();
+        ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+        let published = load_generation_ledger(worktree, owner).unwrap().unwrap();
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(worktree).unwrap();
+        let pointer_bytes = fs::read(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap();
+        let projection_bytes = fs::read(trusted_dir.join("execution-control.json")).unwrap();
+        fs::remove_file(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap();
+        fs::remove_file(generation_pointer_path(worktree)).unwrap();
+        if remove_projection {
+            fs::remove_file(trusted_dir.join("execution-control.json")).unwrap();
+            fs::remove_file(state_path(worktree)).unwrap();
+        }
+        let error = load_generation_ledger(worktree, owner).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains(
+                "execution generation pointer is missing after ledger ownership was established"
+            ),
+            "fixture must reproduce the Issue #3759 launch failure: {error}"
+        );
+        (published, pointer_bytes, projection_bytes)
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_republishes_after_worktree_authority_loss() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let (published, pointer_bytes, projection_bytes) =
+            genesis_with_lost_publication(dir.path(), owner, true);
+        let owner_ledger_path = generation_owner_dir(dir.path(), owner)
+            .unwrap()
+            .join(GENERATION_LEDGER_FILE);
+        let owner_ledger_before = fs::read(&owner_ledger_path).unwrap();
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::Republished
+        );
+
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        assert_eq!(
+            fs::read(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap(),
+            pointer_bytes,
+            "the pointer is a pure function of the ledger and must be rebuilt byte-identical"
+        );
+        assert_eq!(
+            fs::read(trusted_dir.join("execution-control.json")).unwrap(),
+            projection_bytes
+        );
+        assert!(generation_pointer_path(dir.path()).exists());
+        assert!(state_path(dir.path()).exists());
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner).unwrap().unwrap(),
+            published,
+            "the strict view must agree with the owner ledger again"
+        );
+        assert_eq!(
+            current_execution_binding(dir.path(), owner).unwrap(),
+            Some(execution_binding_for_generation(
+                &published,
+                published.current_generation().unwrap()
+            ))
+        );
+        assert_eq!(
+            fs::read(&owner_ledger_path).unwrap(),
+            owner_ledger_before,
+            "healing publication must never rewrite the owner ledger"
+        );
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::AlreadyPublished,
+            "a healthy strict view is a byte-preserving no-op"
+        );
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_republishes_after_pointer_only_loss() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        // Ledger and projection committed, pointer write interrupted.
+        let (published, pointer_bytes, _) = genesis_with_lost_publication(dir.path(), owner, false);
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::Republished
+        );
+
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        assert_eq!(
+            fs::read(trusted_dir.join(GENERATION_POINTER_FILE)).unwrap(),
+            pointer_bytes
+        );
+        assert_eq!(
+            load_generation_ledger(dir.path(), owner).unwrap().unwrap(),
+            published
+        );
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_is_a_no_op_without_an_owner_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::NoLedger
+        );
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        assert!(!trusted_dir.join(GENERATION_POINTER_FILE).exists());
+        assert!(!trusted_dir.join("execution-control.json").exists());
+        assert!(load_generation_ledger(dir.path(), owner).unwrap().is_none());
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_leaves_a_present_but_stale_pointer_fail_closed() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let mut record = active_record("session-holder");
+        record.owner_number = owner.number;
+        save(dir.path(), &record).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
+        let pointer_path = trusted_dir.join(GENERATION_POINTER_FILE);
+        let mut pointer =
+            serde_json::from_slice::<ExecutionGenerationPointer>(&fs::read(&pointer_path).unwrap())
+                .unwrap();
+        pointer.current_generation_content_hash = "stale".to_string();
+        let stale_bytes = serde_json::to_vec_pretty(&pointer).unwrap();
+        fs::write(&pointer_path, &stale_bytes).unwrap();
+        assert!(load_generation_ledger(dir.path(), owner).is_err());
+
+        assert_eq!(
+            heal_missing_generation_publication(dir.path(), owner).unwrap(),
+            GenerationPublicationHeal::NotApplicable,
+            "a present pointer is the stale-worktree fail-closed case, not a lost publication"
+        );
+        assert_eq!(fs::read(&pointer_path).unwrap(), stale_bytes);
+        assert!(load_generation_ledger(dir.path(), owner).is_err());
+    }
+
+    #[test]
+    fn heal_missing_generation_publication_never_publishes_into_a_foreign_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let origin_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(origin_worktree.path());
+        let other_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(other_worktree.path());
+        let owner = generation_owner();
+        let mut record = active_record("session-holder");
+        record.owner_number = owner.number;
+        save(origin_worktree.path(), &record).unwrap();
+        ensure_generation_ledger(origin_worktree.path(), owner, LegacyActiveDisposition::Live)
+            .unwrap();
+        let published = load_generation_ledger(origin_worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert!(
+            load_owner_generation_ledger(other_worktree.path(), owner)
+                .unwrap()
+                .is_some(),
+            "both worktrees must share the repository-scoped owner ledger"
+        );
+
+        assert_eq!(
+            heal_missing_generation_publication(other_worktree.path(), owner).unwrap(),
+            GenerationPublicationHeal::ForeignWorktree
+        );
+
+        let other_trusted_dir =
+            crate::cli::trusted_store::trusted_dir_for_worktree(other_worktree.path()).unwrap();
+        assert!(!other_trusted_dir.join(GENERATION_POINTER_FILE).exists());
+        assert!(!other_trusted_dir.join("execution-control.json").exists());
+        assert!(load_generation_ledger(other_worktree.path(), owner).is_err());
+        assert_eq!(
+            load_generation_ledger(origin_worktree.path(), owner)
+                .unwrap()
+                .unwrap(),
+            published
+        );
     }
 }

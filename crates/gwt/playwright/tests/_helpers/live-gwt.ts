@@ -6,6 +6,7 @@ import type { Page, TestInfo } from "@playwright/test";
 type LiveGwtOptions = {
   enableTestBridge?: boolean;
   keepPresetModal?: boolean;
+  suppressProjectSurfaces?: boolean;
   suppressUpdateApplyStart?: boolean;
 };
 
@@ -153,11 +154,10 @@ export async function gotoLiveGwt(
 
   await page.goto(base);
 
-  const hiddenStartupSelectors = [
-    "#op-briefing",
-    "#project-picker",
-    "#project-onboarding",
-  ];
+  const hiddenStartupSelectors = ["#op-briefing"];
+  if (options.suppressProjectSurfaces) {
+    hiddenStartupSelectors.push("#project-picker", "#project-onboarding");
+  }
   if (!options.keepPresetModal) {
     hiddenStartupSelectors.push("#preset-modal");
   }
@@ -170,11 +170,17 @@ export async function gotoLiveGwt(
     `,
   });
 
-  await page.evaluate(() => {
-    for (const id of ["op-briefing", "project-picker", "project-onboarding"]) {
+  await page.evaluate(({ suppressProjectSurfaces }) => {
+    const hiddenStartupIds = ["op-briefing"];
+    if (suppressProjectSurfaces) {
+      hiddenStartupIds.push("project-picker", "project-onboarding");
+    }
+    for (const id of hiddenStartupIds) {
       const element = document.getElementById(id);
       if (element) element.hidden = true;
     }
+  }, {
+    suppressProjectSurfaces: Boolean(options.suppressProjectSurfaces),
   });
 
   if (options.enableTestBridge) {
@@ -188,6 +194,116 @@ export async function sendLiveGwtEvent(page: Page, payload: unknown): Promise<vo
   await page.evaluate((detail) => {
     window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail }));
   }, payload);
+}
+
+export type LiveLaunchWizardFixture = {
+  windowId: string;
+  createdWorkWindow: boolean;
+  cleanup: () => Promise<void>;
+};
+
+const LIVE_WORK_SURFACE_SELECTOR = [
+  '.workspace-window[data-preset="work"]',
+  '.workspace-window[data-preset="branches"]',
+].join(", ");
+
+/**
+ * Open the normal branch Launch Wizard through the active project's
+ * visible Work/legacy Branches singleton. An existing user window is reused
+ * and never owned by this helper. If none is visible, the helper requests a
+ * persisted Work window; the backend may create one or reveal an existing
+ * singleton. Cleanup closes the returned window only when its id did not exist
+ * before that request. Neither path creates a branch, worktree, or agent
+ * process.
+ */
+export async function openLiveLaunchWizardForBranch(
+  page: Page,
+  branchName = process.env.GWT_PLAYWRIGHT_BRANCH_NAME ?? "develop",
+): Promise<LiveLaunchWizardFixture> {
+  const preexistingWorkSurfaceIds = await liveWorkSurfaceIds(page);
+  let id = await topmostLiveWorkSurfaceId(page);
+  if (!id) {
+    await sendLiveGwtEvent(page, {
+      kind: "create_window",
+      preset: "work",
+      bounds: { x: 96, y: 96, width: 880, height: 520 },
+    });
+    id = await page
+      .waitForFunction((selector) => {
+        const nodes = Array.from(document.querySelectorAll(selector))
+          .filter((node) => !(node as HTMLElement).hidden);
+        const topmost = nodes.sort((left, right) => {
+          const leftZ =
+            Number.parseInt((left as HTMLElement).style.zIndex || "0", 10) || 0;
+          const rightZ =
+            Number.parseInt((right as HTMLElement).style.zIndex || "0", 10) || 0;
+          return rightZ - leftZ;
+        })[0] as HTMLElement | undefined;
+        return topmost?.dataset.id || "";
+      }, LIVE_WORK_SURFACE_SELECTOR)
+      .then((handle) => handle.jsonValue());
+  }
+  if (!id) throw new Error("Work window fixture did not materialize");
+  const createdWorkWindow = !preexistingWorkSurfaceIds.has(id);
+
+  await sendLiveGwtEvent(page, {
+    kind: "open_launch_wizard",
+    id,
+    branch_name: branchName,
+  });
+
+  let cleaned = false;
+  return {
+    windowId: id,
+    createdWorkWindow,
+    cleanup: async () => {
+      if (!createdWorkWindow || cleaned) return;
+      const stillExists = await page
+        .locator(LIVE_WORK_SURFACE_SELECTOR)
+        .evaluateAll(
+          (nodes, windowId) =>
+            nodes.some((node) => (node as HTMLElement).dataset.id === windowId),
+          id,
+        );
+      if (!stillExists) {
+        cleaned = true;
+        return;
+      }
+      await sendLiveGwtEvent(page, { kind: "close_window", id });
+      await page.waitForFunction(
+        ({ selector, windowId }) =>
+          !Array.from(document.querySelectorAll(selector))
+            .some((node) => (node as HTMLElement).dataset.id === windowId),
+        { selector: LIVE_WORK_SURFACE_SELECTOR, windowId: id },
+      );
+      cleaned = true;
+    },
+  };
+}
+
+async function liveWorkSurfaceIds(page: Page): Promise<Set<string>> {
+  const ids = await page.locator(LIVE_WORK_SURFACE_SELECTOR).evaluateAll((nodes) =>
+    nodes.flatMap((node) => {
+      const id = (node as HTMLElement).dataset.id;
+      return id ? [id] : [];
+    }),
+  );
+  return new Set(ids);
+}
+
+async function topmostLiveWorkSurfaceId(page: Page): Promise<string | null> {
+  return page.locator(LIVE_WORK_SURFACE_SELECTOR).evaluateAll((nodes) => {
+    const topmost = [...nodes]
+      .filter((node) => !(node as HTMLElement).hidden)
+      .sort((left, right) => {
+        const leftZ =
+          Number.parseInt((left as HTMLElement).style.zIndex || "0", 10) || 0;
+        const rightZ =
+          Number.parseInt((right as HTMLElement).style.zIndex || "0", 10) || 0;
+        return rightZ - leftZ;
+      })[0] as HTMLElement | undefined;
+    return topmost?.dataset.id || null;
+  });
 }
 
 export async function clearLiveLaunchWizard(page: Page): Promise<void> {

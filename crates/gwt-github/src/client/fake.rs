@@ -16,11 +16,12 @@ use std::{
 
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
-    CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueNumber,
-    IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError, OwnerMutationResult,
-    OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment,
-    RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
-    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
+    CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueCloseReason,
+    IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, MergedPullRequest,
+    OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType,
+    RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
+    RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
+    UpdatedAt,
 };
 
 /// In-memory fake [`IssueClient`].
@@ -37,6 +38,10 @@ pub struct FakeIssueClient {
     /// When set, the next `create_comment` stores a corrupted body so tests
     /// can prove that post-write readback fails closed.
     corrupt_next_create_comment: Arc<std::sync::atomic::AtomicBool>,
+    /// Failure injection for the Issue field patches (`patch_body`,
+    /// `patch_title`, `set_labels`): the next such call fails with the stored
+    /// error and writes nothing (Issue #3865 AC-5).
+    fail_next_issue_patch: Arc<Mutex<Option<ApiError>>>,
 }
 
 struct FakeState {
@@ -127,6 +132,28 @@ impl FakeIssueClient {
             clock: Arc::new(AtomicU64::new(1)),
             fail_create_comment_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             corrupt_next_create_comment: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_next_issue_patch: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Failure injection: the next `patch_body` / `patch_title` /
+    /// `set_labels` call fails with `error` before touching any Issue.
+    pub fn fail_next_issue_patch(&self, error: ApiError) {
+        *self
+            .fail_next_issue_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+    }
+
+    fn take_issue_patch_fault(&self) -> Result<(), ApiError> {
+        match self
+            .fail_next_issue_patch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
@@ -488,6 +515,7 @@ impl IssueClient for FakeIssueClient {
     }
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
         if new_body.len() > 65_536 {
             return Err(ApiError::BodyTooLarge);
         }
@@ -505,7 +533,39 @@ impl IssueClient for FakeIssueClient {
         Ok(issue.clone())
     }
 
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
+        if fields.body.as_ref().is_some_and(|body| body.len() > 65_536) {
+            return Err(ApiError::BodyTooLarge);
+        }
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "patch_issue_fields", &number.to_string());
+        let issue = state
+            .issues
+            .get_mut(&number)
+            .ok_or(ApiError::NotFound(number))?;
+        if let Some(title) = &fields.title {
+            issue.title = title.clone();
+        }
+        if let Some(body) = &fields.body {
+            issue.body = body.clone();
+        }
+        if let Some(labels) = &fields.labels {
+            issue.labels = labels.clone();
+        }
+        issue.updated_at = self.tick();
+        Ok(issue.clone())
+    }
+
     fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
         let mut state = self
             .inner
             .lock()
@@ -635,11 +695,54 @@ impl IssueClient for FakeIssueClient {
         Ok(snapshot)
     }
 
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        self.take_issue_patch_fault()
+            .map_err(OwnerMutationError::PreSubmit)?;
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "add_labels", &number.to_string());
+        let issue = state
+            .issues
+            .get_mut(&number)
+            .ok_or(OwnerMutationError::PreSubmit(ApiError::NotFound(number)))?;
+        for label in labels {
+            if !issue.labels.contains(label) {
+                issue.labels.push(label.clone());
+            }
+        }
+        issue.updated_at = self.tick();
+        Ok(())
+    }
+
+    fn remove_label_mutation(&self, number: IssueNumber, label: &str) -> OwnerMutationResult<()> {
+        self.take_issue_patch_fault()
+            .map_err(OwnerMutationError::PreSubmit)?;
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "remove_label", &number.to_string());
+        let issue = state
+            .issues
+            .get_mut(&number)
+            .ok_or(OwnerMutationError::PreSubmit(ApiError::NotFound(number)))?;
+        issue.labels.retain(|existing| existing != label);
+        issue.updated_at = self.tick();
+        Ok(())
+    }
+
     fn set_labels(
         &self,
         number: IssueNumber,
         labels: &[String],
     ) -> Result<IssueSnapshot, ApiError> {
+        self.take_issue_patch_fault()?;
         let mut state = self
             .inner
             .lock()
@@ -658,12 +761,20 @@ impl IssueClient for FakeIssueClient {
         &self,
         number: IssueNumber,
         new_state: IssueState,
+        reason: Option<IssueCloseReason>,
     ) -> Result<IssueSnapshot, ApiError> {
         let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.record(&mut state, "set_state", &number.to_string());
+        // A close reason is appended to the recorded detail so callers can
+        // assert it reached the client, not merely that a call happened
+        // (SPEC #4249 FR-001). A reasonless call logs exactly as before.
+        let detail = match reason {
+            Some(reason) => format!("{number}:{}", reason.as_str()),
+            None => number.to_string(),
+        };
+        self.record(&mut state, "set_state", &detail);
         let issue = state
             .issues
             .get_mut(&number)

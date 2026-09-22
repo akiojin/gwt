@@ -55,11 +55,33 @@ pub enum WindowPlacement {
         order: u32,
         collapsed: bool,
     },
+    /// SPEC-3671 FR-001: the window exists (and stays fully observable through
+    /// `pane.list` / `pane.read` / `pm.message.send`) but is not drawn on the
+    /// canvas. It is mirrored read-only in the owning Issue window's preview
+    /// pane instead, so an Issue Monitor auto-launch never steals the screen.
+    IssuePreview {
+        issue_window_id: String,
+        issue_number: u64,
+    },
 }
 
 impl WindowPlacement {
     pub fn is_canvas(&self) -> bool {
         matches!(self, Self::Canvas)
+    }
+
+    /// SPEC-3671 FR-004: the Rust-side counterpart of the frontend
+    /// `isOffCanvasPlacement()` seam — true for every placement that must not be
+    /// rendered as a top-level canvas window.
+    pub fn is_off_canvas(&self) -> bool {
+        matches!(self, Self::AgentKanban { .. } | Self::IssuePreview { .. })
+    }
+
+    pub fn issue_preview_issue_number(&self) -> Option<u64> {
+        match self {
+            Self::IssuePreview { issue_number, .. } => Some(*issue_number),
+            _ => None,
+        }
     }
 }
 
@@ -150,6 +172,20 @@ pub struct PersistedWindowState {
     pub tab_group_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// SPEC-3885 FR-011: the Issue this agent window belongs to. It is durable and
+    /// independent of `placement`, so Windowize (IssuePreview -> Canvas) keeps the
+    /// Issue header and FR-012's return-to-list knows which row to fold back into.
+    /// `None` is a session with no Issue behind it, which stays a bare terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_issue_number: Option<u64>,
+    /// SPEC-3885 T-020: wire-only moment this window's agent runtime started,
+    /// in milliseconds since the Unix epoch. The Issue row's elapsed time reads
+    /// it so a frontend reload does not restart the clock from the last state
+    /// change it happened to observe. Like `agent_color` it is recomputed per
+    /// broadcast and never read back from disk — a stored timestamp would
+    /// outlive the PTY it describes.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub runtime_started_at_ms: Option<u64>,
     /// SPEC-3431 FR-020: wire-only marker for the project's resident PM
     /// window, recomputed per broadcast from the durable PM registration. It
     /// is never deserialized from disk — a stored flag would drift from
@@ -162,8 +198,27 @@ pub struct PersistedWindowState {
 pub struct PersistedWindowCanvasState {
     #[serde(default = "default_canvas_viewport")]
     pub viewport: CanvasViewport,
+    #[serde(deserialize_with = "deserialize_restorable_windows")]
     pub windows: Vec<PersistedWindowState>,
     pub next_z_index: u32,
+}
+
+/// Drop windows a newer gwt can no longer describe instead of failing the
+/// whole restore. A retired preset (Issue #3164's Improvement Inbox) still
+/// appears in workspaces saved while that window was open; rejecting the file
+/// would wipe every other window the user had arranged, so an unreadable entry
+/// costs only itself.
+fn deserialize_restorable_windows<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PersistedWindowState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<PersistedWindowState>(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +248,17 @@ pub struct PersistedSessionTabState {
 pub struct PersistedSessionState {
     #[serde(default)]
     pub tabs: Vec<PersistedSessionTabState>,
-    pub active_tab_id: Option<String>,
+    /// Issue #4535 AC-4: read-only legacy field.
+    ///
+    /// Which project a viewer is looking at belongs to the browser tab that is
+    /// viewing it (SPEC #3287), not to one process-wide value in the session
+    /// file — a second browser tab switching projects used to move it for
+    /// everyone. It is still *read*, because a legacy session file is the only
+    /// thing that can say which of several duplicate project roots the user was
+    /// last on (see [`collapse_duplicate_session_tabs`]), but it is never
+    /// written back, so the key disappears on the first save.
+    #[serde(rename = "active_tab_id", default, skip_serializing)]
+    pub legacy_active_tab_id: Option<String>,
     #[serde(default)]
     pub recent_projects: Vec<RecentProjectEntry>,
 }
@@ -214,6 +279,55 @@ struct LegacyPersistedAppState {
     pub active_tab_id: Option<String>,
     #[serde(default)]
     pub recent_projects: Vec<RecentProjectEntry>,
+}
+
+/// Issue #4535 AC-2: collapse legacy duplicate project roots down to one tab
+/// per [`ProjectKey`](gwt_core::repo_hash::ProjectKey).
+///
+/// Sessions written before the project store keyed on a ProjectKey could hold
+/// several tabs for one repository — the workspace home and one of its
+/// worktrees, or the same root opened twice. Each of those tabs loads and then
+/// *writes back* `~/.gwt/projects/<key>/workspace.json`, so the last tab to
+/// persist silently overwrites its siblings' canvases.
+///
+/// The survivor is deterministic: the tab named by the legacy `active_tab_id`
+/// wins, because that is the canvas the user was last looking at; otherwise the
+/// first tab in session order wins. Ordering of the surviving tabs is session
+/// order in both cases, so a collapse never reshuffles the tab bar.
+///
+/// `project_key_of` is injected so the ordering contract is testable without a
+/// git fixture per tab; production passes
+/// [`project_scope_hash`](gwt_core::paths::project_scope_hash).
+pub fn collapse_duplicate_session_tabs(
+    tabs: Vec<PersistedSessionTabState>,
+    active_tab_id: Option<&str>,
+    project_key_of: impl Fn(&Path) -> gwt_core::repo_hash::ProjectKey,
+) -> Vec<PersistedSessionTabState> {
+    let keys: Vec<_> = tabs
+        .iter()
+        .map(|tab| project_key_of(&tab.project_root))
+        .collect();
+    let active_key = active_tab_id.and_then(|active| {
+        tabs.iter()
+            .position(|tab| tab.id == active)
+            .map(|index| keys[index].clone())
+    });
+    let mut kept: Vec<gwt_core::repo_hash::ProjectKey> = Vec::new();
+    tabs.into_iter()
+        .zip(keys)
+        .filter(|(tab, key)| {
+            // The active tab claims its key even when a duplicate precedes it.
+            if active_key.as_ref() == Some(key) && Some(tab.id.as_str()) != active_tab_id {
+                return false;
+            }
+            if kept.contains(key) {
+                return false;
+            }
+            kept.push(key.clone());
+            true
+        })
+        .map(|(tab, _)| tab)
+        .collect()
 }
 
 pub fn empty_workspace_state() -> PersistedWindowCanvasState {
@@ -252,6 +366,8 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             },
             PersistedWindowState {
@@ -278,6 +394,8 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             },
         ],
@@ -288,13 +406,18 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
 pub fn default_session_state() -> PersistedSessionState {
     PersistedSessionState {
         tabs: Vec::new(),
-        active_tab_id: None,
+        legacy_active_tab_id: None,
         recent_projects: Vec::new(),
     }
 }
 
 pub fn pause_process_windows_for_restore(state: &mut PersistedWindowCanvasState) {
     for window in &mut state.windows {
+        // Keep the durable failure signal: otherwise the next restore may
+        // mistake a diagnostic Agent pane for an empty stopped placeholder.
+        if window.preset.is_agent_terminal() && window.status == WindowState::Error {
+            continue;
+        }
         if window.preset.requires_process() {
             window.status = WindowState::Stopped;
         }
@@ -489,7 +612,7 @@ pub fn migrate_legacy_workspace_state(
                         kind: tab.kind,
                     })
                     .collect(),
-                active_tab_id: legacy.active_tab_id,
+                legacy_active_tab_id: legacy.active_tab_id,
                 recent_projects: legacy.recent_projects,
             },
             legacy
@@ -509,7 +632,7 @@ pub fn migrate_legacy_workspace_state(
                     project_root: fallback_project_root.to_path_buf(),
                     kind: fallback_kind,
                 }],
-                active_tab_id: Some("project-1".to_string()),
+                legacy_active_tab_id: Some("project-1".to_string()),
                 recent_projects: vec![RecentProjectEntry {
                     path: fallback_project_root.to_path_buf(),
                     title,
@@ -573,6 +696,85 @@ mod tests {
         assert_eq!(state.next_z_index, 3);
     }
 
+    /// Issue #4535 AC-2 helpers: map a project root onto a stand-in ProjectKey
+    /// so the collapse ordering is exercised without one git fixture per tab.
+    fn session_tab(id: &str, project_root: &str) -> PersistedSessionTabState {
+        PersistedSessionTabState {
+            id: id.to_string(),
+            title: id.to_string(),
+            project_root: PathBuf::from(project_root),
+            kind: ProjectKind::Git,
+        }
+    }
+
+    /// Every root that shares a leading path component resolves to one key,
+    /// mirroring a workspace home and its worktrees resolving to one origin.
+    fn stub_project_key(path: &std::path::Path) -> gwt_core::repo_hash::ProjectKey {
+        // `/tmp/ws/<project>/...` -> the `/tmp/ws/<project>` workspace home.
+        let workspace_home: PathBuf = path.components().take(4).collect();
+        gwt_core::repo_hash::compute_path_hash(&workspace_home)
+    }
+
+    fn collapsed_ids(
+        tabs: Vec<PersistedSessionTabState>,
+        active_tab_id: Option<&str>,
+    ) -> Vec<String> {
+        collapse_duplicate_session_tabs(tabs, active_tab_id, stub_project_key)
+            .into_iter()
+            .map(|tab| tab.id)
+            .collect()
+    }
+
+    #[test]
+    fn collapse_duplicate_session_tabs_keeps_the_active_entry_of_a_duplicated_root() {
+        let tabs = vec![
+            session_tab("project-1", "/tmp/ws/gwt/develop"),
+            session_tab("project-2", "/tmp/ws/gwt/work/issue-1"),
+            session_tab("project-3", "/tmp/ws/other/develop"),
+        ];
+
+        assert_eq!(
+            collapsed_ids(tabs, Some("project-2")),
+            vec!["project-2", "project-3"],
+            "the active tab must survive its duplicate group, even when a duplicate precedes it"
+        );
+    }
+
+    #[test]
+    fn collapse_duplicate_session_tabs_falls_back_to_session_order() {
+        let tabs = vec![
+            session_tab("project-1", "/tmp/ws/gwt/develop"),
+            session_tab("project-2", "/tmp/ws/gwt/work/issue-1"),
+            session_tab("project-3", "/tmp/ws/other/develop"),
+        ];
+
+        // No active id, and an active id naming a tab that no longer exists,
+        // both fall back to the first tab in session order.
+        assert_eq!(
+            collapsed_ids(tabs.clone(), None),
+            vec!["project-1", "project-3"]
+        );
+        assert_eq!(
+            collapsed_ids(tabs, Some("project-gone")),
+            vec!["project-1", "project-3"]
+        );
+    }
+
+    #[test]
+    fn collapse_duplicate_session_tabs_preserves_every_unique_project() {
+        let tabs = vec![
+            session_tab("project-1", "/tmp/ws/gwt/develop"),
+            session_tab("project-2", "/tmp/ws/other/develop"),
+            session_tab("project-3", "/tmp/ws/third/develop"),
+        ];
+
+        assert_eq!(
+            collapsed_ids(tabs, Some("project-2")),
+            vec!["project-1", "project-2", "project-3"],
+            "collapsing duplicates must not drop or reorder unique projects"
+        );
+    }
+
     #[test]
     fn load_session_state_defaults_to_empty_state_for_missing_file() {
         let dir = tempdir().expect("tempdir");
@@ -588,7 +790,7 @@ mod tests {
         let path = dir.path().join("session.json");
         let project_root = dir.path().join("demo");
         let state = PersistedSessionState {
-            active_tab_id: Some("project-2".to_string()),
+            legacy_active_tab_id: None,
             recent_projects: vec![
                 RecentProjectEntry {
                     path: project_root.clone(),
@@ -620,6 +822,59 @@ mod tests {
         save_session_state(&path, &state).expect("save should succeed");
         let loaded = load_session_state(&path).expect("load");
         assert_eq!(loaded, state);
+    }
+
+    /// Issue #4535 AC-4: which project a viewer is looking at belongs to the
+    /// browser tab viewing it (SPEC #3287), so the process-wide `active_tab_id`
+    /// is read for legacy files and then dropped on the first save.
+    #[test]
+    fn saving_a_legacy_session_drops_active_tab_id_but_still_reads_it() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("session.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "tabs": [
+    {
+      "id": "project-1",
+      "title": "demo",
+      "project_root": "/tmp/demo",
+      "kind": "git"
+    },
+    {
+      "id": "project-2",
+      "title": "notes",
+      "project_root": "/tmp/notes",
+      "kind": "non_repo"
+    }
+  ],
+  "active_tab_id": "project-2",
+  "recent_projects": []
+}"#,
+        )
+        .expect("seed legacy session");
+
+        let loaded = load_session_state(&path).expect("legacy load");
+        assert_eq!(
+            loaded.legacy_active_tab_id.as_deref(),
+            Some("project-2"),
+            "read compatibility: a legacy file still reports its active tab"
+        );
+
+        save_session_state(&path, &loaded).expect("save");
+
+        let raw = std::fs::read_to_string(&path).expect("read saved session");
+        assert!(
+            !raw.contains("active_tab_id"),
+            "the saved session must not carry active_tab_id: {raw}"
+        );
+        let reloaded = load_session_state(&path).expect("reload");
+        assert_eq!(reloaded.legacy_active_tab_id, None);
+        assert_eq!(
+            reloaded.tabs.len(),
+            2,
+            "dropping the legacy field must not disturb the tabs themselves"
+        );
     }
 
     #[test]
@@ -666,6 +921,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -692,6 +949,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],
@@ -874,6 +1133,133 @@ mod tests {
         assert_eq!(loaded.next_z_index, 2);
     }
 
+    // SPEC-3671 T-005: adding a third `WindowPlacement` variant must not change how
+    // already-persisted workspaces read. Untagged windows stay `Canvas` and existing
+    // `agent_kanban` blobs keep their lane data.
+    #[test]
+    fn load_workspace_state_reads_placements_written_before_issue_preview() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "shell-1",
+      "title": "Shell",
+      "preset": "shell",
+      "geometry": { "x": 20.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "ready",
+      "persist": true
+    },
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 2,
+      "status": "ready",
+      "persist": true,
+      "placement": {
+        "kind": "agent_kanban",
+        "board_id": "agent-kanban-1",
+        "lane_id": "active",
+        "order": 2,
+        "collapsed": false
+      }
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded = load_workspace_state(&path).expect("pre-IssuePreview placements must load");
+        assert_eq!(loaded.windows.len(), 2);
+        assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+        assert_eq!(
+            loaded.windows[1].placement,
+            WindowPlacement::AgentKanban {
+                board_id: "agent-kanban-1".to_string(),
+                lane_id: AgentKanbanLane::Active,
+                order: 2,
+                collapsed: false,
+            }
+        );
+    }
+
+    // SPEC-3671 FR-001 / T-006.
+    #[test]
+    fn persisted_window_state_round_trips_issue_preview_placement() {
+        let mut window = default_workspace_state().windows.remove(0);
+        window.preset = WindowPreset::Agent;
+        window.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "issue-1".to_string(),
+            issue_number: 3671,
+        };
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            json.contains("\"issue_preview\""),
+            "placement kind must be explicit: {json}"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            parsed.placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
+        assert!(!parsed.placement.is_canvas());
+        assert!(parsed.placement.is_off_canvas());
+        assert_eq!(parsed.placement.issue_preview_issue_number(), Some(3671));
+    }
+
+    // SPEC-3671 T-014: a restored `issue_preview` window must not silently degrade to
+    // `Canvas`; that regression is exactly the "12 windows opened at once" incident the
+    // SPEC was filed for.
+    #[test]
+    fn load_workspace_state_restores_issue_preview_without_canvas_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "agent-1",
+      "title": "Agent",
+      "preset": "agent",
+      "geometry": { "x": 60.0, "y": 80.0, "width": 720.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "error",
+      "persist": true,
+      "placement": {
+        "kind": "issue_preview",
+        "issue_window_id": "issue-1",
+        "issue_number": 3671
+      }
+    }
+  ],
+  "next_z_index": 2
+}"#,
+        )
+        .expect("issue preview workspace write");
+
+        let loaded = load_workspace_state(&path).expect("issue_preview placement must load");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(
+            loaded.windows[0].placement,
+            WindowPlacement::IssuePreview {
+                issue_window_id: "issue-1".to_string(),
+                issue_number: 3671,
+            }
+        );
+    }
+
     #[test]
     fn persisted_window_state_round_trips_agent_kanban_placement() {
         let mut window = default_workspace_state().windows.remove(0);
@@ -940,6 +1326,50 @@ mod tests {
         .expect("legacy memo workspace write");
 
         let loaded = load_workspace_state(&path).expect("legacy memo load should not fail");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].id, "board-1");
+        assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
+        assert_eq!(loaded.next_z_index, 3);
+    }
+
+    // Issue #3164: the Improvement Inbox preset was retired outright rather
+    // than kept as a legacy `WindowPreset` variant. A workspace saved while
+    // that window was open still names it, so an unknown preset must drop
+    // just its own window instead of failing the whole restore and wiping the
+    // user's layout.
+    #[test]
+    fn load_workspace_state_drops_windows_with_an_unknown_preset() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "improvement-1",
+      "title": "Improvement Inbox",
+      "preset": "improvement",
+      "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true
+    },
+    {
+      "id": "board-1",
+      "title": "Board",
+      "preset": "board",
+      "geometry": { "x": 40.0, "y": 60.0, "width": 520.0, "height": 480.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("retired preset workspace write");
+
+        let loaded = load_workspace_state(&path).expect("unknown preset must not fail the restore");
         assert_eq!(loaded.windows.len(), 1);
         assert_eq!(loaded.windows[0].id, "board-1");
         assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
@@ -1040,6 +1470,8 @@ mod tests {
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
+                linked_issue_number: None,
+                runtime_started_at_ms: None,
                 is_pm: false,
             }],
             next_z_index: 2,
@@ -1051,6 +1483,15 @@ mod tests {
             WindowState::Stopped,
             "Agent windows must be paused on restore"
         );
+        state.windows[0].status = WindowState::Error;
+        for _ in 0..2 {
+            pause_process_windows_for_restore(&mut state);
+            assert_eq!(
+                state.windows[0].status,
+                WindowState::Error,
+                "a diagnostic window must not become an empty stopped placeholder"
+            );
+        }
     }
 
     #[test]
@@ -1131,6 +1572,8 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+            linked_issue_number: None,
+            runtime_started_at_ms: None,
             is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -1205,6 +1648,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1231,6 +1676,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],
@@ -1303,7 +1750,9 @@ mod tests {
 
         let session = load_session_state(&session_path).expect("session");
         assert_eq!(session.tabs.len(), 2);
-        assert_eq!(session.active_tab_id.as_deref(), Some("project-2"));
+        // Issue #4535 AC-4: the migration writes the new session file, and the
+        // new file never carries `active_tab_id`.
+        assert_eq!(session.legacy_active_tab_id, None);
         assert_eq!(session.recent_projects.len(), 1);
 
         let workspace_one = load_workspace_state(&workspace_state_path(&project_one)).expect("one");
@@ -1445,6 +1894,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1471,6 +1922,8 @@ mod tests {
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
+                    linked_issue_number: None,
+                    runtime_started_at_ms: None,
                     is_pm: false,
                 },
             ],

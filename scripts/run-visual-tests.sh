@@ -92,6 +92,7 @@ Module._resolveFilename = function resolveFromPinnedPlaywright(
 JS
 
 export GWT_PLAYWRIGHT_NODE_MODULES="${PLAYWRIGHT_NODE_MODULES}"
+export GWT_PLAYWRIGHT_CHECKOUT_ROOT="${GWT_PLAYWRIGHT_CHECKOUT_ROOT:-$ROOT}"
 export GWT_PLAYWRIGHT_PROJECT_ROOT="${GWT_PLAYWRIGHT_PROJECT_ROOT:-$ROOT}"
 export NODE_PATH="${PLAYWRIGHT_NODE_MODULES}${NODE_PATH:+:${NODE_PATH}}"
 export NODE_OPTIONS="--require ${PLAYWRIGHT_RESOLVER}${NODE_OPTIONS:+ ${NODE_OPTIONS}}"
@@ -99,9 +100,7 @@ export NODE_OPTIONS="--require ${PLAYWRIGHT_RESOLVER}${NODE_OPTIONS:+ ${NODE_OPT
 mkdir -p "$RUN_DIR/crates/gwt"
 cp -R "$ROOT/crates/gwt/playwright" "$RUN_DIR/crates/gwt/playwright"
 ln -s "$ROOT/crates/gwt/web" "$RUN_DIR/crates/gwt/web"
-rm -rf "$RUN_DIR/crates/gwt/playwright/snapshots"
 rm -rf "$RUN_DIR/crates/gwt/playwright/test-results"
-ln -s "$ROOT/crates/gwt/playwright/snapshots" "$RUN_DIR/crates/gwt/playwright/snapshots"
 ln -s "$ROOT/crates/gwt/playwright/test-results" "$RUN_DIR/crates/gwt/playwright/test-results"
 
 cd "$RUN_DIR"

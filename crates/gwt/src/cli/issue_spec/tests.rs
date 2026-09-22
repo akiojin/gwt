@@ -619,3 +619,401 @@ fn run_edit_commands_cover_plain_and_structured_json_paths() {
         .to_string()
         .contains("structured JSON edit only supports section 'spec'"));
 }
+
+// Issue #3873 AC-2: the SPEC write paths apply the same acceptance-block
+// guard as `issue.create` whenever the Issue carries the auto-merge label.
+#[test]
+fn spec_create_with_auto_merge_refuses_body_without_acceptance_block() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let mut out = String::new();
+    let err = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Demo".to_string(),
+            body: "# SPEC: Demo\n\n## 成功基準\n\n- [ ] AC-1: misplaced\n".to_string(),
+            labels: vec!["auto-merge".to_string()],
+        },
+        &mut out,
+    )
+    .expect_err("auto-merge SPEC without a readable AC block must be refused");
+    assert!(err.to_string().contains("受け入れ基準"), "err = {err}");
+    assert!(
+        !env.client
+            .call_log()
+            .iter()
+            .any(|c| c.contains("create_issue")),
+        "no Issue may be created: {:?}",
+        env.client.call_log()
+    );
+
+    out.clear();
+    let code = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Demo".to_string(),
+            body: "# SPEC: Demo\n\n## 受け入れ基準\n\n- [ ] AC-1: readable\n".to_string(),
+            labels: vec!["auto-merge".to_string()],
+        },
+        &mut out,
+    )
+    .expect("readable AC block is accepted");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn spec_edit_of_spec_section_on_auto_merge_issue_requires_acceptance_block() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    seed_issue(
+        &env,
+        9,
+        "SPEC: Guarded",
+        "# SPEC: Guarded\n\n## 受け入れ基準\n\n- [ ] AC-1: present\n",
+        "tasks",
+        &["gwt-spec", "auto-merge"],
+    );
+
+    let mut out = String::new();
+    let err = run(
+        &mut env,
+        IssueCommand::SpecEditSectionBody {
+            number: 9,
+            section: "spec".to_string(),
+            body: "# SPEC: Guarded\n\n## 成功基準\n\n- [ ] AC-1: misplaced\n".to_string(),
+        },
+        &mut out,
+    )
+    .expect_err("dropping the AC block from an auto-merge SPEC must be refused");
+    assert!(err.to_string().contains("受け入れ基準"), "err = {err}");
+    let body = Cache::new(env.cache_root())
+        .load_entry(IssueNumber(9))
+        .unwrap()
+        .snapshot
+        .body;
+    assert!(
+        body.contains("- [ ] AC-1: present"),
+        "body must be untouched: {body}"
+    );
+
+    // Non-spec sections and non-auto-merge issues are untouched by the guard.
+    out.clear();
+    assert_eq!(
+        run(
+            &mut env,
+            IssueCommand::SpecEditSectionBody {
+                number: 9,
+                section: "tasks".to_string(),
+                body: "- [ ] T-001: anything".to_string(),
+            },
+            &mut out,
+        )
+        .unwrap(),
+        0
+    );
+    seed_issue(
+        &env,
+        10,
+        "SPEC: Manual",
+        "spec body",
+        "tasks",
+        &["gwt-spec"],
+    );
+    out.clear();
+    assert_eq!(
+        run(
+            &mut env,
+            IssueCommand::SpecEditSectionBody {
+                number: 10,
+                section: "spec".to_string(),
+                body: "free text".to_string(),
+            },
+            &mut out,
+        )
+        .unwrap(),
+        0
+    );
+}
+
+/// Issue #4146 AC-4: the audit names the closed SPECs whose `tasks` section
+/// carries checkbox-less task rows — the shape that read as "all complete" —
+/// and leaves a fully tracked SPEC out of the report.
+#[test]
+fn spec_audit_reports_closed_specs_with_untracked_task_rows() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    seed_closed_spec(
+        &env,
+        3700,
+        "SPEC: perf instrumentation",
+        "- [x] T001\n- [x] T002\n- T010 never tracked\n- T011 never tracked\n",
+    );
+    seed_closed_spec(
+        &env,
+        3800,
+        "SPEC: fully tracked",
+        "- [x] T001\n- [ ] T002\n",
+    );
+
+    let mut out = String::new();
+    assert_eq!(
+        run(&mut env, IssueCommand::SpecAudit { state: None }, &mut out).unwrap(),
+        0
+    );
+
+    assert!(
+        out.contains("#3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"),
+        "untracked rows are reported with their counts: {out}"
+    );
+    assert!(
+        !out.contains("#3800"),
+        "a SPEC whose rows all carry checkboxes is not flagged: {out}"
+    );
+    assert!(
+        out.contains("audit: scanned 2, flagged 1, no tasks section 0, unreadable 0"),
+        "the scan reports its own coverage: {out}"
+    );
+}
+
+#[test]
+fn spec_audit_parse_accepts_state_flag() {
+    let args = [
+        "audit".to_string(),
+        "--state".to_string(),
+        "all".to_string(),
+    ];
+    let refs = args.iter().collect::<Vec<_>>();
+    assert!(matches!(
+        parse(&refs),
+        Ok(IssueCommand::SpecAudit { state }) if state.as_deref() == Some("all")
+    ));
+}
+
+fn seed_closed_spec(env: &TestEnv, number: u64, title: &str, tasks: &str) {
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(number),
+        title: title.to_string(),
+        body: issue_body("spec body", tasks),
+        labels: vec!["gwt-spec".to_string()],
+        state: IssueState::Closed,
+        updated_at: UpdatedAt::new(format!("seed-{number}")),
+        comments: Vec::new(),
+    };
+    env.client.seed(snapshot.clone());
+    Cache::new(env.cache_root())
+        .write_snapshot(&snapshot)
+        .unwrap();
+}
+
+// --- Issue #4541: the lint pre-gate and the completion evidence gate ----
+/// Issue #4541: the operations must reach `issue_spec::run` through the same
+/// dispatch a `gwtd` envelope takes. Calling `super::run` directly would have
+/// hidden the missing routing arm that panicked on the first real invocation.
+fn route<E: crate::cli::CliEnv>(
+    env: &mut E,
+    cmd: IssueCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    crate::cli::issue::run(env, cmd, out)
+}
+
+/// A `TestEnv` whose `repo_path` is a real git worktree and whose `HOME` is a
+/// temp dir, so the inspection state lands somewhere disposable.
+struct LintFixture {
+    env: TestEnv,
+    _cache: tempfile::TempDir,
+    _repo: tempfile::TempDir,
+    _home: tempfile::TempDir,
+    _home_var: gwt_core::test_support::ScopedEnvVar,
+    _userprofile_var: gwt_core::test_support::ScopedEnvVar,
+    _lock: gwt_core::test_support::EnvLockGuard,
+}
+
+fn lint_fixture(number: u64, spec: &str, tasks: &str) -> LintFixture {
+    let lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let home_var = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+    let userprofile_var = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+    let cache = tempfile::tempdir().expect("cache");
+    let repo = tempfile::tempdir().expect("repo");
+    crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+
+    let mut env = TestEnv::new(cache.path().to_path_buf());
+    env.repo_path = repo.path().to_path_buf();
+    seed_issue(
+        &env,
+        number,
+        "SPEC: lint fixture",
+        spec,
+        tasks,
+        &["gwt-spec"],
+    );
+
+    LintFixture {
+        env,
+        _cache: cache,
+        _repo: repo,
+        _home: home,
+        _home_var: home_var,
+        _userprofile_var: userprofile_var,
+        _lock: lock,
+    }
+}
+
+fn lint_command(number: u64) -> IssueCommand {
+    IssueCommand::SpecLint {
+        number,
+        sections: vec!["spec".to_string(), "tasks".to_string()],
+        snapshot: true,
+        directive_epoch: None,
+        phase_slice: None,
+    }
+}
+
+/// AC-1 / AC-3 / AC-4 / AC-5 through the operation surface: the lint runs,
+/// its findings land in the snapshot and the ledger without billing the
+/// reviewer, and the reviewer gets the four-item checklist.
+#[test]
+fn spec_lint_finalizes_the_snapshot_and_seeds_the_ledger() {
+    let mut fixture = lint_fixture(
+        4541,
+        "- **FR-001**: one\n- **FR-001**: one again\n",
+        "- [ ] T-001: do\n",
+    );
+    let mut out = String::new();
+    let code = route(&mut fixture.env, lint_command(4541), &mut out).unwrap();
+
+    assert_eq!(code, 1, "a critical finding must make the gate fail: {out}");
+    assert!(out.contains("2 section(s) scanned"), "{out}");
+    assert!(out.contains("numbering_duplicate"), "{out}");
+    assert!(
+        out.contains("0 charged to reviewer budget"),
+        "machine findings must not bill the reviewer: {out}"
+    );
+    for item in gwt_skills::inspection_guidance::REVIEWER_CHECKLIST {
+        assert!(
+            out.contains(item.id),
+            "checklist item {} missing: {out}",
+            item.id
+        );
+    }
+
+    let snapshot = crate::cli::intake_inspection::load_snapshot(fixture.env.repo_path(), 4541)
+        .unwrap()
+        .expect("snapshot persisted");
+    assert_eq!(snapshot.lint.critical_count, 1);
+    assert_eq!(snapshot.lint.sections_scanned, vec!["spec", "tasks"]);
+    assert_eq!(snapshot.section_hashes.len(), 2);
+
+    let ledger = crate::cli::intake_inspection::load_ledger(fixture.env.repo_path(), 4541)
+        .unwrap()
+        .expect("ledger persisted");
+    assert_eq!(ledger.entries.len(), snapshot.lint.finding_count);
+    assert!(ledger.reviewer_budget_entries().is_empty());
+    assert_eq!(ledger.undisposed_critical().len(), 1);
+}
+
+/// AC-6: completion needs a snapshot first — there is no evidence to check
+/// without one.
+#[test]
+fn spec_inspection_complete_requires_a_snapshot_first() {
+    let mut fixture = lint_fixture(4542, "- **FR-001**: one\n", "- [ ] T-001: do\n");
+    let mut out = String::new();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4542 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 1);
+    assert!(out.contains("run issue.spec.lint first"), "{out}");
+}
+
+/// AC-6: with a clean lint and a GitHub-entity readback that matches the
+/// snapshot, completion passes.
+#[test]
+fn spec_inspection_complete_passes_on_a_matching_github_readback() {
+    let mut fixture = lint_fixture(4543, "- **FR-001**: one\n", "- [ ] T-001: do\n");
+    let mut out = String::new();
+    assert_eq!(
+        route(&mut fixture.env, lint_command(4543), &mut out).unwrap(),
+        0,
+        "clean artifact: {out}"
+    );
+
+    out.clear();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4543 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("PASS"), "{out}");
+    assert!(out.contains("2 section(s) confirmed"), "{out}");
+}
+
+/// AC-6: an undisposed critical finding blocks completion even though the
+/// readback itself is fine.
+#[test]
+fn spec_inspection_complete_blocks_on_an_undisposed_critical_finding() {
+    let mut fixture = lint_fixture(
+        4544,
+        "- **FR-001**: one\n- **FR-001**: one again\n",
+        "- [ ] T-001: do\n",
+    );
+    let mut out = String::new();
+    assert_eq!(
+        route(&mut fixture.env, lint_command(4544), &mut out).unwrap(),
+        1
+    );
+
+    out.clear();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4544 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("BLOCKED"), "{out}");
+    assert!(out.contains("has no disposition"), "{out}");
+}
+
+/// AC-6: a section edited after the snapshot no longer matches it, so the
+/// readback cannot settle completion.
+#[test]
+fn spec_inspection_complete_blocks_when_the_artifact_moved_under_the_snapshot() {
+    let mut fixture = lint_fixture(4545, "- **FR-001**: one\n", "- [ ] T-001: do\n");
+    let mut out = String::new();
+    assert_eq!(
+        route(&mut fixture.env, lint_command(4545), &mut out).unwrap(),
+        0,
+        "{out}"
+    );
+
+    out.clear();
+    route(
+        &mut fixture.env,
+        IssueCommand::SpecEditSectionBody {
+            number: 4545,
+            section: "spec".to_string(),
+            body: "- **FR-001**: one, revised\n".to_string(),
+        },
+        &mut out,
+    )
+    .unwrap();
+
+    out.clear();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4545 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("BLOCKED"), "{out}");
+    assert!(out.contains("snapshot recorded"), "{out}");
+}

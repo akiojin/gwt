@@ -48,6 +48,31 @@ fn main() -> ExitCode {
         _ => {}
     }
 
+    // SPEC #3700 FR-002 / Issue #4145 AC-1: measure this operation's duration
+    // when the GUI has already established perf collection on this HOME.
+    //
+    // `gwtd` deliberately never creates the perf log: it runs once per hook,
+    // per agent call and per contract test, and
+    // `crates/gwt/tests/workspace_cli_test.rs` asserts that a forwarded
+    // `workspace.update` leaves the container HOME byte-identical. Creating a
+    // daily log there would be exactly the read-repair that contract forbids.
+    // Fail-open besides: a disabled kill switch or an unwritable log leaves
+    // every later `record_*` call a no-op.
+    gwt::perf::install_appending_to_established_log_from_settings();
+
+    // PM agent instruction discovery remains in runtime; this short-lived
+    // gateway resolves all operations and legacy cwd-based hooks in its
+    // canonical project checkout. No environment variable can redirect it.
+    if let Some(worktree) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| gwt::pm_registry::pm_worktree_for_runtime_dir(&cwd))
+    {
+        if let Err(error) = std::env::set_current_dir(&worktree) {
+            eprintln!("cannot resolve PM project directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let code = match argv.get(1).map(String::as_str) {
         None => run_json_envelope_cli(&argv),
         Some(_) if is_allowed_argv_exception(&argv) => {
@@ -90,6 +115,8 @@ fn print_help() {
     println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
+    println!("  errors      List host-wide persistent error ledger rows");
+    println!("  perf        Summarize the always-on performance log (SPEC-3700)");
 }
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
@@ -116,8 +143,39 @@ fn family_help(family: &str) -> Option<String> {
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
+        "errors" => Some(format_errors_help()),
+        "perf" => Some(format_perf_help()),
         _ => None,
     }
+}
+
+fn format_perf_help() -> String {
+    [
+        "perf.* — Always-on performance log aggregation via JSON envelope (SPEC-3700 FR-007).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"perf.summary\",\"params\":{\"since\":\"2026-09-08T00:00:00Z\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  perf.summary                            p50 / p95 / worst per stream and target",
+        "  perf.startup                            Latest startup phases and first-frame budget",
+        "  perf.violations                         Sustained budget violations of the period",
+        "",
+        "Key params:",
+        "  since                                   Optional RFC3339 lower bound; omitted reads all",
+        "  stream                                  Optional ui | op | resource filter",
+        "  target                                  Optional substring the target must contain",
+        "",
+        "Notes:",
+        "  - Perf logs live at ~/.gwt/logs/perf/perf-YYYY-MM-DD.jsonl.",
+        "  - `route:*` targets are user-facing paths; `gwtd:*` targets are operations.",
+        "  - `missing_routes` names instrumented routes with no sample in the period.",
+        "  - Both operations are read-only and never perturb what they measure.",
+        "",
+    ]
+    .join("\n")
 }
 
 fn format_workspace_help() -> String {
@@ -133,11 +191,48 @@ fn format_workspace_help() -> String {
         "  workspace.update                       Set Work status fields and Agent purpose/focus",
         "  workspace.create | workspace.ensure    Create or ensure a Work assignment",
         "  workspace.join | workspace.candidates  Join/list Work candidates",
+        "  workspace.work_prune                   Repair stale Works: close closed-owner Works,",
+        "                                         discard orphaned placeholders, detach container",
+        "                                         refs owned by another canonical Work",
+        "  workspace.projection_list              List Workspace projections (--stale/--all)",
+        "  workspace.projection_prune             Archive/delete stale Workspace projections",
+        "  workspace.store_consolidate            Move durable Workspace state to the split root",
         "",
         "Key params:",
         "  purpose                                Short Agent/window title purpose",
         "  current_focus                          Current phase/activity",
         "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
+        "  ids                                    Scope work_prune/projection_prune to these ids",
+        "  dry_run                                Both prune operations default to dry-run;",
+        "                                         pass false to apply",
+        "",
+        "Resolving an ambiguous execution container:",
+        "  1. workspace.candidates                List the Works on this container",
+        "  2. workspace.work_prune {\"ids\":[<stale Work id>]}   Detach the stale ref (dry-run first)",
+        "  3. workspace.join {\"workspace_id\":<canonical Work id>}  Attach explicitly if needed",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_errors_help() -> String {
+    [
+        "errors.* — Host-wide persistent error ledger via JSON envelope.",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"errors.list\",\"params\":{\"since\":\"2026-08-30T00:00:00Z\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  errors.list                             List errors recorded at or after `since`",
+        "",
+        "Key params:",
+        "  since                                   Optional RFC3339 timestamp; omitted lists all",
+        "",
+        "Notes:",
+        "  - Ledger files live at ~/.gwt/logs/errors/YYYY-MM-DD.jsonl.",
+        "  - Live rows are also published on the daemon `errors` channel.",
         "",
     ]
     .join("\n")
@@ -165,11 +260,12 @@ fn format_daemon_help() -> String {
         "                                          stream so a loop can reconcile and resume",
         "",
         "Notes:",
-        "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
+        "  - Listens on a Unix domain socket (Unix) or a named pipe (Windows) per RuntimeScope.",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
         "  - An explicit project_root must resolve to an existing directory; invalid roots",
         "    fail closed and never fall back to cwd. Omitting it preserves cwd resolution.",
-        "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
+        "  - SIGINT / SIGTERM (Unix) or Ctrl-C / Ctrl-Break / console close (Windows) trigger",
+        "    graceful shutdown + endpoint file removal.",
         "  - `status` reports `probe=ok uptime=<s>s channels=<n> connections=<n>` when the",
         "    daemon answers a `ClientFrame::Status` request within 1s, or `probe=failed:<reason>`",
         "    when the endpoint file is stale or unreachable.",
@@ -189,29 +285,68 @@ fn format_issue_help() -> String {
         "",
         "Operations:",
         "  issue.view | issue.comments | issue.linked_prs",
-        "  issue.create | issue.comment",
+        "  issue.create | issue.comment | issue.label",
         "  issue.spec.read | issue.spec.section | issue.spec.edit",
         "  issue.spec.create | issue.spec.list | issue.spec.pull",
-        "  issue.spec.repair | issue.spec.rename",
+        "  issue.spec.repair | issue.spec.rename | issue.spec.audit",
+        "  issue.spec.lint | issue.spec.inspection.complete",
+        "  issue.cache.repair",
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
+        "  issue.monitor.profiles | issue.monitor.profiles.set",
         "  issue.monitor.launch_now | issue.monitor.stop",
         "  issue.monitor.failover | issue.monitor.requeue",
         "  issue.monitor.questions | issue.monitor.question.answer",
+        "  issue.monitor.wait | issue.monitor.wait.invalidate",
+        "  issue.monitor.quota_hold.list | issue.monitor.quota_hold.clear",
+        "  issue.monitor.reconcile | issue.monitor.release_idle",
         "",
         "Key params:",
         "  number, title, section, body, labels, refresh",
+        "  action=add|remove, labels               issue.label; remove accepts one label",
+        "  confirm_queue                         Confirm removal of hold",
+        "  confirm_design_gate                   Confirm removal of gwt-spec",
+        "  confirm_auto_merge                    Confirm addition of auto-merge",
         "  structured                             Treat issue.spec body as structured JSON",
         "  replace                                Replace structured SPEC section instead of merging",
         "  all, numbers                           Controls issue.spec.pull",
+        "  state=closed|open|all                 issue.spec.audit scope; reports SPECs",
+        "                                        whose tasks section has checkbox-less",
+        "                                        task rows (defaults to closed)",
+        "  sections[], snapshot, directive_epoch, phase_slice",
+        "                                        issue.spec.lint runs the deterministic",
+        "                                        artifact lint (numbering, traceability,",
+        "                                        supersede notes, marker/roundtrip) and,",
+        "                                        unless snapshot=false, finalizes the Intake",
+        "                                        Inspection Snapshot and seeds the Finding",
+        "                                        Disposition Ledger; exits 1 on a critical",
+        "                                        finding. issue.spec.inspection.complete then",
+        "                                        checks the GitHub-entity readback per section",
+        "                                        and refuses undisposed critical findings",
         "  project_root                          Optional Issue Monitor project scope",
         "  number, position                      Move one priority (head or numeric index)",
         "  reason, claim_id, delivery_id, window_id  issue.monitor.stop identity + audit",
         "  number, reason                        issue.monitor.requeue releases a dead",
-        "                                        agent_failed / launch_failed hold",
+        "                                        agent_failed / launch_failed hold, or a",
+        "                                        daemon-reported blocked_by_claim hold",
+        "  reason, resume_condition, clear       issue.monitor.wait declares that the",
+        "                                        current launch is waiting (stuck detection",
+        "                                        pauses, max 3h); clear=true when resumed",
+        "  number, reason, by?                   issue.monitor.wait.invalidate: the PM",
+        "                                        voids a wait whose condition no longer",
+        "                                        holds; stuck detection resumes next scan",
+        "  provider, reason                      issue.monitor.quota_hold.clear releases a",
+        "                                        provider-wide quota hold (e.g. codex / claude;",
+        "                                        any agent id the hold is keyed by)",
+        "  number?, dry_run                      issue.monitor.release_idle frees the slots",
+        "                                        of idle windows (review verdict published /",
+        "                                        settled execution / dead binding) and closes",
+        "                                        their panes; dry_run reports only",
         "  issue_numbers                         Replace the complete priority order",
         "  enabled=false, autonomous_mode=false  Safe Issue Monitor kill switches",
         "  max_active                            Positive concurrent-agent limit",
+        "  launch_agent                          Switch the saved launch profile's agent",
+        "                                        (codex / claude); model resets to default",
         "  handoff_id, answer                    Answer one parked autonomous question",
         "  enabled=true / autonomous_mode=true require an explicit GUI action",
         "",
@@ -229,9 +364,9 @@ fn format_pr_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  pr.current | pr.view | pr.checks | pr.reviews | pr.review_threads",
+        "  pr.current | pr.list | pr.view | pr.checks | pr.reviews | pr.review_threads",
         "  pr.create | pr.edit | pr.ready | pr.draft | pr.comment",
-        "  pr.review_threads.reply_and_resolve",
+        "  pr.update_branch | pr.review_threads.reply_and_resolve",
         "",
         "Key params:",
         "  number, base, head, title, body, labels, add_labels, draft",
@@ -242,7 +377,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "actions.* — Fetch GitHub Actions run/job logs via JSON envelope.",
+        "actions.* — Read GitHub Actions run/job logs and re-run failures via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -252,9 +387,15 @@ fn format_actions_help() -> String {
         "Operations:",
         "  actions.logs                            Print raw run logs",
         "  actions.job_logs                        Print raw job logs",
+        "  actions.rerun                           Re-run a failed run or a single failed job",
         "",
         "Key params:",
         "  run_id, job_id",
+        "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
+        "",
+        "Notes:",
+        "  actions.rerun refuses a run_id/job_id the current repository does not own.",
+        "  Prefer job_id so one flaky check does not re-run every job in the run.",
         "",
     ]
     .join("\n")
@@ -276,7 +417,11 @@ fn format_board_help() -> String {
         "Key params:",
         "  kind, body, title, topics, owners, targets, mentions, parent, broadcast",
         "  resolves                                 Blocked entry id(s) this post closes",
-        "  workspace, all                           board.show filters",
+        "  workspace, all, limit                    board.show filters; latest 20 by default",
+        "  all:true removes the default cap; explicit limit always wins (0 is empty).",
+        "  Provider retention still applies. Unknown board.show params are rejected.",
+        "  Cost: N x serialized entry size + metadata; 20 x 2 KiB is about 40 KiB.",
+        "  No fixed byte cap; all:true can return hundreds of KiB or more.",
         "",
         "Note: board.post does not accept purpose/title_summary; update Agent title",
         "      through workspace.update params.purpose.",
@@ -319,10 +464,21 @@ fn format_index_help() -> String {
         "Operations:",
         "  index.status                            Show index runtime and asset status",
         "  index.rebuild                           Rebuild a specific scope",
+        "  index.repair                            Recover the issues index",
+        "  index.cancel                            Request cancellation of an issues rebuild",
         "",
         "Key params:",
         "  scope                                   all|issues|specs|memory|discussions|board|files|files-docs",
         "                                          JSON also accepts files_docs",
+        "                                          index.repair and index.cancel take issues only",
+        "  wait                                    index.repair only. Default false: submit the",
+        "                                          job to a detached worker and answer at once",
+        "                                          with the collection, the job id and the",
+        "                                          index's own repair state. true blocks until",
+        "                                          the job settles and reports the result.",
+        "",
+        "Notes:",
+        "  - index.repair always answers; follow a submitted job with index.status.",
         "",
     ]
     .join("\n")
@@ -442,7 +598,7 @@ fn format_execution_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen",
+        "  execution.status | execution.continue | execution.complete | execution.blocked | execution.adopt | execution.repair | execution.reopen | execution.release_prepared",
         "",
         "Notes:",
         "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
@@ -458,6 +614,10 @@ fn format_execution_help() -> String {
         "  post-block matrix through verify.run, then call execution.reopen",
         "  with a non-empty params.reason. Reopen returns to Active; it does",
         "  not claim completion.",
+        "  When execution.status reports blocking_prepared_transactions for an",
+        "  owner, every launch is refused until they are released. Clear them",
+        "  with execution.release_prepared and params.issue or params.spec plus",
+        "  a non-empty params.reason; params.operation_id releases exactly one.",
         "",
     ]
     .join("\n")
@@ -471,18 +631,29 @@ fn format_verify_help() -> String {
         "  gwtd <<'JSON'",
         "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt --all -- --check\",\"cargo test -p gwt --all-features\"]}}",
         "  JSON",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"verify.adjudicate\",\"params\":{\"record_id\":\"vrr-...\",\"command\":\"cargo test -p gwt --all-features\",\"board_entry_id\":\"...\"}}",
+        "  JSON",
         "",
         "Operations:",
-        "  verify.plan | verify.run",
+        "  verify.plan | verify.run | verify.adjudicate",
         "  verify.lease.acquire | verify.lease.release | verify.lease.extend",
         "  verify.lease.status",
         "",
         "Notes:",
         "  Register the derived matrix with verify.plan first; a run must cover it.",
         "  gwtd executes each command itself (one plain command per entry, no",
-        "  shell operators) and records session/owner/worktree-fingerprint-bound",
-        "  evidence. execution.complete and Ready PR handoffs require a fresh,",
-        "  all-passing record.",
+        "  shell operators; leading KEY=value tokens become process environment)",
+        "  and records session/owner/worktree-fingerprint-bound",
+        "  evidence. execution.complete and non-adjudicated Ready PR handoffs",
+        "  require a fresh, all-passing record. verify.adjudicate attaches one",
+        "  exact Board decision to one exact failing command for pr.ready only;",
+        "  raw completion and obligation evidence remains failing.",
+        "  The referenced kind=decision Board body must contain these exact",
+        "  non-empty lines:",
+        "    Verification record: <id>",
+        "    Failing command: <command>",
+        "    Reason: <reason>",
         "",
         "  verify.lease.* serializes heavy verification host-wide (SPEC #3576):",
         "  take the lease before cargo test --all-features / cargo llvm-cov /",
@@ -491,6 +662,13 @@ fn format_verify_help() -> String {
         "  TTL, so no agent polls another agent's process. Default TTL is 45",
         "  minutes (params.ttl_minutes); the holder self-releases when it",
         "  lapses, and a killed holder releases at once.",
+        "  A refusal reports holder_kind (verification | index | other) and",
+        "  estimated_remaining_ms (remaining_batches: batches left in an index",
+        "  job, commands left in a verify.run), and",
+        "  reserves the caller's turn: background index jobs defer to it until",
+        "  a retry is granted or the reservation lapses (Issue #4086).",
+        "  verify.lease.release with an index job's lease_id answers `yield",
+        "  requested`: the runner releases at its next batch boundary.",
         "",
     ]
     .join("
@@ -672,7 +850,7 @@ fn format_update_help() -> String {
 
 fn run_json_envelope_cli(argv: &[String]) -> i32 {
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Some((owner, repo)) = resolve_repo_coordinates() {
+    if let Some((owner, repo)) = resolve_repo_coordinates(&repo_path) {
         let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
         return gwt::cli::dispatch(&mut env, argv);
     }
@@ -691,14 +869,6 @@ fn is_allowed_argv_exception(argv: &[String]) -> bool {
                 argv.get(4),
             ),
             (Some("hook"), Some("event"), Some(_), None)
-        )
-        || matches!(
-            (
-                argv.get(1).map(String::as_str),
-                argv.get(2).map(String::as_str),
-                argv.get(3),
-            ),
-            (Some("hook"), Some("gwt-self-improvement-stop"), None)
         )
         || matches!(
             (
@@ -729,13 +899,11 @@ fn json_only_argv_message(argv: &[String]) -> String {
     message.push_str(
         "Example: {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<work purpose>\",\"current_focus\":\"<focus>\"}}\n",
     );
-    message.push_str(
-        "Hook transport exceptions: gwtd hook event <Event>; gwtd hook gwt-self-improvement-stop\n",
-    );
+    message.push_str("Hook transport exceptions: gwtd hook event <Event>\n");
     message
 }
 
-fn resolve_repo_coordinates() -> Option<(String, String)> {
+fn resolve_repo_coordinates(repo_path: &std::path::Path) -> Option<(String, String)> {
     // Issue #2054: scan every remote (not just `origin`) and honour
     // `GWT_GITHUB_REPO` / `GWT_REMOTE` overrides so multi-remote repos
     // (local mirror + GitHub under a non-origin name) can still resolve.
@@ -748,7 +916,7 @@ fn resolve_repo_coordinates() -> Option<(String, String)> {
         }
     }
 
-    let remotes = load_remote_pairs();
+    let remotes = load_remote_pairs(repo_path);
 
     if let Some(name) = std::env::var("GWT_REMOTE").ok().filter(|v| !v.is_empty()) {
         if let Some((_, url)) = remotes.iter().find(|(remote_name, _)| remote_name == &name) {
@@ -769,9 +937,10 @@ fn resolve_repo_coordinates() -> Option<(String, String)> {
         .find_map(|(_, url)| parse_github_remote_url(url))
 }
 
-fn load_remote_pairs() -> Vec<(String, String)> {
+fn load_remote_pairs(repo_path: &std::path::Path) -> Vec<(String, String)> {
     let Ok(output) = gwt_core::process::hidden_command("git")
         .args(["remote", "-v"])
+        .current_dir(repo_path)
         .output()
     else {
         return Vec::new();
@@ -821,11 +990,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pm_runtime_remote_discovery_uses_explicit_project_directory() {
+        let project = tempfile::tempdir().unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .arg("init")
+            .arg(project.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fixture/pm-runtime.git"
+            ])
+            .current_dir(project.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert_eq!(
+            load_remote_pairs(project.path()),
+            vec![(
+                "origin".into(),
+                "https://github.com/fixture/pm-runtime.git".into()
+            )]
+        );
+    }
+
+    #[test]
     fn did_you_mean_suggests_search_for_typo() {
         // The motivating misuse: `gwtd serach`-style typos and invented verbs
         // must point at the real `search` family (SPEC-1942 FR-109).
         assert_eq!(did_you_mean("serach"), Some("search"));
         assert_eq!(did_you_mean("baord"), Some("board"));
+    }
+
+    /// Issue #3515 AC-3: `gwtd --help actions` must name the rerun operation
+    /// and both of its target params, so an agent blocked on `gh run rerun`
+    /// can discover the sanctioned replacement from the help alone.
+    #[test]
+    fn actions_family_help_documents_rerun() {
+        let help = family_help("actions").expect("actions family help");
+        for expected in ["actions.rerun", "run_id", "job_id", "failed_only"] {
+            assert!(
+                help.contains(expected),
+                "actions help must mention {expected}, got:\n{help}"
+            );
+        }
+    }
+
+    /// Issue #4465 AC-6'': every workspace operation that exists must be
+    /// discoverable from `gwtd --help workspace`. `workspace.work_prune` and
+    /// the projection operations were absent, so a refusal telling an agent to
+    /// prune had no discoverable route at all — the help, the refusal text and
+    /// four guessed names all missed on 2026-09-16.
+    #[test]
+    fn workspace_family_help_lists_every_workspace_operation() {
+        let help = family_help("workspace").expect("workspace family help");
+        for expected in [
+            "workspace.update",
+            "workspace.create",
+            "workspace.ensure",
+            "workspace.join",
+            "workspace.candidates",
+            "workspace.work_prune",
+            "workspace.projection_list",
+            "workspace.projection_prune",
+            "workspace.store_consolidate",
+        ] {
+            assert!(
+                help.contains(expected),
+                "workspace help must mention {expected}, got:\n{help}"
+            );
+        }
     }
 
     #[test]
@@ -900,6 +1140,14 @@ mod tests {
     }
 
     #[test]
+    fn family_help_resolves_errors_and_documents_list() {
+        let help = family_help("errors").expect("errors help");
+        assert!(help.contains("errors.list"));
+        assert!(help.contains("since"));
+        assert!(help.contains("errors"));
+    }
+
+    #[test]
     fn format_daemon_help_documents_project_root_authority_contract() {
         let help = format_daemon_help();
         for expected in [
@@ -937,6 +1185,25 @@ mod tests {
         assert!(!help.contains("integrity repair"), "{help}");
         assert!(!help.contains("cannot be repaired in the same"), "{help}");
         assert!(!help.contains("fresh linked-owner launch"), "{help}");
+    }
+
+    #[test]
+    fn format_verify_help_documents_pr_ready_adjudication_contract() {
+        let help = format_verify_help();
+        for expected in [
+            "verify.adjudicate",
+            "pr.ready only",
+            "kind=decision",
+            "Verification record: <id>",
+            "Failing command:",
+            "Reason: <reason>",
+            "raw completion and obligation evidence remains failing",
+        ] {
+            assert!(
+                help.contains(expected),
+                "verify help must document adjudication contract {expected}. help:\n{help}",
+            );
+        }
     }
 
     #[test]
@@ -987,6 +1254,9 @@ mod tests {
             "issue.monitor.priority.move",
             "issue.monitor.priority.set",
             "issue.monitor.config.set",
+            // SPEC #3914 FR-011: the launch candidate pool.
+            "issue.monitor.profiles",
+            "issue.monitor.profiles.set",
             "issue.monitor.launch_now",
             "issue.monitor.stop",
             "issue.monitor.failover",
@@ -994,9 +1264,29 @@ mod tests {
             // launch. If it is not discoverable here, the operator falls back
             // to hand-editing the state file, which is the bug.
             "issue.monitor.requeue",
+            // Issue #4084: the manual half of idle-window release.
+            "issue.monitor.release_idle",
+            // Issue #3844: the only way a waiting agent can tell the monitor it
+            // is waiting rather than stuck.
+            "issue.monitor.wait",
+            // Issue #4286: the only way the PM can void a wait whose condition
+            // its ruling removed, short of waiting out the 3h cap.
+            "issue.monitor.wait.invalidate",
+            // Issue #3923: the only release for a provider-wide quota hold.
+            "issue.monitor.quota_hold.list",
+            "issue.monitor.quota_hold.clear",
+            // Issue #3883 AC-6: the only recovery for launches that are still
+            // running but no longer tracked. Undiscoverable here means the
+            // operator hand-edits the state file, which is the bug.
+            "issue.monitor.reconcile",
+            // Issue #3923 AC-5: the PM's CLI route off a held provider.
+            "launch_agent",
             "project_root",
             "enabled=false",
             "autonomous_mode=false",
+            "enabled=true",
+            "autonomous_mode=true",
+            "explicit GUI action",
         ] {
             assert!(
                 help.contains(expected),

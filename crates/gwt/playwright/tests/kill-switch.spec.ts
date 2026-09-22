@@ -14,7 +14,44 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 test.describe("Anshin Phase 1 kill-switch + attention", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
 
-  test("STOP sends stop_window and the window stays on canvas", async ({ page }) => {
+  test("completed turn input readiness is distinct from model response wait", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installKillSwitchBackend(page);
+    await page.goto(liveBase || APP_URL);
+    const win = page.locator('.workspace-window[data-id="agent-1"]');
+    await expect(win).toBeVisible({ timeout: 10_000 });
+    const chip = win.locator(".status-chip");
+    // The running turn includes the quiet interval awaiting a model response;
+    // Stop returns the provider to its prompt without terminating its process.
+    for (const [state, label, description] of [
+      ["running", "Running", "Turn in progress, including waiting for a model response"],
+      ["idle", "Idle", "Turn ended; ready for input"],
+      ["waiting", "Waiting", "Waiting for approval or an external condition"],
+      ["error", "Error", "Error"],
+      ["stopped", "Stopped", "Stopped"],
+    ]) {
+      await page.evaluate((state) => window.__emit({
+        kind: "window_state", window_id: "agent-1", state,
+      }), state);
+      await expect(chip.locator(".status-label")).toHaveText(label);
+      await expect(chip).toHaveAttribute("title", description);
+      await expect(chip).toHaveAttribute("aria-label", label === description
+        ? label
+        : `${label}: ${description}`);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  // SPEC #3885 FR-015 (user ruling 2026-09-03) supersedes FR-041's titlebar
+  // STOP: stopping an agent is offered only from the Issue row's ⋯ menu
+  // (issue-preview.spec.ts). The chrome keeps close and, once stopped, RESTART.
+  test("the window chrome carries no STOP button", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
     await page.goto(APP_URL);
@@ -22,18 +59,14 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     const win = page.locator('.workspace-window[data-id="agent-1"]');
     await expect(win).toBeVisible({ timeout: 10_000 });
 
-    const stop = win.locator('[data-action="stop"]');
-    await expect(stop).toBeVisible();
-    await stop.click();
-
-    await expect
-      .poll(() => page.evaluate(() => window.__sentKinds))
-      .toContain("stop_window");
-    // The window must remain on the canvas after stopping its runtime.
-    await expect(win).toBeVisible();
-    const sent = await page.evaluate(() => window.__sent);
-    const stopEvent = sent.find((e) => e.kind === "stop_window");
-    expect(stopEvent.id).toBe("agent-1");
+    await expect(win.locator('.titlebar [data-action="stop"]')).toHaveCount(0);
+    await expect(win.locator('.titlebar [data-action="close"]')).toBeVisible();
+    await expect(win.locator('.titlebar [data-action="restart"]')).toBeHidden();
+    // A session with no Issue behind it (FR-013) shows neither Issue control.
+    await expect(win.locator('.titlebar [data-action="minimize-to-issue"]')).toBeHidden();
+    await expect(win.locator('.titlebar [data-action="open-issue"]')).toBeHidden();
+    const sent = await page.evaluate(() => window.__sentKinds);
+    expect(sent).not.toContain("stop_window");
   });
 
   test("a stopped window exposes RESTART -> restart_window", async ({ page }) => {

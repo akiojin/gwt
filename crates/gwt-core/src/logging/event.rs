@@ -34,9 +34,10 @@ pub struct LogEvent {
     pub message: String,
     pub detail: Option<String>,
     pub timestamp: DateTime<Utc>,
-    /// Extra structured fields collected from the tracing event
-    /// (`tracing::field::Visit`). Empty when produced by a plain
-    /// `tracing::info!("msg")` call without kv pairs.
+    /// Resolved registered project token; absent for machine-wide events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_scope: Option<String>,
+    /// Extra structured fields collected from the tracing event.
     #[serde(default)]
     pub fields: serde_json::Map<String, serde_json::Value>,
 }
@@ -54,6 +55,7 @@ impl LogEvent {
             message: message.into(),
             detail: None,
             timestamp: Utc::now(),
+            project_scope: None,
             fields: serde_json::Map::new(),
         }
     }

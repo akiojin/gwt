@@ -4,9 +4,9 @@
 //! `tracing-subscriber` Registry with:
 //!
 //! 1. A reloadable `EnvFilter` (level control via `reload::Handle`)
-//! 2. A JSONL formatting layer writing to
-//!    `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD` via a non-blocking,
-//!    daily-rolling appender (`tracing_appender`)
+//! 2. A JSONL formatting layer routing each event to the machine sink or its
+//!    registered project store via one lazy non-blocking, daily-rolling
+//!    appender per store (`tracing_appender`)
 //! 3. A UI forwarder layer that sends `LogEvent`s to an
 //!    `UnboundedSender<LogEvent>` so that TUI surfaces (toasts, error
 //!    modal) can react to `Info`/`Warn`/`Error` events without
@@ -34,7 +34,9 @@ pub use event::LogEvent;
 pub use housekeep::{housekeep, HousekeepReport};
 pub use init::{apply_log_level_to_handle, init, LoggingHandles, ReloadHandle};
 pub use reader::{read_log_file, LogFileEntry, ReadDiagnostics, ReadOutcome};
-pub use writer::{current_log_file, log_file_for_date, LOG_FILE_BASENAME};
+pub use writer::{
+    current_log_file, log_file_for_date, ProjectLogRouter, ProjectLogScope, LOG_FILE_BASENAME,
+};
 
 // SPEC-1924 Update 2026-05-20: re-export ProcessConsoleHub family so
 // downstream crates can access them through `gwt_core::logging::...`

@@ -22,6 +22,7 @@
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn for Board origin jumps.
 // - activeWorkspace() / activeProjectTab(): workspace accessors.
+// - projectWindowContextById(windowId): owning project for per-window Logs.
 // - visibleBounds(): canvas bounds payload helper.
 // - getActiveWorkProjection(): read accessor for the active Work
 //   projection (app.js owns the let).
@@ -51,6 +52,7 @@ export function createBoardLogsSurface({
   focusOrSpawnPreset,
   activeWorkspace,
   activeProjectTab,
+  projectWindowContextById,
   visibleBounds,
   getActiveWorkProjection,
 }) {
@@ -92,9 +94,10 @@ export function createBoardLogsSurface({
           logStateMap.set(windowId, {
             entries: [],
             loading: false,
+            pendingScope: null,
             error: "",
             scope: "project",
-            projectScope: activeProjectTab()?.project_scope || "",
+            projectScope: projectWindowContextById(windowId)?.tab.project_scope || "",
             severity: "debug",
             query: "",
             // SPEC-2019 Amendment 2026-05-20 (Process facet) — AND-filter
@@ -505,18 +508,36 @@ export function createBoardLogsSurface({
       function requestLogs(windowId) {
         const state = ensureLogState(windowId);
         if (state.scope === "project") {
-          state.projectScope = activeProjectTab()?.project_scope || "";
+          state.projectScope = projectWindowContextById(windowId)?.tab.project_scope || "";
         }
         if (state.loading) {
           return;
         }
         state.loading = true;
+        state.pendingScope = { scope: state.scope, projectScope: state.projectScope };
         state.error = "";
         send({
           kind: "load_logs",
           id: windowId,
           scope: state.scope,
         });
+      }
+
+      function finishLogRequest(windowId) {
+        const state = ensureLogState(windowId);
+        const pending = state.pendingScope;
+        state.loading = false;
+        state.pendingScope = null;
+        // Scope changes coalesce behind the one in-flight request. Resolve
+        // the owner again because another project can now be the active tab.
+        const projectScope = projectWindowContextById(windowId)?.tab.project_scope || "";
+        if (pending && (pending.scope !== state.scope ||
+          (state.scope === "project" && pending.projectScope !== projectScope))) {
+          requestLogs(windowId);
+          renderLogs(windowId);
+          return false;
+        }
+        return true;
       }
 
 
@@ -1681,6 +1702,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_entries": {
+            if (!finishLogRequest(event.id)) break;
             const state = ensureLogState(event.id);
             state.entries = event.entries || [];
             state.loading = false;
@@ -1708,6 +1730,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_error": {
+            if (!finishLogRequest(event.id)) break;
             const state = ensureLogState(event.id);
             state.loading = false;
             state.error = event.message;

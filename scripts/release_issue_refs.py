@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Collect auto-close and reference-only issue refs for a release range."""
+"""Collect delivered and reference-only issue refs for a release range.
+
+The Release PR (develop -> main) must never carry GitHub closing keywords:
+`main` is the default branch, so `Closes #N` in its body closes the Issue on
+merge even when acceptance criteria are still open (Issue #3545). Issues are
+settled by the Issue Monitor when the work branch merges into `develop`
+(Issue #3917); the Release PR only *references* them.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +24,15 @@ CLOSING_KEYWORD_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b",
     re.IGNORECASE,
 )
+# GitHub closing-keyword grammar: keyword, optional colon, whitespace, then a
+# `#N`, `owner/repo#N`, or issue-URL reference. Anything matching this in a
+# body pushed to the default branch closes the Issue.
+CLOSING_REFERENCE_RE = re.compile(
+    r"(?P<keyword>\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?))"
+    r"(?P<sep>:?\s+)"
+    r"(?P<ref>(?:[\w.-]+/[\w.-]+)?#\d+\b|https://github\.com/[\w.-]+/[\w.-]+/issues/\d+\b)",
+    re.IGNORECASE,
+)
 ISSUE_REF_RE = re.compile(r"#(\d+)")
 SQUASH_REF_RE = re.compile(r"\(#(\d+)\)$")
 MERGE_PR_RE = re.compile(r"^Merge pull request #(\d+)\b")
@@ -25,7 +41,7 @@ HEADING_RE = re.compile(r"^##\s+(?P<title>.+?)\s*$")
 
 @dataclass
 class BodyIssueRefs:
-    auto_close_issues: list[int] = field(default_factory=list)
+    delivered_issues: list[int] = field(default_factory=list)
     reference_only_issues: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -35,7 +51,7 @@ class CommitRef:
     number: int
     kind: str
     source: str
-    auto_close_issues: list[int] = field(default_factory=list)
+    delivered_issues: list[int] = field(default_factory=list)
     reference_only_issues: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -45,7 +61,7 @@ class ReleaseIssueRefs:
     repo: str
     range: str
     refs: list[CommitRef] = field(default_factory=list)
-    auto_close_issues: list[int] = field(default_factory=list)
+    delivered_issues: list[int] = field(default_factory=list)
     reference_only_issues: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -101,21 +117,21 @@ def parse_pr_body_refs(body: str, pr_number: int | None = None) -> BodyIssueRefs
     closing_section = extract_section(body, "Closing Issues")
     related_section = extract_section(body, "Related Issues / Links")
 
-    auto_close = set(extract_issue_numbers(closing_section))
-    auto_close.update(int(match.group(1)) for match in CLOSING_KEYWORD_RE.finditer(body or ""))
+    delivered = set(extract_issue_numbers(closing_section))
+    delivered.update(int(match.group(1)) for match in CLOSING_KEYWORD_RE.finditer(body or ""))
 
-    reference_only = set(extract_issue_numbers(related_section)) - auto_close
+    reference_only = set(extract_issue_numbers(related_section)) - delivered
     warnings: list[str] = []
 
     if reference_only:
         prefix = f"PR #{pr_number}" if pr_number is not None else "PR body"
         warnings.append(
             f"{prefix} references {format_issue_refs(sorted(reference_only))} only in "
-            "`Related Issues / Links`; they will not auto-close on release."
+            "`Related Issues / Links`; listed as reference-only."
         )
 
     return BodyIssueRefs(
-        auto_close_issues=sorted(auto_close),
+        delivered_issues=sorted(delivered),
         reference_only_issues=sorted(reference_only),
         warnings=warnings,
     )
@@ -171,7 +187,7 @@ def classify_release_ref(
             number=number,
             kind="pr",
             source=source,
-            auto_close_issues=pr_refs.auto_close_issues,
+            delivered_issues=pr_refs.delivered_issues,
             reference_only_issues=pr_refs.reference_only_issues,
             warnings=pr_refs.warnings,
         )
@@ -180,7 +196,7 @@ def classify_release_ref(
         number=number,
         kind="issue",
         source=source,
-        auto_close_issues=[number],
+        delivered_issues=[number],
     )
 
 
@@ -194,50 +210,140 @@ def collect_release_issue_refs(
     merge_subjects = runner(["git", "log", "--merges", "--pretty=%s", range_expr])
 
     refs: list[CommitRef] = []
-    auto_close: set[int] = set()
+    delivered: set[int] = set()
     reference_only: set[int] = set()
     warnings: list[str] = []
 
     for number, source in extract_release_commit_refs(no_merge_subjects, merge_subjects):
         ref = classify_release_ref(number, source, repo, runner)
         refs.append(ref)
-        auto_close.update(ref.auto_close_issues)
+        delivered.update(ref.delivered_issues)
         reference_only.update(ref.reference_only_issues)
         warnings.extend(ref.warnings)
 
-    # Post-filter: move gwt-spec issues from auto-close to reference-only
+    # Post-filter: gwt-spec issues are settled per phase, so they are only
+    # referenced by a release, never listed as delivered.
     spec_protected: list[int] = []
-    for issue_number in sorted(auto_close):
+    for issue_number in sorted(delivered):
         labels = fetch_issue_labels(issue_number, repo, runner)
         if SPEC_LABEL in labels:
             spec_protected.append(issue_number)
 
     if spec_protected:
-        auto_close.difference_update(spec_protected)
+        delivered.difference_update(spec_protected)
         reference_only.update(spec_protected)
         warnings.append(
             f"gwt-spec issues moved to reference-only: "
             f"{format_issue_refs(spec_protected)}. "
-            "gwt-spec issues are never auto-closed by releases."
+            "gwt-spec issues are settled per phase, never by a release."
         )
 
-    reference_only.difference_update(auto_close)
+    reference_only.difference_update(delivered)
     if reference_only:
         warnings.insert(
             0,
             "Reference-only issues detected: "
             f"{format_issue_refs(sorted(reference_only))}. "
-            "Add them to `Closing Issues` if they should auto-close.",
+            "They are listed under `Related Issues / Links`.",
         )
 
     return ReleaseIssueRefs(
         repo=repo,
         range=range_expr,
         refs=refs,
-        auto_close_issues=sorted(auto_close),
+        delivered_issues=sorted(delivered),
         reference_only_issues=sorted(reference_only),
         warnings=dedupe_preserve_order(warnings),
     )
+
+
+def neutralize_closing_keywords(text: str) -> str:
+    """Break every `keyword #N` pair so GitHub cannot read it as a closing link.
+
+    The reference is wrapped in a code span: GitHub does not autolink inside
+    code, so the keyword no longer precedes a linked reference. The rewrite
+    is idempotent and leaves plain `#N` references untouched.
+    """
+
+    def wrap(match: re.Match[str]) -> str:
+        return f"{match.group('keyword')}{match.group('sep')}`{match.group('ref')}`"
+
+    return CLOSING_REFERENCE_RE.sub(wrap, text or "")
+
+
+def contains_closing_reference(text: str) -> bool:
+    """True when `text` still carries a GitHub closing keyword + reference."""
+    return CLOSING_REFERENCE_RE.search(text or "") is not None
+
+
+def _issue_list_section(numbers: Sequence[int]) -> str:
+    if not numbers:
+        return "None"
+    return "\n".join(f"- #{number}" for number in unique_sorted(numbers))
+
+
+def render_release_pr_body(
+    report: ReleaseIssueRefs,
+    version: str,
+    bump: str,
+    notes: str | None = None,
+    breaking_commits: Sequence[str] | None = None,
+) -> str:
+    """Render the reference-only Release PR body (Issue #3545 AC-1 / AC-2).
+
+    Delivered Issues are listed as bare `#N` references. Every line, including
+    free-text `notes`, passes through `neutralize_closing_keywords`, and the
+    result is asserted to contain no closing reference before it is returned.
+
+    `breaking_commits` (Issue #4373 AC-2) lists commits that carry a breaking
+    marker. They are informational only: the marker no longer raises the
+    version, so the section says so and names the explicit `bump=major` route.
+    """
+    sections = [
+        "## Summary",
+        "",
+        f"Release {version}. Version bump and CHANGELOG generated by the Prepare Release workflow.",
+        "",
+        "## Version",
+        "",
+        f"- {version} (bump: {bump})",
+        "",
+    ]
+    if breaking_commits:
+        sections.extend(
+            [
+                "## Breaking Changes",
+                "",
+                "Breaking markers (`type!:` / `BREAKING CHANGE:`) were found in this range but are "
+                "not applied to the version (Issue #4373): a major release requires an explicit "
+                "`bump=major` from the person triggering Prepare Release.",
+                "",
+                *(f"- {line.strip()}" for line in breaking_commits if line.strip()),
+                "",
+            ]
+        )
+    if notes and notes.strip():
+        sections.extend(["## Changes", "", notes.strip(), ""])
+    sections.extend(
+        [
+            "## Delivered Issues",
+            "",
+            _issue_list_section(report.delivered_issues),
+            "",
+            "Reference-only on purpose: Issues are settled by the Issue Monitor when their "
+            "work merges into `develop` (Issue #3917). A Release PR must not close Issues "
+            "(Issue #3545).",
+            "",
+            "## Related Issues / Links",
+            "",
+            _issue_list_section(report.reference_only_issues),
+            "",
+        ]
+    )
+    body = neutralize_closing_keywords("\n".join(sections))
+    if contains_closing_reference(body):
+        raise ValueError("release PR body still contains a closing keyword reference")
+    return body
 
 
 def render_text(report: ReleaseIssueRefs) -> str:
@@ -245,11 +351,11 @@ def render_text(report: ReleaseIssueRefs) -> str:
         f"Repo: {report.repo}",
         f"Range: {report.range}",
         "",
-        "Auto-close issues:",
+        "Delivered issues:",
     ]
 
-    if report.auto_close_issues:
-        lines.extend(f"- Closes #{number}" for number in report.auto_close_issues)
+    if report.delivered_issues:
+        lines.extend(f"- #{number}" for number in report.delivered_issues)
     else:
         lines.append("- None")
 
@@ -268,7 +374,7 @@ def render_text(report: ReleaseIssueRefs) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Collect release auto-close and reference-only issue refs."
+        description="Collect delivered and reference-only issue refs for a release range."
     )
     parser.add_argument(
         "--range",
@@ -284,9 +390,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--format",
-        choices=("text", "json"),
+        choices=("text", "json", "pr-body"),
         default="text",
-        help="Output format.",
+        help="Output format. `pr-body` renders the reference-only Release PR body.",
+    )
+    parser.add_argument(
+        "--version",
+        dest="version",
+        default=None,
+        help="Release tag (for example v9.92.0). Required with --format pr-body.",
+    )
+    parser.add_argument(
+        "--bump",
+        dest="bump",
+        default="auto",
+        help="Bump level recorded in the Release PR body (default: auto).",
+    )
+    parser.add_argument(
+        "--notes-file",
+        dest="notes_file",
+        default=None,
+        help="Optional Markdown file appended as `## Changes`; closing keywords are neutralized.",
+    )
+    parser.add_argument(
+        "--breaking-file",
+        dest="breaking_file",
+        default=None,
+        help="Optional file with one `<sha> <subject>` breaking commit per line, listed under `## Breaking Changes`.",
     )
     return parser
 
@@ -294,6 +424,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if args.format == "pr-body" and not args.version:
+        parser.error("--format pr-body requires --version")
 
     try:
         report = collect_release_issue_refs(args.range_expr, repo_slug=args.repo_slug)
@@ -307,6 +439,21 @@ def main() -> int:
 
     if args.format == "json":
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+    elif args.format == "pr-body":
+        notes = None
+        if args.notes_file:
+            with open(args.notes_file, encoding="utf-8") as handle:
+                notes = handle.read()
+        breaking: list[str] = []
+        if args.breaking_file:
+            with open(args.breaking_file, encoding="utf-8") as handle:
+                breaking = [line for line in handle.read().splitlines() if line.strip()]
+        print(
+            render_release_pr_body(
+                report, args.version, args.bump, notes=notes, breaking_commits=breaking
+            ),
+            end="",
+        )
     else:
         print(render_text(report))
 

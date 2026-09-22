@@ -70,6 +70,8 @@ pub struct LogFileEntry {
     #[serde(default)]
     pub target: String,
     #[serde(default)]
+    pub project_scope: Option<String>,
+    #[serde(default)]
     pub fields: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -92,6 +94,7 @@ impl LogFileEntry {
             detail,
             timestamp: self.timestamp,
             fields: self.fields,
+            project_scope: self.project_scope,
         }
     }
 }
