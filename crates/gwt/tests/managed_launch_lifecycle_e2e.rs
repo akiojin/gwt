@@ -50,9 +50,42 @@ fn block_for(decision: &PermissionModeDecision) -> Option<PermissionReadinessRec
     permission_readiness::pre_launch_block("issue", 4544, "monitor-launch:4544", decision)
 }
 
-/// A real Git worktree with an origin, so the trusted store resolves a
-/// repository-scoped directory instead of the degenerate mirror-only mode.
-fn worktree() -> tempfile::TempDir {
+/// One test's isolated gwt home plus the worktrees that live under it.
+///
+/// The gwt home is scoped with [`ScopedGwtHome`], which is *thread-local*
+/// rather than an environment variable. That matters: an earlier version of
+/// this file set `HOME` in one test while the others read it unlocked, and the
+/// tempdir behind it was removed while a sibling test was mid-write — the
+/// trusted-store write then failed `NotFound` under CI's parallelism and
+/// passed locally. Thread-local isolation removes the shared state instead of
+/// serializing access to it.
+struct Fixture {
+    _home: tempfile::TempDir,
+    _scope: gwt_core::test_support::ScopedGwtHome,
+    worktrees: Vec<tempfile::TempDir>,
+}
+
+impl Fixture {
+    /// `count` real Git worktrees with an origin, so the trusted store
+    /// resolves a repository-scoped directory instead of the degenerate
+    /// mirror-only mode.
+    fn with_worktrees(count: usize) -> Self {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let scope = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktrees = (0..count).map(|_| git_worktree()).collect();
+        Self {
+            _home: home,
+            _scope: scope,
+            worktrees,
+        }
+    }
+
+    fn path(&self, index: usize) -> &Path {
+        self.worktrees[index].path()
+    }
+}
+
+fn git_worktree() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     assert!(gwt_core::process::hidden_command("git")
         .arg("init")
@@ -113,7 +146,8 @@ fn a_producing_launch_with_no_saved_preference_is_forced_prompt_free() {
 /// block says what to do about it.
 #[test]
 fn an_unsupported_provider_is_blocked_before_the_launch_with_a_recovery_action() {
-    let dir = worktree();
+    let fx = Fixture::with_worktrees(1);
+    let dir = fx.path(0);
     let decision = decide(
         &AgentId::OpenClaw,
         None,
@@ -124,7 +158,7 @@ fn an_unsupported_provider_is_blocked_before_the_launch_with_a_recovery_action()
     assert_eq!(decision.outcome, PermissionModeOutcome::UnsupportedProvider);
 
     let refusal = permission_readiness::block_launch_if_unready(
-        dir.path(),
+        dir,
         "issue",
         4544,
         "monitor-launch:4544",
@@ -137,7 +171,7 @@ fn an_unsupported_provider_is_blocked_before_the_launch_with_a_recovery_action()
     assert!(refusal.contains("unsupported"), "{refusal}");
 
     // The block is durable, so `execution.status` can answer for it later.
-    let record = permission_readiness::load(dir.path())
+    let record = permission_readiness::load(dir)
         .expect("load")
         .expect("the block is recorded");
     assert_eq!(record.kind, PermissionReadinessKind::PreLaunchBlock);
@@ -175,7 +209,8 @@ fn an_unsupported_provider_is_blocked_before_the_launch_with_a_recovery_action()
 /// lifecycle is refused because of permissions.
 #[test]
 fn a_supported_launch_leaves_no_gate_decision_and_nothing_is_refused() {
-    let dir = worktree();
+    let fx = Fixture::with_worktrees(1);
+    let dir = fx.path(0);
     let decision = decide(
         &AgentId::Codex,
         None,
@@ -185,7 +220,7 @@ fn a_supported_launch_leaves_no_gate_decision_and_nothing_is_refused() {
     );
 
     permission_readiness::block_launch_if_unready(
-        dir.path(),
+        dir,
         "issue",
         4544,
         "monitor-launch:4544",
@@ -193,10 +228,10 @@ fn a_supported_launch_leaves_no_gate_decision_and_nothing_is_refused() {
     )
     .expect("a supported launch proceeds");
 
-    assert!(permission_readiness::load(dir.path())
+    assert!(permission_readiness::load(dir)
         .expect("load")
         .is_none());
-    assert!(permission_readiness::settlement_refusal(dir.path()).is_none());
+    assert!(permission_readiness::settlement_refusal(dir).is_none());
 }
 
 /// (4) The mapping existed, the launch asked for it, and it did not reach the
@@ -204,13 +239,8 @@ fn a_supported_launch_leaves_no_gate_decision_and_nothing_is_refused() {
 /// work note for the next generation.
 #[test]
 fn a_dropped_skip_flag_blocks_and_captures_a_work_note() {
-    let _lock = gwt_core::test_support::env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let home = tempfile::tempdir().expect("home");
-    let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
-    let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
-    let dir = worktree();
+    let fx = Fixture::with_worktrees(1);
+    let dir = fx.path(0);
 
     // The launch was decided prompt-free, and the argv that shipped does not
     // carry the flag the mapping named.
@@ -229,7 +259,7 @@ fn a_dropped_skip_flag_blocks_and_captures_a_work_note() {
     assert_eq!(dropped.outcome, PermissionModeOutcome::SkipFlagDropped);
 
     let refusal = permission_readiness::block_launch_if_unready(
-        dir.path(),
+        dir,
         "issue",
         4544,
         "monitor-launch:4544",
@@ -238,7 +268,7 @@ fn a_dropped_skip_flag_blocks_and_captures_a_work_note() {
     .expect_err("a dropped flag must not launch");
     assert!(refusal.contains("Recovery:"), "{refusal}");
 
-    let memory = std::fs::read_to_string(gwt_core::paths::gwt_work_notes_memory_path(dir.path()))
+    let memory = std::fs::read_to_string(gwt_core::paths::gwt_work_notes_memory_path(dir))
         .expect("the work-notes memory file exists");
     assert!(memory.contains("skip-permissions"), "{memory}");
     assert!(memory.contains("Future Action:"), "{memory}");
@@ -281,7 +311,8 @@ fn no_surface_can_keep_a_producing_launch_interactive() {
 /// prompt-free launch that then prompts anyway still cannot settle anything.
 #[test]
 fn skip_permissions_does_not_exempt_the_pr_or_verification_gates() {
-    let dir = worktree();
+    let fx = Fixture::with_worktrees(1);
+    let dir = fx.path(0);
     let decision = decide(
         &AgentId::Codex,
         None,
@@ -291,7 +322,7 @@ fn skip_permissions_does_not_exempt_the_pr_or_verification_gates() {
     );
     assert!(decision.effective_skip_permissions);
     permission_readiness::block_launch_if_unready(
-        dir.path(),
+        dir,
         "issue",
         4544,
         "monitor-launch:4544",
@@ -300,13 +331,13 @@ fn skip_permissions_does_not_exempt_the_pr_or_verification_gates() {
     .expect("a supported launch proceeds");
 
     // Nothing refuses yet.
-    assert!(permission_readiness::settlement_refusal(dir.path()).is_none());
+    assert!(permission_readiness::settlement_refusal(dir).is_none());
 
     // The launch prompts anyway. Every settlement now refuses, through the one
     // predicate `execution.complete`, the Ready PR gate, `verify.run`, and the
     // monitor's Deliver routing all consume.
     permission_readiness::record_prompt_regression(
-        dir.path(),
+        dir,
         "issue",
         4544,
         "sess-4544",
@@ -316,7 +347,7 @@ fn skip_permissions_does_not_exempt_the_pr_or_verification_gates() {
     .expect("record the regression");
 
     let refusal =
-        permission_readiness::settlement_refusal(dir.path()).expect("settlement is refused");
+        permission_readiness::settlement_refusal(dir).expect("settlement is refused");
     assert!(
         refusal.contains("permission_prompt_regression"),
         "{refusal}"
@@ -409,10 +440,10 @@ fn read_source(root: &Path, relative: &str) -> String {
 /// different worktree's settlement.
 #[test]
 fn a_block_in_one_worktree_does_not_refuse_another() {
-    let blocked = worktree();
-    let clear = worktree();
+    let fx = Fixture::with_worktrees(2);
+    let (blocked, clear) = (fx.path(0), fx.path(1));
     permission_readiness::record_prompt_regression(
-        blocked.path(),
+        blocked,
         "issue",
         4544,
         "sess-4544",
@@ -421,7 +452,7 @@ fn a_block_in_one_worktree_does_not_refuse_another() {
     )
     .unwrap();
 
-    assert!(permission_readiness::settlement_refusal(blocked.path()).is_some());
-    assert!(permission_readiness::settlement_refusal(clear.path()).is_none());
+    assert!(permission_readiness::settlement_refusal(blocked).is_some());
+    assert!(permission_readiness::settlement_refusal(clear).is_none());
     assert!(permission_readiness::settlement_refusal(Path::new("/nonexistent-worktree")).is_none());
 }
