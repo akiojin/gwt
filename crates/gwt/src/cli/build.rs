@@ -2229,6 +2229,16 @@ mod tests {
             gwt_agent::GWT_SESSION_ID_ENV,
             abort_fixture.session.id.clone(),
         );
+        // Active executions have an unavailable Blocked-only abort probe too;
+        // they must still finish or abort through the ordinary lifecycle.
+        assert!(matches!(
+            crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                &abort_fixture.git.repo,
+                "{}",
+                Some(&abort_fixture.session.id),
+            ),
+            crate::cli::hook::HookOutput::StopBlock { .. }
+        ));
         assert!(matches!(
             crate::cli::execution_state::settle(
                 &abort_fixture.git.repo,
@@ -2245,6 +2255,21 @@ mod tests {
             StatusCode::OK,
             terminal_receipt(crate::AgentWorkTerminalizationOutcome::AlreadyMatching),
         );
+        let diagnosis = crate::cli::execution_state::diagnose(
+            &abort_fixture.git.repo,
+            Some(&abort_fixture.session.id),
+        );
+        assert!(diagnosis
+            .available_recoveries
+            .contains(&"build.abort".to_string()));
+        assert!(matches!(
+            crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                &abort_fixture.git.repo,
+                "{}",
+                Some(&abort_fixture.session.id),
+            ),
+            crate::cli::hook::HookOutput::StopBlock { .. }
+        ));
         let abort_repo = abort_fixture.git.repo.clone();
         let (abort_code, abort_output) =
             with_terminal_bridge_env(&abort_fixture, &abort_server, |_| {
@@ -3069,6 +3094,40 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("ambiguous")),
             "{abort_probe:?}"
+        );
+        let state_path = gwt_core::skill_state::state_path(&fixture.git.repo, SKILL_NAME);
+        let before_state = std::fs::read(&state_path).unwrap();
+        let before_execution = crate::cli::execution_state::load(&fixture.git.repo).unwrap();
+        assert_eq!(
+            crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                &fixture.git.repo,
+                "{}",
+                Some(&fixture.session.id),
+            ),
+            crate::cli::hook::HookOutput::Silent,
+            "non-retryable unavailable abort must not strand Stop"
+        );
+        assert_eq!(std::fs::read(&state_path).unwrap(), before_state);
+        assert_eq!(
+            crate::cli::execution_state::load(&fixture.git.repo).unwrap(),
+            before_execution,
+            "releasing Stop must not pretend the lifecycle was terminalized"
+        );
+        let log_dir = gwt_core::paths::gwt_project_logs_dir_for_project_path(&fixture.git.repo);
+        let log = std::fs::read_to_string(gwt_core::logging::current_log_file(&log_dir)).unwrap();
+        let decision = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|entry| entry["fields"]["issue"] == 4623)
+            .expect("durable stranded-build Stop decision");
+        assert_eq!(decision["fields"]["session_id"], fixture.session.id);
+        assert_eq!(decision["fields"]["owner_number"], 3327);
+        assert_eq!(decision["fields"]["build_active"], true);
+        assert_eq!(decision["fields"]["phase"], "pr");
+        assert_eq!(decision["fields"]["abort_probe"]["state"], "unavailable");
+        assert_eq!(
+            decision["fields"]["abort_probe"]["governance"]["retryable"],
+            false
         );
         assert_build_still_active(&fixture.git);
         server.assert_no_request();
