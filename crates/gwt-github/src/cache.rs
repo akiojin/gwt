@@ -219,6 +219,21 @@ impl Cache {
         self.root.join(number.0.to_string())
     }
 
+    /// Serialize host-local SPEC writers across processes. Kept separate from
+    /// the cache lock because a remote transaction refreshes the cache itself.
+    pub(crate) fn lock_spec_write(&self, number: IssueNumber) -> Result<fs::File, CacheError> {
+        let directory = self.root.join(".locks");
+        fs::create_dir_all(&directory)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(directory.join(format!("{}.spec-write.lock", number.0)))?;
+        lock.lock_exclusive()?;
+        Ok(lock)
+    }
+
     pub fn validation_receipt_path(&self, number: IssueNumber) -> PathBuf {
         self.issue_dir(number).join(ISSUE_VALIDATION_RECEIPT_FILE)
     }

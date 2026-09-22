@@ -891,6 +891,11 @@ JSON
   and section marker / roundtrip health, records the result in the Intake
   Inspection Snapshot, seeds the Finding Disposition Ledger, and prints the
   reviewer checklist. It exits non-zero when a critical finding is present.
+  It also reports missing indexed comment IDs and unindexed artifact comments
+  (including section and part numbers), without rewriting or deleting them.
+  Section writes serialize writers sharing the host cache and check fresh body
+  content before replacing the index; cross-host/external writes and unknown
+  network outcomes are outside this guarantee.
 
 ```bash
 gwtd <<'JSON'
