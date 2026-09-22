@@ -2775,6 +2775,17 @@ fn recovery_storage_projection(record: &ExecutionControlRecord) -> ExecutionCont
     transfers.append(&mut canonical.transfers);
     canonical.transfers = transfers;
     canonical.recoveries.clear();
+    // Issue #4591 follow-up: keep the Permission Mode Decision out of the body
+    // hash, for the same reason `recoveries` is folded into `transfers` above.
+    //
+    // `compute_content_hash` hashes the deserialized record re-serialized, and
+    // `load` parses with plain serde. A binary that does not know this field
+    // drops it, recomputes a different hash, and reports the record `corrupt`
+    // with an empty `available_recoveries` — measured against gwtd 9.101.1.
+    // The decision describes how a launch was decided, not the identity of the
+    // execution, so excluding it costs nothing and keeps the record readable
+    // across the release that introduces the field.
+    canonical.permission_decision = None;
     canonical.content_hash = String::new();
     canonical
 }
@@ -16600,6 +16611,27 @@ mod tests {
             content_hash: String::new(),
             permission_decision: None,
         }
+    }
+
+    /// Issue #4591 follow-up: the Permission Mode Decision must not move the
+    /// record's body hash.
+    ///
+    /// `compute_content_hash` hashes the deserialized record re-serialized, so
+    /// a binary that does not know this field would drop it, recompute a
+    /// different hash, and report every such record `corrupt` with no recovery
+    /// available. Pinning the two hashes equal is what keeps the field
+    /// readable across the release that introduced it.
+    #[test]
+    fn the_permission_mode_decision_stays_out_of_the_record_body_hash() {
+        let without = active_record("sess-4591");
+        let mut with = without.clone();
+        with.permission_decision = Some(gwt_agent::PermissionModeDecision::default());
+
+        assert_eq!(
+            compute_content_hash(&with),
+            compute_content_hash(&without),
+            "a record carrying a permission decision must validate on a binary that does not know the field"
+        );
     }
 
     fn test_recovery(session: &str, index: usize) -> ExecutionRecovery {
