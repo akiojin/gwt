@@ -12,17 +12,27 @@ test.describe("Project tabs", () => {
     const sockets: string[] = [];
     let projectKey: string | undefined;
     let scopedWorkspaceReceived = false;
-    let terminalOutput = "";
+    let backendWindowIds: string[] = [];
+    const terminalOutputs = new Map<string, string>();
+    const inputFrames: Array<{ scope: string | null; id: string; data: string }> = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => {
       if (message.type() === "error") errors.push(message.text());
     });
     page.on("websocket", (socket) => {
       sockets.push(socket.url());
+      socket.on("framesent", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "terminal_input") inputFrames.push({
+          scope: new URL(socket.url()).searchParams.get("repo_hash"),
+          id: event.id, data: event.data,
+        });
+      });
       socket.on("framereceived", ({ payload }) => {
         const event = JSON.parse(String(payload));
         if (event.kind === "terminal_output") {
-          terminalOutput += Buffer.from(event.data_base64, "base64").toString("utf8");
+          terminalOutputs.set(event.id, (terminalOutputs.get(event.id) ?? "")
+            + Buffer.from(event.data_base64, "base64").toString("utf8"));
         }
         if (event.kind !== "workspace_state") return;
         const workspace = event.workspace;
@@ -30,6 +40,7 @@ test.describe("Project tabs", () => {
           ?? workspace.tabs[0];
         projectKey = tab?.project_key;
         if (projectKey && new URL(socket.url()).searchParams.get("repo_hash") === projectKey) {
+          backendWindowIds = (tab.workspace?.windows ?? []).map((entry) => entry.id);
           scopedWorkspaceReceived = true;
         }
       });
@@ -41,19 +52,38 @@ test.describe("Project tabs", () => {
     expect(sockets).toHaveLength(2);
     expect(new URL(sockets[0]).searchParams.has("repo_hash")).toBe(false);
     expect(new URL(sockets[1]).searchParams.get("repo_hash")).toBe(projectKey);
+    const shellSelector = '.workspace-window[data-preset="shell"]';
+    const previousIds = new Set(backendWindowIds);
     await sendLiveGwtEvent(page, {
       kind: "create_window", preset: "shell",
       bounds: { x: 80, y: 80, width: 720, height: 420 },
     });
-    const shell = page.locator('.workspace-window[data-preset="shell"]').last();
-    await expect(shell).toBeVisible({ timeout: 30_000 });
-    const terminal = shell.locator(".terminal-root");
-    await expect(terminal).toBeVisible();
-    await terminal.click();
-    await page.keyboard.type("printf 'GWT_%s\\n' 'SCOPED_4536'\r");
-    await expect.poll(() => terminalOutput, { timeout: 15_000 }).toContain("GWT_SCOPED_4536");
-    const id = await shell.getAttribute("data-id");
-    await sendLiveGwtEvent(page, { kind: "close_window", id });
+    const newIds = () => backendWindowIds.filter((id) => !previousIds.has(id));
+    await expect.poll(newIds, { timeout: 30_000 }).toHaveLength(1);
+    const id = newIds()[0]!;
+    const shell = page.locator(`${shellSelector}[data-id="${id}"]`);
+    try {
+      await expect(shell).toBeVisible();
+      await expect.poll(() => page.evaluate((id) =>
+        window.__gwtTerminalTestApi.metrics(id).isReady, id)).toBe(true);
+      // DOM/xterm readiness precedes shell startup. Wait for its actual prompt
+      // before typing: shell initialization can discard earlier PTY input.
+      await expect.poll(() => page.evaluate((id) =>
+        window.__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 })
+        .toMatch(/[^\n]+[>$#%]$/);
+      const terminal = shell.locator(".terminal-root");
+      await terminal.click();
+      await expect(terminal.locator(".xterm-helper-textarea")).toBeFocused();
+      const command = "printf 'GWT_%s\\n' 'SCOPED_4536'\r";
+      await page.keyboard.type(command);
+      await expect.poll(() => inputFrames.filter((frame) => frame.id === id)
+        .map((frame) => frame.data).join("")).toBe(command);
+      expect(inputFrames.filter((frame) => frame.id === id)
+        .every((frame) => frame.scope === projectKey)).toBe(true);
+      await expect.poll(() => terminalOutputs.get(id) ?? "", { timeout: 15_000 }).toContain("GWT_SCOPED_4536");
+    } finally {
+      await sendLiveGwtEvent(page, { kind: "close_window", id });
+    }
     expect(errors).toEqual([]);
   });
 
