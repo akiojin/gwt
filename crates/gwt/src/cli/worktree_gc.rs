@@ -267,8 +267,10 @@ pub(crate) fn run_gc(
         })
         .collect();
     let root_paths: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
-    let processes = scan_processes(&root_paths);
-    let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir());
+    let system = process_table();
+    let processes = scan_processes(&system, &root_paths);
+    let hosts = live_gwt_hosts(&system);
+    let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
     let probes: Vec<WorktreeProbe> = roots
         .iter()
         .enumerate()
@@ -427,15 +429,10 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Every process on the host whose cwd or executable lies under one of
-/// `roots`, keyed by root (`name (pid N)`). Any process counts, not only
-/// heavy ones: an agent shell idling in the worktree still owns its build.
-fn scan_processes(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
-    let mut found: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
-    if roots.is_empty() {
-        return found;
-    }
-    let own_pid = std::process::id();
+/// One snapshot of the host's processes with their executables and working
+/// directories. Both the worktree attribution and the launch-liveness check
+/// read it, so the sweep judges every worktree against the same instant.
+fn process_table() -> System {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -444,6 +441,70 @@ fn scan_processes(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
             .with_exe(UpdateKind::Always)
             .with_cwd(UpdateKind::Always),
     );
+    system
+}
+
+/// The gwt Host executable. It is the only process that creates a runtime
+/// namespace directory, so it is the only process whose PID can legitimately
+/// name one.
+const HOST_BINARY_STEM: &str = "gwt";
+
+/// Live gwt Host processes by PID, with the OS start time that separates a
+/// Host from a process that merely inherited its PID (Issue #4594).
+///
+/// `gwtd` and the agent processes are deliberately absent: they never own a
+/// runtime namespace.
+fn live_gwt_hosts(system: &System) -> BTreeMap<u32, u64> {
+    system
+        .processes()
+        .iter()
+        .filter(|(_, process)| {
+            let stem = process
+                .exe()
+                .and_then(Path::file_stem)
+                .map(std::ffi::OsStr::to_string_lossy)
+                .unwrap_or_else(|| Path::new(process.name()).to_string_lossy());
+            stem.eq_ignore_ascii_case(HOST_BINARY_STEM)
+        })
+        .map(|(pid, process)| (pid.as_u32(), process.start_time()))
+        .collect()
+}
+
+/// Whether the PID naming a runtime namespace still belongs to the gwt Host
+/// that wrote it (Issue #4594).
+///
+/// `hosts` holds only live gwt Hosts, so a PID the OS has handed to something
+/// else is simply absent — which is the case that mattered in production:
+/// 4016 namespaces outlived their Hosts, and the 39 live PIDs among them had
+/// become `bluetoothuserd`, `loginwindow`, `photoanalysisd` and friends,
+/// processes that never exit. When the sidecar recorded its writer's start
+/// time (Issue #3964), that must match too: one gwt Host can inherit an
+/// earlier one's PID. A Host whose start time the OS will not report keeps the
+/// launch — the sweep deletes, so an unreadable process table must not widen
+/// it.
+fn namespace_host_is_live(
+    hosts: &BTreeMap<u32, u64>,
+    host_pid: u32,
+    recorded_start: Option<u64>,
+) -> bool {
+    let Some(started_at) = hosts.get(&host_pid) else {
+        return false;
+    };
+    match recorded_start.filter(|value| *value > 0) {
+        Some(recorded) => *started_at == 0 || *started_at == recorded,
+        None => true,
+    }
+}
+
+/// Every process on the host whose cwd or executable lies under one of
+/// `roots`, keyed by root (`name (pid N)`). Any process counts, not only
+/// heavy ones: an agent shell idling in the worktree still owns its build.
+fn scan_processes(system: &System, roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
+    let mut found: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    if roots.is_empty() {
+        return found;
+    }
+    let own_pid = std::process::id();
     for (pid, process) in system.processes() {
         let pid = pid.as_u32();
         if pid == own_pid {
@@ -470,11 +531,14 @@ fn scan_processes(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
 }
 
 /// Session ids with a live launch, keyed by the worktree their Session
-/// record names. A launch is live while the gwt host process that wrote its
-/// runtime sidecar is alive, the sidecar is not terminal, and the PTY child
-/// it names (when it names one) is alive. Session status alone is not
-/// evidence: hundreds of `Running` records outlive their panes.
-fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> {
+/// record names. A launch is live while the gwt Host process that wrote its
+/// runtime sidecar is still that Host, the sidecar is not terminal, and the
+/// PTY child it names (when it names one) is alive. Session status alone is
+/// not evidence: hundreds of `Running` records outlive their panes.
+fn scan_tracked_launches(
+    sessions_dir: &Path,
+    hosts: &BTreeMap<u32, u64>,
+) -> BTreeMap<PathBuf, Vec<String>> {
     let mut found: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     let Ok(namespaces) = std::fs::read_dir(sessions_dir.join("runtime")) else {
         return found;
@@ -487,7 +551,7 @@ fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> 
         else {
             continue;
         };
-        if !crate::process::is_process_alive(host_pid) {
+        if !hosts.contains_key(&host_pid) {
             continue;
         }
         let Ok(sidecars) = std::fs::read_dir(namespace.path()) else {
@@ -510,6 +574,9 @@ fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> 
             else {
                 continue;
             };
+            if !namespace_host_is_live(hosts, host_pid, state.host_started_at) {
+                continue;
+            }
             if matches!(
                 state.status,
                 gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
@@ -705,6 +772,90 @@ mod tests {
         let plan = plan(vec![clean], "develop", GcOptions::default(), &[]);
         assert!(plan.candidates.is_empty(), "{plan:?}");
         assert!(kept_reason(&plan, "/work/issue-8").contains("no target/"));
+    }
+
+    /// Issue #4594: a runtime namespace is named by the gwt Host's PID, and
+    /// the OS recycles PIDs. On the reporting host 4016 namespaces outlived
+    /// their Hosts; of the 40 whose PID was still alive, 39 had been inherited
+    /// by unrelated processes that never exit (`bluetoothuserd`,
+    /// `loginwindow`, `photoanalysisd`, …), so 186 of 242 `tracked launch`
+    /// keeps were permanent and held 445 GiB of build cache for launches that
+    /// had ended days earlier. `kill(pid, 0)` cannot tell an inherited PID
+    /// from its writer; the process table can.
+    #[test]
+    fn a_namespace_whose_pid_was_inherited_is_not_a_live_launch() {
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+
+        assert!(namespace_host_is_live(&hosts, 4242, None));
+        assert!(!namespace_host_is_live(&hosts, 909, None));
+    }
+
+    /// The other half of the same rule: one gwt Host can inherit an earlier
+    /// gwt Host's PID, which the executable alone would not catch. A sidecar
+    /// that recorded its writer's start time (Issue #3964) is judged by it.
+    #[test]
+    fn a_namespace_from_an_earlier_host_with_the_same_pid_is_not_live() {
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+
+        assert!(namespace_host_is_live(&hosts, 4242, Some(1000)));
+        assert!(!namespace_host_is_live(&hosts, 4242, Some(17)));
+    }
+
+    /// A Host whose start time the OS will not report stays live: the sweep
+    /// deletes build caches, so an unreadable process table keeps rather than
+    /// reclaims.
+    #[test]
+    fn an_unreadable_host_start_time_keeps_the_launch() {
+        let hosts = BTreeMap::from([(4242u32, 0u64)]);
+
+        assert!(namespace_host_is_live(&hosts, 4242, Some(1000)));
+    }
+
+    /// End to end over the sidecar tree: a namespace held by a live gwt Host
+    /// tracks its worktree, and the identical namespace of a PID something
+    /// else inherited tracks nothing (Issue #4594).
+    #[test]
+    fn scan_tracked_launches_skips_namespaces_whose_pid_was_inherited() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sessions = tmp.path().join("sessions");
+        let live_worktree = tmp.path().join("work").join("live");
+        let dead_worktree = tmp.path().join("work").join("dead");
+        let live = write_tracked_launch(&sessions, 4242, &live_worktree);
+        let dead = write_tracked_launch(&sessions, 909, &dead_worktree);
+        let canonical = |path: &Path| dunce::canonicalize(path).expect("canonicalize");
+
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+        let tracked = scan_tracked_launches(&sessions, &hosts);
+
+        assert_eq!(
+            tracked.get(&canonical(&live_worktree)).map(Vec::as_slice),
+            Some([live].as_slice()),
+            "{tracked:?}"
+        );
+        assert_eq!(
+            tracked.get(&canonical(&dead_worktree)),
+            None,
+            "{tracked:?} ({dead})"
+        );
+    }
+
+    /// Write one `Running` sidecar under `runtime/<host_pid>/` plus the
+    /// Session it names, and return the session id.
+    fn write_tracked_launch(sessions: &Path, host_pid: u32, worktree: &Path) -> String {
+        std::fs::create_dir_all(worktree).expect("worktree");
+        let session = gwt_agent::Session::new(
+            worktree.to_path_buf(),
+            "work/issue-1",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        std::fs::create_dir_all(sessions).expect("sessions dir");
+        session.save(sessions).expect("session");
+        let runtime = gwt_agent::runtime_state_path_for_pid(sessions, host_pid, &session.id);
+        std::fs::create_dir_all(runtime.parent().expect("namespace")).expect("namespace dir");
+        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+            .save(&runtime)
+            .expect("sidecar");
+        session.id
     }
 
     /// The shared `develop` workspace is merged into the base by definition,
