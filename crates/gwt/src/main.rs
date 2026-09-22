@@ -15,7 +15,7 @@ use crate::repo_browser::{
 use base64::Engine;
 use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
-    cleanup_selected_branches_with_progress, detect_shell_program,
+    cleanup_selected_branches_with_progress, collapse_duplicate_session_tabs, detect_shell_program,
     list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
     load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
     read_binary_chunk, read_text_file,
