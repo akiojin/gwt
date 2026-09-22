@@ -132,6 +132,11 @@ the tray menu:
 - **Quit** — gracefully shuts the tray icon, embedded server, and
   PTY children down in order.
 
+Select a project in each browser tab to open its workspace. Different projects
+keep their windows and launch dialogs separate; two browser tabs viewing the same
+project share its live workspace. The project list stays synchronized as projects
+are opened or closed.
+
 Autostart lives in **Settings > System > Launch GWT at login**. Enabling it
 installs an OS-native per-user entry (macOS LaunchAgent / Windows HKCU Run /
 Linux XDG autostart) via the `auto-launch` crate, so `gwt` resumes at the next

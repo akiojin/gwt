@@ -1327,6 +1327,22 @@ pub struct ProfileSnapshotView {
     pub merged_preview: Vec<ProfileEnvEntryView>,
 }
 
+/// Lightweight project catalog. No workspace, terminal, or agent payloads.
+#[derive(Debug, Clone, Serialize)]
+pub struct HubProjectView {
+    pub id: String,
+    pub project_key: String,
+    pub title: String,
+    pub kind: ProjectKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HubStateView {
+    pub app_version: String,
+    pub projects: Vec<HubProjectView>,
+    pub recent_projects: Vec<RecentProjectView>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppStateView {
     pub app_version: String,
@@ -1800,6 +1816,9 @@ pub enum UpdateAutoApplyPhase {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
+    HubState {
+        hub: HubStateView,
+    },
     /// SPEC-2359 US-66 (T-527): canonical Rust name is Work-based; the wire
     /// `kind` stays `workspace_state` as the legacy adapter spelling so no
     /// frontend/client breaks.
@@ -2632,6 +2651,11 @@ impl BackendEventPolicy {
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     BackendEventPolicy::new(
+        "hub_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "workspace_state",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3152,6 +3176,7 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
+            BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
@@ -3332,6 +3357,48 @@ mod tests {
         ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
         RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn issue_monitor_control_errors_never_fall_back_to_global_delivery() {
+        let runtime = include_str!("app_runtime/mod.rs");
+        let errors = runtime
+            .split("fn issue_monitor_control_error_events(")
+            .nth(1)
+            .unwrap()
+            .split("fn quick_register_issue_events(")
+            .next()
+            .unwrap();
+        assert!(
+            !errors.contains("OutboundEvent::broadcast("),
+            "project control errors must never reach unrelated clients"
+        );
+        assert!(
+            errors.contains("project_context_for_root"),
+            "control errors must resolve their explicit project owner"
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_uses_project_context_instead_of_active_tab() {
+        let runtime = include_str!("app_runtime/mod.rs");
+        let update = runtime
+            .split("pub(crate) fn update_staged_events(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn register_agent_backend_connection_probe(")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "active_project_root(",
+            "active_auto_update_drain(",
+            "self.update_auto_apply",
+        ] {
+            assert!(
+                !update.contains(forbidden),
+                "update lifecycle must use each project's context, found {forbidden}"
+            );
+        }
+    }
 
     #[test]
     fn knowledge_search_results_retains_the_baseline_rust_shape() {

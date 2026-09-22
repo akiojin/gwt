@@ -4,15 +4,16 @@ use std::{
     thread,
 };
 
-use crate::{AppEventProxy, OutboundEvent, UserEvent};
+use crate::{app_runtime::ProjectContext, AppEventProxy, OutboundEvent, UserEvent};
 use gwt::{
     hydrate_branch_entries_with_active_sessions, list_branch_entries_with_active_sessions,
     list_branch_inventory, BackendEvent, BranchEntriesPhase, BranchListEntry, BranchResumeInfo,
     BranchScope,
 };
 
-pub fn spawn_branch_load_async(
+pub(crate) fn spawn_branch_load_async(
     proxy: AppEventProxy,
+    context: ProjectContext,
     window_id: String,
     project_root: PathBuf,
     active_session_branches: HashSet<String>,
@@ -34,6 +35,7 @@ pub fn spawn_branch_load_async(
         ));
         dispatch_branch_load_progressive(
             &proxy,
+            &context,
             &window_id,
             &project_root,
             &active_session_branches,
@@ -46,8 +48,9 @@ pub fn spawn_branch_load_async(
 /// Workspace "Open a branch…" picker off the UI thread. Fetches origin first
 /// (best-effort, FR-445) so teammates' freshly pushed branches appear, then
 /// emits a `RemoteStartWorkBranches` event the Workspace surface renders.
-pub fn spawn_remote_start_work_branches_async(
+pub(crate) fn spawn_remote_start_work_branches_async(
     proxy: AppEventProxy,
+    context: ProjectContext,
     window_id: String,
     project_root: PathBuf,
     active_session_branches: HashSet<String>,
@@ -67,7 +70,9 @@ pub fn spawn_remote_start_work_branches_async(
                 .unwrap_or_default();
         dispatch_async_events(
             &proxy,
-            vec![OutboundEvent::broadcast(
+            &context,
+            vec![OutboundEvent::project(
+                context.project_key.clone(),
                 BackendEvent::RemoteStartWorkBranches {
                     id: window_id,
                     branches,
@@ -97,6 +102,7 @@ pub fn preferred_issue_launch_branch(entries: &[BranchListEntry]) -> Option<Stri
 
 fn dispatch_branch_load_progressive(
     proxy: &AppEventProxy,
+    context: &ProjectContext,
     window_id: &str,
     project_root: &Path,
     active_session_branches: &HashSet<String>,
@@ -119,12 +125,16 @@ fn dispatch_branch_load_progressive(
             apply_branch_resume_availability(project_root, &mut entries, resume_sessions);
             dispatch_async_events(
                 proxy,
-                vec![OutboundEvent::broadcast(BackendEvent::BranchEntries {
-                    id: window_id.to_string(),
-                    phase: BranchEntriesPhase::Inventory,
-                    entries: entries.clone(),
-                    load_id,
-                })],
+                context,
+                vec![OutboundEvent::project(
+                    context.project_key.clone(),
+                    BackendEvent::BranchEntries {
+                        id: window_id.to_string(),
+                        phase: BranchEntriesPhase::Inventory,
+                        entries: entries.clone(),
+                        load_id,
+                    },
+                )],
             );
             match hydrate_branch_entries_with_active_sessions(
                 project_root,
@@ -135,29 +145,41 @@ fn dispatch_branch_load_progressive(
                     apply_branch_resume_availability(project_root, &mut entries, resume_sessions);
                     dispatch_async_events(
                         proxy,
-                        vec![OutboundEvent::broadcast(BackendEvent::BranchEntries {
-                            id: window_id.to_string(),
-                            phase: BranchEntriesPhase::Hydrated,
-                            entries,
-                            load_id,
-                        })],
+                        context,
+                        vec![OutboundEvent::project(
+                            context.project_key.clone(),
+                            BackendEvent::BranchEntries {
+                                id: window_id.to_string(),
+                                phase: BranchEntriesPhase::Hydrated,
+                                entries,
+                                load_id,
+                            },
+                        )],
                     )
                 }
                 Err(error) => dispatch_async_events(
                     proxy,
-                    vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                        id: window_id.to_string(),
-                        message: error.to_string(),
-                    })],
+                    context,
+                    vec![OutboundEvent::project(
+                        context.project_key.clone(),
+                        BackendEvent::BranchError {
+                            id: window_id.to_string(),
+                            message: error.to_string(),
+                        },
+                    )],
                 ),
             }
         }
         Err(error) => dispatch_async_events(
             proxy,
-            vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: window_id.to_string(),
-                message: error.to_string(),
-            })],
+            context,
+            vec![OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::BranchError {
+                    id: window_id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
         ),
     }
 }
@@ -183,8 +205,15 @@ fn apply_branch_resume_availability(
     }
 }
 
-fn dispatch_async_events(proxy: &AppEventProxy, events: Vec<OutboundEvent>) {
-    proxy.send(UserEvent::Dispatch(events));
+fn dispatch_async_events(
+    proxy: &AppEventProxy,
+    context: &ProjectContext,
+    events: Vec<OutboundEvent>,
+) {
+    proxy.send(UserEvent::ProjectDispatch {
+        context: context.clone(),
+        events,
+    });
 }
 
 #[cfg(test)]
@@ -330,12 +359,12 @@ mod tests {
 
         for position in positions {
             let prefix = &production_source[..position];
-            let last_broadcast = prefix.rfind("OutboundEvent::broadcast(");
+            let last_broadcast = prefix.rfind("OutboundEvent::project(");
             let last_reply = prefix.rfind("OutboundEvent::reply(");
 
             assert!(
                 last_broadcast.is_some() && last_broadcast > last_reply,
-                "async branch {event} must be broadcast by window id, not targeted to a transient websocket client id",
+                "async branch {event} must be broadcast to the owning project, not targeted to a transient websocket client id",
             );
         }
     }

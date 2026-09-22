@@ -128,6 +128,11 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
   開きます。
 - **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
 
+ブラウザの各タブでプロジェクトを選ぶと、そのワークスペースが開きます。
+異なるプロジェクトのウィンドウと起動ダイアログは独立し、同じプロジェクトを
+開いた複数のブラウザタブではワークスペースが同期します。プロジェクトの
+追加・削除は、表示中のプロジェクトにかかわらず一覧へ反映されます。
+
 Autostart は **Settings > System > Launch GWT at login** で切り替えます。
 有効にすると `auto-launch` crate 経由で macOS LaunchAgent / Windows HKCU
 Run registry / Linux XDG autostart を user scope に登録し、次回 OS ログイン時に

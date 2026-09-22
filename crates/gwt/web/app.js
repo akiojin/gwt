@@ -435,6 +435,9 @@
       let inputTraceSeq = 0;
 
       let socket = null;
+      let hubSocket = null;
+      let hubReconnectTimer = null;
+      const pendingHubMessages = [];
       let socketProjectKey = null;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
@@ -486,6 +489,7 @@
         active_tab_id: null,
         recent_projects: [],
       };
+      let hubCatalog = null;
       let renderedProjectTabsKey = "";
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /workspace-render-sync.js) so a failed sync
@@ -917,6 +921,17 @@
       }
 
       function send(message) {
+        if (message.kind === "select_project_tab") {
+          return selectClientProject(message.tab_id) ? "sent" : "unavailable";
+        }
+        if (isHubNavigationMessage(message.kind)) {
+          if (hubSocket?.readyState === WebSocket.OPEN) {
+            hubSocket.send(JSON.stringify(message));
+            return "sent";
+          }
+          pendingHubMessages.push(message);
+          return "queued";
+        }
         if ((message.kind === "terminal_input" || message.kind === "pane_send_input")
           && !activeProjectKey()) {
           return "unavailable";
@@ -1227,12 +1242,11 @@
         return typeof key === "string" && /^[0-9a-f]{16}$/.test(key) ? key : null;
       }
 
-      function websocketUrl() {
+      function websocketUrl(projectKey = activeProjectKey()) {
         const url = new URL(window.location.href);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
         url.pathname = "/ws";
         url.search = "";
-        const projectKey = activeProjectKey();
         if (projectKey) url.searchParams.set("repo_hash", projectKey);
         url.hash = "";
         return url.toString();
@@ -1357,8 +1371,55 @@
         }
       }
 
+      function isHubNavigationMessage(kind) {
+        return ["open_project_dialog", "reopen_recent_project", "close_project_tab",
+          "select_clone_project_parent", "github_repository_search", "clone_project_start"].includes(kind);
+      }
+
+      function isHubNavigationResult(kind) {
+        return ["hub_state", "project_open_error",
+          "clone_project_parent_selected", "github_repository_search_results",
+          "github_repository_search_error", "clone_project_progress", "clone_project_done",
+          "clone_project_error"].includes(kind);
+      }
+
+      function connectHubSocket() {
+        if (hubSocket && hubSocket.readyState <= WebSocket.OPEN) return;
+        if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+        hubReconnectTimer = null;
+        const connection = new WebSocket(websocketUrl(null));
+        hubSocket = connection;
+        const dispatcher = createSocketReceiveDispatcher({
+          receive: (event) => {
+            if (hubSocket === connection
+              && (socket === connection || isHubNavigationResult(event.kind))) receive(event);
+          },
+          onTrace: traceUi,
+          shouldTrace: uiTraceWiring.isTracing,
+          onReceiveError: (error, eventKind) => renderDegradationBanner.report({
+            source: `receive:${eventKind || "unknown"}`, error,
+          }),
+        });
+        connection.addEventListener("open", () => {
+          if (hubSocket !== connection) return;
+          if (socket === connection) handleSocketOpen();
+          else connection.send(JSON.stringify({ kind: "frontend_ready" }));
+          for (const message of pendingHubMessages.splice(0)) connection.send(JSON.stringify(message));
+        });
+        connection.addEventListener("message", (event) => {
+          if (hubSocket === connection) dispatcher.handle(event);
+        });
+        connection.addEventListener("close", () => {
+          if (hubSocket !== connection) return;
+          if (socket === connection) handleSocketClose();
+          if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+          hubReconnectTimer = window.setTimeout(connectSocket, 1000);
+        });
+      }
+
       function connectSocket() {
         const projectKey = activeProjectKey();
+        connectHubSocket();
         if (socket && socket.readyState <= WebSocket.OPEN
           && socketProjectKey === projectKey) {
           return;
@@ -1369,11 +1430,12 @@
         socketReceiveDispatcher = null;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = null;
-        previousSocket?.close();
+        if (previousSocket && previousSocket !== hubSocket && socketProjectKey) previousSocket.close();
         socketProjectKey = projectKey;
-        socket = new WebSocket(websocketUrl());
+        socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;
         setConnectionState(false);
-        installSocketEventHandlers(socket);
+        if (projectKey) installSocketEventHandlers(socket);
+        else if (socket.readyState === WebSocket.OPEN) handleSocketOpen();
       }
 
       function emptyWorkspace() {
@@ -1389,7 +1451,6 @@
         }
         return (
           appState.tabs.find((tab) => tab.id === appState.active_tab_id) ||
-          appState.tabs[0] ||
           null
         );
       }
@@ -1775,18 +1836,44 @@
       // moved to /project-shell-surface.js; renderAppState below calls the
       // imported renderers.
 
+      function mergeProjectCatalog(state) {
+        if (!hubCatalog) return state;
+        const tabs = hubCatalog.projects.map((project) => ({
+          ...project,
+          ...state.tabs?.find((tab) => tab.id === project.id),
+        }));
+        return {
+          ...state,
+          tabs,
+          active_tab_id: tabs.some((tab) => tab.id === state.active_tab_id)
+            ? state.active_tab_id : null,
+          recent_projects: hubCatalog.recent_projects || [],
+        };
+      }
+
+      function receiveHubState(hub) {
+        hubCatalog = hub;
+        renderAppState({ ...appState, app_version: hub.app_version });
+      }
+
+      function selectClientProject(tabId) {
+        if (!appState.tabs.some((tab) => tab.id === tabId)) return false;
+        renderAppState({ ...appState, active_tab_id: tabId });
+        return true;
+      }
+
       function renderAppState(nextState) {
         dismissOperatorBriefing();
         return traceMeasure(
           UI_TRACE_EVENT.renderAppState,
           { tabs: Array.isArray(nextState?.tabs) ? nextState.tabs.length : 0 },
           () => {
-            appState = nextState || {
+            appState = mergeProjectCatalog(nextState || {
               app_version: "",
               tabs: [],
               active_tab_id: null,
               recent_projects: [],
-            };
+            });
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
             setVersionState(appState.app_version, versionState.latest);
@@ -6099,6 +6186,10 @@
           return;
         }
         switch (event.kind) {
+          case "hub_state": {
+            receiveHubState(event.hub);
+            break;
+          }
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);

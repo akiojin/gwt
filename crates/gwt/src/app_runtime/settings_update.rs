@@ -633,11 +633,16 @@ impl AppRuntime {
             BackendEvent::CustomAgentSaved { .. } | BackendEvent::CustomAgentDeleted { .. }
         ) {
             self.launch_wizard_cache.refresh_agent_options();
-            let had_open_wizard = self.launch_wizard.is_some();
-            self.refresh_open_launch_wizard_from_cache();
+            let contexts = self
+                .project_states
+                .values()
+                .filter(|state| state.launch_wizard.is_some())
+                .map(|state| state.context.clone())
+                .collect::<Vec<_>>();
             let mut events = vec![OutboundEvent::reply(client_id, event)];
-            if had_open_wizard {
-                events.push(self.launch_wizard_state_outbound());
+            for context in contexts {
+                self.refresh_open_launch_wizard_from_cache(&context);
+                events.push(self.launch_wizard_state_outbound(&context));
             }
             return events;
         }
