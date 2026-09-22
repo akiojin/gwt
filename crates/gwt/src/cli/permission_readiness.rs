@@ -243,6 +243,135 @@ pub fn record_prompt_regression(
     Ok(record)
 }
 
+/// Build the gate decision for a launch whose permission mode cannot be
+/// honored, without writing anything.
+///
+/// Split from [`block_launch_if_unready`] so the Issue Monitor can ask the
+/// same question about a launch it has not started — and must not start — in a
+/// worktree it may not even have materialized yet (Issue #4544 AC-2).
+#[must_use]
+pub fn pre_launch_block(
+    owner_kind: &str,
+    owner_number: u64,
+    session_id: &str,
+    decision: &gwt_agent::PermissionModeDecision,
+) -> Option<PermissionReadinessRecord> {
+    if !decision.is_diagnostic() {
+        return None;
+    }
+    let observed = match decision.outcome {
+        gwt_agent::PermissionModeOutcome::UnsupportedProvider => {
+            "unsupported (the provider has no skip-permissions mapping)".to_string()
+        }
+        gwt_agent::PermissionModeOutcome::MissingCustomSkipMapping => {
+            "unsupported (this custom agent declares no skip_permissions_args)".to_string()
+        }
+        gwt_agent::PermissionModeOutcome::SkipFlagDropped => {
+            let evidence = decision
+                .dropped_evidence
+                .as_deref()
+                .unwrap_or("the mapping is absent from the materialized launch");
+            format!("interactive (the skip-permissions mapping was dropped: {evidence})")
+        }
+        // `is_diagnostic` is the definition of this arm being unreachable; a
+        // non-diagnostic outcome returned above.
+        gwt_agent::PermissionModeOutcome::SkipForcedReady
+        | gwt_agent::PermissionModeOutcome::InteractiveRetained => return None,
+    };
+    let mut record = PermissionReadinessRecord {
+        schema_version: 1,
+        gate_id: gate_id(
+            PermissionReadinessKind::PreLaunchBlock,
+            owner_number,
+            session_id,
+        ),
+        kind: PermissionReadinessKind::PreLaunchBlock,
+        owner_kind: owner_kind.to_string(),
+        owner_number,
+        session_id: session_id.to_string(),
+        provider: decision.provider.clone(),
+        expected_permission_mode: "skip-permissions (producing-work launch)".to_string(),
+        observed_permission_mode: observed,
+        reason: decision.reason.clone(),
+        recovery_action: decision.recovery_action.clone(),
+        evidence: format!(
+            "decision {} from {} via {}",
+            decision.outcome.as_str(),
+            decision.source.as_str(),
+            decision.entrypoint,
+        ),
+        recorded_at: Utc::now(),
+        content_hash: String::new(),
+    };
+    record.content_hash = compute_content_hash(&record);
+    Some(record)
+}
+
+/// Refuse a producing-work launch whose permission mode cannot be honored,
+/// recording the gate decision where `execution.status` reports it.
+///
+/// The returned `Err` is the operator-facing refusal. It names the gate, the
+/// provider, both permission modes, and the recovery action, so the refusal
+/// itself is the report — nothing downstream has to reconstruct why the launch
+/// did not happen.
+pub fn block_launch_if_unready(
+    worktree: &Path,
+    owner_kind: &str,
+    owner_number: u64,
+    session_id: &str,
+    decision: &gwt_agent::PermissionModeDecision,
+) -> Result<(), String> {
+    let Some(record) = pre_launch_block(owner_kind, owner_number, session_id, decision) else {
+        return Ok(());
+    };
+    capture_self_improvement(worktree, &record);
+    // Best effort: the refusal is the contract, and a store that cannot be
+    // written must not turn a refused launch into an accepted one.
+    if let Err(error) = crate::cli::trusted_store::with_write_lease(worktree, || {
+        save(worktree, &record)
+    }) {
+        tracing::warn!(%error, owner = owner_number, "could not record the permission readiness block");
+    }
+    Err(format!("launch refused: {}", record.describe()))
+}
+
+/// Append a work-notes memory entry for a block the machine caused.
+///
+/// Issue #4544 AC-6 pairs "block" with "self-improve" for exactly one outcome:
+/// `skip_flag_dropped`. The other two are configuration facts an operator
+/// already sees in the refusal — a provider that has no mapping will not grow
+/// one because a note was written. A dropped flag is different: the mapping
+/// existed, the launch asked for it, and gwt did not apply it. That is a
+/// defect in gwt, and the next generation repeats it unless it is recorded
+/// where work starts.
+///
+/// Best effort in both directions: never fails the block, never blocks on its
+/// own failure.
+fn capture_self_improvement(worktree: &Path, record: &PermissionReadinessRecord) {
+    if record.kind != PermissionReadinessKind::PreLaunchBlock
+        || !record.observed_permission_mode.starts_with("interactive")
+    {
+        return;
+    }
+    let capture = crate::cli::memory::MemoryAddCommand {
+        date: None,
+        memory_type: "lesson".to_string(),
+        title: format!(
+            "{} の launch で skip-permissions フラグが脱落した",
+            record.provider
+        ),
+        context: format!(
+            "Issue #{} の producing-work launch を gate {} が block した。{}",
+            record.owner_number, record.gate_id, record.evidence
+        ),
+        learning: record.reason.clone(),
+        future_action: record.recovery_action.clone(),
+    };
+    if let Err(error) = crate::cli::memory::capture(worktree, &capture) {
+        tracing::warn!(%error, "could not capture the dropped skip-permissions flag in work notes");
+    }
+}
+
 /// The refusal a settlement gate emits while a permission-readiness record
 /// stands, or `None` when the execution is clear.
 ///

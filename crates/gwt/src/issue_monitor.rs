@@ -3618,6 +3618,21 @@ fn hold_clock_label(reset_at: &str) -> String {
 /// is a soft demotion; the first candidate with unknown or under-threshold
 /// usage wins; when every candidate is at or over the threshold, the lowest
 /// known usage wins and ties keep pool order.
+/// Issue #4544 AC-2: the stored definition of one Custom Coding Agent, or
+/// `None` when it cannot be read.
+///
+/// The monitor needs `skip_permissions_args` to tell a custom agent that can
+/// run unattended from one that cannot. `None` means "do not decide", never
+/// "unsupported".
+fn custom_coding_agent_definition(agent_id: &str) -> Option<gwt_agent::CustomCodingAgent> {
+    let home = dirs::home_dir()?;
+    let config_path = gwt_config::Settings::global_config_path_for_home(&home);
+    crate::custom_agents_service::list_custom_agents(&config_path)
+        .ok()?
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+}
+
 pub fn select_launch_profile(
     pool: &[IssueMonitorLaunchProfile],
     holds: &BTreeMap<String, String>,
@@ -9128,6 +9143,93 @@ impl IssueMonitorState {
         })
     }
 
+    /// Issue #4544 AC-2: the permission-readiness gate decision that must stop
+    /// this Issue from being launched, or `None` when the launch may proceed.
+    ///
+    /// Evaluated against the profile `select_launch_profile` would actually
+    /// use, so the answer is about the launch that would happen rather than
+    /// about the pool in general.
+    ///
+    /// Fails open in every case where the answer is not knowable — no eligible
+    /// profile, an unresolvable agent id, a Custom Coding Agent whose
+    /// definition cannot be read. A monitor that turned an unreadable config
+    /// file into a permanent launch block would stop the fleet over a
+    /// filesystem error, and the launch-time gate still refuses the same
+    /// launch a moment later with the definition in hand.
+    fn permission_readiness_block_for_launch(
+        &self,
+        issue_number: u64,
+        now: &str,
+    ) -> Option<crate::cli::permission_readiness::PermissionReadinessRecord> {
+        let now_instant = parse_rfc3339_utc(now)?;
+        let holds = self.admission_provider_quota_holds(now_instant);
+        let selection = select_launch_profile(
+            &self.launch_profiles,
+            &holds,
+            &[],
+            self.launch_usage_threshold_percent,
+            &[],
+            None,
+            now,
+        );
+        let profile = self.launch_profiles.get(selection.selected?)?;
+        let agent_id = gwt_agent::resolve_agent_id(&profile.agent_id)?;
+        let custom_agent = match &agent_id {
+            // An unreadable definition returns `None` from the whole function,
+            // not `None` for the agent: without `skip_permissions_args` the
+            // decision model would call a perfectly capable custom agent
+            // unsupported. Fail open, see the doc comment.
+            gwt_agent::AgentId::Custom(id) => Some(custom_coding_agent_definition(id)?),
+            _ => None,
+        };
+        let decision = gwt_agent::decide_permission_mode(&gwt_agent::PermissionModeInputs {
+            agent_id: &agent_id,
+            custom_agent: custom_agent.as_ref(),
+            source: gwt_agent::PermissionLaunchSource::SilentIssueMonitor,
+            entrypoint: "gwt-execute",
+            launch_route: gwt_agent::LaunchRoute::Autonomous,
+            requested_skip_permissions: Some(profile.skip_permissions),
+            producing_work: true,
+        });
+        crate::cli::permission_readiness::pre_launch_block(
+            "issue",
+            issue_number,
+            // The session does not exist yet — that is the point of blocking
+            // here — so the gate is keyed by the launch that was refused.
+            &format!("monitor-launch:{issue_number}"),
+            &decision,
+        )
+    }
+
+    /// Issue #4544 AC-2: record why this Issue was not launched, and take it
+    /// out of the queue without consuming a slot.
+    ///
+    /// Reported as `NotReady` rather than a new state: the condition is
+    /// re-evaluated on every scan exactly like a missing plan artifact, and a
+    /// new `MonitorInboxState` variant would be an unknown string to every
+    /// shipped `gwtd` parsing `issue.monitor.status`.
+    fn record_permission_readiness_block(
+        &mut self,
+        issue: IssueMonitorIssue,
+        record: &crate::cli::permission_readiness::PermissionReadinessRecord,
+    ) {
+        self.queue.retain(|queued| *queued != issue.number);
+        self.upsert_inbox(IssueMonitorInboxItem {
+            launch_plan: Some(issue_monitor_launch_plan(&issue)),
+            issue,
+            state: MonitorInboxState::NotReady,
+            claim_id: None,
+            blocked_by_owner: None,
+            claim_expires_at: None,
+            blocked_by_claim_id: None,
+            claim_block_issue_updated_at: None,
+            launched_window_id: None,
+            error_message: None,
+            exclusion_reason: Some(record.describe()),
+        });
+        self.apply_priority_order_to_inbox();
+    }
+
     /// Issue #3923 AC-1: release `provider`'s quota hold on the operator's
     /// authority.
     ///
@@ -12410,6 +12512,22 @@ impl IssueMonitorState {
                     issue = issue.number,
                     "issue monitor: completion probe found current-generation evidence"
                 );
+                continue;
+            }
+            // Issue #4544 AC-2: evaluated here, above `acquire_claim`, because
+            // everything the AC forbids starts below this line — the GitHub
+            // claim comment, the launch request the GUI would materialize, the
+            // active slot `apply_confirmed_claim` takes, the daemon's launch
+            // state, and the agent window. Blocking above all of them means a
+            // launch that could not run unattended leaves nothing to clean up.
+            if let Some(record) = self.permission_readiness_block_for_launch(issue.number, now) {
+                tracing::warn!(
+                    issue = issue.number,
+                    gate_id = %record.gate_id,
+                    provider = %record.provider,
+                    "issue monitor: permission readiness blocked this launch before claiming it"
+                );
+                self.record_permission_readiness_block(issue, &record);
                 continue;
             }
             let kind = issue_monitor_linked_issue_kind(&issue);

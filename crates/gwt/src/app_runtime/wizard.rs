@@ -2680,6 +2680,27 @@ impl AppRuntime {
         // now so the Execution Control Record describes the launch that ships.
         launch_request
             .record_permission_launch_source(gwt_agent::PermissionLaunchSource::SilentIssueMonitor);
+        // Issue #4544 AC-1 / AC-5: refuse here, before the window, for the same
+        // reason the unauthenticated-provider probe above refuses — and for
+        // both monitor launches, not just the implementing one.
+        //
+        // The launch-time gate in `app_runtime::launch` only sees producing
+        // owners, and the independent review agent deliberately carries no
+        // Execution Control Record (`set_review_dispatch_context`). Without
+        // this, a review launch on a provider that cannot skip permissions
+        // would sit at a prompt with nobody watching — the same failure the
+        // implementation path is protected from. The refusal funnels through
+        // the normal launch-failed path, so the active slot is released.
+        if let LaunchWizardLaunchRequest::Agent(config) = &launch_request {
+            if let Some(record) = gwt::cli::permission_readiness::pre_launch_block(
+                "issue",
+                issue_number,
+                &format!("monitor-launch:{issue_number}"),
+                &config.permission_decision,
+            ) {
+                return Err(format!("launch refused: {}", record.describe()));
+            }
+        }
         // Issue #3478 (AC-1): the unattended agent must know it is unattended,
         // so its hooks can convert a confirmation question into a NeedsHuman
         // handoff instead of letting it hold this slot until the stuck timeout.
