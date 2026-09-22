@@ -323,7 +323,7 @@ mod tests {
     /// it was observed failing for exactly this reason. The placement tests
     /// have to pin the variable rather than inherit it.
     fn without_declared_spawn_host() -> (
-        std::sync::MutexGuard<'static, ()>,
+        gwt_core::test_support::EnvLockGuard,
         gwt_core::test_support::ScopedEnvVar,
     ) {
         let guard = crate::env_test_lock()

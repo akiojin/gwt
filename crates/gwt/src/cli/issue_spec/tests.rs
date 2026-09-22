@@ -826,7 +826,7 @@ struct LintFixture {
     _home: tempfile::TempDir,
     _home_var: gwt_core::test_support::ScopedEnvVar,
     _userprofile_var: gwt_core::test_support::ScopedEnvVar,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: gwt_core::test_support::EnvLockGuard,
 }
 
 fn lint_fixture(number: u64, spec: &str, tasks: &str) -> LintFixture {
