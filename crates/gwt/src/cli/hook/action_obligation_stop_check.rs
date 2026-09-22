@@ -403,6 +403,68 @@ mod tests {
         );
     }
 
+    /// SPEC #3248 FR-243 (Issue #4545 AC-4): a trusted No Action settles the
+    /// obligations this action armed, so the prompt-to-action gate releases
+    /// through its ordinary settlement contract rather than through a special
+    /// case — and it releases only for the session that recorded it.
+    #[test]
+    fn a_trusted_no_action_settles_this_sessions_obligations() {
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        for args in [
+            vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+            vec!["checkout", "-q", "-b", "work/issue-3290"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        }
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            3290,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        action_obligation::mark_from_prompt(dir.path(), "sess-1", "残りの実装を進めて").unwrap();
+        assert!(
+            matches!(
+                handle_with_input(dir.path(), "{}", Some("sess-1")),
+                HookOutput::StopBlock { .. }
+            ),
+            "the armed obligation gates Stop before the No Action"
+        );
+
+        crate::cli::delivered_owner::record_no_action(
+            dir.path(),
+            "sess-1",
+            "owner #3290 was delivered before this launch",
+        )
+        .unwrap();
+
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            HookOutput::Silent,
+            "No Action settles the obligations it armed"
+        );
+        let settled = action_obligation::load(dir.path()).unwrap().unwrap();
+        assert!(
+            settled.obligations.iter().all(|entry| entry
+                .settled
+                .as_ref()
+                .is_some_and(|settlement| settlement.evidence.starts_with("execution.no_action"))),
+            "the settlement names the operation that produced it: {settled:?}"
+        );
+    }
+
     /// Issue #4454 AC-2: the grounds for the exemption survive the session in
     /// the project log — including which session actually holds the record.
     /// A refusal the agent never sees is not evidence.
