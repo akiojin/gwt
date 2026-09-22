@@ -43966,6 +43966,7 @@ fn app_runtime_load_logs_replies_with_current_log_snapshot() {
 #[test]
 fn frontend_project_log_tab_id_routes_non_window_owners() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project_a = temp.path().join("a");
     let project_b = temp.path().join("b");
     fs::create_dir_all(&project_a).expect("project A");
@@ -44077,9 +44078,7 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![restored_tab], Some("tab-a"));
     // The setter registers tabs restored before the router becomes available.
-    // Ignore its concrete return type: the observable scope below is the
-    // contract, and keeps this RED test neutral on error-reporting policy.
-    let _ = runtime.set_project_log_router(router);
+    runtime.set_project_log_router(router);
 
     let scope_a = runtime
         .project_log_scope_for_tab("tab-a")
