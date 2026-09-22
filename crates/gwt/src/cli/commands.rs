@@ -74,6 +74,11 @@ pub enum IssueCommand {
     SpecRepair {
         number: u64,
     },
+    /// Issue #4392 AC-3: rewrite an Issue's cache entry together with its
+    /// validation receipt, the state no other operation could restore.
+    CacheRepair {
+        number: u64,
+    },
     SpecRename {
         number: u64,
         title: String,

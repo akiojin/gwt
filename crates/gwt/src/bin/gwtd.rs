@@ -262,6 +262,7 @@ fn format_issue_help() -> String {
         "  issue.spec.read | issue.spec.section | issue.spec.edit",
         "  issue.spec.create | issue.spec.list | issue.spec.pull",
         "  issue.spec.repair | issue.spec.rename | issue.spec.audit",
+        "  issue.cache.repair",
         "  issue.monitor.status | issue.monitor.priority.move",
         "  issue.monitor.priority.set | issue.monitor.config.set",
         "  issue.monitor.profiles | issue.monitor.profiles.set",
