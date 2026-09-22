@@ -64,7 +64,7 @@ impl InterleavedClient {
             let error = file
                 .try_lock_exclusive()
                 .expect_err("remote work must hold the OS writer lock");
-            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(error.kind(), fs2::lock_contended_error().kind());
             self.lock_checks.fetch_add(1, Ordering::SeqCst);
         }
     }
