@@ -282,45 +282,59 @@ mod tests {
 
     #[test]
     fn first_implicit_bind_saves_actual_port_and_restart_reuses_it() {
-        let persisted = RefCell::new(Settings::default());
-        let save_count = Cell::new(0);
-        let requested_ports = RefCell::new(Vec::new());
+        retry_ephemeral_port_scenario(|| {
+            let persisted = RefCell::new(Settings::default());
+            let save_count = Cell::new(0);
+            let requested_ports = RefCell::new(Vec::new());
 
-        let first = bind_stable_port_with_store(
-            request(None, false),
-            || Ok(persisted.borrow().clone()),
-            |settings| {
-                save_count.set(save_count.get() + 1);
-                *persisted.borrow_mut() = settings.clone();
-                Ok(())
-            },
-            |port| {
-                requested_ports.borrow_mut().push(port);
-                bind_loopback(port)
-            },
-        )
-        .expect("first implicit bind");
-        let first_port = first.port();
-        assert_ne!(first_port.get(), 0);
-        assert_eq!(persisted.borrow().server.embedded_port, Some(first_port));
-        assert_eq!(save_count.get(), 1);
-        assert_eq!(first.outcome(), StablePortOutcome::Stored);
-        drop(first);
+            let first = bind_stable_port_with_store(
+                request(None, false),
+                || Ok(persisted.borrow().clone()),
+                |settings| {
+                    save_count.set(save_count.get() + 1);
+                    *persisted.borrow_mut() = settings.clone();
+                    Ok(())
+                },
+                |port| {
+                    requested_ports.borrow_mut().push(port);
+                    bind_loopback(port)
+                },
+            )
+            .expect("first implicit bind");
+            let first_port = first.port();
+            assert_ne!(first_port.get(), 0);
+            assert_eq!(persisted.borrow().server.embedded_port, Some(first_port));
+            assert_eq!(save_count.get(), 1);
+            assert_eq!(first.outcome(), StablePortOutcome::Stored);
+            drop(first);
 
-        let second = bind_stable_port_with_store(
-            request(None, false),
-            || Ok(persisted.borrow().clone()),
-            |_| panic!("successful saved-port reuse must not rewrite settings"),
-            |port| {
-                requested_ports.borrow_mut().push(port);
-                bind_loopback(port)
-            },
-        )
-        .expect("restart bind");
+            let second = bind_stable_port_with_store(
+                request(None, false),
+                || Ok(persisted.borrow().clone()),
+                |settings| {
+                    save_count.set(save_count.get() + 1);
+                    *persisted.borrow_mut() = settings.clone();
+                    Ok(())
+                },
+                |port| {
+                    requested_ports.borrow_mut().push(port);
+                    bind_loopback(port)
+                },
+            )
+            .expect("restart bind");
 
-        assert_eq!(second.port(), first_port);
-        assert_eq!(requested_ports.borrow().as_slice(), &[0, first_port.get()]);
-        assert_eq!(second.outcome(), StablePortOutcome::Reused);
+            if second.port() != first_port {
+                return Err(format!(
+                    "saved port {} was taken before restart (got {})",
+                    first_port.get(),
+                    second.port().get()
+                ));
+            }
+            assert_eq!(requested_ports.borrow().as_slice(), &[0, first_port.get()]);
+            assert_eq!(save_count.get(), 1);
+            assert_eq!(second.outcome(), StablePortOutcome::Reused);
+            Ok(())
+        });
     }
 
     #[test]

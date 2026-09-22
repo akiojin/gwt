@@ -97,6 +97,30 @@ impl Row {
         self.wrapped
     }
 
+    pub(crate) fn snapshot_cells(&self) -> &[crate::Cell] {
+        let len = if self.wrapped {
+            self.cells.len()
+        } else {
+            let default_cell = crate::Cell::new();
+            self.cells
+                .iter()
+                .rposition(|cell| cell != &default_cell)
+                .map_or(0, |index| index + 1)
+        };
+        &self.cells[..len]
+    }
+
+    pub(crate) fn from_snapshot_cells(
+        cells: &[crate::Cell],
+        cols: u16,
+        wrapped: bool,
+    ) -> Self {
+        let mut row = Self::new(cols);
+        row.cells[..cells.len()].clone_from_slice(cells);
+        row.wrapped = wrapped;
+        row
+    }
+
     pub fn clear_wide(&mut self, col: u16) {
         let cell = &self.cells[usize::from(col)];
         let other = if cell.is_wide() {

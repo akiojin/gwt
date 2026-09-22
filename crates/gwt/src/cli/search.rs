@@ -122,7 +122,7 @@ pub fn run<E: CliEnv>(
     cmd: SearchCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let outcome = match crate::index_search::search_project_index(
+    let outcome = match crate::index_search::search_project_index_attempt(
         env.repo_path(),
         &cmd.query,
         &cmd.scopes,
@@ -133,12 +133,32 @@ pub fn run<E: CliEnv>(
         true,
     ) {
         Ok(outcome) => outcome,
-        Err(error @ crate::index_search::IndexSearchError::NotReady(_)) => {
+        Err(crate::index_search::IndexSearchAttemptError::Public(
+            error @ crate::index_search::IndexSearchError::NotReady(_),
+        )) => {
             // FR-388: typed retryable failure, never a silent empty success.
             render_not_ready(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
-        Err(error) => {
+        Err(crate::index_search::IndexSearchAttemptError::Public(
+            error @ crate::index_search::IndexSearchError::SearchFailed(_),
+        )) => {
+            // Phase 70a FR-400: a query-contract failure against a healthy
+            // scope is non-retryable and must never enter the repair wait.
+            render_search_failed(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
+        Err(error @ crate::index_search::IndexSearchAttemptError::Unavailable(_)) => {
+            render_search_unavailable(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
+        Err(error @ crate::index_search::IndexSearchAttemptError::RepairRequired(_)) => {
+            // Issue #3866 AC-3: a stop state only `index.repair` clears is
+            // non-retryable and carries its recovery step.
+            render_repair_required(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
+        Err(crate::index_search::IndexSearchAttemptError::Public(error)) => {
             return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
         }
     };
@@ -169,6 +189,53 @@ pub fn run<E: CliEnv>(
     Ok(0)
 }
 
+fn render_search_unavailable(
+    out: &mut String,
+    json: bool,
+    error: &crate::index_search::IndexSearchAttemptError,
+) {
+    let crate::index_search::IndexSearchAttemptError::Unavailable(unavailable) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "SEARCH_UNAVAILABLE",
+            "retryable": true,
+            "reason": unavailable.reason,
+            "retry_after_ms": unavailable.retry_after_ms,
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("{error}\n"));
+    }
+}
+
+fn render_repair_required(
+    out: &mut String,
+    json: bool,
+    error: &crate::index_search::IndexSearchAttemptError,
+) {
+    let crate::index_search::IndexSearchAttemptError::RepairRequired(required) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "INDEX_REPAIR_REQUIRED",
+            "retryable": false,
+            "reason": required.reason,
+            "affected_scopes": required.affected_scopes,
+            "recovery": required.recovery,
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("{error}\n"));
+    }
+}
+
 fn render_not_ready(out: &mut String, json: bool, error: &crate::index_search::IndexSearchError) {
     let crate::index_search::IndexSearchError::NotReady(not_ready) = error else {
         return;
@@ -182,11 +249,38 @@ fn render_not_ready(out: &mut String, json: bool, error: &crate::index_search::I
             "affected_scopes": not_ready.affected_scopes,
             "waited_ms": not_ready.waited_ms,
             "retry_after_ms": not_ready.retry_after_ms,
+            // Issue #4455 AC-3: a preflight caller must be able to tell a
+            // running rebuild apart from an index nobody is repairing.
+            "rebuild_in_progress": not_ready.rebuild_in_progress,
+            "rebuilding_scopes": not_ready.rebuilding_scopes,
         });
         out.push_str(&payload.to_string());
         out.push('\n');
     } else {
         out.push_str(&format!("index not ready: {error}\n"));
+    }
+}
+
+fn render_search_failed(
+    out: &mut String,
+    json: bool,
+    error: &crate::index_search::IndexSearchError,
+) {
+    let crate::index_search::IndexSearchError::SearchFailed(failed) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "SEARCH_FAILED",
+            "retryable": false,
+            "reason": failed.reason,
+            "affected_scopes": failed.affected_scopes,
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("search failed: {error}\n"));
     }
 }
 
@@ -445,6 +539,8 @@ mod tests {
             affected_scopes: vec!["files".to_string()],
             waited_ms: 30_100,
             retry_after_ms: 5_000,
+            rebuild_in_progress: true,
+            rebuilding_scopes: vec!["files".to_string()],
         });
         render_not_ready(&mut out, true, &error);
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
@@ -454,7 +550,85 @@ mod tests {
         assert_eq!(payload["affected_scopes"][0], "files");
         assert_eq!(payload["waited_ms"], 30_100);
         assert_eq!(payload["retry_after_ms"], 5_000);
+        // Issue #4455 AC-3: a preflight caller must be able to tell a running
+        // rebuild apart from an index nobody is repairing.
+        assert_eq!(
+            payload["rebuild_in_progress"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(payload["rebuilding_scopes"][0], "files");
         assert_eq!(error.exit_code(), 75);
+    }
+
+    #[test]
+    fn render_search_failed_json_reports_non_retryable_error_contract() {
+        use crate::index_search::{IndexSearchError, IndexSearchFailed};
+        let mut out = String::new();
+        let error = IndexSearchError::SearchFailed(IndexSearchFailed {
+            reason: "issues query failed: query embedding rejected".to_string(),
+            affected_scopes: vec!["issues".to_string()],
+        });
+
+        render_search_failed(&mut out, true, &error);
+
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "SEARCH_FAILED");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(false));
+        assert_eq!(payload["affected_scopes"][0], "issues");
+        assert!(payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("query embedding rejected")));
+        assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn render_search_unavailable_json_reports_retryable_error_contract() {
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchUnavailable};
+        let mut out = String::new();
+        let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+            reason: "project index runner unavailable".to_string(),
+            retry_after_ms: 5_000,
+        });
+
+        render_search_unavailable(&mut out, true, &error);
+
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "SEARCH_UNAVAILABLE");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
+        assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
+        assert!(error.retryable());
+        assert_eq!(error.retry_after_ms(), Some(5_000));
+        assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn render_repair_required_json_reports_non_retryable_recovery_contract() {
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchRepairRequired};
+        let error = IndexSearchAttemptError::RepairRequired(IndexSearchRepairRequired {
+            reason: "issues index is cancelled".to_string(),
+            affected_scopes: vec!["issues".to_string()],
+            recovery: "run the index.repair JSON operation".to_string(),
+        });
+
+        let mut out = String::new();
+        render_repair_required(&mut out, true, &error);
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "INDEX_REPAIR_REQUIRED");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(false));
+        assert_eq!(payload["affected_scopes"][0], "issues");
+        assert_eq!(payload["reason"], "issues index is cancelled");
+        assert_eq!(payload["recovery"], "run the index.repair JSON operation");
+        assert!(payload.get("retry_after_ms").is_none(), "{payload}");
+        assert_eq!(error.exit_code(), 1);
+
+        let mut text = String::new();
+        render_repair_required(&mut text, false, &error);
+        assert!(text.contains("index repair required"), "{text}");
+        assert!(text.contains("index.repair"), "{text}");
     }
 
     #[test]
@@ -490,6 +664,8 @@ mod tests {
             affected_scopes: vec!["files".to_string()],
             waited_ms: 30_000,
             retry_after_ms: 5_000,
+            rebuild_in_progress: false,
+            rebuilding_scopes: Vec::new(),
         });
         render_not_ready(&mut out, false, &error);
         assert!(out.contains("index not ready"), "{out}");
@@ -617,5 +793,9 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        assert!(
+            crate::index_search::wait_for_index_search_repairs(std::time::Duration::from_secs(20)),
+            "search-triggered repair did not settle before scoped HOME cleanup"
+        );
     }
 }

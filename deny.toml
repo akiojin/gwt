@@ -22,32 +22,32 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 # Allowlisted advisories. Each entry MUST cite the advisory ID and
 # carry a `reason` explaining why the issue is not exploitable in
-# our use, plus the planned exit path. Re-evaluate every time wry /
-# tao / gtk-rs ecosystem ships a new release.
+# our use, plus the planned exit path. Re-evaluate every time tao /
+# tray-icon / gtk-rs ecosystem ships a new release.
 ignore = [
     # All gtk-rs GTK3 bindings are unmaintained — their fix is the
-    # gtk-rs 0.20+ migration, which our wry 0.55 / tao 0.35 (latest
-    # tags) do not yet adopt. We pull these transitively only for
-    # Linux GUI rendering and never call the unsound paths directly.
-    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0412", reason = "gdk (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0413", reason = "atk (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0414", reason = "gdk-sys (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0415", reason = "gtk (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0416", reason = "atk-sys (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0417", reason = "gdkx11 (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0418", reason = "gdkx11-sys (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0419", reason = "gtk3-macros (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
-    { id = "RUSTSEC-2024-0420", reason = "gtk-sys (gtk3-rs unmaintained); blocked on wry/tao bumping to gtk-rs 0.20+" },
+    # gtk-rs 0.20+ migration, which the current tao / tray-icon stack does
+    # not yet adopt. We pull these transitively only for Linux GUI rendering
+    # and never call the unsound paths directly.
+    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0412", reason = "gdk (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0413", reason = "atk (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0414", reason = "gdk-sys (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0415", reason = "gtk (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0416", reason = "atk-sys (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0417", reason = "gdkx11 (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0418", reason = "gdkx11-sys (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0419", reason = "gtk3-macros (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
+    { id = "RUSTSEC-2024-0420", reason = "gtk-sys (gtk3-rs unmaintained); blocked on tao/tray-icon bumping to gtk-rs 0.20+" },
     # proc-macro-error is unmaintained and reaches us only through
     # gtk3-macros. Same upstream-migration exit path as the gtk3-rs
     # crates above.
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained via gtk3-macros; same exit path as gtk3-rs crates" },
     # glib::VariantStrIter unsoundness. We don't construct or iterate
     # GVariant string iters directly — glib reaches us only through
-    # the gtk3-rs / wry stack on Linux. Same exit path. Also tracked
-    # as Dependabot alert #29.
-    { id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter unsoundness; not reachable from our code, blocked on gtk-rs 0.20+ (also tracked as Dependabot #29)" },
+    # the gtk3-rs stack pulled by tao and tray-icon on Linux. Same exit path.
+    # Also tracked as Dependabot alert #29 and follow-up Issue #3530.
+    { id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter unsoundness; not reachable from our code, blocked on tao/tray-icon adopting gtk-rs 0.20+ (Dependabot #29, Issue #3530)" },
     # quick-xml O(N^2) duplicate-attribute check (CPU-exhaustion DoS on
     # untrusted XML). We reach quick-xml only through wayland-scanner, a
     # BUILD-TIME code generator that parses trusted, repo-pinned Wayland

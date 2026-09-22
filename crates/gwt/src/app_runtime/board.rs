@@ -14,7 +14,10 @@
 //! flow through here unchanged — the handler emits the same
 //! `BackendEvent::BoardEntries` / `BackendEvent::BoardError` responses.
 
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use gwt_agent::{AgentId, AgentLaunchBuilder, LaunchConfig, SessionMode};
 use gwt_core::{
@@ -288,6 +291,7 @@ impl AppRuntime {
             .branch(session.branch.clone())
             .session_mode(SessionMode::Resume)
             .resume_session_id(resume_session_id.to_string())
+            .predecessor_session_id(session.id.clone())
             .runtime_target(session.runtime_target)
             .docker_lifecycle_intent(session.docker_lifecycle_intent);
 
@@ -324,6 +328,10 @@ impl AppRuntime {
         if let Some(windows_shell) = session.windows_shell {
             builder = builder.windows_shell(windows_shell);
         }
+        if let Some(provenance) = session.tool_runtime_provenance.clone() {
+            builder = builder.tool_runtime_provenance(provenance);
+        }
+        builder = builder.tool_runtime_source_session_id(session.id.clone());
 
         let mut config = builder.build();
         if !session.display_name.trim().is_empty() {
@@ -357,28 +365,8 @@ impl AppRuntime {
         entry: &coordination::BoardEntry,
     ) -> Vec<OutboundEvent> {
         let _ = tab_id;
-        let projection = match workspace_projection::transact_workspace_state(
-            project_root,
-            |projection, work_items, _work_items_persisted| {
-                let Some(event) =
-                    workspace_projection::resolve_workspace_work_event_from_board_entry(
-                        projection, work_items, entry,
-                    )
-                else {
-                    return Ok((projection.clone(), Vec::new()));
-                };
-                let state_cutoff = work_items
-                    .work_items
-                    .iter()
-                    .find(|item| item.id == event.work_item_id)
-                    .map(|item| item.updated_at);
-                if event.work_item_id == projection.id {
-                    projection.record_board_milestone_with_state_cutoff(entry, state_cutoff);
-                }
-                Ok((projection.clone(), vec![event]))
-            },
-        ) {
-            Ok(projection) => projection,
+        let projection = match persist_workspace_board_milestone(project_root, entry) {
+            Ok((projection, _)) => projection,
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -669,16 +657,14 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn handle_board_projection_changed_events(
-        &mut self,
+    /// Issue #4406: capture what a Board refresh needs. This is the only part
+    /// of a Board change that runs on the GUI event loop; reading the Board
+    /// there blocked it for 14s at the median once the Board held 3,410 posts.
+    pub(crate) fn board_projection_refresh_job(
+        &self,
         project_root: &Path,
-    ) -> Vec<OutboundEvent> {
-        let Ok(snapshot) = gwt::board_provider::load_snapshot(project_root) else {
-            return Vec::new();
-        };
-
-        let mut events = Vec::new();
-        let latest_entry = snapshot.board.entries.last().cloned();
+    ) -> BoardProjectionRefreshJob {
+        let mut windows = Vec::new();
         for tab in &self.tabs {
             if !same_worktree_path(&tab.project_root, project_root) {
                 continue;
@@ -688,45 +674,173 @@ impl AppRuntime {
                     continue;
                 }
                 let window_id = combined_window_id(&tab.id, &window.id);
-                let scope = if self.board_all_view_windows.contains(&window_id) {
-                    gwt_core::coordination::BoardAudienceScope::All
-                } else {
-                    gui_default_board_scope_for_project(&tab.project_root)
-                        .unwrap_or(gwt_core::coordination::BoardAudienceScope::All)
-                };
-                let board = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-                    snapshot.board.clone()
-                } else {
-                    gwt::board_provider::load_snapshot_for_scope(&tab.project_root, &scope)
-                        .map(|snapshot| snapshot.board)
-                        .unwrap_or_else(|_| snapshot.board.clone())
-                };
-                let mut entries = board.entries;
-                attach_board_body_html(&mut entries);
-                events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
-                    id: window_id,
-                    entries,
-                    has_more_before: board.has_more_before,
-                }));
+                windows.push(BoardRefreshWindow {
+                    all_view: self.board_all_view_windows.contains(&window_id),
+                    window_id,
+                    tab_project_root: tab.project_root.clone(),
+                });
             }
         }
-        if let Some(entry) = latest_entry.as_ref() {
-            if let Some((tab_id, project_root)) = self
-                .tabs
-                .iter()
-                .find(|tab| {
-                    same_worktree_path(&tab.project_root, project_root)
-                        && self.active_tab_id.as_deref() == Some(tab.id.as_str())
-                })
-                .map(|tab| (tab.id.clone(), tab.project_root.clone()))
-            {
-                events.extend(self.record_workspace_board_milestone_event(
-                    &tab_id,
-                    &project_root,
-                    entry,
-                ));
-            }
+        let milestone_root = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                same_worktree_path(&tab.project_root, project_root)
+                    && self.active_tab_id.as_deref() == Some(tab.id.as_str())
+            })
+            .map(|tab| tab.project_root.clone());
+        BoardProjectionRefreshJob {
+            project_root: project_root.to_path_buf(),
+            windows,
+            milestone_root,
+        }
+    }
+
+    /// Issue #4406: apply a Board refresh that ran off the GUI event loop.
+    /// A Work milestone is merged into the cached Active Work view, the same
+    /// cache-only path the Workspace watcher takes (Issue #3783); rebuilding
+    /// Active Work here cost seconds per Board post.
+    pub(crate) fn apply_board_projection_refresh(
+        &mut self,
+        refreshed: BoardProjectionRefreshed,
+    ) -> Vec<OutboundEvent> {
+        let BoardProjectionRefreshed {
+            mut events,
+            milestone,
+        } = refreshed;
+        if let Some((project_root, projection)) = milestone {
+            events.extend(
+                self.apply_workspace_projection_title_sync_cache_only(&project_root, &projection),
+            );
         }
         events
     }
+
+    #[cfg(test)]
+    pub(crate) fn handle_board_projection_changed_events(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let job = self.board_projection_refresh_job(project_root);
+        let (refreshed, _) = run_board_projection_refresh(job, BoardScopedViews::new());
+        self.apply_board_projection_refresh(refreshed)
+    }
+}
+
+/// Issue #4406: a Board change captured on the GUI event loop, to be refreshed
+/// off it by [`run_board_projection_refresh`].
+#[derive(Debug)]
+pub(crate) struct BoardProjectionRefreshJob {
+    pub(crate) project_root: PathBuf,
+    windows: Vec<BoardRefreshWindow>,
+    /// Set when the project is the active tab: its latest post is recorded as
+    /// a Work milestone under this root.
+    milestone_root: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct BoardRefreshWindow {
+    window_id: String,
+    tab_project_root: PathBuf,
+    all_view: bool,
+}
+
+/// The outcome of [`run_board_projection_refresh`], applied on the GUI event
+/// loop by [`AppRuntime::apply_board_projection_refresh`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BoardProjectionRefreshed {
+    pub(crate) events: Vec<OutboundEvent>,
+    /// The Workspace projection after the latest post was recorded as a Work
+    /// milestone, when it resolved to one.
+    pub(crate) milestone: Option<(PathBuf, workspace_projection::WorkspaceProjection)>,
+}
+
+/// Scoped Board views of one project, by Board window, kept between refreshes
+/// so a post is applied incrementally instead of rescanning the history.
+pub(crate) type BoardScopedViews = HashMap<String, coordination::ScopedBoardView>;
+
+/// Issue #4406: refresh every Board window of a project. Runs off the GUI
+/// event loop; the views of windows that no longer exist are dropped.
+pub(crate) fn run_board_projection_refresh(
+    job: BoardProjectionRefreshJob,
+    mut views: BoardScopedViews,
+) -> (BoardProjectionRefreshed, BoardScopedViews) {
+    let mut refreshed = BoardProjectionRefreshed::default();
+    let mut retained = BoardScopedViews::new();
+    let Ok(snapshot) = gwt::board_provider::load_snapshot(&job.project_root) else {
+        return (refreshed, retained);
+    };
+    for window in job.windows {
+        let scope = if window.all_view {
+            coordination::BoardAudienceScope::All
+        } else {
+            gui_default_board_scope_for_project(&window.tab_project_root)
+                .unwrap_or(coordination::BoardAudienceScope::All)
+        };
+        let board = if matches!(scope, coordination::BoardAudienceScope::All) {
+            snapshot.board.clone()
+        } else {
+            match gwt::board_provider::refresh_scoped_board_view(
+                &window.tab_project_root,
+                &scope,
+                views.remove(&window.window_id),
+            ) {
+                Ok((view, _)) => {
+                    let board = view.board.clone();
+                    retained.insert(window.window_id.clone(), view);
+                    board
+                }
+                Err(_) => snapshot.board.clone(),
+            }
+        };
+        let mut entries = board.entries;
+        attach_board_body_html(&mut entries);
+        refreshed
+            .events
+            .push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
+                id: window.window_id,
+                entries,
+                has_more_before: board.has_more_before,
+            }));
+    }
+    if let (Some(root), Some(entry)) = (job.milestone_root, snapshot.board.entries.last()) {
+        match persist_workspace_board_milestone(&root, entry) {
+            Ok((projection, true)) => refreshed.milestone = Some((root, projection)),
+            Ok((_, false)) => {}
+            Err(error) => tracing::warn!(
+                error = %error,
+                project_root = %root.display(),
+                "failed to persist workspace board milestone"
+            ),
+        }
+    }
+    (refreshed, retained)
+}
+
+/// Record `entry` as a Work milestone. Returns the persisted Workspace
+/// projection and whether the entry resolved to a Work event at all; when it
+/// did not, nothing a Work row shows has changed.
+fn persist_workspace_board_milestone(
+    project_root: &Path,
+    entry: &coordination::BoardEntry,
+) -> gwt_core::Result<(workspace_projection::WorkspaceProjection, bool)> {
+    workspace_projection::transact_workspace_state(
+        project_root,
+        |projection, work_items, _work_items_persisted| {
+            let Some(event) = workspace_projection::resolve_workspace_work_event_from_board_entry(
+                projection, work_items, entry,
+            ) else {
+                return Ok(((projection.clone(), false), Vec::new()));
+            };
+            let state_cutoff = work_items
+                .work_items
+                .iter()
+                .find(|item| item.id == event.work_item_id)
+                .map(|item| item.updated_at);
+            if event.work_item_id == projection.id {
+                projection.record_board_milestone_with_state_cutoff(entry, state_cutoff);
+            }
+            Ok(((projection.clone(), true), vec![event]))
+        },
+    )
 }

@@ -13,8 +13,30 @@ import {
   installEmbeddedRoutes,
 } from "./_helpers/embedded-frontend";
 
+const browserErrors = new WeakMap<
+  object,
+  { consoleErrors: string[]; pageErrors: string[] }
+>();
+
 test.describe("Projects ▾ consolidated chrome", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
+
+  test.beforeEach(({ page }) => {
+    const errors = { consoleErrors: [] as string[], pageErrors: [] as string[] };
+    browserErrors.set(page, errors);
+    page.on("console", (message) => {
+      if (message.type() === "error") {
+        errors.consoleErrors.push(message.text());
+      }
+    });
+    page.on("pageerror", (error) => errors.pageErrors.push(error.message));
+  });
+
+  test.afterEach(({ page }) => {
+    const errors = browserErrors.get(page);
+    expect(errors?.consoleErrors ?? []).toEqual([]);
+    expect(errors?.pageErrors ?? []).toEqual([]);
+  });
 
   test("the Open Project split-button is removed from the top bar", async ({
     page,
@@ -80,6 +102,99 @@ test.describe("Projects ▾ consolidated chrome", () => {
     );
   });
 
+  test("Clone modal stays interactive above the zero-tab project picker", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page, { activeTabKind: null });
+    await page.goto(APP_URL);
+
+    await expect(page.locator("#project-picker")).toHaveClass(/visible/);
+    await page.locator("#picker-clone-project").click();
+    await expect(page.locator("#clone-project-modal")).toHaveClass(/open/);
+
+    await expectCloneModalAbove(page, "#project-picker");
+  });
+
+  test("Projects popover can open Clone above non-git onboarding", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page, { activeTabKind: "non_repo" });
+    await page.goto(APP_URL);
+
+    await expect(page.locator("#project-onboarding")).toHaveClass(/visible/);
+    await page.locator("#project-switcher-button").click();
+    await page
+      .locator("[data-action='clone-from-github']")
+      .click({ timeout: 2_000 });
+    await expect(page.locator("#clone-project-modal")).toHaveClass(/open/);
+
+    await expectCloneModalAbove(page, "#project-onboarding");
+  });
+
+  test("Clone modal stays interactive above the command palette", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page);
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await page.locator("#project-switcher-button").click();
+    await page.locator("[data-action='clone-from-github']").click();
+    await expect(page.locator("#clone-project-modal")).toHaveClass(/open/);
+
+    await page.evaluate(() => {
+      const palette = document.getElementById("op-palette-backdrop");
+      palette?.setAttribute("data-open", "true");
+      palette?.setAttribute("aria-hidden", "false");
+    });
+    await expectCloneModalAbove(page, "#op-palette-backdrop");
+  });
+
+  test("Command palette keeps aria-modal ownership above the Projects popover", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page);
+    await page.goto(APP_URL);
+
+    const panel = page.locator("#project-switcher-panel");
+    const palette = page.locator("#op-palette-backdrop");
+    await page.locator("#project-switcher-button").click();
+    await expect(panel).toBeVisible();
+    await page.locator("body").dispatchEvent("keydown", {
+      key: "k",
+      code: "KeyK",
+      metaKey: true,
+      bubbles: true,
+    });
+    await expect(palette).toHaveAttribute("data-open", "true");
+    await expect(panel).toBeVisible();
+
+    const result = await page.evaluate(() => {
+      const palette = document.getElementById("op-palette-backdrop");
+      const panel = document.getElementById("project-switcher-panel");
+      if (!(palette instanceof HTMLElement) || !(panel instanceof HTMLElement)) {
+        return null;
+      }
+      const rect = panel.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        rect.left + rect.width / 2,
+        rect.top + rect.height / 2,
+      );
+      return {
+        paletteZ: Number(getComputedStyle(palette).zIndex),
+        panelZ: Number(getComputedStyle(panel).zIndex),
+        paletteOwnsHit: hit !== null && palette.contains(hit),
+      };
+    });
+    expect(result).not.toBeNull();
+    expect(result!.paletteZ).toBeGreaterThan(result!.panelZ);
+    expect(result!.paletteOwnsHit).toBe(true);
+  });
+
   test("Escape closes the Projects switcher", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installWorkspaceFixture(page);
@@ -104,29 +219,37 @@ test.describe("Projects ▾ consolidated chrome", () => {
 
 async function installWorkspaceFixture(
   page: any,
-  options: { recentProjects?: Array<{ title: string; path: string; kind: string }> } = {},
+  options: {
+    recentProjects?: Array<{ title: string; path: string; kind: string }>;
+    activeTabKind?: string | null;
+  } = {},
 ): Promise<void> {
   const recentProjects = options.recentProjects ?? [
     { title: "Recent A", path: "/recent/a", kind: "git" },
   ];
+  const activeTabKind =
+    options.activeTabKind === undefined ? "git" : options.activeTabKind;
   await page.addInitScript((fixture: any) => {
-    const workspaceState = {
-      kind: "workspace_state",
-      workspace: {
-        app_version: "playwright",
-        tabs: [
+    const tabs = fixture.activeTabKind === null
+      ? []
+      : [
           {
             id: "tab-1",
             title: "Fixture Project",
             project_root: "/fixture",
-            kind: "git",
+            kind: fixture.activeTabKind,
             workspace: {
               viewport: { x: 0, y: 0, zoom: 1 },
               windows: [],
             },
           },
-        ],
-        active_tab_id: "tab-1",
+        ];
+    const workspaceState = {
+      kind: "workspace_state",
+      workspace: {
+        app_version: "playwright",
+        tabs,
+        active_tab_id: tabs.length > 0 ? "tab-1" : null,
         recent_projects: fixture.recentProjects,
       },
     };
@@ -177,5 +300,53 @@ async function installWorkspaceFixture(
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, { recentProjects });
+  }, { recentProjects, activeTabKind });
+}
+
+async function expectCloneModalAbove(
+  page: any,
+  coveredSelector: string,
+): Promise<void> {
+  await expect(page.locator(coveredSelector)).toBeVisible();
+  const result = await page.evaluate((selector: string) => {
+    const modal = document.getElementById("clone-project-modal");
+    const dialog = modal?.querySelector(".modal-shell");
+    const covered = document.querySelector(selector);
+    if (
+      !(modal instanceof HTMLElement) ||
+      !(dialog instanceof HTMLElement) ||
+      !(covered instanceof HTMLElement)
+    ) {
+      return null;
+    }
+    const rect = dialog.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const coveredRect = covered.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      centerX,
+      centerY,
+    );
+    return {
+      modalZ: Number(getComputedStyle(modal).zIndex),
+      coveredZ: Number(getComputedStyle(covered).zIndex),
+      coveredContainsDialogCenter:
+        coveredRect.left <= centerX &&
+        centerX <= coveredRect.right &&
+        coveredRect.top <= centerY &&
+        centerY <= coveredRect.bottom,
+      dialogOwnsHit: hit !== null && dialog.contains(hit),
+      hitDescription: hit
+        ? `${hit.tagName.toLowerCase()}#${hit.id}.${Array.from(hit.classList).join(".")}`
+        : "none",
+    };
+  }, coveredSelector);
+
+  expect(result).not.toBeNull();
+  expect(result!.modalZ).toBeGreaterThan(result!.coveredZ);
+  expect(result!.coveredContainsDialogCenter).toBe(true);
+  expect(
+    result!.dialogOwnsHit,
+    `dialog center hit ${result!.hitDescription}`,
+  ).toBe(true);
 }

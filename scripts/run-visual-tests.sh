@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLAYWRIGHT_VERSION="${GWT_PLAYWRIGHT_VERSION:-1.49.1}"
+# Single source for the pinned version: the browsers installed by
+# scripts/install-playwright-browsers.sh must be the revision this
+# @playwright/test build expects, and the CI cache is keyed off the same file.
+PLAYWRIGHT_VERSION="${GWT_PLAYWRIGHT_VERSION:-$(tr -d '[:space:]' <"${ROOT}/scripts/playwright-version.txt")}"
 PLAYWRIGHT_DEPS_DIR="${GWT_PLAYWRIGHT_DEPS_DIR:-${TMPDIR:-/tmp}/gwt-playwright-${PLAYWRIGHT_VERSION}}"
 PLAYWRIGHT_NODE_MODULES="${PLAYWRIGHT_DEPS_DIR}/node_modules"
 PLAYWRIGHT_RESOLVER="${PLAYWRIGHT_DEPS_DIR}/resolve-playwright.cjs"
@@ -89,6 +92,7 @@ Module._resolveFilename = function resolveFromPinnedPlaywright(
 JS
 
 export GWT_PLAYWRIGHT_NODE_MODULES="${PLAYWRIGHT_NODE_MODULES}"
+export GWT_PLAYWRIGHT_CHECKOUT_ROOT="${GWT_PLAYWRIGHT_CHECKOUT_ROOT:-$ROOT}"
 export GWT_PLAYWRIGHT_PROJECT_ROOT="${GWT_PLAYWRIGHT_PROJECT_ROOT:-$ROOT}"
 export NODE_PATH="${PLAYWRIGHT_NODE_MODULES}${NODE_PATH:+:${NODE_PATH}}"
 export NODE_OPTIONS="--require ${PLAYWRIGHT_RESOLVER}${NODE_OPTIONS:+ ${NODE_OPTIONS}}"
@@ -96,9 +100,7 @@ export NODE_OPTIONS="--require ${PLAYWRIGHT_RESOLVER}${NODE_OPTIONS:+ ${NODE_OPT
 mkdir -p "$RUN_DIR/crates/gwt"
 cp -R "$ROOT/crates/gwt/playwright" "$RUN_DIR/crates/gwt/playwright"
 ln -s "$ROOT/crates/gwt/web" "$RUN_DIR/crates/gwt/web"
-rm -rf "$RUN_DIR/crates/gwt/playwright/snapshots"
 rm -rf "$RUN_DIR/crates/gwt/playwright/test-results"
-ln -s "$ROOT/crates/gwt/playwright/snapshots" "$RUN_DIR/crates/gwt/playwright/snapshots"
 ln -s "$ROOT/crates/gwt/playwright/test-results" "$RUN_DIR/crates/gwt/playwright/test-results"
 
 cd "$RUN_DIR"

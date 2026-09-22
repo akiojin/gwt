@@ -22,10 +22,14 @@ mod identity;
 mod lifecycle;
 mod persistence;
 mod projection;
+pub mod store_migration;
 mod work_items;
 
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
-pub use identity::{canonical_work_id, workspace_group_key_for_item};
+pub use identity::{
+    can_upgrade_work_owner, canonical_work_id, successor_work_id, work_owner_for_branch,
+    workspace_group_key_for_item,
+};
 pub use lifecycle::{
     decide_work_close, derive_merged_done_equivalent, recompute_lifecycle_stage,
     recompute_work_active_lifecycle, WorkActiveLifecycleState, WorkAgentRuntime, WorkCloseDecision,
@@ -34,9 +38,10 @@ pub use lifecycle::{
 };
 pub use persistence::{
     append_workspace_journal_entry_to_path, append_workspace_work_event_to_path, apply_prune_plan,
-    classify_workspace_projections, decompose_legacy_multi_branch_work_items,
-    decompose_legacy_multi_branch_work_items_paths, emit_workspace_discard_event_for_session,
-    emit_workspace_discard_event_for_session_outcome,
+    classify_workspace_projections, current_work_id, decode_workspace_work_event_line,
+    decompose_legacy_multi_branch_work_items, decompose_legacy_multi_branch_work_items_paths,
+    detach_foreign_container_refs, detach_foreign_container_refs_for_work_event_root,
+    emit_workspace_discard_event_for_session, emit_workspace_discard_event_for_session_outcome,
     emit_workspace_discard_event_for_session_outcome_paths,
     emit_workspace_discard_event_for_session_paths, emit_workspace_discard_event_if_absent,
     emit_workspace_discard_event_if_absent_paths, emit_workspace_done_event_for_branch,
@@ -45,7 +50,9 @@ pub use persistence::{
     emit_workspace_done_event_for_session_outcome_paths,
     emit_workspace_done_event_for_session_paths, emit_workspace_done_event_if_absent,
     emit_workspace_done_event_if_absent_paths,
+    emit_workspace_terminal_event_for_exact_resolved_work_target,
     emit_workspace_terminal_event_for_resolved_work_target, find_work_item_for_container,
+    heal_same_container_duplicate_claim_attachments_for_work_event_root,
     load_or_default_workspace_projection, load_or_default_workspace_projection_from_path,
     load_or_synthesize_workspace_work_items, load_or_synthesize_workspace_work_items_from_paths,
     load_recent_workspace_journal_entries, load_recent_workspace_journal_entries_from_path,
@@ -53,44 +60,53 @@ pub use persistence::{
     load_workspace_work_items_from_path, mark_workspace_agent_stopped,
     mark_workspace_agent_stopped_at, mutate_existing_workspace_projection,
     mutate_existing_workspace_projection_for_cleanup, mutate_workspace_projection,
-    mutate_workspace_projection_at, rebuild_work_items_from_events_for_repo,
-    rebuild_work_items_from_events_paths, reconcile_worktree_work_items,
-    reconcile_worktree_work_items_paths, record_workspace_backfill_event_paths,
+    mutate_workspace_projection_at, preserve_workspace_work_event_log_as_shards,
+    rebuild_work_items_from_events_for_repo, rebuild_work_items_from_events_paths,
+    reconcile_worktree_work_items, reconcile_worktree_work_items_paths,
+    record_workspace_backfill_event_paths, record_workspace_pr_metadata_for_execution,
     record_workspace_work_event, record_workspace_work_event_paths,
     record_workspace_work_events_paths, record_workspace_work_paused_event,
     record_workspace_work_paused_event_paths, recover_pending_workspace_state_transaction,
+    recover_pending_workspace_state_transaction_for_work_event_root,
     repair_resume_owner_bleed_for_repo, repair_resume_owner_bleed_paths,
     reset_legacy_agent_identity_at, reset_legacy_agent_identity_for_repo,
+    resolve_legacy_workspace_state_external_commit_for_work_event_root,
     resolve_workspace_id_for_mention, resolve_workspace_id_for_session,
     resolve_workspace_state_external_commit, resolve_workspace_state_external_commit_at,
     resolve_workspace_work_event_from_board_entry, retroactive_auto_done_scan,
     retroactive_auto_done_scan_paths, save_workspace_projection, save_workspace_projection_to_path,
     save_workspace_work_items_projection_to_path, transact_workspace_state,
     transact_workspace_state_at, transact_workspace_state_at_with_commit,
-    transact_workspace_state_with_commit, try_resolve_workspace_assignment_for_session,
-    try_resolve_workspace_id_for_session, update_workspace_projection_with_journal,
+    transact_workspace_state_for_work_event_root,
+    transact_workspace_state_for_work_event_root_with_commit,
+    transact_workspace_state_for_work_event_root_with_preflight,
+    transact_workspace_state_with_commit, transact_workspace_state_with_preflight,
+    try_resolve_workspace_assignment_for_session, try_resolve_workspace_id_for_session,
+    update_workspace_projection_with_journal,
     update_workspace_projection_with_journal_for_resolved_work_target,
     update_workspace_projection_with_journal_for_work_event_root,
     update_workspace_projection_with_journal_paths,
     update_workspace_projection_with_journal_paths_at, workspace_projection_stale_reason,
     workspace_state_external_commit_resolution, workspace_state_external_commit_resolution_at,
     workspace_work_event_from_board_entry, worktree_sources_needing_backfill, ClassifiedProjection,
-    ExternalWorkspaceCommitDecision, ExternalWorkspaceCommitResolution, PruneAction,
-    PruneSkipReason, PruneSummary, ResumeOwnerBleedRepairReport,
-    SessionBoundWorkspaceMutationTarget, SessionBoundWorkspaceTerminalTarget, StaleReason,
-    TrackedWorkEventPolicy, WorkItemsCache, WorkItemsRebuildOutcome, WorkspaceRetentionConfig,
+    DecodedWorkspaceWorkEvent, ExactWorkspaceTerminalPolicy, ExternalWorkspaceCommitDecision,
+    ExternalWorkspaceCommitResolution, PruneAction, PruneSkipReason, PruneSummary,
+    ResumeOwnerBleedRepairReport, SessionBoundWorkspaceMutationTarget,
+    SessionBoundWorkspaceTerminalTarget, StaleReason, TrackedWorkEventPolicy, WorkItemsCache,
+    WorkItemsLoadProfile, WorkItemsRebuildOutcome, WorkspaceRetentionConfig,
     WorkspaceSessionAssignment, WorkspaceTerminalEventOutcome, WorktreeReconcileSource,
     WORKSPACE_AGENT_IDENTITY_RESET_VERSION, WORK_ITEMS_REBUILD_VERSION,
 };
 pub(crate) use persistence::{
-    decode_workspace_work_event_line, with_workspace_current_and_work_items_lock,
-    with_workspace_work_items_lock, write_atomic, DecodedWorkspaceWorkEvent,
+    with_workspace_current_and_work_items_lock, with_workspace_work_items_lock, write_atomic,
 };
 pub use projection::{
     workspace_projection_default_created_at, GitDetails, WorkspaceCleanupCandidate,
     WorkspaceCleanupReason, WorkspaceJournalEntry, WorkspaceLaunchUpdate, WorkspaceProjection,
     WorkspaceProjectionUpdate, WorkspaceStartUpdate,
 };
+pub use work_items::workspace_execution_container_same;
+pub use work_items::MAX_INLINE_WORK_EVENTS;
 pub use work_items::{
     DuplicateWorkEventProvenance, WorkAgentRef, WorkEvent, WorkEventApplyOutcome, WorkEventKind,
     WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceIssueLink,

@@ -70,6 +70,8 @@ fn managed_build_start_refusal_is_typed_and_does_not_create_state() {
             missing_verification: None,
             launched_at: chrono::Utc::now(),
             settled_at: None,
+            completion_evidence: None,
+            permission_decision: None,
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
@@ -92,7 +94,7 @@ fn managed_build_start_refusal_is_typed_and_does_not_create_state() {
     .expect("nested build.start refusal JSON");
     assert_eq!(refusal["ok"], false);
     assert_eq!(refusal["error_code"], "relaunch_required");
-    assert_eq!(refusal["recovery_operation"], "session.relaunch");
+    assert_eq!(refusal["recovery_operation"], "execution.status");
     assert!(
         skill_state::load(dir.path(), "build-spec")
             .expect("load build state")
@@ -415,18 +417,50 @@ fn seed_assigned_branch_work(
     work_id: &str,
 ) {
     seed_assigned_branch_assignment(work_event_root, project_state_root, session_id, work_id);
-    gwt_core::workspace_projection::record_workspace_work_paused_event(
-        work_event_root,
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
         work_id,
-        Some("Assigned branch Work"),
-        None,
-        Some("SPEC-2359"),
-        &[],
-        None,
-        Some(session_id),
         chrono::Utc::now(),
-    )
-    .expect("seed assigned branch Work");
+    );
+    event.title = Some("Assigned branch Work".to_string());
+    event.owner = Some("SPEC-2359".to_string());
+    event.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+    event.agent_session_id = Some(session_id.to_string());
+    event.agent_id = Some("codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("feature/build-resolution".to_string()),
+            worktree_path: Some(work_event_root.to_path_buf()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    let mut result = None;
+    for attempt in 0..4 {
+        let event = event.clone();
+        match gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+            project_state_root,
+            work_event_root,
+            |_, _, _| Ok(((), vec![event])),
+        ) {
+            Ok(()) => return,
+            Err(gwt_core::error::GwtError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 3 =>
+            {
+                result = Some(gwt_core::error::GwtError::Io(error));
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+            }
+            Err(error) => {
+                result = Some(error);
+                break;
+            }
+        }
+    }
+    panic!(
+        "seed split-root assigned branch Work: {:?}",
+        result.expect("failed seed must retain its error")
+    );
 }
 
 fn seed_ambiguous_legacy_assigned_work(
@@ -437,10 +471,11 @@ fn seed_ambiguous_legacy_assigned_work(
 ) {
     seed_assigned_branch_work(work_event_root, project_state_root, session_id, work_id);
     let work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
-    let mut projection = gwt_core::workspace_projection::load_workspace_work_items(work_event_root)
-        .unwrap()
-        .unwrap();
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_state_root);
+    let mut projection =
+        gwt_core::workspace_projection::load_workspace_work_items(project_state_root)
+            .unwrap()
+            .unwrap();
     let item = projection
         .work_items
         .iter_mut()
@@ -470,15 +505,11 @@ fn build_complete_prefers_assigned_branch_work_over_legacy_session_work() {
     let session_id = "session-assigned-complete";
     let work_id = "work-feature-build-resolution-a1b2c3d4";
     let work_event_root = dir.path().join("work-event-root");
+    let project_state_root = dir.path().join("project-state-root");
     std::fs::create_dir_all(&work_event_root).unwrap();
     let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
     seed_session_work(&work_event_root, session_id);
-    seed_assigned_branch_work(
-        &work_event_root,
-        &dir.path().join("project-state-root"),
-        session_id,
-        work_id,
-    );
+    seed_assigned_branch_work(&work_event_root, &project_state_root, session_id, work_id);
 
     dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
     assert_eq!(
@@ -490,7 +521,7 @@ fn build_complete_prefers_assigned_branch_work_over_legacy_session_work() {
         0
     );
 
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
         .expect("load Work items")
         .expect("Work items");
     let assigned = projection
@@ -523,15 +554,11 @@ fn build_abort_prefers_assigned_branch_work_over_legacy_session_work() {
     let session_id = "session-assigned-abort";
     let work_id = "work-feature-build-resolution-e5f6a7b8";
     let work_event_root = dir.path().join("work-event-root");
+    let project_state_root = dir.path().join("project-state-root");
     std::fs::create_dir_all(&work_event_root).unwrap();
     let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
     seed_session_work(&work_event_root, session_id);
-    seed_assigned_branch_work(
-        &work_event_root,
-        &dir.path().join("project-state-root"),
-        session_id,
-        work_id,
-    );
+    seed_assigned_branch_work(&work_event_root, &project_state_root, session_id, work_id);
 
     dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
     assert_eq!(
@@ -543,7 +570,7 @@ fn build_abort_prefers_assigned_branch_work_over_legacy_session_work() {
         0
     );
 
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
         .expect("load Work items")
         .expect("Work items");
     let assigned = projection
@@ -766,17 +793,13 @@ fn build_complete_does_not_fall_back_when_assigned_work_is_terminal() {
     let session_id = "session-assigned-work-terminal";
     let work_id = "work-feature-build-resolution-terminal";
     let work_event_root = dir.path().join("work-event-root");
+    let project_state_root = dir.path().join("project-state-root");
     std::fs::create_dir_all(&work_event_root).unwrap();
     let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
     seed_session_work(&work_event_root, session_id);
-    seed_assigned_branch_work(
-        &work_event_root,
-        &dir.path().join("project-state-root"),
-        session_id,
-        work_id,
-    );
+    seed_assigned_branch_work(&work_event_root, &project_state_root, session_id, work_id);
     gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
-        &work_event_root,
+        &project_state_root,
         work_id,
         chrono::Utc::now(),
     )
@@ -792,7 +815,7 @@ fn build_complete_does_not_fall_back_when_assigned_work_is_terminal() {
         0
     );
 
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
         .unwrap()
         .unwrap();
     let legacy = projection
@@ -813,16 +836,12 @@ fn build_complete_rejects_assigned_discarded_work_and_keeps_build_active() {
     let session_id = "session-assigned-discarded-complete";
     let work_id = "work-feature-build-resolution-discarded";
     let work_event_root = dir.path().join("work-event-root");
+    let project_state_root = dir.path().join("project-state-root");
     std::fs::create_dir_all(&work_event_root).unwrap();
     let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
-    seed_assigned_branch_work(
-        &work_event_root,
-        &dir.path().join("project-state-root"),
-        session_id,
-        work_id,
-    );
+    seed_assigned_branch_work(&work_event_root, &project_state_root, session_id, work_id);
     gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
-        &work_event_root,
+        &project_state_root,
         work_id,
         chrono::Utc::now(),
     )
@@ -838,7 +857,7 @@ fn build_complete_rejects_assigned_discarded_work_and_keeps_build_active() {
     let state = skill_state::load(dir.path(), "build-spec")
         .unwrap()
         .unwrap();
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
         .unwrap()
         .unwrap();
     let assigned = projection
@@ -881,16 +900,12 @@ fn build_abort_rejects_assigned_done_work_and_keeps_build_active() {
     let session_id = "session-assigned-done-abort";
     let work_id = "work-feature-build-resolution-done";
     let work_event_root = dir.path().join("work-event-root");
+    let project_state_root = dir.path().join("project-state-root");
     std::fs::create_dir_all(&work_event_root).unwrap();
     let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
-    seed_assigned_branch_work(
-        &work_event_root,
-        &dir.path().join("project-state-root"),
-        session_id,
-        work_id,
-    );
+    seed_assigned_branch_work(&work_event_root, &project_state_root, session_id, work_id);
     gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
-        &work_event_root,
+        &project_state_root,
         work_id,
         chrono::Utc::now(),
     )
@@ -906,7 +921,7 @@ fn build_abort_rejects_assigned_done_work_and_keeps_build_active() {
     let state = skill_state::load(dir.path(), "build-spec")
         .unwrap()
         .unwrap();
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
         .unwrap()
         .unwrap();
     let assigned = projection
@@ -964,7 +979,7 @@ fn build_complete_rejects_ambiguous_legacy_work_and_keeps_build_active() {
     let state = skill_state::load(dir.path(), "build-spec")
         .unwrap()
         .unwrap();
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
         .unwrap()
         .unwrap();
     let item = projection
@@ -1028,7 +1043,7 @@ fn build_abort_rejects_ambiguous_legacy_work_and_keeps_build_active() {
     let state = skill_state::load(dir.path(), "build-spec")
         .unwrap()
         .unwrap();
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
         .unwrap()
         .unwrap();
     let item = projection

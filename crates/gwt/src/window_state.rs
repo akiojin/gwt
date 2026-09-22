@@ -5,6 +5,289 @@ use crate::{
 };
 use gwt_terminal::PaneStatus;
 
+/// Provider family whose current rendered screen can be classified for a
+/// human tool-approval prompt. Unsupported providers deliberately fail open:
+/// a false positive is more disruptive than leaving an unknown prompt Idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPromptProvider {
+    ClaudeCode,
+    Codex,
+    Unsupported,
+}
+
+/// Return a privacy-safe identity for a fully rendered provider approval
+/// prompt. The classifier is anchored to the bottom of the current vt100
+/// screen and requires the provider's ordered title, affirmative choice,
+/// reject choice, and footer. Whitespace is removed so terminal soft wrapping
+/// at different widths does not change the result. Selection glyphs are also
+/// excluded from the hash so arrow-key navigation remains the same prompt.
+pub fn approval_prompt_fingerprint(provider: ApprovalPromptProvider, screen: &str) -> Option<u64> {
+    if provider == ApprovalPromptProvider::Unsupported {
+        return None;
+    }
+
+    let normalized = normalize_approval_screen(screen);
+    let (titles, accepts, reject, footer): (&[&str], &[&str], &str, &str) = match provider {
+        ApprovalPromptProvider::Codex => (
+            &[
+                "wouldyouliketorunthefollowingcommand?",
+                "wouldyouliketograntthesepermissions?",
+                "wouldyouliketomakethefollowingedits?",
+                "needsyourapproval.",
+            ],
+            &["1.yes,proceed", "yes,proceed"],
+            "no,andtellcodexwhattododifferently",
+            "pressentertoconfirmoresctocancel",
+        ),
+        ApprovalPromptProvider::ClaudeCode => (
+            &[
+                "doyouwanttoproceed?",
+                "doyouwanttomakethiseditto",
+                "doyouwanttoallowclaudetofetchthiscontent?",
+            ],
+            &[
+                "1.yes",
+                "yes,duringthissession",
+                "yes,allow",
+                "yes,anddon'taskagain",
+                "yes,anddon’taskagain",
+            ],
+            "no,andtellclaudewhattododifferently",
+            "entertoconfirm·esctocancel",
+        ),
+        ApprovalPromptProvider::Unsupported => return None,
+    };
+
+    if !normalized.ends_with(footer) {
+        return None;
+    }
+    let (title, title_start, title_end) = titles
+        .iter()
+        .filter_map(|title| {
+            normalized
+                .rfind(title)
+                .map(|start| (*title, start, start + title.len()))
+        })
+        .max_by_key(|(_, start, _)| *start)?;
+    let accept_end = accepts
+        .iter()
+        .filter_map(|accept| {
+            normalized[title_end..]
+                .find(accept)
+                .map(|start| title_end + start + accept.len())
+        })
+        .min()?;
+    let reject_end = normalized[accept_end..]
+        .find(reject)
+        .map(|start| accept_end + start + reject.len())?;
+    let footer_start = normalized[reject_end..]
+        .find(footer)
+        .map(|start| reject_end + start)?;
+    if footer_start + footer.len() != normalized.len() {
+        return None;
+    }
+    if !has_selected_choice_in_latest_block(screen, title, &normalized[title_end..footer_start]) {
+        return None;
+    }
+
+    Some(fnv1a64(
+        match provider {
+            ApprovalPromptProvider::Codex => b"codex:".as_slice(),
+            ApprovalPromptProvider::ClaudeCode => b"claude-code:".as_slice(),
+            ApprovalPromptProvider::Unsupported => return None,
+        },
+        &normalized.as_bytes()[title_start..],
+    ))
+}
+
+/// Return a privacy-safe identity only for Codex's fully rendered directory
+/// trust onboarding prompt. This is intentionally separate from tool approval:
+/// a managed launch blocked here needs a terminal human handoff, while ordinary
+/// approvals remain a resumable `Waiting` state.
+pub fn directory_trust_prompt_fingerprint(
+    provider: ApprovalPromptProvider,
+    screen: &str,
+) -> Option<u64> {
+    if provider != ApprovalPromptProvider::Codex {
+        return None;
+    }
+
+    const TITLE: &str = "doyoutrustthecontentsofthisdirectory?";
+    const TITLE_START: &str = "doyoutrustthecontents";
+    const ACCEPT: &str = "1.yes,continue";
+    const REJECT: &str = "2.no,quit";
+    const FOOTERS: &[&str] = &[
+        "pressentertocontinueandcreateasandbox...",
+        "pressentertocontinue",
+    ];
+
+    let lines = screen.lines().collect::<Vec<_>>();
+    let title_line = lines
+        .iter()
+        .rposition(|line| normalize_directory_trust_screen(line).starts_with(TITLE_START))?;
+    let context_line = lines[..title_line]
+        .iter()
+        .rposition(|line| directory_trust_context_path(line).is_some())?;
+    let prompt_lines = &lines[context_line..];
+    let normalized = normalize_directory_trust_screen(&prompt_lines.join("\n"));
+    let title_start =
+        normalize_directory_trust_screen(&lines[context_line..title_line].join("\n")).len();
+    if !normalized[title_start..].starts_with(TITLE) {
+        return None;
+    }
+    let title_end = title_start + TITLE.len();
+    let accept_end = normalized[title_end..]
+        .find(ACCEPT)
+        .map(|start| title_end + start + ACCEPT.len())?;
+    let reject_end = normalized[accept_end..]
+        .find(REJECT)
+        .map(|start| accept_end + start + REJECT.len())?;
+    let footer = FOOTERS
+        .iter()
+        .copied()
+        .find(|footer| normalized.ends_with(footer))?;
+    let footer_start = normalized.len().checked_sub(footer.len())?;
+    if footer_start < reject_end
+        || !has_selected_choice_in_latest_block(
+            &prompt_lines.join("\n"),
+            TITLE,
+            &normalized[title_end..footer_start],
+        )
+    {
+        return None;
+    }
+
+    // The platform-specific footer is a rendering detail, not a different
+    // prompt. Excluding it also keeps the identity stable as the selection
+    // moves between the two choices.
+    Some(fnv1a64(
+        b"codex-directory-trust:",
+        &normalized.as_bytes()[..footer_start],
+    ))
+}
+
+/// Boolean compatibility wrapper for callers that do not need prompt
+/// identity.
+pub fn detect_approval_prompt(provider: ApprovalPromptProvider, screen: &str) -> bool {
+    approval_prompt_fingerprint(provider, screen).is_some()
+}
+
+/// Whether an incomplete screen still carries provider-specific approval UI
+/// evidence. This deliberately recognizes only distinctive title, reject, or
+/// footer phrases; ordinary command output must not keep a stale wait latched.
+pub fn has_approval_prompt_evidence(provider: ApprovalPromptProvider, screen: &str) -> bool {
+    let normalized = normalize_approval_screen(screen);
+    let evidence: &[&str] = match provider {
+        ApprovalPromptProvider::Codex => &[
+            "wouldyouliketorunthefollowingcommand?",
+            "wouldyouliketograntthesepermissions?",
+            "wouldyouliketomakethefollowingedits?",
+            "needsyourapproval.",
+            "no,andtellcodexwhattododifferently",
+            "pressentertoconfirmoresctocancel",
+        ],
+        ApprovalPromptProvider::ClaudeCode => &[
+            "doyouwanttoproceed?",
+            "doyouwanttomakethiseditto",
+            "doyouwanttoallowclaudetofetchthiscontent?",
+            "no,andtellclaudewhattododifferently",
+            "entertoconfirm·esctocancel",
+        ],
+        ApprovalPromptProvider::Unsupported => return false,
+    };
+    evidence.iter().any(|phrase| normalized.ends_with(phrase))
+}
+
+fn normalize_approval_screen(screen: &str) -> String {
+    screen
+        .lines()
+        .map(|line| selected_choice_body(line).unwrap_or(line))
+        .flat_map(str::chars)
+        .filter(|character| {
+            !character.is_whitespace() && !matches!(character, '›' | '❯' | '▸' | '▶')
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalize_directory_trust_screen(screen: &str) -> String {
+    screen
+        .lines()
+        .map(directory_trust_line_body)
+        .flat_map(str::chars)
+        .filter(|character| {
+            !character.is_whitespace() && !matches!(character, '›' | '❯' | '▸' | '▶')
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn directory_trust_line_body(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    trimmed
+        .strip_prefix(['›', '❯', '▸', '▶', '>'])
+        .map(str::trim_start)
+        .unwrap_or(trimmed)
+}
+
+fn directory_trust_context_path(line: &str) -> Option<&str> {
+    let body = directory_trust_line_body(line);
+    let path = body.strip_prefix("You are in")?;
+    path.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then_some(path.trim())
+        .filter(|path| !path.is_empty())
+}
+
+fn has_selected_choice_in_latest_block(
+    screen: &str,
+    normalized_title: &str,
+    normalized_block: &str,
+) -> bool {
+    let lines = screen.lines().collect::<Vec<_>>();
+    let title_line = (0..lines.len()).rev().find(|start| {
+        normalize_approval_screen(&lines[*start..].join("\n")).contains(normalized_title)
+    });
+    let Some(title_line) = title_line else {
+        return false;
+    };
+    lines[title_line..].iter().any(|line| {
+        let Some(rest) = selected_choice_body(line) else {
+            return false;
+        };
+        let normalized_choice = normalize_approval_screen(rest);
+        !normalized_choice.is_empty() && normalized_block.contains(&normalized_choice)
+    })
+}
+
+fn selected_choice_body(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix(['›', '❯', '▸', '▶', '>'])?;
+    let rest = rest.trim_start();
+    if matches!(rest.as_bytes(), [b'0'..=b'9', b'.', ..]) {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+fn fnv1a64(prefix: &[u8], value: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in prefix.iter().chain(value) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Whether one byte-exact terminal input resolves the currently selected
+/// approval choice. Arrow/function-key escape sequences and ordinary typing
+/// must not clear the wait overlay.
+pub fn is_approval_resolution_input(data: &str) -> bool {
+    data == "\u{1b}" || data.ends_with('\r') || data.ends_with('\n')
+}
+
 pub fn compose_window_state(
     pty_state: WindowState,
     preset: WindowPreset,
@@ -36,6 +319,81 @@ pub fn compose_window_state_with_active_session(
         });
     }
     pty_state
+}
+
+/// Compose the transient approval overlay without overwriting the underlying
+/// hook state. Terminal lifecycle evidence remains authoritative; otherwise a
+/// supported live Agent prompt projects through the existing Waiting state.
+pub fn compose_window_state_with_approval_wait(
+    pty_state: WindowState,
+    preset: WindowPreset,
+    hook_state: Option<WindowState>,
+    has_active_agent_session: bool,
+    approval_waiting: bool,
+) -> WindowState {
+    if approval_waiting && matches!(pty_state, WindowState::Stopped | WindowState::Error) {
+        return pty_state;
+    }
+    let composed = compose_window_state_with_active_session(
+        pty_state,
+        preset,
+        hook_state,
+        has_active_agent_session,
+    );
+    if approval_waiting
+        && uses_agent_hook_state(preset)
+        && !matches!(composed, WindowState::Stopped | WindowState::Error)
+    {
+        WindowState::Waiting
+    } else {
+        composed
+    }
+}
+
+/// Issue #3616: present a quota-blocked agent pane as waiting.
+///
+/// Every other projection of this situation lies. `Stopped` renders as `DONE`,
+/// claiming the work completed; `Error` claims the agent broke; and `Idle` —
+/// what a Claude pane reports, because its process never exits — claims a
+/// healthy agent between turns. None happened: the account ran out and the
+/// conversation is intact. `Waiting` is the existing state for "this pane needs
+/// something from outside before it can continue".
+///
+/// Applied to whatever the pane composed to, because both observed shapes need
+/// it: Codex exits (terminal states) and Claude does not (live states).
+pub fn apply_provider_quota_block(composed: WindowState, quota_blocked: bool) -> WindowState {
+    if quota_blocked {
+        WindowState::Waiting
+    } else {
+        composed
+    }
+}
+
+/// Issue #4584: present a pane whose turn died on a provider API error as
+/// waiting.
+///
+/// The failure leaves no trace in anything else the runtime watches. The
+/// process is still alive, so no exit or status event fires; the hook state
+/// stays on whatever the turn was last doing, because the turn ended without
+/// reaching its `Stop` hook. The pane therefore keeps reporting `running`
+/// while it sits at its prompt — which is how two windows in this Issue's
+/// report burned twenty minutes each before anyone read them.
+///
+/// `Waiting` is reused rather than given a new value: it already means "this
+/// pane needs something from outside before it can continue", which is
+/// exactly true here, and the PM contract already routes it.
+///
+/// Unlike [`apply_provider_quota_block`] this does not override `Stopped` or
+/// `Error`. A quota hold has to, because the account is out for hours whether
+/// or not the process survived. Here the process surviving *is* the observed
+/// shape, and a pane that genuinely ended is better described by its own
+/// terminal state than by a projection guessing at it.
+pub fn apply_provider_api_error_block(composed: WindowState, api_error: bool) -> WindowState {
+    if api_error && !matches!(composed, WindowState::Stopped | WindowState::Error) {
+        WindowState::Waiting
+    } else {
+        composed
+    }
 }
 
 pub fn is_live_agent_hook_state(state: WindowState) -> bool {
@@ -100,8 +458,11 @@ fn parse_runtime_status(status: &str) -> Option<WindowState> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_window_state, compose_window_state_with_active_session, runtime_hook_window_state,
-        window_state_from_pane_status,
+        approval_prompt_fingerprint, compose_window_state,
+        compose_window_state_with_active_session, compose_window_state_with_approval_wait,
+        detect_approval_prompt, directory_trust_prompt_fingerprint, has_approval_prompt_evidence,
+        is_approval_resolution_input, runtime_hook_window_state, window_state_from_pane_status,
+        ApprovalPromptProvider,
     };
     use crate::{
         daemon_runtime::{RuntimeHookEvent, RuntimeHookEventKind},
@@ -311,5 +672,387 @@ mod tests {
             window_state_from_pane_status(&PaneStatus::Error("boom".to_string())),
             WindowState::Error
         );
+    }
+
+    #[test]
+    fn approval_prompt_classifier_requires_complete_codex_prompt_structure() {
+        let prompt = r#"
+Would you like to run the following command?
+
+  cargo test -p gwt window_state
+
+› 1. Yes, proceed
+  2. Yes, and don't ask again for commands that start with `cargo test`
+  3. No, and tell Codex what to do differently
+
+Press enter to confirm or esc to cancel
+"#;
+
+        assert!(detect_approval_prompt(
+            ApprovalPromptProvider::Codex,
+            prompt
+        ));
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::Codex,
+            "The docs say: Would you like to run the following command? Yes, proceed."
+        ));
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::Codex,
+            "Would you like to run the following command?\n› 1. Yes, proceed"
+        ));
+    }
+
+    #[test]
+    fn approval_prompt_classifier_requires_complete_claude_prompt_structure() {
+        let prompt = r#"
+Bash command
+
+  cargo test -p gwt window_state
+
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and don't ask again for cargo test commands in this project
+  3. No, and tell Claude what to do differently
+
+Enter to confirm · Esc to cancel
+"#;
+
+        assert!(detect_approval_prompt(
+            ApprovalPromptProvider::ClaudeCode,
+            prompt
+        ));
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::ClaudeCode,
+            "Do you want to proceed?"
+        ));
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::ClaudeCode,
+            "Do you want to proceed?\nYes\nNo"
+        ));
+    }
+
+    #[test]
+    fn approval_prompt_classifier_does_not_cross_provider_boundaries() {
+        let codex_prompt = r#"
+Would you like to make the following edits?
+› 1. Yes, proceed
+  2. No, and tell Codex what to do differently
+Press enter to confirm or esc to cancel
+"#;
+
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::ClaudeCode,
+            codex_prompt
+        ));
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::Unsupported,
+            codex_prompt
+        ));
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_requires_the_complete_bottom_anchored_structure() {
+        let prompt = "You are in /Users/alice/project\n\n\
+            Do you trust the contents of this directory? Working with untrusted contents comes with higher\n\
+            risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n\
+            policies to load.\n\n\
+            › 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue";
+        let wrapped = prompt
+            .replace("contents of this directory", "contents of this\n directory")
+            .replace("Yes, continue", "Yes,\n continue");
+        let reject_selected = prompt
+            .replace("› 1. Yes", "  1. Yes")
+            .replace("  2. No", "› 2. No");
+        let windows_footer = prompt.replace(
+            "Press enter to continue",
+            "Press enter to continue and create a sandbox...",
+        );
+
+        let fingerprint = directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, prompt)
+            .expect("complete Codex directory-trust prompt");
+        assert_eq!(
+            directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, &wrapped),
+            Some(fingerprint),
+            "terminal soft wrapping must not change prompt identity"
+        );
+        assert_eq!(
+            directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, &reject_selected),
+            Some(fingerprint),
+            "selection movement must not change prompt identity"
+        );
+        assert_eq!(
+            directory_trust_prompt_fingerprint(ApprovalPromptProvider::Codex, &windows_footer),
+            Some(fingerprint),
+            "the Windows sandbox footer must preserve prompt identity"
+        );
+    }
+
+    #[test]
+    fn codex_directory_trust_prompt_rejects_partial_prose_history_tool_and_non_codex_frames() {
+        let prompt = "You are in /Users/alice/project\n\n\
+            Do you trust the contents of this directory? Working with untrusted contents comes with higher\n\
+            risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n\
+            policies to load.\n\n\
+            › 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue";
+        let partial = "Do you trust the contents of this directory?\n› 1. Yes, continue";
+        let missing_context = "Do you trust the contents of this directory? Working with untrusted contents comes with higher\n\
+            risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.\n\n\
+            > 1. Yes, continue\n2. No, quit\nPress enter to continue";
+        let prose = "The documentation asks: Do you trust the contents of this directory?\n\
+            > 1. Yes, continue\n2. No, quit\nPress enter to continue";
+        let wrong_order = "You are in /Users/alice/project\n\n\
+            Do you trust the contents of this directory?\n\n\
+            > 2. No, quit\n1. Yes, continue\n\nPress enter to continue";
+        let history = format!("{prompt}\nCodex is now working on the task.");
+        let tool_approval = "Would you like to run the following command?\n\
+            › 1. Yes, proceed\n 2. No, and tell Codex what to do differently\n\
+            Press enter to confirm or esc to cancel";
+
+        for (case, provider, screen) in [
+            ("partial", ApprovalPromptProvider::Codex, partial),
+            (
+                "missing working-directory context",
+                ApprovalPromptProvider::Codex,
+                missing_context,
+            ),
+            ("prose", ApprovalPromptProvider::Codex, prose),
+            (
+                "wrong choice order",
+                ApprovalPromptProvider::Codex,
+                wrong_order,
+            ),
+            ("history", ApprovalPromptProvider::Codex, history.as_str()),
+            (
+                "tool approval",
+                ApprovalPromptProvider::Codex,
+                tool_approval,
+            ),
+            ("Claude", ApprovalPromptProvider::ClaudeCode, prompt),
+            ("unsupported", ApprovalPromptProvider::Unsupported, prompt),
+        ] {
+            assert_eq!(
+                directory_trust_prompt_fingerprint(provider, screen),
+                None,
+                "{case} must not become a directory-trust failure"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_prompt_classifier_is_bottom_anchored_and_ignores_selection_movement() {
+        let selected_accept = "Would you like to run the following command?\n\n  cargo test\n\n\
+            › 1. Yes, proceed\n  2. No, and tell Codex what to do differently\n\n\
+            Press enter to confirm or esc to cancel";
+        let selected_reject = selected_accept
+            .replace("› 1. Yes", "  1. Yes")
+            .replace("  2. No", "› 2. No");
+        let quoted_history = format!("{selected_accept}\n\nThe command completed successfully.");
+
+        let accept_fingerprint =
+            approval_prompt_fingerprint(ApprovalPromptProvider::Codex, selected_accept)
+                .expect("complete bottom prompt");
+        let reject_fingerprint =
+            approval_prompt_fingerprint(ApprovalPromptProvider::Codex, &selected_reject)
+                .expect("selection may move");
+        let shifted_history = format!("unrelated output scrolled above\n{selected_accept}");
+        let shifted_fingerprint =
+            approval_prompt_fingerprint(ApprovalPromptProvider::Codex, &shifted_history)
+                .expect("history above the prompt is not prompt identity");
+        let ascii_selection = selected_accept.replace('›', ">");
+        let ascii_fingerprint =
+            approval_prompt_fingerprint(ApprovalPromptProvider::Codex, &ascii_selection)
+                .expect("ASCII selection glyph");
+
+        assert_eq!(accept_fingerprint, reject_fingerprint);
+        assert_eq!(accept_fingerprint, shifted_fingerprint);
+        assert_eq!(accept_fingerprint, ascii_fingerprint);
+        assert!(
+            approval_prompt_fingerprint(ApprovalPromptProvider::Codex, &quoted_history).is_none()
+        );
+    }
+
+    #[test]
+    fn approval_prompt_classifier_normalizes_soft_wraps_and_rejects_custom_provider_names() {
+        let narrow_claude = "Do you want to make this edit\n to src/main.rs?\n\n\
+            ❯ 1. Yes, allow\n  2. No, and tell Claude what to do\n differently\n\n\
+            Enter to confirm · Esc to cancel";
+
+        assert!(detect_approval_prompt(
+            ApprovalPromptProvider::ClaudeCode,
+            narrow_claude
+        ));
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::Unsupported,
+            narrow_claude
+        ));
+    }
+
+    #[test]
+    fn approval_prompt_classifier_handles_sanitized_width_and_title_variants() {
+        let codex_160 = "Would you like to grant these permissions?\n allow network for tests\n\
+            › 1. Yes, proceed\n 2. No, and tell Codex what to do differently\n\
+            Press enter to confirm or esc to cancel";
+        let codex_80 = codex_160
+            .replace("grant these permissions", "grant these\n permissions")
+            .replace("what to do differently", "what to do\n differently");
+        let codex_40 = codex_160
+            .replace(
+                "Would you like to grant these permissions?",
+                "Would you like to\n grant these\n permissions?",
+            )
+            .replace(
+                "tell Codex what to do differently",
+                "tell Codex what\n to do differently",
+            );
+
+        let fingerprints = [codex_160, codex_80.as_str(), codex_40.as_str()].map(|screen| {
+            approval_prompt_fingerprint(ApprovalPromptProvider::Codex, screen)
+                .expect("width variant")
+        });
+        assert_eq!(fingerprints[0], fingerprints[1]);
+        assert_eq!(fingerprints[0], fingerprints[2]);
+
+        for title in [
+            "Would you like to make the following edits?",
+            "The shell command needs your approval.",
+        ] {
+            let prompt = format!(
+                "{title}\n details\n› 1. Yes, proceed\n\
+                 2. No, and tell Codex what to do differently\n\
+                 Press enter to confirm or esc to cancel"
+            );
+            assert!(detect_approval_prompt(
+                ApprovalPromptProvider::Codex,
+                &prompt
+            ));
+        }
+    }
+
+    #[test]
+    fn approval_prompt_selection_must_belong_to_the_bottom_prompt_block() {
+        let prose = "> 1. Yes, proceed\n\
+            Would you like to run the following command?\n command\n\
+            1. Yes, proceed\n 2. No, and tell Codex what to do differently\n\
+            Press enter to confirm or esc to cancel";
+
+        assert!(!detect_approval_prompt(
+            ApprovalPromptProvider::Codex,
+            prose
+        ));
+    }
+
+    #[test]
+    fn approval_evidence_is_bottom_anchored_not_scattered_history() {
+        let historical = "Would you like to run the following command?\n\
+            output\nNo, and tell Codex what to do differently\n\
+            Press enter to confirm or esc to cancel\nRunning tests...";
+        let scattered = "Would you like to run the following command?\n\
+            unrelated output\nRunning tests...\n\
+            No, and tell Codex what to do differently\nStill running...";
+
+        assert!(!has_approval_prompt_evidence(
+            ApprovalPromptProvider::Codex,
+            historical
+        ));
+        assert!(!has_approval_prompt_evidence(
+            ApprovalPromptProvider::Codex,
+            scattered
+        ));
+    }
+
+    #[test]
+    fn approval_wait_overlay_precedes_live_hook_state_but_not_terminal_state() {
+        assert_eq!(
+            compose_window_state_with_approval_wait(
+                WindowState::Running,
+                WindowPreset::Codex,
+                Some(WindowState::Running),
+                true,
+                true,
+            ),
+            WindowState::Waiting
+        );
+        assert_eq!(
+            compose_window_state_with_approval_wait(
+                WindowState::Running,
+                WindowPreset::Shell,
+                None,
+                false,
+                true,
+            ),
+            WindowState::Running
+        );
+        assert_eq!(
+            compose_window_state_with_approval_wait(
+                WindowState::Stopped,
+                WindowPreset::Codex,
+                Some(WindowState::Running),
+                true,
+                true,
+            ),
+            WindowState::Stopped
+        );
+        assert_eq!(
+            compose_window_state_with_approval_wait(
+                WindowState::Error,
+                WindowPreset::Codex,
+                Some(WindowState::Running),
+                true,
+                true,
+            ),
+            WindowState::Error
+        );
+    }
+
+    /// Issue #4584 AC-1: the whole defect is that this pane reads `running`.
+    /// A turn that died on a provider API error left an agent sitting at its
+    /// prompt, so every live state it could otherwise compose to is a claim
+    /// that work is still happening.
+    #[test]
+    fn provider_api_error_projects_a_live_pane_as_waiting() {
+        for live in [
+            WindowState::Running,
+            WindowState::Idle,
+            WindowState::Starting,
+            WindowState::Waiting,
+        ] {
+            assert_eq!(
+                super::apply_provider_api_error_block(live, true),
+                WindowState::Waiting,
+                "{live:?} must not keep reading as work in progress"
+            );
+            assert_eq!(
+                super::apply_provider_api_error_block(live, false),
+                live,
+                "{live:?} must be untouched with no error"
+            );
+        }
+    }
+
+    /// Unlike a quota hold, this does not override a terminal state. A pane
+    /// whose process actually ended is reporting something this projection
+    /// does not know better than, and the observed shape of this failure is a
+    /// live pane back at its prompt.
+    #[test]
+    fn provider_api_error_leaves_a_terminal_pane_alone() {
+        for terminal in [WindowState::Stopped, WindowState::Error] {
+            assert_eq!(
+                super::apply_provider_api_error_block(terminal, true),
+                terminal
+            );
+        }
+    }
+
+    #[test]
+    fn approval_resolution_input_only_accepts_submit_or_standalone_cancel() {
+        assert!(is_approval_resolution_input("\r"));
+        assert!(is_approval_resolution_input("\n"));
+        assert!(is_approval_resolution_input("\r\n"));
+        assert!(is_approval_resolution_input("\u{1b}"));
+        assert!(!is_approval_resolution_input("1"));
+        assert!(!is_approval_resolution_input("\u{1b}[A"));
+        assert!(is_approval_resolution_input("1\r"));
+        assert!(is_approval_resolution_input("yes\n"));
+        assert!(!is_approval_resolution_input("yes"));
     }
 }

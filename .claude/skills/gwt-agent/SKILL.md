@@ -1,6 +1,6 @@
 ---
 name: gwt-agent
-description: "Use proactively when monitoring or controlling running agent panes. Auto-detects mode: no args lists panes, pane ID reads output, stop/close stops a pane. For agent-to-agent communication, use the shared Board. Triggers: 'list panes', 'check agent', 'stop agent'."
+description: "Use proactively when monitoring or controlling running agent panes or the Issue Monitor queue. Auto-detects pane mode from arguments. For agent-to-agent communication, use the shared Board."
 allowed-tools: Bash, Read
 argument-hint: "[list | <pane-id> [--lines N] | stop <pane-id>]"
 ---
@@ -103,6 +103,178 @@ JSON
 ```
 
 Stops the specified pane.
+
+## Issue Monitor Queue Operations
+
+Use these JSON operations for project-scoped queue inspection and control. The
+optional `project_root` parameter defaults to the caller's current worktree.
+
+Read the ordered runtime queue and active launches:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.status","params":{}}
+JSON
+```
+
+Move an Issue to the head (the default) or to a zero-based numeric index:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.priority.move","params":{"number":42,"position":"head"}}
+JSON
+```
+
+Replace the complete priority order (an empty array clears it):
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.priority.set","params":{"issue_numbers":[42,17]}}
+JSON
+```
+
+Safely stop processing or lower/raise the positive concurrency limit:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.config.set","params":{"enabled":false,"autonomous_mode":false,"max_active":2}}
+JSON
+```
+
+Read the launch candidate pool (ordered providers, their rate-limit holds, and
+the usage threshold), or replace it whole. With two or more candidates the
+Monitor skips held and `limit_reached` providers, ranks the rest by
+`prefer_for` match (soft-avoiding the implementer's provider for an
+independent review), and launches the first candidate whose usage is unknown
+or below `usage_threshold_percent` (when every candidate is above it, the
+lowest known usage wins), so one rate-limited provider does not stop the
+queue. `agent_id` is the
+only required field per candidate; providers must be unique and known, and
+`prefer_for` tags use `type:<cc-type>` / `kind:spec|issue` / `label:<name>`:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.profiles","params":{}}
+JSON
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.profiles.set","params":{"profiles":[{"agent_id":"codex","prefer_for":["type:fix"]},{"agent_id":"claude"}],"usage_threshold_percent":80}}
+JSON
+```
+
+Ask the Issue Monitor to take an Issue next — move it to the priority head and
+trigger an immediate scan. The launch itself still goes through the Monitor's
+own claim/slot path, so this can never produce a duplicate agent:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.launch_now","params":{"number":42}}
+JSON
+```
+
+The response reports `scan_delivery`: `immediate` when a daemon accepted the
+scan request, `next-scheduled-scan` when none was reachable (the new order is
+already durable either way).
+
+List every provider-wide quota hold with the evidence it was formed from, and
+release a false one by provider (Issue #3923). The release is a durable fence,
+so no process can re-stamp the old hold from memory:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.quota_hold.list","params":{}}
+JSON
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.quota_hold.clear","params":{"provider":"codex","reason":"usage poller reads 26%; the pane notice was stale"}}
+JSON
+```
+
+Move the fleet to the other provider from the CLI (Issue #3923): `launch_agent`
+switches the saved launch profile's agent, resets model / reasoning to that
+agent's defaults, and keeps the wizard's runtime and Docker choices. It refuses
+when no profile was ever saved:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.config.set","params":{"launch_agent":"claude"}}
+JSON
+```
+
+`enabled=true` and `autonomous_mode=true` are rejected for every JSON caller,
+including the registered PM. Enabling either capability requires an explicit
+GUI action. Configuration changes are
+committed atomically to the project preferences source of truth; OFF operations
+also revoke outstanding effect authority. Priority changes become visible to
+the GUI and daemon on their next scan/rebase. Configuration changes use an
+atomic daemon control when it is available; the fence-aware local fallback is
+observed on the next scan.
+
+### Checking which project store the operation reached
+
+`ok: true` proves the operation ran; it does not prove *where*. A `project_root`
+whose repository identity cannot be resolved still gets a working project store
+— just an isolated one, keyed by path, that no running gwt opened under a
+different path will ever read. A write there succeeds and reads straight back
+while changing nothing the GUI or daemon sees.
+
+Every `issue.monitor.*` response therefore carries a `project_store` block on
+the envelope, next to `ok`:
+
+```json
+{
+  "ok": true,
+  "operation": "issue.monitor.status",
+  "project_store": {
+    "project_root": "/Users/you/Workbench/gwt",
+    "hash": "99a8660247f5bc49",
+    "source": "nested_bare_repository",
+    "identity_resolved": true,
+    "store_path": "/Users/you/.gwt/projects/99a8660247f5bc49"
+  }
+}
+```
+
+- `identity_resolved: true` — the store is keyed by the repository's origin, so
+  every worktree and layout root of that repository shares it. `source` is
+  `origin` or `nested_bare_repository`.
+- `identity_resolved: false` — the store is isolated to this path. `source` is
+  `path_fallback` (no repository identity was resolvable) or
+  `ambiguous_nested_bare_repositories` (several direct-child bare repositories
+  name different origins; the rejected `candidates` are listed).
+
+Check `identity_resolved` and `hash` after any write that matters. A path
+fallback usually means the `project_root` was a directory that only *contains*
+the repository — pass the repository or a worktree inside it instead. Do not
+infer the landing from file mtimes under `~/.gwt/projects/`.
+
+## Parked Question Handoffs
+
+An unattended autonomous execution never waits on a confirmation question. A
+question tool call is converted into a structured handoff before it can wait:
+the owner Issue is parked as `NeedsHuman` and its active slot is released for
+the next ready Issue.
+
+List the questions parked executions are waiting on:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.questions","params":{}}
+JSON
+```
+
+Each entry carries the owner Issue, the asking session, the question text, the
+offered options, the rationale, and a machine-readable `reason_code`.
+
+Answer one parked question by its `handoff_id`:
+
+```bash
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"issue.monitor.question.answer","params":{"handoff_id":"<id>","answer":"<decision>"}}
+JSON
+```
+
+An unknown or already-answered `handoff_id` is rejected rather than silently
+accepted. On the next scan the driver un-parks the Issue and resumes the exact
+stored session with the answer as its first prompt — no duplicate launch.
 
 ## Workflows
 

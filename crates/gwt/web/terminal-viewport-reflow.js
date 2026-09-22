@@ -609,6 +609,29 @@ export function rearmRefreshOnVisible({
 }
 
 /**
+ * Resolve caller-owned pending refresh state after an activation attempt.
+ *
+ * Persisted geometry and the caller-owned authoritative pending flag both
+ * require settlement. A failed authoritative attempt must stay pending for a
+ * later visibility or layout recovery, while a successful one clears that
+ * intent. Ordinary queued redraws are intentionally excluded: they may block
+ * the focus fast path, but focus-only failures must not promote them into
+ * persistent geometry work.
+ */
+export function resolveTerminalViewportRefreshSettlement({
+  activationRan,
+  shouldPersistGeometry = false,
+  hasAuthoritativePendingRefresh = false,
+} = {}) {
+  const authoritative =
+    shouldPersistGeometry === true || hasAuthoritativePendingRefresh === true;
+  return {
+    shouldUpdate: authoritative,
+    pending: authoritative && activationRan !== true,
+  };
+}
+
+/**
  * Route a terminal fit without ever treating a hidden or unresolved grid as
  * authoritative. Persisted requests stay pending until a later visible fit
  * can measure the terminal and publish fresh cols/rows.
@@ -618,6 +641,7 @@ export function runTerminalFitRequest({
   canFit,
   activate,
   markPending,
+  clearPending,
 }) {
   if (typeof canFit === "function" && !canFit()) {
     if (persist && typeof markPending === "function") {
@@ -626,8 +650,14 @@ export function runTerminalFitRequest({
     return null;
   }
   const activation = typeof activate === "function" ? activate() : null;
-  if (persist && activation?.ran !== true && typeof markPending === "function") {
-    markPending();
+  if (persist) {
+    if (activation?.ran === true) {
+      if (typeof clearPending === "function") {
+        clearPending();
+      }
+    } else if (typeof markPending === "function") {
+      markPending();
+    }
   }
   return activation;
 }

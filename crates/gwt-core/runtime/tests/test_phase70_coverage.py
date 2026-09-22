@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -111,6 +112,30 @@ class GenerationBranchTests(unittest.TestCase):
             self.assertEqual(copied, 0)
 
 
+class WorkEventShardDiscoveryBranchTests(unittest.TestCase):
+    def test_store_parent_inspection_error_reports_the_managed_path(self):
+        store = Path("/repo/.gwt/work/events")
+        with mock.patch.object(Path, "lstat", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(ValueError, re.escape(str(store.parent.parent))):
+                runner._work_event_shard_store_exists(store)
+
+    def test_bucket_enumeration_error_reports_the_bucket_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / ".gwt" / "work" / "events"
+            bucket = store / "aa"
+            bucket.mkdir(parents=True)
+            original_iterdir = Path.iterdir
+
+            def fail_bucket_iterdir(path: Path):
+                if path == bucket:
+                    raise PermissionError("denied")
+                return original_iterdir(path)
+
+            with mock.patch.object(Path, "iterdir", fail_bucket_iterdir):
+                with self.assertRaisesRegex(ValueError, re.escape(str(bucket))):
+                    runner._enumerate_work_event_shards(store)
+
+
 class InProcessYieldTests(unittest.TestCase):
     def test_background_full_build_yields_in_process(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +182,25 @@ class PublishFailurePropagationTests(unittest.TestCase):
             db_root = base / "index"
             project = base / "project"
             project.mkdir()
+            # Issue #4205: the issues build refuses an empty corpus before it
+            # ever reaches publication, so a cached issue is required to keep
+            # this test exercising the publish-failure branch.
+            issue_dir = base / ".gwt" / "cache" / "issues" / REPO_HASH / "1"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "number": 1,
+                        "title": "Cached issue",
+                        "labels": [],
+                        "state": "open",
+                        "updated_at": "2026-09-10T00:00:00Z",
+                        "comment_ids": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (issue_dir / "body.md").write_text("Body", encoding="utf-8")
             cases = [
                 lambda: runner.action_index_specs_v2(
                     project_root=str(project),
@@ -207,14 +251,22 @@ class PublishFailurePropagationTests(unittest.TestCase):
                     self.assertEqual(result, failure)
                 with mock.patch.object(
                     runner, "_publish_generation", return_value=failure
-                ):
+                ) as publish:
                     result = runner.action_index_issues_v2(
                         repo_hash=REPO_HASH,
                         project_root=str(project),
                         db_root=db_root,
                         respect_ttl=False,
                     )
-                self.assertEqual(result, failure)
+                # The issues scope records the failure in its repair gate
+                # (Issue #4205) instead of returning the publisher dict
+                # verbatim, but the failure must still propagate. The
+                # EMPTY_CORPUS short-circuit is covered separately in
+                # test_issue_ttl / test_auto_build_fallback; this case must keep
+                # reaching the publisher.
+                publish.assert_called_once()
+                self.assertFalse(result.get("ok"), result)
+                self.assertEqual(result.get("error_code"), "PUBLISH_FAILED", result)
 
 
 class SearchClassificationBranchTests(unittest.TestCase):
@@ -224,10 +276,21 @@ class SearchClassificationBranchTests(unittest.TestCase):
             "healthy": True,
             "ttl_remaining_seconds": 120,
         }
-        stale_drift = {
+        # Issue #4132: the store trails the Issue cache but agrees with its
+        # own manifest — serve it and queue a refresh instead of blocking.
+        source_drift = {
             "exists": True,
             "healthy": False,
+            "repair_required": True,
+            "source_drift": True,
             "reason": "source_cache_changed",
+        }
+        store_contradicts_meta = {
+            "exists": True,
+            "healthy": False,
+            "repair_required": True,
+            "source_drift": False,
+            "reason": "count_mismatch",
         }
         broken_meta = {
             "exists": True,
@@ -236,7 +299,8 @@ class SearchClassificationBranchTests(unittest.TestCase):
         }
         for health, expected in [
             (healthy_fresh, "fresh"),
-            (stale_drift, "stale"),
+            (source_drift, "stale"),
+            (store_contradicts_meta, "corrupt"),
             (broken_meta, "corrupt"),
         ]:
             with mock.patch.object(runner, "_issue_status_v2", return_value=health):
@@ -245,7 +309,7 @@ class SearchClassificationBranchTests(unittest.TestCase):
                 )
             self.assertEqual(state, expected, health)
 
-    def test_search_multi_marks_scope_corrupt_when_query_blows_up(self):
+    def test_search_multi_keeps_healthy_scope_out_of_corrupt_on_query_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(
                 os.environ,
@@ -272,8 +336,47 @@ class SearchClassificationBranchTests(unittest.TestCase):
                     scopes=["works"],
                     db_root=Path(tmp),
                 )
+        self.assertFalse(payload.get("ok"), payload)
+        self.assertEqual(payload.get("error_code"), "SEARCH_FAILED", payload)
+        self.assertIs(payload.get("retryable"), False, payload)
+        self.assertEqual(payload.get("affected_scopes"), ["works"], payload)
+        self.assertNotIn("scopes", payload)
+
+    def test_search_multi_marks_scope_corrupt_only_when_recheck_is_corrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GWT_INDEX_FAKE_EMBEDDING": "1",
+                    "GWT_INDEX_COORDINATOR_ROOT": tmp,
+                },
+                clear=False,
+            ), mock.patch.object(
+                runner,
+                "_classify_scope_for_search",
+                side_effect=[
+                    ("fresh", {"reason": "ready"}),
+                    ("corrupt", {"reason": "count_mismatch"}),
+                ],
+            ), mock.patch.object(
+                runner,
+                "_search_scope_collection",
+                side_effect=RuntimeError("store broke after classification"),
+            ):
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=None,
+                    project_root=None,
+                    query="q",
+                    n_results=3,
+                    scopes=["works"],
+                    db_root=Path(tmp),
+                )
         self.assertTrue(payload.get("ok"), payload)
         self.assertEqual(payload["scopes"]["works"]["state"], "corrupt", payload)
+        self.assertEqual(
+            payload["scopes"]["works"]["reason"], "count_mismatch", payload
+        )
 
     def test_search_scope_collection_emits_all_terms_suggestions(self):
         with tempfile.TemporaryDirectory() as tmp:

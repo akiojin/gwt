@@ -3,6 +3,9 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+#[cfg(unix)]
+use std::{path::PathBuf, process::Output};
+
 use gwt::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
@@ -10,31 +13,30 @@ use gwt::{
 };
 use gwt_agent::AgentId;
 use gwt_core::process::hidden_command;
-use gwt_skills::{CodexHookDiscoveryMode, SessionKind};
+use gwt_skills::settings_local::{hook_bin_override, ScopedHookBin};
+use gwt_skills::CodexHookDiscoveryMode;
 use serde_json::Value;
 use tempfile::tempdir;
 
-/// SPEC-3247 AS-2 / AS-3 (delivery wiring): materializing managed assets with
-/// `SessionKind::Intake` writes a coordination SKILL.md that omits the
-/// `workspace.update` Work-state instruction and frames curation, while
-/// `SessionKind::Execution` keeps the producing-work instruction. This guards
-/// the boundary a regression to a hardcoded kind would otherwise pass silently.
+/// SPEC #3245 FR-004 / AC-1: the coordination guidance no longer branches by
+/// session kind. Every materialization gets the single guidance including the
+/// `workspace.update` Work-state instruction; the curation framing that told
+/// intake sessions they "produce no Work" is gone (#3379 contradiction).
 #[test]
-fn session_kind_selects_intake_or_execution_coordination_guidance() {
-    fn materialize_and_read(kind: SessionKind) -> String {
+fn coordination_guidance_is_identical_for_all_session_kinds() {
+    fn materialize_and_read(is_ephemeral: bool) -> String {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
-        let _env_guard = env_lock();
         let cli_bin = dir.path().join("bin/gwtd");
         std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
         std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
         refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
             dir.path(),
             &AgentId::ClaudeCode,
             CodexHookDiscoveryMode::WorkspaceHome,
-            kind,
+            is_ephemeral,
         )
         .expect("materialize managed assets");
 
@@ -42,60 +44,68 @@ fn session_kind_selects_intake_or_execution_coordination_guidance() {
             .expect("read coordination SKILL.md")
     }
 
-    let intake = materialize_and_read(SessionKind::Intake);
-    assert!(
-        !intake.contains(r#""operation":"workspace.update""#),
-        "intake materialized guidance must omit the workspace.update Work-state instruction"
+    let intake = materialize_and_read(true);
+    let execution = materialize_and_read(false);
+    assert_eq!(
+        intake, execution,
+        "guidance must be identical for every session kind (single guidance, FR-004)"
     );
     assert!(
-        intake.contains("intake sessions produce no Work"),
-        "intake materialized guidance must frame curation"
+        intake.contains(r#""operation":"workspace.update""#),
+        "the single guidance must keep the workspace.update Work-state instruction"
     );
-
-    let execution = materialize_and_read(SessionKind::Execution);
     assert!(
-        execution.contains(r#""operation":"workspace.update""#),
-        "execution materialized guidance must keep the workspace.update Work-state instruction"
+        !intake.contains("intake sessions produce no Work"),
+        "the curation framing must be gone from the single guidance"
     );
 }
 
-/// SPEC-3248 P4 (FR-011): materializing with `SessionKind::Intake` applies the
-/// reduced (curation) skill set — implementation skills are dropped, curation
-/// skills stay; execution keeps the full set.
+/// SPEC #3245 FR-003 / AC-1: every session kind receives the full skill set.
+/// The reduced (curation) skill set is removed — implementation skills stay
+/// available in intake-kind materializations too.
 #[test]
-fn intake_materialize_applies_reduced_skill_set() {
-    fn materialize(kind: SessionKind) -> tempfile::TempDir {
+fn intake_materialize_keeps_full_skill_set() {
+    fn materialize(is_ephemeral: bool) -> tempfile::TempDir {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
-        let _env_guard = env_lock();
         let cli_bin = dir.path().join("bin/gwtd");
         std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
         std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
         refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
             dir.path(),
             &AgentId::ClaudeCode,
             CodexHookDiscoveryMode::WorkspaceHome,
-            kind,
+            is_ephemeral,
         )
         .expect("materialize managed assets");
         dir
     }
 
-    let intake = materialize(SessionKind::Intake);
+    let intake = materialize(true);
     assert!(
-        !intake.path().join(".claude/skills/gwt-build-spec").exists(),
-        "intake must drop the implementation skill gwt-build-spec"
+        intake
+            .path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "intake must keep the implementation skill gwt-build-spec (full set)"
     );
     assert!(
         intake
             .path()
             .join(".claude/skills/gwt-register-issue/SKILL.md")
             .exists(),
-        "intake must keep curation skills"
+        "intake must keep registration skills"
+    );
+    assert!(
+        intake
+            .path()
+            .join(".claude/skills/gwt-register-spec/SKILL.md")
+            .exists(),
+        "intake must keep the register-spec alias too (FR-005)"
     );
 
-    let execution = materialize(SessionKind::Execution);
+    let execution = materialize(false);
     assert!(
         execution
             .path()
@@ -105,36 +115,32 @@ fn intake_materialize_applies_reduced_skill_set() {
     );
 }
 
-/// #3377 (AC): a worktree whose lane file says intake keeps the reduced
-/// (curation) skill set when re-materialized by a process WITHOUT
-/// `GWT_SESSION_KIND` in its env (e.g. the GUI front door). Before #3399 the
-/// resolver read only the env, fell back to Execution, and wrote
-/// implementation skills back into the intake worktree.
+/// SPEC #3245 FR-003: an intake lane file no longer changes the distributed
+/// skill set — envless re-materialization (e.g. the GUI front door) writes
+/// the full set exactly like every other worktree.
 #[test]
-fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
+fn envless_rematerialize_keeps_full_skill_set_for_intake_lane_file() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), &gwt_skills::INTAKE_PROFILE)
-        .expect("write intake lane file");
-    let _env_guard = env_lock();
-    let _kind = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
         .expect("materialize managed assets");
 
     assert!(
-        !dir.path().join(".claude/skills/gwt-build-spec").exists(),
-        "intake lane file must keep the reduced skill set without env"
+        dir.path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "an intake lane file must not reduce the distributed skill set"
     );
     assert!(
         dir.path()
             .join(".claude/skills/gwt-register-issue/SKILL.md")
             .exists(),
-        "intake must keep curation skills"
+        "registration skills stay distributed everywhere"
     );
 }
 
@@ -145,7 +151,7 @@ fn envless_rematerialize_preserves_intake_lane_from_lane_file() {
 /// refuses to heal. Execution worktrees keep the tracked copies (SPEC #1942).
 #[test]
 fn intake_materialize_overrides_stale_tracked_gwt_skills() {
-    fn materialize_with_stale_tracked(kind: SessionKind) -> tempfile::TempDir {
+    fn materialize_with_stale_tracked(is_ephemeral: bool) -> tempfile::TempDir {
         let dir = tempdir().expect("tempdir");
         run_git(dir.path(), &["init", "-q"]);
         // A stale tracked copy of a curation skill (survives the reduced set).
@@ -159,22 +165,21 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
             &["add", ".claude/skills/gwt-register-issue/SKILL.md"],
         );
 
-        let _env_guard = env_lock();
         let cli_bin = dir.path().join("bin/gwtd");
         std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
         std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
         refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
             dir.path(),
             &AgentId::ClaudeCode,
             CodexHookDiscoveryMode::WorkspaceHome,
-            kind,
+            is_ephemeral,
         )
         .expect("materialize managed assets");
         dir
     }
 
-    let intake = materialize_with_stale_tracked(SessionKind::Intake);
+    let intake = materialize_with_stale_tracked(true);
     let refreshed = std::fs::read_to_string(
         intake
             .path()
@@ -186,7 +191,7 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
         "intake must refresh a stale tracked gwt skill from the embedded bundle"
     );
 
-    let execution = materialize_with_stale_tracked(SessionKind::Execution);
+    let execution = materialize_with_stale_tracked(false);
     let preserved = std::fs::read_to_string(
         execution
             .path()
@@ -203,13 +208,10 @@ fn intake_materialize_overrides_stale_tracked_gwt_skills() {
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
@@ -250,6 +252,19 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         coordination_body.contains("regardless of project AGENTS.md / CLAUDE.md content"),
         "coordination skill description must declare project-AGENTS.md-independence"
     );
+    assert!(
+        coordination_body.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
+            && coordination_body.contains("immutable event shard"),
+        "materialized coordination guidance must deliver new Work events as bucketed immutable shards"
+    );
+    assert!(
+        coordination_body.contains("frozen read-only compatibility history"),
+        "materialized coordination guidance must make legacy events.jsonl read-only"
+    );
+    assert!(
+        coordination_body.contains(".gwt/work/events/<digest-prefix>/.*.jsonl.create-*"),
+        "materialized guidance must exclude writer temp residue from delivery"
+    );
     let claude_settings = std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
         .expect("read claude");
     let codex_hooks =
@@ -257,16 +272,17 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     let cli_bin_text = cli_bin.display().to_string();
     // Diagnostic-rich asserts: if the test ever flakes on CI again,
     // the failure message includes the resolved cli_bin path, the
-    // observed GWT_HOOK_BIN env value, and a redacted view of the
-    // generated commands so we can see WHICH command shape mismatched
-    // instead of just `assertion failed`.
-    let observed_env = std::env::var("GWT_HOOK_BIN").unwrap_or_else(|_| "<unset>".to_string());
+    // thread-local hook bin override in effect (#4057: no process env is
+    // involved any more), and a redacted view of the generated commands so
+    // we can see WHICH command shape mismatched instead of just
+    // `assertion failed`.
+    let observed_override = hook_bin_override().unwrap_or_else(|| "<unset>".to_string());
     let claude_commands = json_commands(&claude_settings);
     assert!(
         claude_commands
             .iter()
             .any(|command| command.contains(&cli_bin_text)),
-        "claude settings missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  GWT_HOOK_BIN env: {observed_env}\n  generated commands ({} entries):\n{}",
+        "claude settings missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
         claude_commands.len(),
         claude_commands
             .iter()
@@ -279,7 +295,7 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         codex_commands
             .iter()
             .any(|command| command.contains(&cli_bin_text)),
-        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  GWT_HOOK_BIN env: {observed_env}\n  generated commands ({} entries):\n{}",
+        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  hook bin override: {observed_override}\n  generated commands ({} entries):\n{}",
         codex_commands.len(),
         codex_commands
             .iter()
@@ -303,17 +319,241 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     assert!(exclude.contains(".codex/skills/gwt-*"));
 }
 
+/// Issue #4339 AC-1 / AC-3: a worktree inherits `core.hooksPath` through git
+/// config while the directory it names arrives empty, so worktree
+/// materialization has to make the required hooks real — without adding a
+/// tracked diff.
+#[test]
+fn refresh_managed_gwt_assets_materializes_the_configured_git_hook_directory() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    run_git(root, &["init", "-q"]);
+    run_git(root, &["config", "user.email", "test@example.com"]);
+    run_git(root, &["config", "user.name", "Test User"]);
+    run_git(root, &["config", "core.hooksPath", ".husky/_"]);
+    std::fs::create_dir_all(root.join(".husky")).expect("create .husky");
+    std::fs::write(
+        root.join(".husky/commit-msg"),
+        "#!/usr/bin/env sh\nexit 0\n",
+    )
+    .expect("write commit-msg source");
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-q", "-m", "feat: seed"]);
+    let cli_bin = root.join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+    assert!(
+        !root.join(".husky/_/commit-msg").exists(),
+        "the configured hook directory must start out empty"
+    );
+
+    refresh_managed_gwt_assets_for_worktree(root).expect("refresh managed assets");
+
+    assert!(
+        root.join(".husky/_/commit-msg").is_file(),
+        "materialization must create the hook core.hooksPath points at"
+    );
+    let status = hidden_command("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git status");
+    assert!(
+        String::from_utf8_lossy(&status.stdout)
+            .lines()
+            .all(|line| !line.contains(".husky")),
+        "materialized hooks must stay out of the tracked diff: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_audit_accepts_all_provider_surfaces_and_preserves_user_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_lock();
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let hermes_home = tempdir().expect("hermes home tempdir");
+    let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
+
+    let stable_hook_bin = dir.path().join("installed/gwtd'${stable}");
+    std::fs::create_dir_all(stable_hook_bin.parent().expect("stable bin parent"))
+        .expect("create stable bin parent");
+    std::fs::write(&stable_hook_bin, "#!/bin/sh\nexit 0\n").expect("write stable hook bin");
+    std::fs::set_permissions(&stable_hook_bin, std::fs::Permissions::from_mode(0o755))
+        .expect("make stable hook bin executable");
+    let _hook_bin_guard = ScopedHookBin::set(&stable_hook_bin);
+
+    let claude_settings = dir.path().join(".claude/settings.local.json");
+    std::fs::create_dir_all(claude_settings.parent().expect("Claude settings parent"))
+        .expect("create Claude settings parent");
+    std::fs::write(
+        &claude_settings,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "customSetting": true,
+            "hooks": {
+                "Stop": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "echo keep-user-hook"
+                    }]
+                }, {
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/old/worktree/target/debug/gwtd hook event Stop"
+                    }]
+                }]
+            }
+        }))
+        .expect("serialize Claude settings"),
+    )
+    .expect("seed Claude settings");
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
+
+    let hook_artifacts = [
+        ".claude/settings.local.json",
+        ".codex/hooks.json",
+        ".gwt/opencode/plugins/gwt-hooks.js",
+        ".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts",
+        ".gwt/hermes/agent-hooks/gwt-hook.sh",
+    ];
+    for artifact in hook_artifacts {
+        assert!(
+            dir.path().join(artifact).is_file(),
+            "missing managed hook surface: {artifact}"
+        );
+    }
+
+    let before = hook_artifacts
+        .iter()
+        .map(|artifact| std::fs::read(dir.path().join(artifact)).expect("read hook artifact"))
+        .collect::<Vec<_>>();
+    let output = run_browser_check_hook_audit(dir.path(), &stable_hook_bin, None);
+    assert!(
+        output.status.success(),
+        "browser-check audit failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = hook_artifacts
+        .iter()
+        .map(|artifact| std::fs::read(dir.path().join(artifact)).expect("read hook artifact"))
+        .collect::<Vec<_>>();
+    assert_eq!(before, after, "hook.health audit must be read-only");
+
+    let rendered_claude =
+        std::fs::read_to_string(&claude_settings).expect("read refreshed Claude settings");
+    assert!(rendered_claude.contains("echo keep-user-hook"));
+    assert!(!rendered_claude.contains("/old/worktree/target/debug/gwtd"));
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_audit_blocks_exact_fallback_mismatch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_guard = env_lock();
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let hermes_home = tempdir().expect("hermes home tempdir");
+    let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
+    let _hook_bin_guard = ScopedHookBin::set("gwtd");
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
+
+    let opencode_hook = dir.path().join(".gwt/opencode/plugins/gwt-hooks.js");
+    let rendered = std::fs::read_to_string(&opencode_hook).expect("read OpenCode hook");
+    let mismatched = rendered.replacen(
+        "process.env.GWT_BIN_PATH || \"gwtd\"",
+        "process.env.GWT_BIN_PATH || \"/wrong/stable/gwtd\"",
+        1,
+    );
+    assert_ne!(
+        rendered, mismatched,
+        "OpenCode fallback fixture must change"
+    );
+    std::fs::write(&opencode_hook, mismatched).expect("write mismatched OpenCode hook");
+
+    let path_dir = tempdir().expect("PATH tempdir");
+    let path_gwtd = path_dir.path().join("gwtd");
+    std::fs::write(&path_gwtd, "#!/bin/sh\nexit 0\n").expect("write PATH gwtd");
+    std::fs::set_permissions(&path_gwtd, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH gwtd executable");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let audit_path = std::env::join_paths(
+        std::iter::once(path_dir.path().to_path_buf()).chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose audit PATH");
+
+    let output = run_browser_check_hook_audit(dir.path(), Path::new("gwtd"), Some(&audit_path));
+    assert!(
+        !output.status.success(),
+        "browser-check audit unexpectedly accepted mismatched fallback"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("managed hook surfaces did not converge"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("managed hook binary skew")
+            && stderr.contains("/wrong/stable/gwtd")
+            && stderr.contains("expected gwtd"),
+        "audit must report the exact fallback mismatch even though the file contains other gwtd tokens:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_audit_allows_missing_logical_fallback() {
+    let _env_guard = env_lock();
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let hermes_home = tempdir().expect("hermes home tempdir");
+    let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
+    let _hook_bin_guard = ScopedHookBin::set("gwtd");
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
+
+    let tools = tempdir().expect("isolated tool PATH");
+    for name in ["bash", "env", "jq", "grep"] {
+        let source = which::which(name).unwrap_or_else(|error| panic!("resolve {name}: {error}"));
+        std::os::unix::fs::symlink(&source, tools.path().join(name))
+            .unwrap_or_else(|error| panic!("link {name} from {}: {error}", source.display()));
+    }
+    assert!(
+        which::which_in("gwtd", Some(tools.path().as_os_str()), dir.path()).is_err(),
+        "isolated audit PATH must not contain gwtd"
+    );
+
+    let output = run_browser_check_hook_audit(
+        dir.path(),
+        Path::new("gwtd"),
+        Some(tools.path().as_os_str()),
+    );
+    assert!(
+        output.status.success(),
+        "a missing logical fallback is fail-open\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
 
     refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Codex)
         .expect("refresh Codex assets");
@@ -353,16 +593,73 @@ fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
 }
 
 #[test]
-fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
+fn refresh_managed_assets_for_agent_self_heals_existing_mirror_targets() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
     let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
     let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    let stale_codex_skill = dir.path().join(".codex/skills/gwt-manage-pr/SKILL.md");
+    std::fs::create_dir_all(stale_codex_skill.parent().expect("skill parent"))
+        .expect("create stale codex skill dir");
+    std::fs::write(&stale_codex_skill, "stale").expect("seed stale codex skill");
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
+        .expect("refresh Claude assets");
+
+    assert!(dir
+        .path()
+        .join(".claude/skills/gwt-manage-pr/references/deliver-flow.md")
+        .exists());
+    assert!(
+        dir.path()
+            .join(".codex/skills/gwt-manage-pr/references/deliver-flow.md")
+            .exists(),
+        "existing Codex managed surface must be self-healed during Claude launch refresh"
+    );
+    assert!(dir.path().join(".codex/hooks.json").exists());
+    assert!(!dir.path().join(".gwt/hermes/config.yaml").exists());
+}
+
+#[test]
+fn refresh_managed_assets_for_an_agent_without_a_surface_still_heals_existing_targets() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    let stale_claude_skill = dir.path().join(".claude/skills/gwt-manage-pr/SKILL.md");
+    std::fs::create_dir_all(stale_claude_skill.parent().expect("skill parent"))
+        .expect("create stale claude skill dir");
+    std::fs::write(&stale_claude_skill, "stale").expect("seed stale claude skill");
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Gemini)
+        .expect("refresh assets for an agent without a managed surface");
+
+    assert!(
+        dir.path()
+            .join(".claude/skills/gwt-manage-pr/references/deliver-flow.md")
+            .exists(),
+        "an agent without its own managed surface must still refresh the existing ones"
+    );
+    assert!(!dir.path().join(".codex").exists());
+}
+
+#[test]
+fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
     // Pin HERMES_HOME to an isolated empty dir so the credential bridge never
     // reads the developer's real ~/.hermes during this test.
     let hermes_home = tempdir().expect("hermes home tempdir");
@@ -401,13 +698,10 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
 fn refresh_existing_managed_assets_refreshes_only_present_provider_surfaces() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
-    let _env_guard = env_lock();
     let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
-    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
     std::fs::create_dir_all(dir.path().join(".codex/skills")).expect("create codex marker");
 
     refresh_existing_managed_gwt_assets_for_worktree(dir.path())
@@ -453,8 +747,6 @@ fn refresh_managed_gwt_assets_reports_the_failed_step() {
 fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
-    gwt_skills::write_lane_file(dir.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
@@ -521,6 +813,295 @@ fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
     );
 }
 
+/// Materialize managed assets into a canonical PM worktree under an isolated
+/// gwt home, returning the worktree so the caller can inspect the result of a
+/// full distribution — the state a PM agent actually starts in.
+fn materialize_into_pm_worktree(
+    home: &Path,
+    agent_id: &AgentId,
+    seed: impl FnOnce(&Path),
+) -> std::path::PathBuf {
+    let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home);
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    run_git(&repo, &["init", "-q"]);
+
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&repo);
+    std::fs::create_dir_all(&worktree).expect("create pm worktree");
+    run_git(&worktree, &["init", "-q"]);
+
+    seed(&worktree);
+
+    let cli_bin = home.join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        agent_id,
+        CodexHookDiscoveryMode::WorkspaceHome,
+        false,
+    )
+    .expect("materialize managed assets");
+    worktree
+}
+
+/// SPEC-3431 FR-001 / T-052 regression: the `$gwt-pm` bootstrap prompt only
+/// resolves if the gwt-pm skill survives the launch's own asset refresh.
+///
+/// The original implementation wrote the skill just before spawning, and the
+/// launch thread's `prune_managed_asset_roots_for_targets` then deleted it
+/// (it removes every `gwt-*` skill dir absent from the embedded bundle, and
+/// gwt-pm is generated rather than bundled). The PM booted as a plain agent
+/// with a dangling prompt. Asserting the post-distribution state is the whole
+/// point — the old synchronous-existence assertion passed while this was live.
+#[test]
+fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::ClaudeCode, |worktree| {
+        gwt_skills::pm_guidance::generate_pm_guidance(worktree).expect("pre-write guidance");
+    });
+
+    let skill = std::fs::read_to_string(
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md"),
+    )
+    .expect("gwt-pm skill must survive distribution");
+    assert_eq!(skill, gwt_skills::pm_guidance::render_skill_md());
+}
+
+/// The resume path never pre-writes the skill, and a binary upgrade must not
+/// leave a PM running an obsolete contract. Both cases are the same
+/// requirement: distribution owns the file's content, unconditionally.
+#[test]
+fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::ClaudeCode, |_| {});
+    let path = worktree
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join(".claude/skills/gwt-pm/SKILL.md");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("guidance generated without a pre-write"),
+        gwt_skills::pm_guidance::render_skill_md()
+    );
+
+    std::fs::write(&path, "stale contract").expect("tamper");
+    let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let _cli_bin_guard = ScopedHookBin::set(home.path().join("bin/gwtd"));
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        &worktree,
+        &AgentId::ClaudeCode,
+        CodexHookDiscoveryMode::WorkspaceHome,
+        false,
+    )
+    .expect("re-materialize");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("guidance restored"),
+        gwt_skills::pm_guidance::render_skill_md(),
+        "a tampered or stale contract must be rewritten from the canonical source"
+    );
+}
+
+/// Issue #3825 AC-5: both generated mirrors must be the canonical
+/// `pm_guidance` source verbatim, and both must carry the nonblocking resident
+/// loop. `.codex` was only ever asserted to exist, so a Codex PM could have
+/// been handed a mirror that disagreed with the Claude one about how long a
+/// cycle may block.
+#[test]
+fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
+    let canonical = gwt_skills::pm_guidance::render_skill_md();
+
+    for (agent, mirror) in [
+        (AgentId::ClaudeCode, ".claude/skills/gwt-pm/SKILL.md"),
+        (AgentId::Codex, ".codex/skills/gwt-pm/SKILL.md"),
+    ] {
+        let home = tempdir().expect("tempdir");
+        let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
+        let rendered =
+            std::fs::read_to_string(worktree.parent().unwrap().join("runtime").join(mirror))
+                .unwrap_or_else(|error| panic!("{mirror} must be generated: {error}"));
+        assert_eq!(
+            rendered, canonical,
+            "{mirror} must be the canonical pm_guidance source verbatim"
+        );
+        for phrase in [
+            "`params.timeout_seconds:5`",
+            "as a background task",
+            "Do not await or synchronously poll it",
+            "outer wall-clock deadline of 5 seconds",
+        ] {
+            assert!(
+                rendered.contains(phrase),
+                "{mirror} must carry the nonblocking resident loop: {phrase}"
+            );
+        }
+        assert!(
+            !rendered.contains("`params.timeout_seconds:60`"),
+            "{mirror} must not restore the 60-second blocking subscribe"
+        );
+    }
+}
+
+/// Per-target isolation holds for gwt-pm exactly as it does for
+/// gwt-coordination: a Codex PM gets the Codex mirror only.
+#[test]
+fn pm_worktree_codex_only_target_writes_only_the_codex_mirror() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::Codex, |_| {});
+    assert!(worktree
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join(".codex/skills/gwt-pm/SKILL.md")
+        .exists());
+    assert!(
+        !worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md")
+            .exists(),
+        "a Codex-only target must not write the Claude mirror"
+    );
+}
+
+/// SPEC-3431 FR-122 / T-484: Grok consumes the existing Claude-compatible
+/// managed target. It gets the canonical PM and coordination guidance plus
+/// Claude hook settings, while tracked project assets remain untouched and no
+/// parallel `.grok` managed tree is invented.
+#[test]
+fn pm_worktree_grok_uses_claude_compatible_managed_assets_without_a_grok_mirror() {
+    let home = tempdir().expect("tempdir");
+    let worktree = materialize_into_pm_worktree(home.path(), &AgentId::GrokBuild, |worktree| {
+        let tracked = worktree.join(".claude/skills/gwt-register-issue/SKILL.md");
+        std::fs::create_dir_all(tracked.parent().expect("tracked skill parent"))
+            .expect("create tracked skill parent");
+        std::fs::write(&tracked, "tracked project skill").expect("seed tracked skill");
+        run_git(
+            worktree,
+            &["add", ".claude/skills/gwt-register-issue/SKILL.md"],
+        );
+    });
+
+    assert!(
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-pm/SKILL.md")
+            .is_file(),
+        "Grok PM must receive the canonical Claude-compatible gwt-pm skill"
+    );
+    assert!(
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/skills/gwt-coordination/SKILL.md")
+            .is_file(),
+        "Grok PM must receive Claude-compatible coordination guidance"
+    );
+    assert!(
+        worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".claude/settings.local.json")
+            .is_file(),
+        "Grok PM must receive Claude-compatible managed hook settings"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".claude/skills/gwt-register-issue/SKILL.md"))
+            .expect("read preserved tracked skill"),
+        "tracked project skill",
+        "persistent PM materialization must preserve tracked project assets"
+    );
+    assert!(
+        !worktree
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join(".grok")
+            .exists(),
+        "Claude compatibility must not create a duplicate .grok managed tree"
+    );
+}
+
+/// The PM contract must never reach an implementation agent. Its description
+/// shares gwt-coordination's "use proactively at the start of every
+/// conversation" stem, so an agent that picked it up would adopt "you never
+/// implement production code yourself" and silently refuse to implement.
+#[test]
+fn non_pm_worktree_never_receives_gwt_pm_guidance() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("materialize managed assets");
+
+    assert!(!dir.path().join(".claude/skills/gwt-pm").exists());
+    assert!(!dir.path().join(".codex/skills/gwt-pm").exists());
+}
+
+/// #4057 regression: two materializations running at the same time on
+/// different threads, each pinning its own hook binary through the thread-local
+/// seam, must never see each other's binary in the generated hook commands.
+/// The CI flake this guards against embedded another test's (already deleted)
+/// tempdir because the pin was a process-global `GWT_HOOK_BIN`.
+#[test]
+fn concurrent_materializations_keep_their_own_hook_bin() {
+    const WRITERS: usize = 4;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+    let workers = (0..WRITERS)
+        .map(|_| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let dir = tempdir().expect("tempdir");
+                run_git(dir.path(), &["init", "-q"]);
+                let cli_bin = dir.path().join("bin/gwtd");
+                std::fs::create_dir_all(cli_bin.parent().expect("bin parent"))
+                    .expect("create bin dir");
+                std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+                let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+                barrier.wait();
+                refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
+                    .expect("materialize managed assets");
+                let settings =
+                    std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
+                        .expect("read claude settings");
+                (cli_bin.display().to_string(), json_commands(&settings))
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join materialization thread"))
+        .collect::<Vec<_>>();
+    for (own_bin, commands) in &results {
+        assert!(
+            commands.iter().any(|command| command.contains(own_bin)),
+            "generated commands must embed this thread's hook bin {own_bin}:\n{commands:#?}"
+        );
+        for (other_bin, _) in &results {
+            if other_bin != own_bin {
+                assert!(
+                    !commands.iter().any(|command| command.contains(other_bin)),
+                    "another thread's hook bin {other_bin} leaked into commands generated for {own_bin}:\n{commands:#?}"
+                );
+            }
+        }
+    }
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let output = hidden_command("git")
         .args(args)
@@ -533,6 +1114,58 @@ fn run_git(repo: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(unix)]
+fn browser_check_shell_block(name: &str) -> String {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let skill = std::fs::read_to_string(&skill_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", skill_path.display()));
+    let begin = format!("# browser-check-{name}-begin");
+    let end = format!("# browser-check-{name}-end");
+    let body = skill
+        .split_once(&begin)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {begin}"))
+        .1
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {end}"))
+        .0;
+    body.lines()
+        .map(|line| line.strip_prefix("     ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(unix)]
+fn run_browser_check_hook_audit(
+    worktree: &Path,
+    expected_hook_bin: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Output {
+    let script = format!(
+        "{}\n{}",
+        browser_check_shell_block("hook-authority"),
+        browser_check_shell_block("hook-audit")
+    );
+    let mut command = hidden_command("bash");
+    command
+        .args(["-c", &script])
+        .current_dir(worktree)
+        .env("REPO_ROOT", worktree)
+        .env("CHECK_HOME", worktree)
+        .env("CHECKOUT_GWTD", env!("CARGO_BIN_EXE_gwtd"))
+        .env("GWT_HOOK_BIN", expected_hook_bin)
+        .env("GWT_BIN_PATH", "/ambient/stale/target/debug/gwtd")
+        .env_remove(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .env_remove("GWT_HOOK_FORWARD_TOKEN")
+        .env_remove("GWT_HOOK_FORWARD_URL")
+        .env_remove("GWT_PROJECT_ROOT")
+        .env_remove("GWT_SESSION_ID");
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    command.output().expect("run browser-check hook audit")
 }
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -568,4 +1201,81 @@ fn json_commands(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     collect(&value, &mut out);
     out
+}
+
+/// Issue #4283 AC-6: pane creation must not queue behind the managed-asset
+/// materialization of an unrelated worktree.
+///
+/// The lock used to be keyed on the repository's main worktree root, so one
+/// exclusive file lock covered every worktree of the repository. Every pane
+/// launch, every fresh-worktree SessionStart self-heal and every startup
+/// hook-config self-heal took it around the full ~350 ms materialization, and
+/// the fleet serialized: `phase:pane.create.managed_assets` measured a p50 of
+/// 34,001 ms against a 330–660 ms uncontended cost.
+///
+/// The bound is expressed as a deadline rather than as a wall-clock assertion:
+/// with a sibling worktree's lock held for the whole test, materialization here
+/// must still finish inside the operation deadline. Under the old key it waited
+/// for the holder and failed the deadline instead.
+#[test]
+fn materializing_one_worktree_does_not_wait_on_a_sibling_worktrees_asset_lock() {
+    use std::time::{Duration, Instant};
+
+    let _env_guard = env_lock();
+    let home = tempdir().expect("tempdir");
+    let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    run_git(&repo, &["init", "-q", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "test"]);
+    std::fs::write(repo.join("README.md"), "seed\n").expect("seed file");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-qm", "seed"]);
+
+    let sibling = home.path().join("sibling");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "sibling",
+            sibling.to_str().expect("sibling path"),
+        ],
+    );
+    for worktree in [&repo, &sibling] {
+        std::fs::create_dir_all(worktree.join(".claude/skills")).expect("claude surface");
+        std::fs::create_dir_all(worktree.join(".codex/skills")).expect("codex surface");
+    }
+
+    let cli_bin = home.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedHookBin::set(&cli_bin);
+
+    let held_path = gwt::managed_asset_lock_path(&repo);
+    std::fs::create_dir_all(held_path.parent().expect("lock dir")).expect("create lock dir");
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&held_path)
+        .expect("open sibling lock");
+    fs2::FileExt::lock_exclusive(&held).expect("hold sibling lock");
+
+    let deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + Duration::from_secs(20),
+    );
+    let outcome = refresh_managed_gwt_assets_for_agent(&sibling, &AgentId::ClaudeCode);
+    drop(deadline);
+    fs2::FileExt::unlock(&held).expect("release sibling lock");
+
+    outcome.expect(
+        "a sibling worktree's held managed-asset lock must not block this worktree's \
+         materialization",
+    );
 }

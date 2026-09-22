@@ -7,6 +7,8 @@ import { parseHTML } from "linkedom";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
+const runtimeCpuUnitsPattern =
+  /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 
 test("Operator shell fails open when browser storage and media APIs are unavailable", async () => {
   const { initOperatorShell } = await importOperatorShell();
@@ -159,7 +161,7 @@ test("FR-047 (anshin): MISSION cell shows done/total and converges to complete",
 test("Runtime health renderer updates severity-first compact PERF values", async () => {
   const { applyRuntimeHealth } = await importOperatorShell();
   assert.equal(typeof applyRuntimeHealth, "function");
-  const { document } = parseHTML(html);
+  const { document, window } = parseHTML(html);
 
   applyRuntimeHealth(document, {
     state: "warn",
@@ -182,6 +184,14 @@ test("Runtime health renderer updates severity-first compact PERF values", async
   assert.equal(value?.textContent, "WARN 42% 768M");
   assert.match(cell?.getAttribute("title") ?? "", /processes: 3/);
   assert.match(cell?.getAttribute("title") ?? "", /dropped: \+2/);
+  assert.match(cell?.getAttribute("title") ?? "", runtimeCpuUnitsPattern);
+  assert.match(cell?.getAttribute("aria-label") ?? "", /WARN.*42%.*768M/i);
+  assert.match(cell?.getAttribute("aria-label") ?? "", runtimeCpuUnitsPattern);
+
+  cell?.dispatchEvent(new window.Event("focus", { bubbles: true }));
+  const detail = document.getElementById("op-runtime-health-detail");
+  assert.equal(detail?.hidden, false, "keyboard focus must expose runtime detail");
+  assert.match(detail?.textContent ?? "", runtimeCpuUnitsPattern);
 });
 
 test("Runtime health renderer shows structured diagnostic hover detail", async () => {
@@ -191,7 +201,7 @@ test("Runtime health renderer shows structured diagnostic hover detail", async (
 
   applyRuntimeHealth(document, {
     state: "hot",
-    cpu_percent: 101.2,
+    cpu_percent: 501.2,
     memory_bytes: 2 * 1024 * 1024 * 1024,
     process_count: 2,
     runner_count: 1,
@@ -215,7 +225,7 @@ test("Runtime health renderer shows structured diagnostic hover detail", async (
         parent_pid: 101,
         role: "runner",
         name: "chroma_index_runner",
-        cpu_percent: 18.4,
+        cpu_percent: 118.4,
         memory_bytes: 512 * 1024 * 1024,
       },
     ],
@@ -234,9 +244,16 @@ test("Runtime health renderer shows structured diagnostic hover detail", async (
   assert.ok(summary, "expected summary chips");
   assert.ok(queue, "expected queue diagnostics");
   assert.equal(processRows.length, 2);
+  assert.equal(
+    document.getElementById("op-strip-runtime-health-value")?.textContent,
+    "HOT 100% 2.0G",
+    "legacy aggregate payloads must clamp to the host-share ceiling",
+  );
   assert.match(summary?.textContent ?? "", /HOT/);
-  assert.match(summary?.textContent ?? "", /101%/);
+  assert.match(summary?.textContent ?? "", /100%/);
+  assert.doesNotMatch(summary?.textContent ?? "", /501%/);
   assert.match(summary?.textContent ?? "", /2.0G/);
+  assert.match(detail?.textContent ?? "", runtimeCpuUnitsPattern);
   assert.match(queue?.textContent ?? "", /queued/i);
   assert.match(queue?.textContent ?? "", /7/);
 
@@ -254,7 +271,8 @@ test("Runtime health renderer shows structured diagnostic hover detail", async (
   );
   assert.match(
     runnerRow?.querySelector(".op-runtime-health-detail__process-metric")?.textContent ?? "",
-    /18%/,
+    /118%/,
+    "process rows keep the 1 core = 100% convention and are not aggregate-clamped",
   );
   assert.equal(
     detail?.querySelector("button.op-runtime-health-detail__process"),
@@ -729,3 +747,35 @@ async function importOperatorShell() {
   writeFileSync(tmpModule, source);
   return import(pathToFileURL(tmpModule).href);
 }
+
+// Issue #3884 AC-3: the RUNNING cell tells how many of the running agents live
+// as inline terminals inside the Issue window (SPEC-3671 `issue_preview`
+// placement) instead of on the canvas, so "RUNNING 6" with an empty canvas is
+// no longer a contradiction.
+test("Issue #3884 AC-3: RUNNING cell breaks out inline-terminal agents", async () => {
+  const { applyTelemetryCounts } = await importOperatorShell();
+  const { document } = parseHTML(html);
+
+  const runningCell = () => document.querySelector(".op-status-strip__cell--running");
+  const inline = () => document.getElementById("op-strip-running-inline");
+  assert.ok(inline(), "index.html carries the inline breakdown slot inside the RUNNING cell");
+  assert.ok(runningCell()?.contains(inline()));
+
+  applyTelemetryCounts(document, { running: 6, running_inline: 5 });
+  assert.equal(document.getElementById("op-strip-running")?.textContent, "6");
+  assert.equal(inline()?.textContent, "5 inline");
+  assert.equal(inline()?.hidden, false);
+  assert.match(
+    runningCell()?.title || "",
+    /5 of 6 running agents are inline terminals in the Issue window/,
+    "hover explains where the agents are",
+  );
+
+  applyTelemetryCounts(document, { running: 1, running_inline: 0 });
+  assert.equal(inline()?.hidden, true, "no breakdown when every running agent is on the canvas");
+  assert.equal(runningCell()?.title, "");
+
+  // Counts that omit the breakdown (legacy callers) keep the slot hidden.
+  applyTelemetryCounts(document, { running: 2 });
+  assert.equal(inline()?.hidden, true);
+});

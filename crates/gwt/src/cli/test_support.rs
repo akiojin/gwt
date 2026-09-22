@@ -59,7 +59,9 @@ fn main() -> ExitCode {
 
     match args.as_slice() {
         [pr, list, ..] if pr == "pr" && list == "list" => {
-            if mode == "multi-pr-current" {
+            if mode == "foreign-fork-fallback" {
+                println!("[]");
+            } else if mode == "multi-pr-current" {
                 println!("{}", r#"[
 {"number":2537,"title":"Older PR","state":"CLOSED","url":"https://github.com/akiojin/gwt/pull/2537","createdAt":"2026-05-07T08:05:00Z","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"UNKNOWN","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}},
 {"number":2538,"title":"Newer PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}}
@@ -75,15 +77,25 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
+            if mode == "foreign-fork-fallback" {
+                let mut pr = pr_json("12", "Foreign fork PR");
+                pr.pop();
+                pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"other-user"}, "headRepository":{"name":"gwt"}}"#);
+                println!("{pr}");
+                return ExitCode::SUCCESS;
+            }
             if mode == "no-current-pr" {
                 eprintln!("no pull requests found for branch");
                 return ExitCode::from(1);
             }
-            if mode == "behind" {
-                println!("{}", behind_pr_json("12", "Current PR"));
+            let mut pr = if mode == "behind" {
+                behind_pr_json("12", "Current PR")
             } else {
-                println!("{}", pr_json("12", "Current PR"));
-            }
+                pr_json("12", "Current PR")
+            };
+            pr.pop();
+            pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"akiojin"}, "headRepository":{"name":"gwt"}}"#);
+            println!("{pr}");
             return ExitCode::SUCCESS;
         }
         [pr, view, number, repo_flag, _, json_flag, ..]
@@ -250,10 +262,10 @@ fn main() -> ExitCode {
 }
 
 pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
-    let _env_lock = crate::env_test_lock()
+    let env_lock = crate::env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _lock = fake_gh_test_lock()
+    let fake_gh_lock = fake_gh_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
@@ -262,35 +274,61 @@ pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     let repo_path = temp.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo path");
 
-    let old_path = env::var_os("PATH");
-    let old_mode = env::var_os("GWT_FAKE_GH_MODE");
-    let old_state = env::var_os("GWT_FAKE_GH_STATE_FILE");
+    let existing_path = env::var_os("PATH");
+    let existing_mode = env::var_os("GWT_FAKE_GH_MODE");
+    let existing_state = env::var_os("GWT_FAKE_GH_STATE_FILE");
     let state_file = temp.path().join("gh-state");
     let joined_path = env::join_paths(
         std::iter::once(PathBuf::from(temp.path()))
-            .chain(old_path.iter().flat_map(env::split_paths)),
+            .chain(existing_path.iter().flat_map(env::split_paths)),
     )
     .expect("join PATH");
-    env::set_var("PATH", joined_path);
-    env::set_var("GWT_FAKE_GH_MODE", mode);
-    env::set_var("GWT_FAKE_GH_STATE_FILE", &state_file);
+    let outcome = {
+        let _path = ScopedEnvVar::set("PATH", joined_path);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+        let _state = ScopedEnvVar::set("GWT_FAKE_GH_STATE_FILE", &state_file);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&repo_path)))
+    };
+    assert_eq!(
+        env::var_os("PATH"),
+        existing_path,
+        "fake gh helper must restore PATH before releasing the environment lock",
+    );
+    assert_eq!(
+        env::var_os("GWT_FAKE_GH_MODE"),
+        existing_mode,
+        "fake gh helper must restore its mode before releasing the environment lock",
+    );
+    assert_eq!(
+        env::var_os("GWT_FAKE_GH_STATE_FILE"),
+        existing_state,
+        "fake gh helper must restore its state path before releasing the environment lock",
+    );
 
-    let result = test(&repo_path);
+    // Resume a callback panic only after releasing process-wide test locks so
+    // one negative-path assertion cannot poison unrelated parallel tests.
+    drop(fake_gh_lock);
+    drop(env_lock);
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
 
-    match old_path {
-        Some(value) => env::set_var("PATH", value),
-        None => env::remove_var("PATH"),
-    }
-    match old_mode {
-        Some(value) => env::set_var("GWT_FAKE_GH_MODE", value),
-        None => env::remove_var("GWT_FAKE_GH_MODE"),
-    }
-    match old_state {
-        Some(value) => env::set_var("GWT_FAKE_GH_STATE_FILE", value),
-        None => env::remove_var("GWT_FAKE_GH_STATE_FILE"),
-    }
+#[test]
+fn fake_gh_helper_restores_process_env_when_callback_panics() {
+    let outcome = std::panic::catch_unwind(|| {
+        with_fake_gh("success", |_| {
+            std::panic::panic_any("intentional fake-gh callback panic");
+        });
+    });
 
-    result
+    let payload = outcome.expect_err("callback panic must be resumed");
+    assert_eq!(
+        payload.downcast_ref::<&'static str>().copied(),
+        Some("intentional fake-gh callback panic"),
+        "the original callback panic must escape after environment restoration",
+    );
 }
 
 pub fn sample_thread() -> PrReviewThread {
@@ -322,6 +360,8 @@ pub fn sample_issue_snapshot() -> IssueSnapshot {
 
 pub fn sample_pr_status() -> gwt_git::PrStatus {
     gwt_git::PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 128,
         title: "Enforce coverage".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -347,4 +387,24 @@ pub fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<
         .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
         .filter_map(|hook| hook["command"].as_str())
         .collect()
+}
+
+/// Declare that this test accepts its runner's own scheduling priority for
+/// verification children (Issue #4409).
+///
+/// `verify.run` refuses to launch verification from a process running at a
+/// degraded nice value when no daemon can launch it instead, because spawning
+/// in place would hand the workload the agent launch policy's priority. A test
+/// runner inherits whatever priority its parent had and cannot change it, so a
+/// test that drives the real operation would pass or fail on where it happened
+/// to be started from — green in CI and in a terminal, red inside an agent.
+///
+/// These tests are about the record, the settlement rules, and the PR
+/// lifecycle, not about where verification is hosted; the placement decision
+/// has its own tests in `gwt_core::verification_priority` and
+/// `cli::daemon::verification_host`. Hold [`gwt_core::test_support::env_lock`]
+/// before calling this, like any other environment override.
+#[must_use]
+pub fn declare_inherited_spawn_host() -> ScopedEnvVar {
+    ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit")
 }

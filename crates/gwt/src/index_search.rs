@@ -1,5 +1,15 @@
-use std::{ffi::OsString, path::Path, thread, time::Duration};
+use std::{
+    collections::HashSet,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::{Condvar, Mutex, OnceLock},
+    thread,
+    time::{Duration, Instant},
+};
 
+use gwt_core::index_coordinator::{
+    IndexCoordinator, TargetKey, INTERACTIVE_SEARCH_ADMISSION_DEADLINE,
+};
 use serde_json::Value;
 
 use crate::{
@@ -8,6 +18,8 @@ use crate::{
 };
 
 const INDEX_SEARCH_LIMIT: usize = 50;
+const SEARCH_ATTEMPT_HARD_LIMIT_MS: u64 = 30_000;
+const RUNNER_DIAGNOSTIC_MAX_BYTES: usize = 512;
 
 /// Exit code for retryable "index not ready" search failures (Phase 70
 /// FR-388): missing / corrupt scopes that did not repair within the wait
@@ -32,6 +44,38 @@ pub struct IndexSearchNotReady {
     pub affected_scopes: Vec<String>,
     pub waited_ms: u64,
     pub retry_after_ms: u64,
+    /// Issue #4455: a rebuild for `rebuilding_scopes` is running in the
+    /// background. The caller is being told to come back, not to keep waiting.
+    pub rebuild_in_progress: bool,
+    pub rebuilding_scopes: Vec<String>,
+}
+
+/// Non-retryable query failure against a scope whose canonical health check
+/// still reports a usable store (Phase 70a FR-400).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexSearchFailed {
+    pub reason: String,
+    pub affected_scopes: Vec<String>,
+}
+
+/// Retryable infrastructure failure of an internal search attempt (Phase 70d
+/// FR-097/FR-103). This is intentionally crate-private: the public error enum
+/// predates this classification and downstream exhaustive matches must remain
+/// source compatible.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexSearchUnavailable {
+    pub(crate) reason: String,
+    pub(crate) retry_after_ms: u64,
+}
+
+/// Non-retryable stop state that only an explicit `index.repair` clears
+/// (Issue #3866 AC-3). Crate-private for the same source-compatibility reason
+/// as [`IndexSearchUnavailable`]; public callers see `SearchFailed`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexSearchRepairRequired {
+    pub(crate) reason: String,
+    pub(crate) affected_scopes: Vec<String>,
+    pub(crate) recovery: String,
 }
 
 /// Search error surface (Phase 70 FR-388). `NotReady` is retryable and maps
@@ -39,6 +83,7 @@ pub struct IndexSearchNotReady {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexSearchError {
     NotReady(IndexSearchNotReady),
+    SearchFailed(IndexSearchFailed),
     Other(String),
 }
 
@@ -46,19 +91,28 @@ impl IndexSearchError {
     pub fn exit_code(&self) -> i32 {
         match self {
             IndexSearchError::NotReady(_) => INDEX_NOT_READY_EXIT_CODE,
-            IndexSearchError::Other(_) => 1,
+            IndexSearchError::SearchFailed(_) | IndexSearchError::Other(_) => 1,
         }
     }
 
     pub fn error_code(&self) -> Option<&'static str> {
         match self {
             IndexSearchError::NotReady(_) => Some("INDEX_NOT_READY"),
+            IndexSearchError::SearchFailed(_) => Some("SEARCH_FAILED"),
             IndexSearchError::Other(_) => None,
         }
     }
 
     pub fn retryable(&self) -> bool {
         matches!(self, IndexSearchError::NotReady(_))
+    }
+
+    /// Retry delay hint carried by the retryable variants (FR-098 metadata).
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            IndexSearchError::NotReady(not_ready) => Some(not_ready.retry_after_ms),
+            IndexSearchError::SearchFailed(_) | IndexSearchError::Other(_) => None,
+        }
     }
 }
 
@@ -73,6 +127,7 @@ impl std::fmt::Display for IndexSearchError {
                 not_ready.reason,
                 not_ready.retry_after_ms,
             ),
+            IndexSearchError::SearchFailed(failed) => f.write_str(&failed.reason),
             IndexSearchError::Other(message) => f.write_str(message),
         }
     }
@@ -81,6 +136,91 @@ impl std::fmt::Display for IndexSearchError {
 impl From<String> for IndexSearchError {
     fn from(message: String) -> Self {
         IndexSearchError::Other(message)
+    }
+}
+
+/// Crate-internal attempt taxonomy. CLI and Knowledge Bridge consume this
+/// typed path so retry metadata never depends on parsing display strings.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum IndexSearchAttemptError {
+    Public(IndexSearchError),
+    Unavailable(IndexSearchUnavailable),
+    RepairRequired(IndexSearchRepairRequired),
+}
+
+impl IndexSearchAttemptError {
+    pub(crate) fn exit_code(&self) -> i32 {
+        match self {
+            Self::Public(error) => error.exit_code(),
+            Self::Unavailable(_) | Self::RepairRequired(_) => 1,
+        }
+    }
+
+    pub(crate) fn error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Public(error) => error.error_code(),
+            Self::Unavailable(_) => Some("SEARCH_UNAVAILABLE"),
+            Self::RepairRequired(_) => Some("INDEX_REPAIR_REQUIRED"),
+        }
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        match self {
+            Self::Public(error) => error.retryable(),
+            Self::Unavailable(_) => true,
+            Self::RepairRequired(_) => false,
+        }
+    }
+
+    pub(crate) fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::Public(error) => error.retry_after_ms(),
+            Self::Unavailable(unavailable) => Some(unavailable.retry_after_ms),
+            Self::RepairRequired(_) => None,
+        }
+    }
+
+    fn into_public(self) -> IndexSearchError {
+        match self {
+            Self::Public(error) => error,
+            Self::Unavailable(_) => IndexSearchError::Other(
+                "project index search is temporarily unavailable".to_string(),
+            ),
+            Self::RepairRequired(required) => IndexSearchError::SearchFailed(IndexSearchFailed {
+                reason: format!("{}; {}", required.reason, required.recovery),
+                affected_scopes: required.affected_scopes,
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for IndexSearchAttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public(error) => error.fmt(f),
+            Self::Unavailable(unavailable) => write!(
+                f,
+                "search unavailable: {} (retry in {} ms)",
+                unavailable.reason, unavailable.retry_after_ms,
+            ),
+            Self::RepairRequired(required) => write!(
+                f,
+                "index repair required: {}; {}",
+                required.reason, required.recovery,
+            ),
+        }
+    }
+}
+
+impl From<IndexSearchError> for IndexSearchAttemptError {
+    fn from(error: IndexSearchError) -> Self {
+        Self::Public(error)
+    }
+}
+
+impl From<String> for IndexSearchAttemptError {
+    fn from(message: String) -> Self {
+        Self::Public(IndexSearchError::Other(message))
     }
 }
 
@@ -96,17 +236,50 @@ pub fn search_project_index(
     match_mode: IndexSearchMatchMode,
     auto_build: bool,
 ) -> Result<ProjectIndexSearchOutcome, IndexSearchError> {
+    search_project_index_attempt(
+        project_root,
+        query,
+        scopes,
+        selected_worktree_hash,
+        match_mode,
+        auto_build,
+    )
+    .map_err(IndexSearchAttemptError::into_public)
+}
+
+pub(crate) fn search_project_index_attempt(
+    project_root: &Path,
+    query: &str,
+    scopes: &[IndexSearchScope],
+    selected_worktree_hash: Option<&str>,
+    match_mode: IndexSearchMatchMode,
+    auto_build: bool,
+) -> Result<ProjectIndexSearchOutcome, IndexSearchAttemptError> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(ProjectIndexSearchOutcome::default());
     }
-    let index_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
+    // Issue #4145 AC-1: both the GUI blocking-pool caller and the `search`
+    // JSON operation funnel through here, so one guard measures the search
+    // route end to end, early returns included.
+    let _perf_route = crate::perf::RouteTimer::start(crate::perf::PerfRoute::Search);
+    // One absolute attempt budget covers runtime ensure/provisioning, its
+    // cross-process lock, every health probe, repair polling, and the final
+    // runner. Nested callers retain an earlier ambient deadline.
+    let _attempt_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + Duration::from_millis(search_attempt_deadline_ms()),
+    );
+    let git_context = crate::index_worker::project_index_git_context_for_search(project_root)
+        .map_err(|_| search_unavailable_error("project index git context unavailable"))?
         .ok_or_else(|| "project index search requires a git origin remote".to_string())?;
+    let index_repo_root = git_context.repo_root.clone();
     let repo_hash = crate::index_worker::detect_repo_hash(&index_repo_root)
         .ok_or_else(|| "project index search requires a git origin remote".to_string())?;
-    let repo_search_root = crate::index_worker::default_project_index_worktree_root(project_root)
-        .unwrap_or_else(|| index_repo_root.clone());
-    gwt_core::runtime::ensure_project_index_runtime().map_err(|error| error.to_string())?;
+    let repo_search_root =
+        crate::index_worker::default_project_index_worktree_root_for_search(&git_context)
+            .map_err(|_| search_unavailable_error("project index git context unavailable"))?;
+    gwt_core::runtime::ensure_project_index_runtime()
+        .map_err(|_| search_unavailable_error("project index runtime unavailable"))?;
 
     let effective_scopes = if scopes.is_empty() {
         default_index_search_scopes()
@@ -117,7 +290,8 @@ pub fn search_project_index(
         .unwrap_or(gwt_core::coordination::BoardAudienceScope::All);
     let file_worktree = if effective_scopes.iter().any(|scope| is_file_scope(*scope)) {
         Some(resolve_file_search_worktree(
-            project_root,
+            &index_repo_root,
+            &repo_search_root,
             selected_worktree_hash,
         )?)
     } else {
@@ -129,7 +303,7 @@ pub fn search_project_index(
     // runner tree, one model load, one query encode.
     let per_scope_limit = per_scope_limit(effective_scopes.len());
     let worktree_hash_arg = file_worktree.as_ref().map(|worktree| worktree.hash.clone());
-    let run_batch = || -> Result<Value, String> {
+    let run_batch = || -> Result<Value, IndexSearchAttemptError> {
         run_batch_scope_search(
             &repo_search_root,
             repo_hash.as_str(),
@@ -141,44 +315,110 @@ pub fn search_project_index(
         )
     };
 
-    let repair_deadline = Duration::from_millis(search_repair_wait_ms());
+    // Issue #4455 AC-3: the join window only covers a rebuild small enough to
+    // serve within this search. A full collection rebuild now runs on its own
+    // budget, so holding an interactive preflight for it buys nothing — the
+    // caller is told the rebuild is in flight instead.
+    let repair_deadline = Duration::from_millis(search_repair_wait_ms()).min(REPAIR_JOIN_WINDOW);
     let started = std::time::Instant::now();
-    let mut payload = run_batch()?;
-    let mut broken = broken_scopes(&payload);
+    let mut payload = None;
+    let mut broken = match run_batch() {
+        Ok(initial) => {
+            if let Some(required) = operator_repair_required(&initial) {
+                return Err(IndexSearchAttemptError::RepairRequired(required));
+            }
+            let broken = broken_scopes(&initial);
+            payload = Some(initial);
+            broken
+        }
+        Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => not_ready
+            .affected_scopes
+            .into_iter()
+            .map(|scope| (scope, "not-ready".to_string()))
+            .collect(),
+        Err(error) => return Err(error),
+    };
     if !broken.is_empty() {
         // FR-388: missing / corrupt scopes never degrade into a silent
-        // empty success. With auto_build the caller joins the coordinated
-        // repair and waits up to the deadline; without it (GUI, watcher owns
-        // builds) the typed retryable error returns immediately.
+        // empty success. FR-097 (T-IDX-417): every caller queues the
+        // coordinated repair first — the host-wide coordinator coalesces
+        // concurrent admissions into one job. With auto_build the caller
+        // then joins that repair and waits up to the deadline; without it
+        // (GUI, watcher owns builds) the typed retryable error returns
+        // promptly while the repair proceeds in the background.
+        let mut rebuilding =
+            queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
         if !auto_build {
-            return Err(build_not_ready_error(&broken, 0));
+            return Err(not_ready_error(&broken, 0, &rebuilding).into());
         }
-        queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
         loop {
             let elapsed = started.elapsed();
             if elapsed >= repair_deadline {
-                return Err(build_not_ready_error(&broken, elapsed.as_millis() as u64));
+                return Err(
+                    not_ready_error(&broken, elapsed.as_millis() as u64, &rebuilding).into(),
+                );
             }
             let remaining = repair_deadline - elapsed;
-            thread::sleep(remaining.min(Duration::from_secs(1)));
+            if sleep_with_attempt_deadline(remaining.min(Duration::from_secs(1))).is_err() {
+                return Err(not_ready_error(
+                    &broken,
+                    started.elapsed().as_millis() as u64,
+                    &rebuilding,
+                )
+                .into());
+            }
             // PR #3301 review: poll repair progress through the model-free
             // status action; the full batch search (one model load) runs
             // only after the broken scopes report healthy again.
-            if broken_scopes_still_unhealthy(
+            let still_unhealthy = match broken_scopes_still_unhealthy(
                 &repo_search_root,
                 repo_hash.as_str(),
                 &broken,
                 worktree_hash_arg.as_deref(),
             ) {
+                Ok(value) => value,
+                Err(_error)
+                    if gwt_core::operation_deadline::current()
+                        .is_some_and(|deadline| deadline <= Instant::now()) =>
+                {
+                    return Err(not_ready_error(
+                        &broken,
+                        started.elapsed().as_millis() as u64,
+                        &rebuilding,
+                    )
+                    .into());
+                }
+                Err(error) => return Err(error),
+            };
+            if still_unhealthy {
                 continue;
             }
-            payload = run_batch()?;
-            broken = broken_scopes(&payload);
-            if broken.is_empty() {
-                break;
+            match run_batch() {
+                Ok(next) => {
+                    if let Some(required) = operator_repair_required(&next) {
+                        return Err(IndexSearchAttemptError::RepairRequired(required));
+                    }
+                    broken = broken_scopes(&next);
+                    payload = Some(next);
+                    if broken.is_empty() {
+                        break;
+                    }
+                }
+                Err(IndexSearchAttemptError::Public(IndexSearchError::NotReady(not_ready))) => {
+                    broken = not_ready
+                        .affected_scopes
+                        .into_iter()
+                        .map(|scope| (scope, "not-ready".to_string()))
+                        .collect();
+                }
+                Err(error) => return Err(error),
             }
+            rebuilding = queue_scope_rebuilds(project_root, &broken, worktree_hash_arg.as_deref());
         }
     }
+    let payload = payload.ok_or_else(|| {
+        search_unavailable_error("project index search completed without a payload")
+    })?;
 
     // FR-387 stale-while-revalidate: verified results return immediately;
     // one refresh is queued per stale scope (the coordinator coalesces
@@ -201,7 +441,7 @@ pub fn search_project_index(
             .iter()
             .map(|scope| (scope.clone(), "stale".to_string()))
             .collect();
-        queue_scope_rebuilds(project_root, &stale_pairs, worktree_hash_arg.as_deref());
+        let _ = queue_scope_rebuilds(project_root, &stale_pairs, worktree_hash_arg.as_deref());
         true
     };
 
@@ -225,13 +465,60 @@ pub fn search_project_index(
     })
 }
 
-/// Default (and env-overridable) wait for missing / corrupt scope repair
+/// Upper bound on how long an interactive search joins a queued repair before
+/// answering `INDEX_NOT_READY` with `rebuild_in_progress` (Issue #4455 AC-3).
+/// A scope small enough to rebuild inside this window is still served in one
+/// round trip; a full collection rebuild is reported, not waited out.
+const REPAIR_JOIN_WINDOW: Duration = Duration::from_secs(3);
+
+/// Default (and env-shortenable) wait for missing / corrupt scope repair
 /// before returning `INDEX_NOT_READY` (FR-388: 30 seconds).
 fn search_repair_wait_ms() -> u64 {
     std::env::var("GWT_INDEX_SEARCH_REPAIR_WAIT_MS")
         .ok()
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30_000)
+}
+
+/// Budget for a repair a search queued (Issue #4455). It is sized for a full
+/// collection rebuild — the host-wide coordinator can also make the job wait
+/// behind another build — and deliberately independent of the interactive
+/// search deadline. It stays finite so a wedged runner cannot hold its
+/// single-flight admission forever (Issue #3866).
+const SEARCH_REPAIR_BUDGET_MS: u64 = 30 * 60 * 1_000;
+
+fn search_repair_budget_ms() -> u64 {
+    std::env::var("GWT_INDEX_SEARCH_REPAIR_BUDGET_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(SEARCH_REPAIR_BUDGET_MS)
+}
+
+/// Hard attempt budget. Fault-injection tests may shorten it, but environment
+/// input can never extend the production 30-second ceiling.
+fn search_attempt_deadline_ms() -> u64 {
+    std::env::var("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(SEARCH_ATTEMPT_HARD_LIMIT_MS)
+        .min(SEARCH_ATTEMPT_HARD_LIMIT_MS)
+}
+
+fn sleep_with_attempt_deadline(duration: Duration) -> Result<(), IndexSearchAttemptError> {
+    let sleep_for = match gwt_core::operation_deadline::current() {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(search_unavailable_error("project index search timed out"));
+            }
+            duration.min(remaining)
+        }
+        None => duration,
+    };
+    thread::sleep(sleep_for);
+    gwt_core::operation_deadline::ensure_remaining("project index repair wait")
+        .map_err(|_| search_unavailable_error("project index search timed out"))?;
+    Ok(())
 }
 
 const SEARCH_RETRY_AFTER_MS: u64 = 5_000;
@@ -255,6 +542,42 @@ fn broken_scopes(payload: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Scope stop states the runner holds until an explicit `index.repair`
+/// (Issue #4205). It refuses every queued repair while they hold, so waiting
+/// for one only burns the attempt deadline (Issue #3866).
+const OPERATOR_REPAIR_REASONS: &[&str] = &["cancelled", "repair_stopped"];
+
+const OPERATOR_REPAIR_RECOVERY: &str = "run the `index.repair` JSON operation to clear the \
+     stop state and rebuild; `index.status` shows each scope's reason";
+
+/// Extract the scopes in an operator stop state from the batch payload.
+fn operator_repair_required(payload: &Value) -> Option<IndexSearchRepairRequired> {
+    let stopped: Vec<(&String, &str)> = payload
+        .get("scopes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(scope, status)| {
+            let reason = status.get("reason").and_then(Value::as_str)?;
+            OPERATOR_REPAIR_REASONS
+                .contains(&reason)
+                .then_some((scope, reason))
+        })
+        .collect();
+    if stopped.is_empty() {
+        return None;
+    }
+    Some(IndexSearchRepairRequired {
+        reason: stopped
+            .iter()
+            .map(|(scope, reason)| format!("{scope} index is {reason}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+        affected_scopes: stopped.iter().map(|(scope, _)| (*scope).clone()).collect(),
+        recovery: OPERATOR_REPAIR_RECOVERY.to_string(),
+    })
+}
+
 /// Light repair-progress probe (PR #3301 review): checks the broken scopes
 /// through the model-free `status` action so the repair wait does not pay a
 /// model load per poll. Fails closed: any probe error keeps waiting.
@@ -263,57 +586,113 @@ fn broken_scopes_still_unhealthy(
     repo_hash: &str,
     broken: &[(String, String)],
     worktree_hash: Option<&str>,
-) -> bool {
-    let mut command =
-        gwt_core::process::hidden_command(crate::index_worker::project_index_python_path());
-    command
-        .arg(gwt_core::runtime::project_index_runner_path())
-        .arg("--action")
-        .arg("status")
-        .arg("--repo-hash")
-        .arg(repo_hash)
-        .current_dir(project_root);
-    if let Some(hash) = worktree_hash {
-        command.arg("--worktree-hash").arg(hash);
-    }
-    let output = match command.output() {
-        Ok(output) if output.status.success() => output,
-        _ => return true,
+) -> Result<bool, IndexSearchAttemptError> {
+    let args = repair_status_probe_args(repo_hash, broken, worktree_hash);
+    let output = match gwt_core::process_console::spawn_logged_blocking(
+        &gwt_core::process_console::ProcessConsoleHub::new(),
+        gwt_core::process_console::ProcessKind::IndexRunner,
+        crate::index_worker::project_index_python_path(),
+        &args,
+        gwt_core::process_console::SpawnOptions::new("project index status")
+            .current_dir(project_root)
+            .forward_output(false),
+    ) {
+        Ok(output) if output.success() => output,
+        Ok(_) => {
+            return Err(search_unavailable_error(
+                "project index status probe unavailable",
+            ));
+        }
+        // Issue #4033: a probe the attempt deadline cut short has not proven
+        // the scope healthy, so report it as still broken and let the caller's
+        // own deadline check return the typed `INDEX_NOT_READY`. Surfacing it
+        // as a distinct failure made the error *type* depend on whether the
+        // reaper happened to return a few microseconds before or after the
+        // deadline instant — on a loaded runner that flipped a passing search
+        // contract into an unrelated failure.
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return Ok(true),
+        Err(_) => {
+            return Err(search_unavailable_error(
+                "project index status probe unavailable",
+            ));
+        }
     };
-    let Ok(payload) = serde_json::from_slice::<Value>(&output.stdout) else {
-        return true;
+    let Ok(payload) = serde_json::from_str::<Value>(&output.stdout) else {
+        return Ok(true);
     };
     let status = payload.get("status").cloned().unwrap_or(Value::Null);
-    broken.iter().any(|(scope, _)| {
-        let ready = status
-            .get(scope.as_str())
-            .map(|entry| {
-                let healthy = entry
-                    .get("healthy")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let repair_required = entry
-                    .get("repair_required")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                healthy && !repair_required
-            })
-            .unwrap_or(false);
-        !ready
-    })
+    Ok(broken
+        .iter()
+        .any(|(scope, _)| !scope_probe_reports_ready(status.get(scope.as_str()))))
 }
 
-fn build_not_ready_error(broken: &[(String, String)], waited_ms: u64) -> IndexSearchError {
-    let reason = broken
+/// Decide whether one `status` entry proves the scope can be searched again.
+///
+/// Issue #4132: `healthy` alone is too strict. The issues scope reports
+/// `healthy: false` as soon as the Issue cache moves ahead of the built index,
+/// which every `issue.create` / `issue.comment` on the host does — including
+/// ones that land while this repair is running. Such a store is internally
+/// consistent and search classifies it `stale` (serve it, queue a refresh), so
+/// waiting for `healthy` again would burn the whole repair deadline and return
+/// `INDEX_NOT_READY` for an index that answers queries.
+fn scope_probe_reports_ready(entry: Option<&Value>) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    let flag = |name: &str| entry.get(name).and_then(Value::as_bool).unwrap_or(false);
+    flag("healthy") || flag("source_drift")
+}
+
+fn repair_status_probe_args(
+    repo_hash: &str,
+    broken: &[(String, String)],
+    worktree_hash: Option<&str>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        gwt_core::runtime::project_index_runner_path().into_os_string(),
+        OsString::from("--action"),
+        OsString::from("status"),
+        OsString::from("--repo-hash"),
+        OsString::from(repo_hash),
+    ];
+    if let Some(hash) = worktree_hash {
+        args.extend([OsString::from("--worktree-hash"), OsString::from(hash)]);
+    }
+    if broken
+        .iter()
+        .any(|(scope, _)| matches!(scope.as_str(), "files" | "files-docs"))
+    {
+        args.extend([
+            OsString::from("--file-index-protocol"),
+            OsString::from("v2"),
+        ]);
+    }
+    args
+}
+
+/// Issue #4455 AC-3: `rebuilding` names the scopes whose rebuild this search
+/// queued and which are still running, so the caller learns a rebuild is in
+/// flight instead of being held or handed a bare "missing".
+fn not_ready_error(
+    broken: &[(String, String)],
+    waited_ms: u64,
+    rebuilding: &[String],
+) -> IndexSearchError {
+    let mut reason = broken
         .iter()
         .map(|(scope, state)| format!("{scope} index is {state}"))
         .collect::<Vec<_>>()
         .join("; ");
+    if !rebuilding.is_empty() {
+        reason.push_str(&format!("; rebuild in progress: {}", rebuilding.join(", ")));
+    }
     IndexSearchError::NotReady(IndexSearchNotReady {
         reason,
         affected_scopes: broken.iter().map(|(scope, _)| scope.clone()).collect(),
         waited_ms,
         retry_after_ms: SEARCH_RETRY_AFTER_MS,
+        rebuild_in_progress: !rebuilding.is_empty(),
+        rebuilding_scopes: rebuilding.to_vec(),
     })
 }
 
@@ -336,38 +715,181 @@ fn rebuild_scope_for_name(name: &str) -> Option<crate::index_worker::IndexRebuil
 /// coordinator coalesces concurrent requests for the same target, which is
 /// what makes the stale refresh single-flight (FR-387) and the repair join
 /// shared (FR-382).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RepairKey {
+    repo_root: PathBuf,
+    scope: String,
+    worktree_hash: Option<String>,
+}
+
+#[derive(Default)]
+struct RepairTracker {
+    active: Mutex<HashSet<RepairKey>>,
+    settled: Condvar,
+}
+
+static REPAIR_TRACKER: OnceLock<RepairTracker> = OnceLock::new();
+
+fn repair_tracker() -> &'static RepairTracker {
+    REPAIR_TRACKER.get_or_init(RepairTracker::default)
+}
+
+struct RepairLease {
+    key: Option<RepairKey>,
+}
+
+impl RepairLease {
+    fn admit(key: RepairKey) -> Option<Self> {
+        let tracker = repair_tracker();
+        let mut active = tracker
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !active.insert(key.clone()) {
+            return None;
+        }
+        Some(Self { key: Some(key) })
+    }
+}
+
+impl Drop for RepairLease {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        let tracker = repair_tracker();
+        let mut active = tracker
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.remove(&key);
+        tracker.settled.notify_all();
+    }
+}
+
+type RepairTask = Box<dyn FnOnce() + Send + 'static>;
+
+fn spawn_tracked_repair_with(
+    key: RepairKey,
+    job: impl FnOnce() + Send + 'static,
+    spawn: impl FnOnce(RepairTask) -> std::io::Result<()>,
+) -> bool {
+    let Some(lease) = RepairLease::admit(key) else {
+        return false;
+    };
+    // Issue #4455: a repair rebuilds a whole collection, so it runs on its own
+    // budget rather than on the interactive deadline of the search that
+    // queued it. Inheriting that deadline killed every rebuild at 30 seconds
+    // and left `specs` and `board` at `documents=0`; only `issues`, exempted
+    // further downstream, ever recovered. The budget stays finite so a wedged
+    // runner still releases its admission (Issue #3866). Thread-local
+    // deadlines do not cross `std::thread::spawn`, so the absolute expiry is
+    // captured here rather than inside the worker.
+    let deadline = Instant::now() + Duration::from_millis(search_repair_budget_ms());
+    let task: RepairTask = Box::new(move || {
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let _lease = lease;
+        job();
+    });
+    // If spawning fails, `spawn` drops `task`; the captured lease rolls the
+    // admission back and wakes bounded fixture waits.
+    spawn(task).is_ok()
+}
+
+/// Wait until all search-triggered repair tasks have released their tracked
+/// leases. Test fixtures use this before restoring scoped environment values.
+#[cfg(test)]
+pub(crate) fn wait_for_index_search_repairs(timeout: Duration) -> bool {
+    let tracker = repair_tracker();
+    let active = tracker
+        .active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if active.is_empty() {
+        return true;
+    }
+    let (active, _) = tracker
+        .settled
+        .wait_timeout_while(active, timeout, |active| !active.is_empty())
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    active.is_empty()
+}
+
+/// Returns the rebuild targets that are in flight after this call — the ones
+/// queued here plus the ones a concurrent caller already owns (Issue #4455
+/// AC-3).
+fn repair_in_flight(key: &RepairKey) -> bool {
+    repair_tracker()
+        .active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(key)
+}
+
 fn queue_scope_rebuilds(
     project_root: &Path,
     scopes: &[(String, String)],
     worktree_hash: Option<&str>,
-) {
+) -> Vec<String> {
+    let mut rebuilding = Vec::new();
+    let repair_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let repair_repo_root = dunce::canonicalize(&repair_repo_root).unwrap_or(repair_repo_root);
+    let mut scheduled = HashSet::new();
     for (scope_name, _) in scopes {
-        let Some(rebuild_scope) = rebuild_scope_for_name(scope_name) else {
+        let Some(mut rebuild_scope) = rebuild_scope_for_name(scope_name) else {
             continue;
+        };
+        let scope_label = if matches!(scope_name.as_str(), "files" | "files-docs") {
+            rebuild_scope = crate::index_worker::IndexRebuildScope::Files;
+            "files".to_string()
+        } else {
+            scope_name.clone()
         };
         let project_root = project_root.to_path_buf();
         let worktree = rebuild_scope
             .requires_worktree_hash()
             .then(|| worktree_hash.map(str::to_string))
             .flatten();
-        let scope_label = scope_name.clone();
-        let _ = std::thread::Builder::new()
-            .name("gwt-index-search-repair".to_string())
-            .spawn(move || {
+        if !scheduled.insert((scope_label.clone(), worktree.clone())) {
+            continue;
+        }
+        let key = RepairKey {
+            repo_root: repair_repo_root.clone(),
+            scope: scope_label.clone(),
+            worktree_hash: worktree.clone(),
+        };
+        let job_label = scope_label.clone();
+        let spawned = spawn_tracked_repair_with(
+            key.clone(),
+            move || {
                 if let Err(error) = crate::index_worker::default_rebuild_runner(
                     &project_root,
                     rebuild_scope,
                     worktree.as_deref(),
                 ) {
-                    tracing::warn!(
+                    let _ = error;
+                    tracing::debug!(
                         target: "gwt::index",
-                        scope = %scope_label,
-                        error = %error,
+                        scope = %job_label,
                         "search-triggered index repair failed"
                     );
                 }
-            });
+            },
+            |task| {
+                std::thread::Builder::new()
+                    .name("gwt-index-search-repair".to_string())
+                    .spawn(task)
+                    .map(|_| ())
+            },
+        );
+        // A refused admission means a concurrent caller already owns the same
+        // rebuild, which is still an in-flight rebuild for this caller.
+        if spawned || repair_in_flight(&key) {
+            rebuilding.push(scope_label);
+        }
     }
+    rebuilding
 }
 
 /// Per-scope sub-payload of a batch response; falls back to the merged
@@ -486,18 +1008,16 @@ struct FileSearchWorktree {
 }
 
 fn resolve_file_search_worktree(
-    project_root: &Path,
+    index_repo_root: &Path,
+    default_worktree_root: &Path,
     selected_worktree_hash: Option<&str>,
 ) -> Result<FileSearchWorktree, String> {
-    let index_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
     if let Some(hash) = selected_worktree_hash
         .map(str::trim)
         .filter(|hash| !hash.is_empty())
     {
-        let active_root = crate::index_worker::default_project_index_worktree_root(project_root);
         let entries =
-            worktree_inventory::enumerate_worktrees(&index_repo_root, active_root.as_deref())
+            worktree_inventory::enumerate_worktrees(index_repo_root, Some(default_worktree_root))
                 .map_err(|error| error.to_string())?;
         let entry = entries
             .into_iter()
@@ -510,10 +1030,9 @@ fn resolve_file_search_worktree(
             hash: hash.to_string(),
         });
     }
-    let worktree_root = crate::index_worker::default_project_index_worktree_root(project_root)
-        .ok_or_else(|| "file search requires a git worktree".to_string())?;
+    let worktree_root = default_worktree_root;
     if worktree_root == index_repo_root {
-        let entries = worktree_inventory::enumerate_worktrees(&index_repo_root, None)
+        let entries = worktree_inventory::enumerate_worktrees(index_repo_root, None)
             .map_err(|error| error.to_string())?;
         if let Some(entry) = entries
             .into_iter()
@@ -525,10 +1044,47 @@ fn resolve_file_search_worktree(
             return Ok(FileSearchWorktree { hash });
         }
     }
-    let hash = gwt_core::worktree_hash::compute_worktree_hash(&worktree_root)
+    let hash = gwt_core::worktree_hash::compute_worktree_hash(worktree_root)
         .map_err(|error| error.to_string())?
         .to_string();
     Ok(FileSearchWorktree { hash })
+}
+
+fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptError {
+    IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+        reason: sanitize_runner_diagnostic(&reason.into()),
+        retry_after_ms: SEARCH_RETRY_AFTER_MS,
+    })
+}
+
+/// Claim the host-wide heavy lease for one query encode (FR-417).
+///
+/// Admission shares the search attempt's absolute deadline. If the slot is
+/// unavailable, return the existing retryable error without starting model
+/// work alongside the current holder.
+fn acquire_search_heavy_lease(
+    repo_hash: &str,
+    worktree_hash: Option<&str>,
+) -> Result<gwt_core::index_coordinator::HeavyLease, IndexSearchAttemptError> {
+    let deadline = gwt_core::operation_deadline::ensure_remaining("search heavy admission")
+        .map_err(|_| search_unavailable_error("search admission deadline expired"))?;
+    let timeout = deadline.map_or(INTERACTIVE_SEARCH_ADMISSION_DEADLINE, |deadline| {
+        INTERACTIVE_SEARCH_ADMISSION_DEADLINE
+            .min(deadline.saturating_duration_since(Instant::now()))
+    });
+    let coordinator = IndexCoordinator::open_default()
+        .map_err(|_| search_unavailable_error("search coordinator unavailable"))?;
+    let key = TargetKey::search(repo_hash, worktree_hash);
+    coordinator
+        .acquire_interactive_search_heavy(&key, timeout)
+        .map_err(|error| {
+            tracing::debug!(
+                target: "gwt::index",
+                %error,
+                "search heavy admission failed"
+            );
+            search_unavailable_error("search heavy lease unavailable")
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -540,29 +1096,105 @@ fn run_batch_scope_search(
     query: &str,
     limit: usize,
     match_mode: IndexSearchMatchMode,
-) -> Result<Value, String> {
-    let output =
-        gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
-            .args(batch_scope_search_command_args(
-                project_root,
-                repo_hash,
-                scopes,
-                worktree_hash,
-                query,
-                limit,
-                match_mode,
-            ))
+) -> Result<Value, IndexSearchAttemptError> {
+    let args = batch_scope_search_command_args(
+        project_root,
+        repo_hash,
+        scopes,
+        worktree_hash,
+        query,
+        limit,
+        match_mode,
+    );
+    // FR-417 (T-IDX-437 / AS-30): `search-multi` encodes the query with the
+    // same model a build loads, so it is an ordinary claimant of the
+    // host-wide heavy lease — not an exception to it. Registering as a
+    // pending interactive claimant is also what makes a running background
+    // build hand the lease back at its next 16-document checkpoint.
+    let _heavy = acquire_search_heavy_lease(repo_hash, worktree_hash)?;
+    // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
+    // shared process lifecycle boundary — captured output without terminal
+    // forwarding, one hard deadline, and full process-tree termination and
+    // reaping on expiry. Spawn failure and deadline expiry are retryable
+    // SEARCH_UNAVAILABLE, never a raw error string.
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &gwt_core::process_console::ProcessConsoleHub::new(),
+        gwt_core::process_console::ProcessKind::IndexRunner,
+        crate::index_worker::project_index_python_path(),
+        &args,
+        gwt_core::process_console::SpawnOptions::new("project index search-multi")
             .current_dir(project_root)
-            .output()
-            .map_err(|error| format!("run project index search: {error}"))?;
-    if !output.status.success() {
-        return Err(format_runner_failure(&output));
+            .forward_output(false),
+    )
+    .map_err(|_| search_unavailable_error("project index runner unavailable"))?;
+    if !output.success() {
+        return Err(classify_failed_runner_output(&output));
     }
-    let payload = parse_runner_payload(&output.stdout)?;
+    classify_successful_runner_output(&output)
+}
+
+fn classify_successful_runner_output(
+    output: &gwt_core::process_console::SpawnOutput,
+) -> Result<Value, IndexSearchAttemptError> {
+    let payload = parse_runner_payload(output.stdout.as_bytes()).map_err(|_| {
+        IndexSearchAttemptError::Public(IndexSearchError::Other(
+            "malformed project index search response".to_string(),
+        ))
+    })?;
     if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(payload_error(&payload));
+        return Err(runner_payload_error(&payload));
+    }
+    const ERROR_ONLY_FIELDS: &[&str] = &[
+        "error",
+        "error_code",
+        "reason",
+        "retryable",
+        "affected_scopes",
+        "waited_ms",
+        "retry_after_ms",
+    ];
+    if ERROR_ONLY_FIELDS
+        .iter()
+        .any(|field| payload.get(*field).is_some())
+    {
+        return Err(IndexSearchError::Other(
+            "contradictory project index search response".to_string(),
+        )
+        .into());
     }
     Ok(payload)
+}
+
+/// Classify a non-zero runner exit (T-IDX-419): a structured stdout
+/// diagnostic wins over stderr progress noise; an unstructured termination
+/// is a retryable `SEARCH_UNAVAILABLE`.
+fn classify_failed_runner_output(
+    output: &gwt_core::process_console::SpawnOutput,
+) -> IndexSearchAttemptError {
+    if let Ok(payload) = parse_runner_payload(output.stdout.as_bytes()) {
+        if payload.get("ok").is_some()
+            || payload.get("error").is_some()
+            || payload.get("error_code").is_some()
+        {
+            return runner_payload_error(&payload);
+        }
+    }
+    let stderr = output.stderr.trim();
+    let detail = if stderr.is_empty() {
+        output.stdout.trim()
+    } else {
+        stderr
+    };
+    let exit = output
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let detail = sanitize_runner_diagnostic(detail);
+    search_unavailable_error(if detail.is_empty() {
+        format!("project index runner exited with {exit}")
+    } else {
+        format!("project index runner exited with {exit}: {detail}")
+    })
 }
 
 /// One versioned `search-multi` request covering every scope (FR-384):
@@ -605,6 +1237,10 @@ fn batch_scope_search_command_args(
     if let Some(hash) = worktree_hash {
         args.push(OsString::from("--worktree-hash"));
         args.push(OsString::from(hash));
+    }
+    if scopes.iter().any(|scope| is_file_scope(*scope)) {
+        args.push(OsString::from("--file-index-protocol"));
+        args.push(OsString::from("v2"));
     }
     args
 }
@@ -900,23 +1536,138 @@ fn distance_key(result: &IndexSearchResult) -> f64 {
 }
 
 fn payload_error(payload: &Value) -> String {
-    payload
-        .get("error")
-        .and_then(Value::as_str)
-        .unwrap_or("project index search failed")
-        .to_string()
+    sanitize_runner_diagnostic(
+        payload
+            .get("error")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("reason").and_then(Value::as_str))
+            .unwrap_or("project index search failed"),
+    )
 }
 
-fn format_runner_failure(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
+fn runner_payload_error(payload: &Value) -> IndexSearchAttemptError {
+    let malformed = || IndexSearchError::Other(payload_error(payload)).into();
+    if payload.get("ok").and_then(Value::as_bool) != Some(false) {
+        return malformed();
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
+    match payload.get("error_code").and_then(Value::as_str) {
+        Some("INDEX_NOT_READY") => {
+            let Some(reason) = typed_payload_reason(payload) else {
+                return malformed();
+            };
+            let Some(affected_scopes) = typed_affected_scopes(payload) else {
+                return malformed();
+            };
+            let Some(waited_ms) = payload.get("waited_ms").and_then(Value::as_u64) else {
+                return malformed();
+            };
+            let Some(retry_after_ms) = typed_positive_retry_after(payload) else {
+                return malformed();
+            };
+            if payload.get("retryable").and_then(Value::as_bool) != Some(true) {
+                return malformed();
+            }
+            IndexSearchError::NotReady(IndexSearchNotReady {
+                reason,
+                affected_scopes,
+                waited_ms,
+                retry_after_ms,
+                // The runner reports scope health, not this host's rebuild
+                // admissions; `queue_scope_rebuilds` fills these in.
+                rebuild_in_progress: false,
+                rebuilding_scopes: Vec::new(),
+            })
+            .into()
+        }
+        Some("SEARCH_FAILED") => {
+            let Some(reason) = typed_payload_reason(payload) else {
+                return malformed();
+            };
+            let Some(affected_scopes) = typed_affected_scopes(payload) else {
+                return malformed();
+            };
+            if payload.get("retryable").and_then(Value::as_bool) != Some(false) {
+                return malformed();
+            }
+            IndexSearchError::SearchFailed(IndexSearchFailed {
+                reason,
+                affected_scopes,
+            })
+            .into()
+        }
+        Some("SEARCH_UNAVAILABLE") => {
+            let Some(reason) = typed_payload_reason(payload) else {
+                return malformed();
+            };
+            let Some(retry_after_ms) = typed_positive_retry_after(payload) else {
+                return malformed();
+            };
+            if payload.get("retryable").and_then(Value::as_bool) != Some(true)
+                || (payload.get("affected_scopes").is_some()
+                    && typed_affected_scopes(payload).is_none())
+            {
+                return malformed();
+            }
+            IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+                reason,
+                retry_after_ms,
+            })
+        }
+        // Unknown, absent, malformed, and legacy structured diagnostics are
+        // intentionally non-retryable. Only the exact three codes above
+        // participate in the typed retry protocol.
+        _ => IndexSearchError::Other(payload_error(payload)).into(),
     }
-    format!("runner exited with {}", output.status)
+}
+
+fn typed_payload_reason(payload: &Value) -> Option<String> {
+    let raw = match (payload.get("reason"), payload.get("error")) {
+        (Some(Value::String(reason)), None) | (None, Some(Value::String(reason))) => reason,
+        _ => return None,
+    };
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > RUNNER_DIAGNOSTIC_MAX_BYTES {
+        return None;
+    }
+    let sanitized = sanitize_runner_diagnostic(raw);
+    (!sanitized.trim().is_empty()).then_some(sanitized)
+}
+
+fn typed_affected_scopes(payload: &Value) -> Option<Vec<String>> {
+    let values = payload.get("affected_scopes")?.as_array()?;
+    if values.is_empty() {
+        return None;
+    }
+    let mut scopes = Vec::with_capacity(values.len());
+    for value in values {
+        let scope = value.as_str()?.trim();
+        if scope.is_empty()
+            || scope.len() > 64
+            || rebuild_scope_for_name(scope).is_none()
+            || scopes.iter().any(|existing| existing == scope)
+        {
+            return None;
+        }
+        scopes.push(scope.to_string());
+    }
+    Some(scopes)
+}
+
+fn typed_positive_retry_after(payload: &Value) -> Option<u64> {
+    payload
+        .get("retry_after_ms")
+        .and_then(Value::as_u64)
+        .filter(|retry_after_ms| *retry_after_ms > 0)
+}
+
+fn sanitize_runner_diagnostic(raw: &str) -> String {
+    let stripped = gwt_core::process_console::strip_ansi(raw);
+    let redacted = gwt_core::process_console::redact_line(&stripped);
+    let mut end = redacted.len().min(RUNNER_DIAGNOSTIC_MAX_BYTES);
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    redacted[..end].to_string()
 }
 
 fn parse_runner_payload(stdout: &[u8]) -> Result<Value, String> {
@@ -932,7 +1683,10 @@ fn parse_runner_payload(stdout: &[u8]) -> Result<Value, String> {
                 let Ok(payload) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
-                if payload.get("ok").is_some() || payload.get("error").is_some() {
+                if payload.get("ok").is_some()
+                    || payload.get("error").is_some()
+                    || payload.get("error_code").is_some()
+                {
                     return Ok(payload);
                 }
             }
@@ -1355,9 +2109,14 @@ mod tests {
     fn file_search_default_worktree_uses_workspace_entry_for_workspace_home() {
         let temp = tempfile::tempdir().expect("tempdir");
         let develop = make_bare_workspace_with_worktree(temp.path());
+        let index_repo_root = crate::index_worker::resolve_project_index_repo_root(temp.path())
+            .expect("index repo root");
+        let default_worktree_root =
+            crate::index_worker::default_project_index_worktree_root(temp.path())
+                .expect("default worktree root");
 
-        let resolved =
-            resolve_file_search_worktree(temp.path(), None).expect("file search worktree");
+        let resolved = resolve_file_search_worktree(&index_repo_root, &default_worktree_root, None)
+            .expect("file search worktree");
 
         // The batch search identifies the worktree store purely by hash;
         // resolving to the develop workspace hash proves the right worktree
@@ -1460,6 +2219,179 @@ mod tests {
     }
 
     #[test]
+    fn repaired_scope_is_ready_even_when_the_source_cache_already_moved_on() {
+        // Issue #4132: the repair wait polls `status`, whose `healthy` flag
+        // goes false the moment the Issue cache outgrows the rebuilt index —
+        // which a concurrent `issue.create` does within seconds on a busy
+        // host. The scope is searchable again (search classifies it `stale`),
+        // so the wait must end instead of burning the deadline and returning
+        // INDEX_NOT_READY for a store that answers queries.
+        assert!(
+            scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": true,
+                "reason": "count_mismatch",
+            }))),
+            "a rebuilt index that merely trails its source is ready to search"
+        );
+        assert!(
+            !scope_probe_reports_ready(Some(&json!({
+                "healthy": false,
+                "repair_required": true,
+                "source_drift": false,
+                "reason": "count_mismatch",
+            }))),
+            "a store that contradicts its own manifest is still unrepaired"
+        );
+        assert!(
+            scope_probe_reports_ready(Some(&json!({"healthy": true}))),
+            "a healthy scope is ready"
+        );
+        assert!(
+            !scope_probe_reports_ready(None),
+            "a scope the probe did not report has not been proven repaired"
+        );
+    }
+
+    #[test]
+    fn repair_status_probe_args_request_v2_for_file_scopes() {
+        // T-IDX-431 RED: the repair recheck must use the same explicit v2
+        // selector as the search that admitted Files / FilesDocs repair.
+        let cases = [
+            vec![("files".to_string(), "missing".to_string())],
+            vec![("files-docs".to_string(), "corrupt".to_string())],
+            vec![
+                ("issues".to_string(), "missing".to_string()),
+                ("files".to_string(), "corrupt".to_string()),
+                ("files-docs".to_string(), "missing".to_string()),
+            ],
+        ];
+
+        for broken in cases {
+            let args = repair_status_probe_args("repo-hash", &broken, Some("wt-hash"));
+
+            assert_eq!(
+                args.windows(2)
+                    .filter(|pair| pair[0] == "--file-index-protocol" && pair[1] == "v2")
+                    .count(),
+                1,
+                "file-scope repair status argv must contain one v2 pair: {args:?}"
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| {
+                        arg.as_os_str() == std::ffi::OsStr::new("--file-index-protocol")
+                    })
+                    .count(),
+                1,
+                "protocol flag must appear exactly once: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--action" && pair[1] == "status"),
+                "repair recheck must remain a status action: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--repo-hash" && pair[1] == "repo-hash"),
+                "repair recheck must retain the repository hash: {args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--worktree-hash" && pair[1] == "wt-hash"),
+                "repair recheck must retain the worktree hash: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_status_probe_args_keep_non_file_only_rechecks_legacy() {
+        // The flag must be gated by the broken scope set. Adding it to every
+        // status action would silently change the legacy/default Python API.
+        let broken = vec![
+            ("issues".to_string(), "missing".to_string()),
+            ("specs".to_string(), "corrupt".to_string()),
+        ];
+        let args = repair_status_probe_args("repo-hash", &broken, Some("wt-hash"));
+
+        assert!(
+            !args.iter().any(|arg| arg == "--file-index-protocol"),
+            "issues/specs-only repair status must retain legacy/default argv: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--action" && pair[1] == "status"),
+            "repair recheck must remain a status action: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--repo-hash" && pair[1] == "repo-hash"),
+            "repair recheck must retain the repository hash: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--worktree-hash" && pair[1] == "wt-hash"),
+            "repair recheck must retain the worktree hash: {args:?}"
+        );
+    }
+
+    #[test]
+    fn broken_scopes_extracts_missing_issue_and_corrupt_spec_states() {
+        // T-IDX-416 (SPEC #1939 Phase 70d, bundled-required by SPEC #3170
+        // FR-097): the Knowledge Bridge consumer scopes classify exactly like
+        // the file scopes — missing / corrupt block searching, stale does not.
+        let payload = json!({
+            "ok": true,
+            "scopes": {
+                "issues": {"state": "missing"},
+                "specs": {"state": "corrupt"},
+                "board": {"state": "fresh"},
+                "works": {"state": "stale"},
+            },
+        });
+        let mut broken = broken_scopes(&payload);
+        broken.sort();
+        assert_eq!(
+            broken,
+            vec![
+                ("issues".to_string(), "missing".to_string()),
+                ("specs".to_string(), "corrupt".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn issue_and_spec_not_ready_errors_carry_prompt_retry_contract() {
+        // T-IDX-416: the non-blocking (GUI) path reports waited_ms = 0 — a
+        // prompt typed failure — while keeping the mandatory retry delay.
+        let error = not_ready_error(
+            &[
+                ("issues".to_string(), "missing".to_string()),
+                ("specs".to_string(), "corrupt".to_string()),
+            ],
+            0,
+            &[],
+        );
+        assert_eq!(error.exit_code(), INDEX_NOT_READY_EXIT_CODE);
+        assert_eq!(error.error_code(), Some("INDEX_NOT_READY"));
+        assert!(error.retryable());
+        match error {
+            IndexSearchError::NotReady(not_ready) => {
+                assert_eq!(
+                    not_ready.affected_scopes,
+                    vec!["issues".to_string(), "specs".to_string()]
+                );
+                assert_eq!(not_ready.waited_ms, 0);
+                assert!(not_ready.retry_after_ms > 0);
+                assert!(not_ready.reason.contains("issues index is missing"));
+                assert!(not_ready.reason.contains("specs index is corrupt"));
+            }
+            other => panic!("expected NotReady, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn scope_subpayload_prefers_per_scope_results_over_legacy_merge() {
         let payload = json!({
             "ok": true,
@@ -1485,7 +2417,7 @@ mod tests {
 
     #[test]
     fn not_ready_error_reports_retry_contract() {
-        let error = build_not_ready_error(&[("files".to_string(), "missing".to_string())], 30_100);
+        let error = not_ready_error(&[("files".to_string(), "missing".to_string())], 30_100, &[]);
         assert_eq!(error.exit_code(), 75);
         assert_eq!(error.error_code(), Some("INDEX_NOT_READY"));
         assert!(error.retryable());
@@ -1496,7 +2428,766 @@ mod tests {
                 assert!(not_ready.retry_after_ms > 0);
                 assert!(not_ready.reason.contains("files"));
             }
-            IndexSearchError::Other(_) => panic!("expected NotReady"),
+            other => panic!("expected NotReady, got {other:?}"),
+        }
+    }
+
+    fn runner_output(
+        exit_code: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> gwt_core::process_console::SpawnOutput {
+        gwt_core::process_console::SpawnOutput {
+            exit_code: Some(exit_code),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            stdout_lines: stdout.lines().count() as u64,
+            stderr_lines: stderr.lines().count() as u64,
+        }
+    }
+
+    #[test]
+    fn structured_runner_errors_restore_only_the_three_known_codes() {
+        let not_ready = runner_payload_error(&json!({
+            "ok": false,
+            "error_code": "INDEX_NOT_READY",
+            "retryable": true,
+            "reason": "issues missing",
+            "affected_scopes": ["issues"],
+            "waited_ms": 7,
+            "retry_after_ms": 11,
+        }));
+        assert!(matches!(
+            not_ready,
+            IndexSearchAttemptError::Public(IndexSearchError::NotReady(_))
+        ));
+
+        let failed = runner_payload_error(&json!({
+            "ok": false,
+            "error_code": "SEARCH_FAILED",
+            "retryable": false,
+            "error": "bad query",
+            "affected_scopes": ["issues"],
+        }));
+        assert!(matches!(
+            failed,
+            IndexSearchAttemptError::Public(IndexSearchError::SearchFailed(_))
+        ));
+
+        let unavailable = runner_payload_error(&json!({
+            "ok": false,
+            "error_code": "SEARCH_UNAVAILABLE",
+            "retryable": true,
+            "reason": "runner busy",
+            "retry_after_ms": 123,
+        }));
+        assert!(matches!(
+            unavailable,
+            IndexSearchAttemptError::Unavailable(_)
+        ));
+
+        for payload in [
+            json!({"ok": false, "error_code": "UNKNOWN", "error": "legacy"}),
+            json!({"ok": false, "error": "untyped"}),
+        ] {
+            assert!(matches!(
+                runner_payload_error(&payload),
+                IndexSearchAttemptError::Public(IndexSearchError::Other(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_known_code_payload_matrix_is_never_retryable() {
+        let oversized_reason = "x".repeat(RUNNER_DIAGNOSTIC_MAX_BYTES + 1);
+        let rows = vec![
+            (
+                "not-ready missing ok",
+                json!({
+                    "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "affected_scopes": ["issues"],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready successful payload",
+                json!({
+                    "ok": true, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "affected_scopes": ["issues"],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready retryable false",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": false,
+                    "reason": "missing", "affected_scopes": ["issues"],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready zero retry delay",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "affected_scopes": ["issues"],
+                    "waited_ms": 0, "retry_after_ms": 0,
+                }),
+            ),
+            (
+                "not-ready non-string reason",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": 7, "affected_scopes": ["issues"],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready ambiguous reason fields",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "error": "other", "affected_scopes": ["issues"],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready non-array scopes",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "affected_scopes": "issues",
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready empty scopes",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "affected_scopes": [],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready unknown scope",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "affected_scopes": ["future-scope"],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready missing waited duration",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": "missing", "affected_scopes": ["issues"],
+                    "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "not-ready oversized reason",
+                json!({
+                    "ok": false, "error_code": "INDEX_NOT_READY", "retryable": true,
+                    "reason": oversized_reason, "affected_scopes": ["issues"],
+                    "waited_ms": 0, "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "unavailable successful payload",
+                json!({
+                    "ok": true, "error_code": "SEARCH_UNAVAILABLE", "retryable": true,
+                    "reason": "busy", "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "unavailable missing retryable flag",
+                json!({
+                    "ok": false, "error_code": "SEARCH_UNAVAILABLE",
+                    "reason": "busy", "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "unavailable retryable false",
+                json!({
+                    "ok": false, "error_code": "SEARCH_UNAVAILABLE", "retryable": false,
+                    "reason": "busy", "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "unavailable zero retry delay",
+                json!({
+                    "ok": false, "error_code": "SEARCH_UNAVAILABLE", "retryable": true,
+                    "reason": "busy", "retry_after_ms": 0,
+                }),
+            ),
+            (
+                "unavailable non-string reason",
+                json!({
+                    "ok": false, "error_code": "SEARCH_UNAVAILABLE", "retryable": true,
+                    "reason": ["busy"], "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "unavailable ansi-only reason",
+                json!({
+                    "ok": false, "error_code": "SEARCH_UNAVAILABLE", "retryable": true,
+                    "reason": "\u{1b}[31m\u{1b}[0m", "retry_after_ms": 5_000,
+                }),
+            ),
+            (
+                "unavailable missing retry delay",
+                json!({
+                    "ok": false, "error_code": "SEARCH_UNAVAILABLE", "retryable": true,
+                    "reason": "busy",
+                }),
+            ),
+            (
+                "unavailable malformed optional scopes",
+                json!({
+                    "ok": false, "error_code": "SEARCH_UNAVAILABLE", "retryable": true,
+                    "reason": "busy", "retry_after_ms": 5_000,
+                    "affected_scopes": [7],
+                }),
+            ),
+            (
+                "search-failed retryable true",
+                json!({
+                    "ok": false, "error_code": "SEARCH_FAILED", "retryable": true,
+                    "error": "bad query", "affected_scopes": ["issues"],
+                }),
+            ),
+            (
+                "search-failed missing scopes",
+                json!({
+                    "ok": false, "error_code": "SEARCH_FAILED", "retryable": false,
+                    "error": "bad query",
+                }),
+            ),
+            (
+                "search-failed non-string scope",
+                json!({
+                    "ok": false, "error_code": "SEARCH_FAILED", "retryable": false,
+                    "error": "bad query", "affected_scopes": [7],
+                }),
+            ),
+            (
+                "search-failed missing reason",
+                json!({
+                    "ok": false, "error_code": "SEARCH_FAILED", "retryable": false,
+                    "affected_scopes": ["issues"],
+                }),
+            ),
+        ];
+
+        for (case, payload) in rows {
+            let error = runner_payload_error(&payload);
+            assert!(
+                matches!(
+                    error,
+                    IndexSearchAttemptError::Public(IndexSearchError::Other(_))
+                ),
+                "{case} unexpectedly restored a typed error: {error:?}"
+            );
+            assert!(!error.retryable(), "{case} unexpectedly became retryable");
+            assert_eq!(error.error_code(), None, "{case}");
+        }
+    }
+
+    #[test]
+    fn exit_zero_malformed_and_unknown_payloads_are_not_retryable() {
+        let malformed = classify_successful_runner_output(&runner_output(0, "not json", ""))
+            .expect_err("malformed success payload must fail");
+        assert!(matches!(
+            malformed,
+            IndexSearchAttemptError::Public(IndexSearchError::Other(_))
+        ));
+        assert!(!malformed.retryable());
+
+        let unknown = classify_successful_runner_output(&runner_output(
+            0,
+            r#"{"ok":false,"error_code":"FUTURE_CODE","error":"future"}"#,
+            "",
+        ))
+        .expect_err("unknown typed payload must fail closed");
+        assert!(matches!(
+            unknown,
+            IndexSearchAttemptError::Public(IndexSearchError::Other(_))
+        ));
+        assert!(!unknown.retryable());
+    }
+
+    #[test]
+    fn exit_zero_payload_cannot_mix_success_with_retryable_error_fields() {
+        let cases = [
+            ("error", serde_json::json!({"error": "failed"})),
+            (
+                "error_code",
+                serde_json::json!({"error_code": "INDEX_NOT_READY"}),
+            ),
+            ("reason", serde_json::json!({"reason": "not ready"})),
+            ("retryable", serde_json::json!({"retryable": true})),
+            (
+                "affected_scopes",
+                serde_json::json!({"affected_scopes": ["issues"]}),
+            ),
+            ("waited_ms", serde_json::json!({"waited_ms": 0})),
+            (
+                "retry_after_ms",
+                serde_json::json!({"retry_after_ms": 5_000}),
+            ),
+        ];
+        for (field, extra) in cases {
+            let mut payload = serde_json::json!({"ok": true});
+            payload
+                .as_object_mut()
+                .expect("success payload object")
+                .extend(extra.as_object().expect("extra fields").clone());
+            let output = runner_output(0, &payload.to_string(), "");
+
+            let error = classify_successful_runner_output(&output)
+                .expect_err("contradictory success payload must fail closed");
+
+            assert!(
+                matches!(
+                    error,
+                    IndexSearchAttemptError::Public(IndexSearchError::Other(_))
+                ),
+                "{field}"
+            );
+            assert!(!error.retryable(), "{field}");
+        }
+    }
+
+    #[test]
+    fn nonzero_unstructured_output_is_search_unavailable() {
+        let error = classify_failed_runner_output(&runner_output(
+            9,
+            "progress only",
+            "temporary transport failure",
+        ));
+        assert!(matches!(error, IndexSearchAttemptError::Unavailable(_)));
+        assert!(error.retryable());
+        assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
+    }
+
+    #[test]
+    fn public_mapping_hides_internal_unavailable_diagnostics() {
+        let raw = format!(
+            "\u{1b}[31msecret runner path ghp_abcdef0123456789ABCDEF\u{1b}[0m {}",
+            "x".repeat(RUNNER_DIAGNOSTIC_MAX_BYTES * 4)
+        );
+        let public_error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+            reason: raw.clone(),
+            retry_after_ms: SEARCH_RETRY_AFTER_MS,
+        })
+        .into_public();
+
+        let IndexSearchError::Other(message) = public_error else {
+            panic!("internal unavailability must map to the legacy public Other variant");
+        };
+        assert_eq!(message, "project index search is temporarily unavailable");
+        assert!(!message.contains(&raw));
+        assert!(!message.contains('\u{1b}'));
+        assert!(!message.contains("ghp_"));
+        assert!(message.len() < RUNNER_DIAGNOSTIC_MAX_BYTES);
+    }
+
+    /// Issue #3866 AC-3: `cancelled` and `repair_stopped` hold until an
+    /// explicit `index.repair` (Issue #4205), so a search must not treat them
+    /// as a retryable wait.
+    #[test]
+    fn operator_stop_states_require_explicit_repair_instead_of_a_retry_wait() {
+        for reason in ["cancelled", "repair_stopped"] {
+            let payload = serde_json::json!({
+                "ok": true,
+                "scopes": {
+                    "issues": {"state": "corrupt", "reason": reason},
+                    "specs": {"state": "missing", "reason": "empty_collection"},
+                },
+            });
+            let required = operator_repair_required(&payload)
+                .expect("an operator stop state must not enter the repair wait");
+            assert_eq!(required.affected_scopes, vec!["issues".to_string()]);
+            assert!(required.reason.contains(reason), "{required:?}");
+            assert!(required.recovery.contains("index.repair"), "{required:?}");
+
+            let attempt = IndexSearchAttemptError::RepairRequired(required);
+            assert!(!attempt.retryable());
+            assert_eq!(attempt.retry_after_ms(), None);
+            assert_eq!(attempt.error_code(), Some("INDEX_REPAIR_REQUIRED"));
+            let public = attempt.into_public();
+            assert!(!public.retryable());
+            let IndexSearchError::SearchFailed(failed) = public else {
+                panic!("public callers must see the non-retryable failure");
+            };
+            assert!(failed.reason.contains("index.repair"), "{failed:?}");
+        }
+
+        let repairable = serde_json::json!({
+            "ok": true,
+            "scopes": {"issues": {"state": "corrupt", "reason": "count_mismatch"}},
+        });
+        assert!(operator_repair_required(&repairable).is_none());
+    }
+
+    #[test]
+    fn runner_diagnostic_is_ansi_free_redacted_and_unicode_safely_bounded() {
+        let token = "ghp_abcdef0123456789ABCDEF";
+        let raw = format!("\u{1b}[31m{token}\u{1b}[0m {}", "界".repeat(800));
+        let sanitized = sanitize_runner_diagnostic(&raw);
+
+        assert!(!sanitized.contains('\u{1b}'));
+        assert!(!sanitized.contains(token));
+        assert!(sanitized.contains(gwt_core::process_console::REDACTED));
+        assert!(sanitized.len() <= RUNNER_DIAGNOSTIC_MAX_BYTES);
+        assert!(sanitized.len() > RUNNER_DIAGNOSTIC_MAX_BYTES - 4);
+        assert!(std::str::from_utf8(sanitized.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn search_attempt_environment_can_only_shorten_the_hard_limit() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _long = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "60000");
+        assert_eq!(search_attempt_deadline_ms(), SEARCH_ATTEMPT_HARD_LIMIT_MS);
+        drop(_long);
+        let _short = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "125");
+        assert_eq!(search_attempt_deadline_ms(), 125);
+    }
+
+    #[test]
+    fn hanging_git_context_probe_is_bounded_and_maps_to_search_unavailable() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _hang = ScopedEnvVar::set("GWT_INDEX_TEST_GIT_HANG", "1");
+        let _pre_spawn = ScopedEnvVar::set("GWT_INDEX_TEST_GIT_PRESPAWN_MS", "100");
+        let _deadline = ScopedEnvVar::set("GWT_INDEX_SEARCH_RUNNER_DEADLINE_MS", "150");
+
+        let started = Instant::now();
+        let error = search_project_index_attempt(
+            temp.path(),
+            "deadline git context",
+            &[IndexSearchScope::Issues],
+            None,
+            IndexSearchMatchMode::Semantic,
+            false,
+        )
+        .expect_err("a hanging git context probe must not escape the attempt deadline");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "git context probe exceeded the absolute search budget: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(error, IndexSearchAttemptError::Unavailable(_)),
+            "{error:?}"
+        );
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn git_context_spawn_failure_maps_to_search_unavailable() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _spawn_failure = ScopedEnvVar::set("GWT_INDEX_TEST_GIT_SPAWN_FAILURE", "1");
+
+        let error = search_project_index_attempt(
+            temp.path(),
+            "unavailable git context",
+            &[IndexSearchScope::Issues],
+            None,
+            IndexSearchMatchMode::Semantic,
+            false,
+        )
+        .expect_err("git spawn failure must be retryable infrastructure failure");
+
+        assert!(
+            matches!(error, IndexSearchAttemptError::Unavailable(_)),
+            "{error:?}"
+        );
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn repair_spawn_failure_rolls_back_admission_and_notifies_waiters() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = RepairKey {
+            repo_root: PathBuf::from("spawn-failure-test"),
+            scope: "issues".to_string(),
+            worktree_hash: None,
+        };
+        let spawned = spawn_tracked_repair_with(
+            key.clone(),
+            || panic!("failed spawner must never run the repair"),
+            |task| {
+                drop(task);
+                Err(std::io::Error::other("injected spawn failure"))
+            },
+        );
+
+        assert!(!spawned);
+        assert!(wait_for_index_search_repairs(Duration::from_millis(50)));
+        let lease = RepairLease::admit(key).expect("spawn failure released the repair key");
+        drop(lease);
+    }
+
+    #[test]
+    fn repair_admission_is_single_flight_per_repo_scope_and_worktree() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = RepairKey {
+            repo_root: PathBuf::from("single-flight-test"),
+            scope: "files".to_string(),
+            worktree_hash: Some("worktree-a".to_string()),
+        };
+        let first = RepairLease::admit(key.clone()).expect("first admission");
+        assert!(RepairLease::admit(key.clone()).is_none());
+        assert!(RepairLease::admit(RepairKey {
+            worktree_hash: Some("worktree-b".to_string()),
+            ..key.clone()
+        })
+        .is_some());
+        drop(first);
+        assert!(RepairLease::admit(key).is_some());
+    }
+
+    /// Issue #4455 AC-2: the repair a search queues rebuilds a whole
+    /// collection; it must run on its own budget instead of the interactive
+    /// search deadline that queued it. Inheriting that deadline is what left
+    /// `specs` and `board` at `documents=0` while `issues` — exempted
+    /// downstream — recovered.
+    #[test]
+    fn search_queued_repair_runs_on_its_own_budget_not_the_search_deadline() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = RepairKey {
+            repo_root: PathBuf::from("repair-budget-test"),
+            scope: "specs".to_string(),
+            worktree_hash: None,
+        };
+        let (budget_tx, budget_rx) = std::sync::mpsc::channel();
+        let search_expiry = Instant::now() + Duration::from_millis(150);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(search_expiry);
+
+        let spawned = spawn_tracked_repair_with(
+            key.clone(),
+            move || {
+                let _ = budget_tx.send(gwt_core::operation_deadline::current());
+            },
+            |task| {
+                std::thread::Builder::new()
+                    .name("repair-budget-fixture".to_string())
+                    .spawn(task)
+                    .map(|_| ())
+            },
+        );
+
+        assert!(spawned);
+        let budget = budget_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the repair worker must observe a deadline decision");
+        let budget = budget.expect("the repair budget must stay finite (Issue #3866)");
+        assert!(
+            budget >= search_expiry + Duration::from_secs(60),
+            "the queued repair inherited the interactive search deadline"
+        );
+        assert!(wait_for_index_search_repairs(Duration::from_secs(5)));
+        let lease = RepairLease::admit(key).expect("settled repair key must be re-admitted");
+        drop(lease);
+    }
+
+    #[test]
+    fn repair_budget_expiry_releases_the_lease_and_allows_re_admission() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = RepairKey {
+            repo_root: PathBuf::from("deadline-repair-test"),
+            scope: "issues".to_string(),
+            worktree_hash: None,
+        };
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        // The search deadline is far shorter than the repair budget: only the
+        // budget may end the repair process.
+        let _budget = ScopedEnvVar::set("GWT_INDEX_SEARCH_REPAIR_BUDGET_MS", "600");
+        let expires_at = Instant::now() + Duration::from_millis(150);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expires_at);
+
+        let spawned = spawn_tracked_repair_with(
+            key.clone(),
+            move || {
+                #[cfg(windows)]
+                let (program, args) = (
+                    OsString::from("powershell.exe"),
+                    vec![
+                        OsString::from("-NoProfile"),
+                        OsString::from("-Command"),
+                        OsString::from("Start-Sleep -Seconds 4"),
+                    ],
+                );
+                #[cfg(not(windows))]
+                let (program, args) = (
+                    OsString::from("sh"),
+                    vec![OsString::from("-c"), OsString::from("sleep 4")],
+                );
+                let result = gwt_core::process_console::spawn_logged_blocking(
+                    &gwt_core::process_console::ProcessConsoleHub::new(),
+                    gwt_core::process_console::ProcessKind::IndexRunner,
+                    program,
+                    &args,
+                    gwt_core::process_console::SpawnOptions::new("deadline repair fixture")
+                        .forward_output(false),
+                )
+                .map_err(|error| error.kind());
+                let _ = result_tx.send(result);
+            },
+            |task| {
+                std::thread::Builder::new()
+                    .name("deadline-repair-fixture".to_string())
+                    .spawn(task)
+                    .map(|_| ())
+            },
+        );
+
+        assert!(spawned);
+        let started = Instant::now();
+        let bounded_result = result_rx.recv_timeout(Duration::from_secs(3));
+        if bounded_result.is_err() {
+            // Let an unbounded child finish before failing so the process and
+            // the global repair tracker cannot leak into other tests.
+            let _ = result_rx.recv_timeout(Duration::from_secs(5));
+        }
+        let process_result = bounded_result.expect("repair process must settle at its own budget");
+        assert!(
+            matches!(process_result, Err(std::io::ErrorKind::TimedOut)),
+            "repair process must be killed by the repair budget: {process_result:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "the repair process died at the interactive search deadline instead of its budget"
+        );
+        assert!(wait_for_index_search_repairs(Duration::from_millis(100)));
+        let lease = RepairLease::admit(key).expect("settled repair key must be re-admitted");
+        drop(lease);
+    }
+
+    /// Issue #4455 AC-1/AC-2: a repo-shared scope other than `issues` — the
+    /// two that stayed at `documents=0` — must reach the production rebuild
+    /// runner even when the search that queued it is about to expire, and it
+    /// must still settle on its own finite budget (Issue #3866).
+    #[test]
+    fn queued_rebuild_runner_hang_settles_on_the_repair_budget_not_the_search_deadline() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo directory");
+        run_git_at(&repo, &["init", "-q", "-b", "develop"]);
+        // The production coordinator is host-wide and keys repo-shared jobs
+        // by the origin-derived repo hash. Give every fixture invocation its
+        // own identity so an earlier run or another checkout cannot coalesce
+        // this repair before the runner closure reaches the marker.
+        let remote_suffix = temp
+            .path()
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("tempdir name");
+        let remote = format!("https://example.com/deadline-repair-{remote_suffix}.git");
+        run_git_at(&repo, &["remote", "add", "origin", remote.as_str()]);
+        let marker = temp.path().join("rebuild-started.marker");
+        let _hang = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_HANG", "1");
+        let _marker = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_MARKER", &marker);
+        // Coverage instrumentation makes startup of the child test binary
+        // materially slower than an idle production runner, so the budget has
+        // to cover a cold start. The search deadline stays far below it: the
+        // budget alone may end the rebuild.
+        let repair_budget = Duration::from_secs(8);
+        let _budget = ScopedEnvVar::set("GWT_INDEX_SEARCH_REPAIR_BUDGET_MS", "8000");
+        let search_expiry = Instant::now() + Duration::from_secs(1);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(search_expiry);
+
+        let started = Instant::now();
+        queue_scope_rebuilds(&repo, &[("specs".to_string(), "missing".to_string())], None);
+
+        let marker_wait_started = Instant::now();
+        while !marker.exists() && marker_wait_started.elapsed() < repair_budget {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let settled = wait_for_index_search_repairs(repair_budget + Duration::from_secs(4));
+        if !settled {
+            // Let an unbounded child finish before failing, keeping the
+            // singleton tracker clean for the rest of the test process.
+            let _ = wait_for_index_search_repairs(Duration::from_secs(20));
+        }
+        let settled_after = started.elapsed();
+
+        assert!(
+            marker.exists(),
+            "the production rebuild runner path was not reached for a non-issues scope"
+        );
+        assert!(settled, "queued rebuild outlived its own repair budget");
+        assert!(
+            settled_after >= Duration::from_secs(3),
+            "the queued rebuild was cut short by the interactive search deadline \
+             (settled after {settled_after:?})"
+        );
+        let key = RepairKey {
+            repo_root: dunce::canonicalize(&repo).unwrap_or(repo),
+            scope: "specs".to_string(),
+            worktree_hash: None,
+        };
+        let lease = RepairLease::admit(key).expect("settled queued repair must be re-admitted");
+        drop(lease);
+    }
+
+    /// Issue #4455 AC-4: every scope a search can report as broken must have
+    /// at least one production rebuild path — no scope may be missing one.
+    #[test]
+    fn every_search_scope_has_a_production_rebuild_path() {
+        use crate::cli::index::{runtime::rebuild_actions, IndexScope};
+
+        const ALL_SEARCH_SCOPES: &[IndexSearchScope] = &[
+            IndexSearchScope::Issues,
+            IndexSearchScope::Specs,
+            IndexSearchScope::Memory,
+            IndexSearchScope::Discussions,
+            IndexSearchScope::Board,
+            IndexSearchScope::Works,
+            IndexSearchScope::Files,
+            IndexSearchScope::FilesDocs,
+        ];
+
+        let manual_labels: Vec<&str> = rebuild_actions(IndexScope::All)
+            .into_iter()
+            .map(|action| action.label)
+            .collect();
+
+        for scope in ALL_SEARCH_SCOPES {
+            let name = scope.as_str();
+            let rebuild_scope = rebuild_scope_for_name(name)
+                .unwrap_or_else(|| panic!("scope {name} has no search-queued rebuild target"));
+            assert_eq!(rebuild_scope.label(), name);
+            assert!(
+                crate::index_worker::rebuild_action_for_scope(rebuild_scope).label == name,
+                "scope {name} has no production rebuild action"
+            );
+            assert!(
+                manual_labels.contains(&name),
+                "scope {name} is missing from the manual `index.rebuild` path"
+            );
         }
     }
 }

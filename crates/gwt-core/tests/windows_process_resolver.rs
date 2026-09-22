@@ -100,7 +100,6 @@ fn write_valid_pe(path: &Path) {
             path,
         )
         .expect("copy real PE fixture");
-        return;
     }
     #[cfg(not(windows))]
     {

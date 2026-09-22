@@ -565,6 +565,26 @@ impl BoardProvider for TeamsProvider {
         }))
     }
 
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        diff_since: DateTime<Utc>,
+        _scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Result<gwt_core::coordination::PromptBoardRead> {
+        Ok(
+            gwt_core::coordination::PromptBoardRead::from_channel_history(
+                self.cached_history(worktree_root)?,
+                diff_since,
+                status_author,
+                status_kind,
+                status_since,
+            ),
+        )
+    }
+
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
         Ok(self
             .cached_history(worktree_root)?
@@ -709,18 +729,14 @@ mod tests {
     }
 
     /// Unique throwaway repo root per call so the SPEC-2963 root mapping is
-    /// isolated from the real working tree (mirrors the Slack tests).
+    /// isolated from the real working tree (mirrors the Slack tests). The
+    /// random suffix avoids stale-root collisions when Windows reuses a PID.
     fn root() -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "gwt-board-roots-teams-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::create_dir_all(&path);
-        path
+        tempfile::Builder::new()
+            .prefix("gwt-board-roots-teams-test-")
+            .tempdir()
+            .expect("Teams board remote test root")
+            .keep()
     }
 
     /// Records every post_json / patch_json (url + body) and returns an

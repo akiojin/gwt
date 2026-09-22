@@ -38,7 +38,7 @@ Do not use this for an existing Issue. Use `gwt-execute #N` instead.
 2. Normalize the request into summary, background, expected outcome, and constraints.
 3. Run duplicate search before creating anything. Search both open Issues and existing SPEC owners, using the `gwt-search` skill (a skill, not a PATH command) when possible.
 4. Decide the registration outcome with the `Spec Status` contract below before creating any new owner.
-5. When the request is a narrow bug, docs, chore, or investigation item and the `Spec Status` allows a plain Issue, create it with JSON operation `issue.create`.
+5. When the request is a narrow bug, docs, chore, or investigation item and the `Spec Status` allows a plain Issue, create it with JSON operation `issue.create`, applying the autonomous-eligibility defaults below (`"labels":["auto-merge"]` unless the registration opts out).
 6. When the request needs design first, stop plain-Issue creation and hand off to `gwt-discussion` until the design is complete.
 7. When `gwt-discussion` returns a Register Spec action bundle with a title and body file, create the design-required Work Item from this skill:
    - validate the body against the canonical SPEC sections
@@ -68,6 +68,49 @@ If duplicate search finds an existing owner SPEC, treat that SPEC as the decisio
 - `SPEC-GAP` and `SPEC-AMBIGUOUS` are stop rules until `gwt-discussion` produces a complete design or existing owner update path.
 - Design-required registration must apply the `gwt-spec` design-required tag and use `issue.spec.create`, `issue.spec.edit`, and a roundtrip `issue.spec.section` read.
 
+## Autonomous Eligibility Defaults
+
+The registration template produces Issues that qualify for autonomous
+resolution by the Issue Monitor by default (acceptance-criteria checkboxes
+plus the `auto-merge` label):
+
+- The plain Issue body MUST contain an `## Acceptance Criteria` section with
+  `- [ ] AC-N:` checkbox lines. Every criterion is one verifiable statement.
+- Readiness format (what the Issue Monitor's classifier actually reads):
+  - Recognized headings: `## Acceptance Criteria`, `## 受け入れ基準`,
+    `## 受け入れ条件`. `## 成功基準` is not scanned.
+  - Items: `- [ ] AC-N: <text>` checkbox lines directly under that heading
+    (parsing stops at the next heading). A `- [ ]` line without the `AC-N:`
+    prefix is also accepted and numbered by position (`AC-1`, `AC-2`, …);
+    the prefix is recommended, not required, because it keeps ids stable
+    across edits.
+  - Do not mix the two styles in one block. When any item carries an
+    explicit `AC-N:`, only those items become criteria and every
+    un-prefixed `- [ ]` line in the same block is dropped from the
+    readiness snapshot and from the review verdict. Put notes and
+    sub-tasks outside the acceptance block.
+  - Design-required (`gwt-spec`) Issues keep the block in the `spec`
+    section; the classifier reads it wherever the storage layer placed that
+    section (body or comment), so no body rewrite is needed.
+  - When readiness fails, the `needs_human` reason names the missing
+    element (no recognized heading, or a heading with no checklist items).
+    Fix it with `issue.edit` / `issue.spec.edit`, then run
+    `issue.monitor.requeue`.
+- Pass `"labels":["auto-merge"]` to JSON operation `issue.create` by default:
+
+  ```json
+  {"schema_version":1,"operation":"issue.create","params":{"title":"fix: ...","body":"...","labels":["auto-merge"]}}
+  ```
+
+- **Explicit opt-out**: omit the `auto-merge` label only when the user asks
+  for human review, or the change touches surfaces where auto-merge is
+  forbidden (hooks/gates, launch authority, release machinery, security
+  boundaries). State the opt-out reason in the Issue body `## Notes`.
+- Alignment: the Issue Monitor treats `auto-merge` + AC checkboxes as the
+  autonomous-eligibility signal; an opted-out Issue stays on the human gate.
+- The `issue.create` operation itself stays neutral: `labels` is optional and
+  no label is applied unconditionally. The default lives in this template.
+
 ## Required Plain Issue Body Structure
 
 ```markdown
@@ -86,6 +129,11 @@ If duplicate search finds an existing owner SPEC, treat that SPEC as the decisio
 ## Related SPECs
 
 (- SPEC-1234, or `- None` when no owner SPEC applies)
+
+## Acceptance Criteria
+
+- [ ] AC-1: (one verifiable completion statement)
+- [ ] AC-2: (add one line per criterion)
 
 ## Expected Outcome
 

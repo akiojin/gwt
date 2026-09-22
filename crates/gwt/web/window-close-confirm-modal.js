@@ -7,7 +7,8 @@
 //
 // state shape:
 //   { open: bool, windowId: string|null, windowTitle: string,
-//     agentLabel: string, runtimeLabel: string, running: bool }
+//     agentLabel: string, runtimeLabel: string, running: bool,
+//     isPm: bool }  // isPm: SPEC-3431 FR-022 close-consequence copy
 
 import { createFocusTrap } from "./focus-trap.js";
 
@@ -148,6 +149,19 @@ export function renderWindowCloseConfirmModal({
         "p",
         "window-close-confirm__warning",
         "The running agent will be stopped and its session ends.",
+      ),
+    );
+  }
+
+  // SPEC-3431 FR-022: closing the PM is the documented way to stop it, so say
+  // what that actually costs — it will not come back on its own, unlike a
+  // crash, which auto-resumes.
+  if (state.isPm) {
+    dialogEl.appendChild(
+      createNode(
+        "p",
+        "window-close-confirm__warning",
+        "This is the Project Manager. Closing it stops the PM until you open the project again or start it from the PM button — it will not restart on its own.",
       ),
     );
   }

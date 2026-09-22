@@ -28,7 +28,20 @@ use crate::{
 ///   primitives + GREEN integration). Older clients/daemons will
 ///   reject the handshake and force a respawn instead of attempting
 ///   to exchange frames they cannot parse.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
+/// - `3`: connection-bound GUI materializer subscription frame. Ordinary
+///   subscribers remain read-only observers regardless of channel selection.
+/// - `4`: connection-bound verification spawn frames (Issue #4409). The
+///   daemon launches a verification workload outside the caller's process
+///   tree and reclaims it when the connection drops.
+pub const DAEMON_PROTOCOL_VERSION: u32 = 4;
+
+/// Lowest protocol version that understands [`ClientFrame::SpawnVerification`].
+///
+/// Separate from [`DAEMON_PROTOCOL_VERSION`] so a client can tell "this daemon
+/// is too old to launch verification" apart from "this daemon is too old to
+/// talk to at all" — the first is a refusal the caller can act on
+/// (Issue #4409 AC-5), the second is a handshake failure.
+pub const VERIFICATION_SPAWN_MIN_PROTOCOL_VERSION: u32 = 4;
 
 /// Runtime backend target for daemon-managed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +117,279 @@ impl RuntimeScope {
     }
 }
 
+/// Environment variable pinning the directory used for shortened daemon
+/// sockets.
+///
+/// Set it to a short, private, writable directory when every default
+/// candidate is itself too long. An explicit value replaces the default
+/// candidate list entirely, so a wrong value fails loudly instead of
+/// silently falling back somewhere the operator did not choose.
+pub const DAEMON_SOCKET_DIR_ENV: &str = "GWT_DAEMON_SOCKET_DIR";
+
+/// Byte capacity of `sockaddr_un.sun_path` on this platform: 104 on
+/// macOS/BSD, 108 on Linux.
+#[cfg(unix)]
+pub const UNIX_SOCKET_PATH_CAPACITY: usize =
+    std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path);
+
+/// Longest socket path `bind(2)` accepts. One byte of `sun_path` is
+/// reserved for the NUL terminator, which is exactly the boundary
+/// `std::os::unix::net::UnixListener::bind` enforces before it reaches the
+/// kernel.
+#[cfg(unix)]
+pub const MAX_UNIX_SOCKET_PATH_LEN: usize = UNIX_SOCKET_PATH_CAPACITY - 1;
+
+pub use crate::daemon_pipe_name::{windows_pipe_name_for, WINDOWS_PIPE_PREFIX};
+
+/// Where the daemon's socket ended up relative to its endpoint file. A
+/// Windows named pipe is always [`Self::Colocated`]: pipe names live in the
+/// pipe namespace and have no `sun_path` limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonSocketPlacement {
+    /// Beside the endpoint metadata inside the project runtime root. This
+    /// is the ordinary layout and keeps the socket inside the same
+    /// owner-scoped directory as the endpoint it belongs to.
+    Colocated,
+    /// Inside a private per-user runtime directory, used when the
+    /// colocated path would overflow `sun_path`.
+    Shortened,
+}
+
+/// A daemon socket location plus how it was chosen. On Windows `path` holds
+/// the named-pipe name (`\\.\pipe\gwtd-...`), which callers pass to the
+/// transport verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonSocketPath {
+    pub path: PathBuf,
+    pub placement: DaemonSocketPlacement,
+}
+
+/// Resolve the named-pipe name for a daemon endpoint (Issue #3526).
+///
+/// The name is derived from the full endpoint path, so the same gwt home
+/// plus [`RuntimeScope`] always resolves to the same pipe while distinct
+/// scopes never share one — the Windows counterpart of the Unix socket
+/// contract below.
+#[cfg(windows)]
+pub fn resolve_daemon_socket_path(endpoint_path: &Path) -> Result<DaemonSocketPath> {
+    Ok(DaemonSocketPath {
+        path: PathBuf::from(windows_pipe_name_for(&endpoint_path.to_string_lossy())),
+        placement: DaemonSocketPlacement::Colocated,
+    })
+}
+
+#[cfg(unix)]
+const SHORT_SOCKET_DIR_MODE: u32 = 0o700;
+/// Hex prefix width of the endpoint digest used as the shortened socket
+/// file name. 64 bits is far beyond collision range for the handful of
+/// worktrees one user runs, and keeps the whole name at 21 bytes.
+#[cfg(unix)]
+const SHORT_SOCKET_NAME_HEX_LEN: usize = 16;
+
+/// Ordered directories to try when the colocated socket path is too long.
+///
+/// Reads [`DAEMON_SOCKET_DIR_ENV`], `XDG_RUNTIME_DIR`, and `TMPDIR` from
+/// the environment; see [`short_socket_base_candidates_for`] for the
+/// selection rules.
+#[cfg(unix)]
+pub fn short_socket_base_candidates() -> Vec<PathBuf> {
+    short_socket_base_candidates_for(
+        env_dir(DAEMON_SOCKET_DIR_ENV),
+        env_dir("XDG_RUNTIME_DIR"),
+        env_dir("TMPDIR"),
+    )
+}
+
+/// Pure form of [`short_socket_base_candidates`].
+///
+/// An explicit override wins outright. Otherwise the per-user runtime
+/// directories come first (`XDG_RUNTIME_DIR` on systemd hosts, `TMPDIR`
+/// which is already private per user on macOS) and `/tmp` is the
+/// last resort that always exists.
+#[cfg(unix)]
+pub fn short_socket_base_candidates_for(
+    socket_dir_override: Option<PathBuf>,
+    xdg_runtime_dir: Option<PathBuf>,
+    tmpdir: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    if let Some(dir) = socket_dir_override {
+        return vec![dir];
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
+    for candidate in [xdg_runtime_dir, tmpdir, Some(PathBuf::from("/tmp"))]
+        .into_iter()
+        .flatten()
+    {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(unix)]
+fn env_dir(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Resolve the Unix socket path for a daemon endpoint, shortening it when
+/// the colocated path would overflow `sockaddr_un.sun_path`.
+///
+/// Uses [`short_socket_base_candidates`] for the shortened case; see
+/// [`resolve_daemon_socket_path_in`] for the contract.
+#[cfg(unix)]
+pub fn resolve_daemon_socket_path(endpoint_path: &Path) -> Result<DaemonSocketPath> {
+    resolve_daemon_socket_path_in(endpoint_path, &short_socket_base_candidates())
+}
+
+/// Resolve the Unix socket path for a daemon endpoint against an explicit
+/// candidate list.
+///
+/// The colocated `<endpoint>.sock` is preferred and returned untouched
+/// whenever it fits. Otherwise the socket moves to
+/// `<base>/gwt-ipc-<uid>/<endpoint digest>.sock` for the first candidate
+/// base that is an existing directory, yields a path within the platform
+/// limit, and can be made private to the current user.
+///
+/// The name is derived from the full endpoint path, so the same
+/// gwt home plus [`RuntimeScope`] always resolves to the same socket —
+/// stale-socket cleanup and endpoint reuse keep working across daemon
+/// restarts — while distinct scopes never share one.
+///
+/// Fails with a diagnosis naming the oversized path, the platform limit,
+/// why each candidate was rejected, and [`DAEMON_SOCKET_DIR_ENV`] as the
+/// recovery lever, rather than deferring to `bind(2)`'s bare
+/// `path must be shorter than SUN_LEN`.
+#[cfg(unix)]
+pub fn resolve_daemon_socket_path_in(
+    endpoint_path: &Path,
+    bases: &[PathBuf],
+) -> Result<DaemonSocketPath> {
+    let colocated = endpoint_path.with_extension("sock");
+    if colocated.as_os_str().len() <= MAX_UNIX_SOCKET_PATH_LEN {
+        return Ok(DaemonSocketPath {
+            path: colocated,
+            placement: DaemonSocketPlacement::Colocated,
+        });
+    }
+
+    let file_name = short_socket_file_name(endpoint_path);
+    let dir_name = short_socket_dir_name();
+    let mut rejections: Vec<String> = Vec::new();
+
+    for base in bases {
+        if !base.is_dir() {
+            rejections.push(format!("{}: not an existing directory", base.display()));
+            continue;
+        }
+
+        let dir = base.join(&dir_name);
+        let candidate = dir.join(&file_name);
+        let len = candidate.as_os_str().len();
+        if len > MAX_UNIX_SOCKET_PATH_LEN {
+            rejections.push(format!(
+                "{}: shortened path would still be {len} bytes",
+                base.display()
+            ));
+            continue;
+        }
+
+        match ensure_private_dir(&dir) {
+            Ok(()) => {
+                return Ok(DaemonSocketPath {
+                    path: candidate,
+                    placement: DaemonSocketPlacement::Shortened,
+                })
+            }
+            Err(reason) => rejections.push(format!("{}: {reason}", base.display())),
+        }
+    }
+
+    let rejected = if rejections.is_empty() {
+        "no candidate directories were configured".to_string()
+    } else {
+        rejections.join("; ")
+    };
+    Err(GwtError::Config(format!(
+        "daemon socket path exceeds this platform's {MAX_UNIX_SOCKET_PATH_LEN}-byte sun_path \
+         limit and no shorter socket directory was usable. socket path: {socket} ({len} bytes). \
+         rejected candidates: {rejected}. recovery: set {DAEMON_SOCKET_DIR_ENV} to a short, \
+         private, writable directory such as /tmp, or move the gwt home or the project to a \
+         shorter path",
+        socket = colocated.display(),
+        len = colocated.as_os_str().len(),
+    )))
+}
+
+#[cfg(unix)]
+fn short_socket_dir_name() -> String {
+    format!("gwt-ipc-{}", effective_uid())
+}
+
+#[cfg(unix)]
+fn short_socket_file_name(endpoint_path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(endpoint_path.to_string_lossy().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("{}.sock", &digest[..SHORT_SOCKET_NAME_HEX_LEN])
+}
+
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Create or validate a directory that only the current user can reach.
+///
+/// Moving the socket out of the project runtime root must not widen the
+/// local-only, owner-scoped IPC boundary, so an existing entry is accepted
+/// only when it is a real directory (not a symlink) owned by this user,
+/// and its mode is forced back to 0700.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &Path) -> std::result::Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    match fs::DirBuilder::new()
+        .mode(SHORT_SOCKET_DIR_MODE)
+        .create(dir)
+    {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(format!("cannot create {}: {err}", dir.display())),
+    }
+
+    let metadata =
+        fs::symlink_metadata(dir).map_err(|err| format!("cannot stat {}: {err}", dir.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "{} exists but is not a directory owned by this user",
+            dir.display()
+        ));
+    }
+
+    let own_uid = effective_uid();
+    if metadata.uid() != own_uid {
+        return Err(format!(
+            "{} is owned by uid {} rather than {own_uid}",
+            dir.display(),
+            metadata.uid()
+        ));
+    }
+
+    if metadata.permissions().mode() & 0o777 != SHORT_SOCKET_DIR_MODE {
+        fs::set_permissions(dir, fs::Permissions::from_mode(SHORT_SOCKET_DIR_MODE))
+            .map_err(|err| format!("cannot restrict {} to 0700: {err}", dir.display()))?;
+    }
+
+    Ok(())
+}
+
 /// Persisted daemon endpoint metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonEndpoint {
@@ -151,6 +437,20 @@ impl DaemonEndpoint {
             && !self.auth_token.trim().is_empty()
             && is_process_alive(self.pid)
     }
+
+    /// Whether the process that wrote this descriptor is still running.
+    ///
+    /// Issue #2338 AC-A: deliberately separate from [`Self::is_usable`].
+    /// `is_usable` asks "may *I* talk to this daemon", which a protocol or
+    /// scope mismatch answers with no; this asks "is anyone still behind this
+    /// file", which decides whether the file may be deleted. Conflating the
+    /// two let a version-skewed caller erase a healthy daemon's descriptor.
+    pub fn has_live_owner<F>(&self, is_process_alive: F) -> bool
+    where
+        F: Fn(u32) -> bool,
+    {
+        self.pid > 0 && is_process_alive(self.pid)
+    }
 }
 
 /// Hook event payload forwarded into the daemon runtime.
@@ -194,6 +494,10 @@ pub enum ClientFrame {
     Hook(HookEnvelope),
     /// Subscribe to one or more daemon broadcast channels.
     Subscribe { channels: Vec<String> },
+    /// Subscribe as the GUI process that materializes Issue Monitor launch
+    /// deliveries. Unlike [`Self::Subscribe`], the daemon binds a presence
+    /// lease to this IPC connection and releases it on disconnect.
+    SubscribeMaterializer { channels: Vec<String> },
     /// Publish a payload to a daemon broadcast channel. Subscribers of
     /// `channel` receive a [`DaemonFrame::Event`] with the same payload.
     /// This is the gwt → gwtd companion to `Subscribe`; it is what
@@ -202,6 +506,70 @@ pub enum ClientFrame {
     Publish { channel: String, payload: Value },
     /// Request a snapshot of the daemon's current runtime stats.
     Status,
+    /// Launch one verification command from the daemon instead of from the
+    /// caller's process tree (Issue #4409).
+    ///
+    /// The daemon replies with [`DaemonFrame::VerificationAccepted`] once the
+    /// child exists and with [`DaemonFrame::VerificationFinished`] when it
+    /// exits. The child's lifetime is bound to *this connection*: if the
+    /// caller dies or disconnects first, the daemon reclaims the whole
+    /// dedicated process group, so escaping the caller's tree never leaves
+    /// orphans behind (AC-2 / AC-7, Issue #3845).
+    SpawnVerification(VerificationSpawnRequest),
+}
+
+/// One verification command, described completely enough that the daemon can
+/// reproduce the child the caller would otherwise have spawned itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSpawnRequest {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Working directory; normally the worktree under verification.
+    pub cwd: PathBuf,
+    /// The child's **complete** environment. The daemon clears its own
+    /// environment before applying it, because a test runner whose
+    /// environment differs from an ordinary shell produces verdicts nobody
+    /// can reproduce — and the daemon's environment is not the caller's.
+    pub env: Vec<(String, String)>,
+    /// Files the daemon redirects the child's streams into. The caller owns
+    /// and reads them; streaming the transcript back through newline-
+    /// delimited JSON would have to escape and re-frame every byte of a
+    /// multi-megabyte `cargo test` log for no gain.
+    pub stdout_path: PathBuf,
+    pub stderr_path: PathBuf,
+}
+
+/// The daemon accepted a spawn request and the child is running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSpawnAccepted {
+    pub pid: u32,
+    /// The dedicated process group the child leads. Reclamation targets this
+    /// group and nothing above it, so the daemon is never caught in its own
+    /// cleanup (AC-7).
+    pub process_group: u32,
+    /// The nice value the child *actually* got, read back after the spawn
+    /// rather than assumed from what was requested.
+    pub nice: Option<i32>,
+    /// Why the child is not at baseline priority, when it is not.
+    ///
+    /// This is a record, not a refusal: an environment that will not let the
+    /// daemon reach nice 0 is not something the caller can fix, so the run
+    /// proceeds and says what it got (AC-6). A *missing* daemon is the
+    /// opposite case and is refused before the request is ever sent (AC-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nice_reason: Option<String>,
+}
+
+/// The daemon's verification child exited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSpawnFinished {
+    /// Exit code, or `-1` when the child was killed by a signal.
+    pub exit_code: i32,
+    /// Whether the daemon had to kill the child's process group after it
+    /// exited because descendants were still alive. Recorded so an orphan
+    /// left by a runner is visible instead of silently reclaimed.
+    #[serde(default)]
+    pub reclaimed_survivors: bool,
 }
 
 /// Tagged frame envelope returned by `gwtd`.
@@ -224,6 +592,10 @@ pub enum DaemonFrame {
     /// Snapshot of daemon runtime stats, returned in response to a
     /// [`ClientFrame::Status`] request.
     Status(DaemonStatus),
+    /// A [`ClientFrame::SpawnVerification`] child is running.
+    VerificationAccepted(VerificationSpawnAccepted),
+    /// That child exited.
+    VerificationFinished(VerificationSpawnFinished),
 }
 
 /// Runtime stats snapshot returned by a [`DaemonFrame::Status`] frame.
@@ -237,12 +609,25 @@ pub struct DaemonStatus {
     /// asking for the status snapshot.
     #[serde(default)]
     pub connections: usize,
+    /// Latest atomic Issue Monitor projection owned by this daemon. Older
+    /// daemons omit it; clients must not treat a missing projection from a live
+    /// daemon as permission to reconstruct runtime state from stale cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_monitor: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonBootstrapAction {
     Reuse(DaemonEndpoint),
-    Spawn { endpoint_path: PathBuf },
+    Spawn {
+        endpoint_path: PathBuf,
+    },
+    /// Issue #4038 (AC-6): a live daemon serves this scope but was built from
+    /// another gwt version. It must not be adopted; the caller retires it and
+    /// spawns a fresh one once its descriptor is gone.
+    RetireStaleVersion {
+        endpoint: DaemonEndpoint,
+    },
 }
 
 pub fn validate_handshake(
@@ -295,7 +680,11 @@ pub fn persist_endpoint(path: &Path, endpoint: &DaemonEndpoint) -> Result<()> {
     ensure_dir(parent)?;
     let payload = serde_json::to_vec_pretty(endpoint)
         .map_err(|e| GwtError::Other(format!("serialize daemon endpoint failed: {e}")))?;
-    fs::write(path, payload)?;
+    // Issue #3911: a plain write leaves the descriptor existing but empty
+    // between create and fill, and the heal loop's readers check for the path
+    // before parsing it — that gap is what fails them with "EOF while parsing
+    // a value" on a loaded host.
+    crate::atomic_file::write_atomic(path, &payload)?;
     Ok(())
 }
 
@@ -308,12 +697,78 @@ pub fn resolve_bootstrap_action<F>(
 where
     F: Fn(u32) -> bool,
 {
+    resolve_bootstrap_action_with_version(
+        gwt_home,
+        scope,
+        expected_protocol_version,
+        None,
+        is_process_alive,
+    )
+}
+
+/// Issue #4038 (AC-6): like [`resolve_bootstrap_action`], but a usable, live
+/// endpoint whose `daemon_version` differs from `expected_daemon_version` is
+/// returned as [`DaemonBootstrapAction::RetireStaleVersion`] instead of
+/// `Reuse`. The endpoint contract otherwise never compares versions, which is
+/// how a pre-update daemon survived into the post-update GUI (Issue #3633).
+pub fn resolve_bootstrap_action_for_version<F>(
+    gwt_home: &Path,
+    scope: &RuntimeScope,
+    expected_protocol_version: u32,
+    expected_daemon_version: &str,
+    is_process_alive: F,
+) -> Result<DaemonBootstrapAction>
+where
+    F: Fn(u32) -> bool,
+{
+    resolve_bootstrap_action_with_version(
+        gwt_home,
+        scope,
+        expected_protocol_version,
+        Some(expected_daemon_version),
+        is_process_alive,
+    )
+}
+
+fn daemon_versions_match(left: &str, right: &str) -> bool {
+    left.trim().trim_start_matches('v') == right.trim().trim_start_matches('v')
+}
+
+fn resolve_bootstrap_action_with_version<F>(
+    gwt_home: &Path,
+    scope: &RuntimeScope,
+    expected_protocol_version: u32,
+    expected_daemon_version: Option<&str>,
+    is_process_alive: F,
+) -> Result<DaemonBootstrapAction>
+where
+    F: Fn(u32) -> bool,
+{
     let endpoint_path = scope.endpoint_path(gwt_home);
     match load_endpoint(&endpoint_path) {
-        Ok(endpoint) if endpoint.is_usable(scope, expected_protocol_version, is_process_alive) => {
-            Ok(DaemonBootstrapAction::Reuse(endpoint))
+        Ok(endpoint) if endpoint.is_usable(scope, expected_protocol_version, &is_process_alive) => {
+            match expected_daemon_version {
+                Some(expected) if !daemon_versions_match(&endpoint.daemon_version, expected) => {
+                    Ok(DaemonBootstrapAction::RetireStaleVersion { endpoint })
+                }
+                _ => Ok(DaemonBootstrapAction::Reuse(endpoint)),
+            }
         }
-        Ok(_) | Err(GwtError::Other(_)) => {
+        // Issue #2338 AC-A: "not reusable" and "abandoned" are different
+        // questions, and `is_usable` only answers the first. Four of this
+        // function's five production callers merely read the endpoint, so
+        // deleting on any `is_usable` failure meant a single version-skewed
+        // or wrong-scope caller could erase a running daemon's descriptor —
+        // `daemon.status` breaking the daemon it was asked about. Only a
+        // descriptor whose owner is provably gone is ours to remove.
+        Ok(endpoint) => {
+            if !endpoint.has_live_owner(&is_process_alive) {
+                remove_endpoint_file(&endpoint_path)?;
+            }
+            Ok(DaemonBootstrapAction::Spawn { endpoint_path })
+        }
+        // Unparsable: no owner pid can be read, so nothing can be preserved.
+        Err(GwtError::Other(_)) => {
             remove_endpoint_file(&endpoint_path)?;
             Ok(DaemonBootstrapAction::Spawn { endpoint_path })
         }
@@ -322,6 +777,54 @@ where
         }
         Err(err) => Err(err),
     }
+}
+
+/// Issue #2338 AC-D: remove the past-generation descriptors in `daemon_dir`.
+///
+/// Endpoint files are only ever removed by whoever happens to resolve that
+/// exact path, so descriptors left by earlier gwt generations pile up — a
+/// production machine accumulated 746 of them, every one a
+/// `internal://gwt-front-door` sentinel. Returns the paths that were removed.
+///
+/// Abandonment must be *proven*, never assumed: a descriptor is removed only
+/// when its recorded owner is gone (`is_process_alive` says no, or the pid is
+/// zero) *and* nothing answers on its bind address (`is_bind_serving`). A
+/// descriptor whose pid died but whose socket still serves belongs to a daemon
+/// this sweep cannot see, and an unreadable descriptor names no owner at all;
+/// both are left alone. Files that are not `*.json` are never touched.
+///
+/// A missing `daemon_dir` is not an error — there is simply nothing to sweep.
+pub fn sweep_dead_endpoints<F, G>(
+    daemon_dir: &Path,
+    is_process_alive: F,
+    is_bind_serving: G,
+) -> Result<Vec<PathBuf>>
+where
+    F: Fn(u32) -> bool,
+    G: Fn(&str) -> bool,
+{
+    let entries = match fs::read_dir(daemon_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut removed = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(endpoint) = load_endpoint(&path) else {
+            continue;
+        };
+        if endpoint.has_live_owner(&is_process_alive) || is_bind_serving(endpoint.bind.trim()) {
+            continue;
+        }
+        remove_endpoint_file(&path)?;
+        removed.push(path);
+    }
+    Ok(removed)
 }
 
 fn load_endpoint(path: &Path) -> Result<DaemonEndpoint> {

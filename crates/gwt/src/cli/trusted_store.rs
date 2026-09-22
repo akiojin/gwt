@@ -32,7 +32,15 @@ use sha2::{Digest, Sha256};
 /// mode).
 #[must_use]
 pub fn trusted_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    let repo_hash = crate::index_worker::detect_repo_hash(worktree)?;
+    // A trusted-store key is defined only for an actual Git worktree (or bare
+    // repository). Do not use the project-index resolver here: its
+    // workspace-home compatibility fallback shells out to `git rev-parse`.
+    // Diagnosis is projected for every historical Work on the GUI event
+    // loop, so one non-Git/stale directory would otherwise spawn Git
+    // repeatedly and freeze the Workspace surface. The core resolver reads
+    // `.git` / config files directly and returns `None` for those rows,
+    // preserving the documented mirror-only degenerate mode.
+    let repo_hash = gwt_core::repo_hash::detect_repo_hash(worktree)?;
     Some(
         gwt_core::paths::gwt_projects_dir()
             .join(repo_hash.as_str())

@@ -64,10 +64,7 @@ test("Surface Deck — categories own the expected preset members", () => {
     "board",
     "console",
     "file_tree",
-    "improvement",
-    "issue_monitor",
     "logs",
-    "work",
   ]);
   assert.deepEqual(presetsIn("knowledge").sort(), [
     "index",
@@ -104,26 +101,23 @@ test("Surface Deck — Issue remains the canonical entry and SPEC is not separat
   assert.doesNotMatch(knowledgeText, /\bSPEC\b/i, "knowledge deck must not show SPEC");
 });
 
-test("Surface Deck — all 12 visible data-preset values are preserved", () => {
+test("Surface Deck — the unified Issue entry leaves 9 visible presets", () => {
   const presets = [...modal.querySelectorAll(".preset-button[data-preset]")].map(
     (btn) => btn.dataset.preset,
   );
   const expected = [
     "file_tree",
-    "issue_monitor",
     "settings",
     "index",
     "profile",
     "logs",
     "issue",
-    "work",
     "board",
-    "improvement",
     "pr",
     "console",
   ].sort();
   assert.deepEqual(presets.sort(), expected);
-  assert.equal(presets.length, 12, "expected exactly 12 preset buttons");
+  assert.equal(presets.length, 9, "expected exactly 9 preset buttons");
 });
 
 test("Surface Deck — no forbidden presets leak into the modal", () => {
@@ -133,7 +127,12 @@ test("Surface Deck — no forbidden presets leak into the modal", () => {
     "codex",
     "branches",
     "agent_kanban",
+    "issue_monitor",
+    "intake",
     "spec",
+    // SPEC-3671 FR-016 (T-029): the Work window left ADD WINDOW once every
+    // Work information item moved to the Issue row.
+    "work",
   ]) {
     assert.equal(
       modal.querySelector(`.preset-button[data-preset="${forbidden}"]`) !== null,
@@ -145,7 +144,7 @@ test("Surface Deck — no forbidden presets leak into the modal", () => {
 
 test("Surface Deck — every button carries icon glyph + strong label + description", () => {
   const buttons = [...modal.querySelectorAll(".preset-button")];
-  assert.equal(buttons.length, 12);
+  assert.equal(buttons.length, 9);
   for (const btn of buttons) {
     const preset = btn.dataset.preset;
     assert.ok(
@@ -184,8 +183,6 @@ test("Surface Deck — specific glyphs map to the right presets", () => {
     logs: "≡",
     console: "❯",
     board: "▦",
-    work: "◆",
-    improvement: "◇",
     issue: "◍",
     pr: "⇄",
     index: "⌕",
@@ -422,27 +419,26 @@ test("Surface Deck JS — wires the roving keydown listener and clears state on 
 
 // Behavioral lock for the geometry direction-nearest roving math. linkedom does
 // no layout, so we replicate the exact scorer from app.js against synthetic rect
-// centers modeling the weighted deck (SURFACES 2-col with a fourth row, KNOWLEDGE 2-col
-// x 2-row with one open slot, CONFIG 1-col x 2-row) and assert intuitive navigation. A future
-// scorer change that breaks cross-column / clamp behavior trips this test.
+// centers modeling the weighted deck (SURFACES 2-col x 3-row with one open
+// slot, KNOWLEDGE 2-col x 2-row with one open slot, CONFIG 1-col x 2-row) and
+// assert intuitive navigation. A future scorer change that breaks
+// cross-column / clamp behavior trips this test.
 test("Surface Deck behavioral — geometry roving picks the nearest tile in the pressed direction", () => {
   const buttons = [...modal.querySelectorAll(".preset-button")];
-  assert.equal(buttons.length, 12);
+  assert.equal(buttons.length, 9);
 
-  // center coords keyed by DOM order: SURFACES(0-6), KNOWLEDGE(7-9), CONFIG(10-11)
+  // center coords keyed by DOM order: SURFACES(0-3), KNOWLEDGE(4-6), CONFIG(7-8)
+  // (SPEC-3671 FR-016 / T-029 retired the Work tile, so SURFACES is a full 2x2).
   const centers = [
-    { x: 100, y: 100 }, // 0 file_tree   (SURFACES col1 row1)
-    { x: 250, y: 100 }, // 1 logs        (SURFACES col2 row1)
-    { x: 100, y: 180 }, // 2 console     (SURFACES col1 row2)
-    { x: 250, y: 180 }, // 3 board       (SURFACES col2 row2)
-    { x: 100, y: 260 }, // 4 work        (SURFACES col1 row3)
-    { x: 250, y: 260 }, // 5 monitor     (SURFACES col2 row3)
-    { x: 100, y: 340 }, // 6 improvement (SURFACES col1 row4)
-    { x: 450, y: 100 }, // 7 issue       (KNOWLEDGE col1 row1)
-    { x: 580, y: 100 }, // 8 pr          (KNOWLEDGE col2 row1)
-    { x: 450, y: 180 }, // 9 index       (KNOWLEDGE col1 row2)
-    { x: 750, y: 100 }, // 10 settings   (CONFIG row1)
-    { x: 750, y: 180 }, // 11 profile    (CONFIG row2)
+    { x: 100, y: 100 }, // 0 file_tree (SURFACES col1 row1)
+    { x: 250, y: 100 }, // 1 logs      (SURFACES col2 row1)
+    { x: 100, y: 180 }, // 2 console   (SURFACES col1 row2)
+    { x: 250, y: 180 }, // 3 board     (SURFACES col2 row2)
+    { x: 450, y: 100 }, // 4 issue     (KNOWLEDGE col1 row1)
+    { x: 580, y: 100 }, // 5 pr        (KNOWLEDGE col2 row1)
+    { x: 450, y: 180 }, // 6 index     (KNOWLEDGE col1 row2)
+    { x: 750, y: 100 }, // 7 settings  (CONFIG row1)
+    { x: 750, y: 180 }, // 8 profile   (CONFIG row2)
   ];
 
   // Replica of app.js findGeometryNeighbor: direction half-plane filter +
@@ -482,18 +478,18 @@ test("Surface Deck behavioral — geometry roving picks the nearest tile in the 
   assert.equal(move(0, "ArrowDown"), 2, "File Tree → Console");
   assert.equal(move(2, "ArrowUp"), 0, "Console → File Tree");
   assert.equal(move(1, "ArrowDown"), 3, "Logs → Board (same inner column)");
-  assert.equal(move(3, "ArrowDown"), 5, "Board → Issue Monitor");
-  assert.equal(move(4, "ArrowRight"), 5, "Workspace → Issue Monitor");
-  assert.equal(move(4, "ArrowDown"), 6, "Workspace → Improvement Inbox");
+  assert.equal(move(2, "ArrowRight"), 3, "Console → Board");
+  assert.equal(move(3, "ArrowDown"), 3, "bottom of SURFACES clamps (Work tile retired)");
+  assert.equal(move(2, "ArrowDown"), 2, "bottom of SURFACES col1 clamps");
   // Cross-column to the next category at the same row.
-  assert.equal(move(1, "ArrowRight"), 7, "Logs → Issue (jump to KNOWLEDGE)");
-  assert.equal(move(8, "ArrowRight"), 10, "PR → Settings (jump to CONFIG)");
+  assert.equal(move(1, "ArrowRight"), 4, "Logs → Issue (jump to KNOWLEDGE)");
+  assert.equal(move(5, "ArrowRight"), 7, "PR → Settings (jump to CONFIG)");
   // CONFIG single column.
-  assert.equal(move(10, "ArrowDown"), 11, "Settings → Profile");
-  assert.equal(move(11, "ArrowUp"), 10, "Profile → Settings");
+  assert.equal(move(7, "ArrowDown"), 8, "Settings → Profile");
+  assert.equal(move(8, "ArrowUp"), 7, "Profile → Settings");
   // Clamp at edges (no wrap).
   assert.equal(move(0, "ArrowLeft"), 0, "left edge clamps");
   assert.equal(move(0, "ArrowUp"), 0, "top edge clamps");
-  assert.equal(move(11, "ArrowDown"), 11, "bottom of CONFIG clamps");
-  assert.equal(move(10, "ArrowRight"), 10, "right edge clamps");
+  assert.equal(move(8, "ArrowDown"), 8, "bottom of CONFIG clamps");
+  assert.equal(move(7, "ArrowRight"), 7, "right edge clamps");
 });

@@ -1,8 +1,16 @@
 //! Managed hook health read model.
 
 use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock, PoisonError,
+    },
+    time::SystemTime,
 };
 
 use gwt_agent::PendingDiscussionResume;
@@ -10,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const SLOW_HANDLER_THRESHOLD_MS: f64 = 1000.0;
+const SELF_HEALED_MARKER: &str = ".gwt/managed-hook-self-healed";
+/// How long a hook failure keeps showing in `hook.health` (Issue #3541).
+const HOOK_FAILURE_RETENTION_HOURS: i64 = 24;
 const MANAGED_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -71,7 +82,9 @@ impl ManagedHookHealthInput {
             runtime_state_path: std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
                 .map(PathBuf::from),
             profile_path: None,
-            expected_hook_bin: None,
+            expected_hook_bin: std::env::var("GWT_HOOK_BIN")
+                .ok()
+                .filter(|value| !value.is_empty()),
         }
     }
 
@@ -108,7 +121,138 @@ struct RuntimeStateReadModel {
     pub pending_discussion: Option<PendingDiscussionResume>,
 }
 
+/// Hook failures read once and reused for a whole projection.
+///
+/// Issue #4172: `read_managed_hook_health` is called once per Work row, and
+/// each call used to scan the whole host error ledger. With a real ledger the
+/// scan alone cost seconds per projection and grew with the recorded volume.
+/// One projection now takes a single snapshot and every row reads its own
+/// worktree's failures out of it, so the cost stops scaling with Work count.
+///
+/// The snapshot is deliberately not cached beyond the projection that holds
+/// it: the next projection takes a fresh one, so newly recorded failures still
+/// surface on the next refresh.
+#[derive(Debug, Clone, Default)]
+pub struct ManagedHookFailureSnapshot {
+    /// Latest hard / fail-open failure per canonicalized worktree root.
+    ///
+    /// Folding at snapshot time keeps the per-worktree read out of the ledger
+    /// size entirely: the rows are canonicalized and reduced once, so a Work
+    /// row only looks its own worktree up.
+    by_worktree: HashMap<PathBuf, WorktreeHookFailures>,
+    /// Surface audits this snapshot refreshed or reused (Issue #4370).
+    surface_audits: Arc<SurfaceAuditCounters>,
+    /// Issue #4257: bare hook binaries resolved during this projection.
+    hook_binaries: HookBinaryResolutionCache,
+}
+
+/// Memo of bare hook-binary resolution for one projection.
+///
+/// Issue #4257: resolving a bare fallback such as `gwtd` walks the whole
+/// PATH (~11ms per lookup on a 59-entry Windows PATH) and depends only on
+/// process-wide state, yet every managed command of every event of every
+/// Work row asked again. The GUI builds the projection on its event loop,
+/// so that repetition held pane replies for tens of seconds.
+#[derive(Debug, Clone, Default)]
+struct HookBinaryResolutionCache {
+    bare_resolved: RefCell<HashMap<String, Option<PathBuf>>>,
+}
+
+impl HookBinaryResolutionCache {
+    fn resolve_bare_hook_binary(&self, actual: &str) -> Option<PathBuf> {
+        if let Some(resolved) = self.bare_resolved.borrow().get(actual) {
+            return resolved.clone();
+        }
+        let resolved = resolve_bare_hook_binary(actual);
+        self.bare_resolved
+            .borrow_mut()
+            .insert(actual.to_string(), resolved.clone());
+        resolved
+    }
+}
+
+/// Surface audit cache activity for one [`ManagedHookFailureSnapshot`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SurfaceAuditStats {
+    /// Rows whose managed hook surface was audited from disk.
+    pub refreshed: usize,
+    /// Rows whose unchanged surface reused the cached audit.
+    pub reused: usize,
+}
+
+#[derive(Debug, Default)]
+struct SurfaceAuditCounters {
+    refreshed: AtomicUsize,
+    reused: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorktreeHookFailures {
+    latest_hard: Option<gwt_core::error_ledger::ErrorRecord>,
+    latest_fail_open: Option<gwt_core::error_ledger::ErrorRecord>,
+}
+
+impl ManagedHookFailureSnapshot {
+    /// Read the retained hook failures from the host error ledger once.
+    ///
+    /// A ledger that cannot be read yields an empty snapshot, matching the
+    /// fail-open behaviour the per-row read had.
+    pub fn read() -> Self {
+        use gwt_core::error_ledger::ErrorKind;
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(HOOK_FAILURE_RETENTION_HOURS);
+        let mut by_worktree: HashMap<PathBuf, WorktreeHookFailures> = HashMap::new();
+        // `list_since` returns rows oldest first, so the last match wins.
+        for row in gwt_core::error_ledger::list_since(Some(since))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.kind == ErrorKind::HookFailure)
+        {
+            let Some(project_root) = row.target.project_root.as_deref() else {
+                continue;
+            };
+            let key = comparable_path(Path::new(project_root));
+            let entry = by_worktree.entry(key).or_default();
+            if row.context.get("fail_open").map(String::as_str) == Some("true") {
+                entry.latest_fail_open = Some(row);
+            } else {
+                entry.latest_hard = Some(row);
+            }
+        }
+        Self {
+            by_worktree,
+            surface_audits: Arc::default(),
+            hook_binaries: HookBinaryResolutionCache::default(),
+        }
+    }
+
+    /// Number of distinct bare hook binaries this projection resolved.
+    pub fn resolved_hook_binaries(&self) -> usize {
+        self.hook_binaries.bare_resolved.borrow().len()
+    }
+
+    /// Project managed hook health for one worktree out of this snapshot.
+    pub fn read_health(&self, input: &ManagedHookHealthInput) -> ManagedHookHealth {
+        read_managed_hook_health_with(input, self)
+    }
+
+    /// How many rows this snapshot audited from disk versus reused.
+    pub fn surface_audit_stats(&self) -> SurfaceAuditStats {
+        SurfaceAuditStats {
+            refreshed: self.surface_audits.refreshed.load(Ordering::Relaxed),
+            reused: self.surface_audits.reused.load(Ordering::Relaxed),
+        }
+    }
+}
+
 pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHealth {
+    read_managed_hook_health_with(input, &ManagedHookFailureSnapshot::read())
+}
+
+fn read_managed_hook_health_with(
+    input: &ManagedHookHealthInput,
+    failures: &ManagedHookFailureSnapshot,
+) -> ManagedHookHealth {
     let mut health = ManagedHookHealth {
         status: ManagedHookHealthStatus::Ready,
         last_event: None,
@@ -128,13 +272,17 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
         issues: Vec::new(),
     };
 
-    audit_managed_hook_configs(input, &mut health);
+    let surface = cached_surface_audit(input, failures);
+    health.status = surface.status;
+    health.issues = surface.issues;
     audit_hook_profile(input, &mut health);
+    audit_hook_failures(input, failures, &mut health);
 
     let Some(runtime_state_path) = input.runtime_state_path.as_ref() else {
         if health.status == ManagedHookHealthStatus::Ready {
             health.status = ManagedHookHealthStatus::Inactive;
         }
+        apply_self_healed_marker(input, &mut health);
         return health;
     };
 
@@ -142,6 +290,7 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
         if health.status == ManagedHookHealthStatus::Ready {
             health.status = ManagedHookHealthStatus::WaitingForFirstHookEvent;
         }
+        apply_self_healed_marker(input, &mut health);
         return health;
     }
 
@@ -167,7 +316,29 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
         }
     }
 
+    apply_self_healed_marker(input, &mut health);
     health
+}
+
+fn apply_self_healed_marker(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
+    if input.worktree_root.join(SELF_HEALED_MARKER).is_file()
+        && matches!(
+            health.status,
+            ManagedHookHealthStatus::Ready
+                | ManagedHookHealthStatus::Inactive
+                | ManagedHookHealthStatus::WaitingForFirstHookEvent
+        )
+    {
+        health.status = ManagedHookHealthStatus::SelfHealed;
+    }
+}
+
+pub fn record_managed_hook_self_healed(worktree_root: &Path) -> io::Result<()> {
+    let marker = worktree_root.join(SELF_HEALED_MARKER);
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(marker, chrono::Utc::now().to_rfc3339())
 }
 
 fn audit_hook_profile(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
@@ -242,17 +413,270 @@ fn audit_hook_profile(input: &ManagedHookHealthInput, health: &mut ManagedHookHe
     }
 }
 
-fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut ManagedHookHealth) {
-    let worktree = &input.worktree_root;
+/// Issue #3541: project recent hook failures from the host error ledger so a
+/// later successful event turns them into "recovered" evidence instead of
+/// erasing them. Unresolved handler failures degrade health; recovered and
+/// fail-open (live forwarding) failures need attention until they age out.
+fn audit_hook_failures(
+    input: &ManagedHookHealthInput,
+    failures: &ManagedHookFailureSnapshot,
+    health: &mut ManagedHookHealth,
+) {
+    let worktree = comparable_path(&input.worktree_root);
+    let Some(matching) = failures.by_worktree.get(&worktree) else {
+        return;
+    };
+
+    if let Some(row) = matching.latest_hard.as_ref() {
+        let completed_at = input
+            .runtime_state_path
+            .as_deref()
+            .and_then(read_last_completed_hook_event_at);
+        let recovered = completed_at.is_some_and(|at| at > row.recorded_at);
+        let state = if recovered { "recovered" } else { "unresolved" };
+        let issue = describe_hook_failure(row, state);
+        if recovered {
+            needs_attention(health, issue);
+        } else {
+            degraded(health, issue);
+        }
+    }
+    if let Some(row) = matching.latest_fail_open.as_ref() {
+        needs_attention(health, describe_hook_failure(row, "fail-open"));
+    }
+}
+
+fn describe_hook_failure(row: &gwt_core::error_ledger::ErrorRecord, state: &str) -> String {
+    let field = |key: &str| {
+        row.context
+            .get(key)
+            .map(String::as_str)
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    format!(
+        "managed hook failure: {}/{} state={state} recorded_at={} (errors.list id={})",
+        field("event"),
+        field("handler"),
+        row.recorded_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        row.id
+    )
+}
+
+fn read_last_completed_hook_event_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let at = value.get("last_completed_hook_event_at")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|at| at.with_timezone(&chrono::Utc))
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Environment that decides how a bare hook binary such as `gwtd` resolves.
+const SURFACE_AUDIT_ENV: &[&str] = &["PATH", "GWT_BIN_PATH"];
+
+/// Managed hook surface audits reused across projections (Issue #4370).
+///
+/// The Active Work projection reads hook health once per Work row, and the
+/// surface audit spawns `git` (tracked-config and hooks-path probes) and parses
+/// every hook config. At 592 rows that cost 72-77 s per build although almost
+/// no worktree's surface changes between builds. An audit is now kept per
+/// worktree and expected binary, and reused while every file it depends on
+/// keeps the same length and modification time.
+///
+/// Inputs the fingerprint cannot see — a config becoming git-tracked without a
+/// content change, or `core.hooksPath` being set where it was unset — are
+/// picked up the next time any watched file changes.
+static SURFACE_AUDITS: OnceLock<Mutex<HashMap<SurfaceAuditKey, CachedSurfaceAudit>>> =
+    OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SurfaceAuditKey {
+    worktree: PathBuf,
+    expected_hook_bin: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedSurfaceAudit {
+    fingerprint: SurfaceFingerprint,
+    /// Paths outside the fixed surface the audit consulted: hook binaries and
+    /// the `core.hooksPath` hook scripts.
+    dependencies: Vec<PathBuf>,
+    audit: SurfaceAudit,
+}
+
+#[derive(Debug, Clone)]
+struct SurfaceAudit {
+    status: ManagedHookHealthStatus,
+    issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SurfaceFingerprint {
+    env: Vec<Option<OsString>>,
+    files: Vec<Option<FileStamp>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+fn cached_surface_audit(
+    input: &ManagedHookHealthInput,
+    snapshot: &ManagedHookFailureSnapshot,
+) -> SurfaceAudit {
+    let counters = &snapshot.surface_audits;
+    let cache = SURFACE_AUDITS.get_or_init(Mutex::default);
+    let key = SurfaceAuditKey {
+        worktree: input.worktree_root.clone(),
+        expected_hook_bin: input.expected_hook_bin.clone(),
+    };
+    let surface = watched_surface_paths(&input.worktree_root);
+    let cached = cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    if let Some(cached) = cached {
+        if surface_fingerprint(&surface, &cached.dependencies) == cached.fingerprint {
+            counters.reused.fetch_add(1, Ordering::Relaxed);
+            return cached.audit;
+        }
+    }
+
+    // Stamp the surface before auditing it, so a write that lands mid-audit
+    // mismatches on the next read instead of being cached as seen.
+    let mut fingerprint = surface_fingerprint(&surface, &[]);
+    let mut scratch = ManagedHookHealth {
+        status: ManagedHookHealthStatus::Ready,
+        last_event: None,
+        last_event_at: None,
+        pending_discussion: None,
+        pending_goal: None,
+        slow_handlers: Vec::new(),
+        issues: Vec::new(),
+    };
+    let mut dependencies = Vec::new();
+    audit_managed_hook_configs(
+        input,
+        &snapshot.hook_binaries,
+        &mut scratch,
+        &mut dependencies,
+    );
+    fingerprint
+        .files
+        .extend(dependencies.iter().map(|path| file_stamp(path)));
+    let audit = SurfaceAudit {
+        status: scratch.status,
+        issues: scratch.issues,
+    };
+    counters.refreshed.fetch_add(1, Ordering::Relaxed);
+    cache.lock().unwrap_or_else(PoisonError::into_inner).insert(
+        key,
+        CachedSurfaceAudit {
+            fingerprint,
+            dependencies,
+            audit: audit.clone(),
+        },
+    );
+    audit
+}
+
+/// Every path whose presence or content decides the surface audit.
+fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree);
+    let worktree = runtime.as_deref().unwrap_or(worktree);
+    let mut paths = vec![
+        worktree.join(".claude"),
+        worktree.join(".claude/settings.local.json"),
+        worktree.join(".codex"),
+        worktree.join(".codex/hooks.json"),
+    ];
+    for hooks in crate::managed_assets::managed_codex_hook_paths(worktree) {
+        paths.push(codex_root_of(&hooks));
+        paths.push(hooks);
+    }
+    for (root, artifact) in provider_hook_surfaces(worktree) {
+        paths.push(root);
+        paths.push(artifact);
+    }
+    paths
+}
+
+fn surface_fingerprint(surface: &[PathBuf], dependencies: &[PathBuf]) -> SurfaceFingerprint {
+    SurfaceFingerprint {
+        env: SURFACE_AUDIT_ENV.iter().map(std::env::var_os).collect(),
+        files: surface
+            .iter()
+            .chain(dependencies)
+            .map(|path| file_stamp(path))
+            .collect(),
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+/// Provider plugin surfaces as `(provider root, generated hook artifact)`.
+fn provider_hook_surfaces(worktree: &Path) -> [(PathBuf, PathBuf); 3] {
+    [
+        (
+            worktree.join(".gwt/opencode"),
+            worktree.join(".gwt/opencode/plugins/gwt-hooks.js"),
+        ),
+        (
+            worktree.join(".gwt/openclaw"),
+            worktree.join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
+        ),
+        (
+            worktree.join(".gwt/hermes"),
+            worktree.join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
+        ),
+    ]
+}
+
+fn audit_managed_hook_configs(
+    input: &ManagedHookHealthInput,
+    binaries: &HookBinaryResolutionCache,
+    health: &mut ManagedHookHealth,
+    dependencies: &mut Vec<PathBuf>,
+) {
+    // Provider configuration follows PM runtime discovery. Session identity
+    // and Git hook dependencies remain rooted in the canonical checkout.
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(&input.worktree_root);
+    let worktree = runtime.as_deref().unwrap_or(&input.worktree_root);
     let claude_dir = worktree.join(".claude");
     let claude_settings = worktree.join(".claude/settings.local.json");
-    let codex_dir = worktree.join(".codex");
-    let codex_hooks = worktree.join(".codex/hooks.json");
+    // #3474: audit every `.codex/hooks.json` the self-heal writer owns, not
+    // just the worktree-local one. For a linked worktree the writer targets the
+    // repo-root (workspace-home) copy that newer Codex reads, so auditing only
+    // the worktree-local copy reported a file nothing would ever rewrite.
+    let codex_hooks_paths = crate::managed_assets::managed_codex_hook_paths(worktree);
+    let provider_hooks = provider_hook_surfaces(worktree);
 
+    // Whether this worktree has a gwt surface at all stays a worktree-local
+    // question: the workspace-home copy is shared by every worktree, so it must
+    // never make an unmaterialized one report hook health.
+    let codex_dir = worktree.join(".codex");
     let has_surface = claude_dir.exists()
         || claude_settings.exists()
         || codex_dir.exists()
-        || codex_hooks.exists();
+        || worktree.join(".codex/hooks.json").exists()
+        || provider_hooks
+            .iter()
+            .any(|(root, artifact)| root.exists() || artifact.exists());
     if !has_surface {
         health.status = ManagedHookHealthStatus::Inactive;
         return;
@@ -264,23 +688,106 @@ fn audit_managed_hook_configs(input: &ManagedHookHealthInput, health: &mut Manag
             "managed hook config missing: .claude/settings.local.json",
         );
     }
-    if codex_dir.exists() && !codex_hooks.exists() {
-        needs_attention(health, "managed hook config missing: .codex/hooks.json");
+    for hooks in &codex_hooks_paths {
+        if codex_root_of(hooks).exists() && !hooks.exists() {
+            needs_attention(
+                health,
+                format!("managed hook config missing: {}", hooks.display()),
+            );
+        }
     }
 
+    let expected_hook_bin = input.expected_hook_bin.as_deref();
     if claude_settings.exists() {
-        audit_hook_json_config(&claude_settings, input.expected_hook_bin.as_deref(), health);
+        audit_hook_json_config(
+            &claude_settings,
+            expected_hook_bin,
+            binaries,
+            health,
+            dependencies,
+        );
     }
-    if codex_hooks.exists() {
-        audit_hook_json_config(&codex_hooks, input.expected_hook_bin.as_deref(), health);
+    for hooks in &codex_hooks_paths {
+        if hooks.exists() {
+            audit_hook_json_config(hooks, expected_hook_bin, binaries, health, dependencies);
+        }
     }
+
+    for (root, artifact) in provider_hooks {
+        if artifact.exists() {
+            audit_provider_hook_config(
+                &artifact,
+                expected_hook_bin,
+                binaries,
+                health,
+                dependencies,
+            );
+        } else if root.exists() {
+            needs_attention(
+                health,
+                format!("managed hook config missing: {}", artifact.display()),
+            );
+        }
+    }
+
+    audit_managed_git_hooks(&input.worktree_root, health, dependencies);
+}
+
+/// Issue #4339: a `core.hooksPath` aimed at a directory with no hook in it
+/// makes Git skip commitlint and the commit/push gates without a word. Report
+/// it so the skip is visible and the self-heal pass can materialize them.
+fn audit_managed_git_hooks(
+    worktree: &Path,
+    health: &mut ManagedHookHealth,
+    dependencies: &mut Vec<PathBuf>,
+) {
+    let Some(plan) = gwt_skills::plan_managed_git_hooks(worktree) else {
+        return;
+    };
+    let missing_hooks = plan.missing_hooks();
+    dependencies.push(plan.hooks_dir);
+    for hook in plan.hooks {
+        dependencies.push(hook.source);
+        dependencies.push(hook.target);
+    }
+    for missing in missing_hooks {
+        needs_attention(
+            health,
+            format!(
+                "managed git hook missing: {} (core.hooksPath is configured but the hook is not materialized)",
+                missing.display()
+            ),
+        );
+    }
+}
+
+/// The binary a config at `path` is expected to fall back to.
+///
+/// #3567: the generator writes the canonical bare `gwtd` into a git-tracked
+/// config and the absolute install path into a machine-local one, so the
+/// auditor has to ask the same question. Auditing a tracked config against the
+/// running binary's absolute path reported "binary skew" forever, and startup
+/// self-heal answered it by rewriting the tracked file on every boot — the loop
+/// that kept every worktree permanently dirty.
+fn expected_hook_bin_for_config_path<'a>(
+    path: &Path,
+    configured: Option<&'a str>,
+) -> Option<&'a str> {
+    configured?;
+    if gwt_skills::managed_hook_config_is_git_tracked(path) {
+        return configured.map(|_| gwt_skills::CANONICAL_HOOK_BIN);
+    }
+    configured
 }
 
 fn audit_hook_json_config(
     path: &Path,
     expected_hook_bin: Option<&str>,
+    binaries: &HookBinaryResolutionCache,
     health: &mut ManagedHookHealth,
+    dependencies: &mut Vec<PathBuf>,
 ) {
+    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
     let Ok(raw) = fs::read_to_string(path) else {
         degraded(
             health,
@@ -311,28 +818,212 @@ fn audit_hook_json_config(
                 ),
             );
         }
+        for command in &commands {
+            if !is_managed_event_command(command, event) {
+                continue;
+            }
+            if !command.contains("GWT_BIN_PATH") {
+                needs_attention(
+                    health,
+                    format!("managed hook runtime resolver missing: {}", path.display()),
+                );
+            }
+            if !has_runtime_guard(command) {
+                needs_attention(
+                    health,
+                    format!("managed hook runtime guard missing: {}", path.display()),
+                );
+            }
+        }
         if let Some(expected) = expected_hook_bin {
             for command in commands {
                 if !is_managed_event_command(&command, event) {
                     continue;
                 }
-                let Some(actual) = hook_command_binary_prefix(&command) else {
+                let Some(actual) = hook_command_binary_fallback(&command) else {
                     continue;
                 };
-                if actual != expected {
-                    degraded(
-                        health,
-                        format!(
-                            "managed hook binary skew: {} uses {}, expected {}",
-                            path.display(),
-                            actual,
-                            expected
-                        ),
-                    );
+                audit_hook_binary(
+                    path,
+                    &actual,
+                    Some(expected),
+                    binaries,
+                    health,
+                    dependencies,
+                );
+            }
+        } else {
+            for command in commands {
+                if !is_managed_event_command(&command, event) {
+                    continue;
+                }
+                if let Some(actual) = hook_command_binary_fallback(&command) {
+                    audit_hook_binary(path, &actual, None, binaries, health, dependencies);
                 }
             }
         }
     }
+}
+
+fn audit_provider_hook_config(
+    path: &Path,
+    expected_hook_bin: Option<&str>,
+    binaries: &HookBinaryResolutionCache,
+    health: &mut ManagedHookHealth,
+    dependencies: &mut Vec<PathBuf>,
+) {
+    let expected_hook_bin = expected_hook_bin_for_config_path(path, expected_hook_bin);
+    let Ok(raw) = fs::read_to_string(path) else {
+        degraded(
+            health,
+            format!("managed hook config could not be read: {}", path.display()),
+        );
+        return;
+    };
+    if !raw.contains("GWT_BIN_PATH") {
+        needs_attention(
+            health,
+            format!("managed hook runtime resolver missing: {}", path.display()),
+        );
+    }
+    let Some(actual) = hook_command_binary_fallback(&raw) else {
+        needs_attention(
+            health,
+            format!("managed hook runtime resolver missing: {}", path.display()),
+        );
+        return;
+    };
+    audit_hook_binary(
+        path,
+        &actual,
+        expected_hook_bin,
+        binaries,
+        health,
+        dependencies,
+    );
+}
+
+fn audit_hook_binary(
+    path: &Path,
+    actual: &str,
+    expected_hook_bin: Option<&str>,
+    binaries: &HookBinaryResolutionCache,
+    health: &mut ManagedHookHealth,
+    dependencies: &mut Vec<PathBuf>,
+) {
+    let actual_path = Path::new(actual);
+    let explicitly_pinned = expected_hook_bin.is_some_and(|expected| expected == actual);
+    if crate::managed_assets::is_worktree_local_build_binary(actual_path) && !explicitly_pinned {
+        degraded(
+            health,
+            format!(
+                "managed hook worktree-local binary: {} uses {}",
+                path.display(),
+                actual
+            ),
+        );
+        return;
+    }
+    if let Some(expected) = expected_hook_bin {
+        if actual != expected {
+            degraded(
+                health,
+                format!(
+                    "managed hook binary skew: {} uses {}, expected {}",
+                    path.display(),
+                    actual,
+                    expected
+                ),
+            );
+        }
+    }
+    if looks_absolute(actual) {
+        dependencies.push(actual_path.to_path_buf());
+        if !actual_path.is_file() {
+            degraded(
+                health,
+                format!(
+                    "managed hook binary missing: {} uses {}",
+                    path.display(),
+                    actual
+                ),
+            );
+        } else if which::which(actual).is_err() {
+            degraded(
+                health,
+                format!(
+                    "managed hook binary not executable: {} uses {}",
+                    path.display(),
+                    actual
+                ),
+            );
+        }
+    } else if let Some(resolved) = binaries.resolve_bare_hook_binary(actual) {
+        dependencies.push(resolved);
+    } else {
+        degraded(
+            health,
+            format!(
+                "managed hook binary missing: {} uses {}",
+                path.display(),
+                actual
+            ),
+        );
+    }
+}
+
+/// Whether a bare-name hook fallback such as `gwtd` resolves to a real binary.
+///
+/// #3474 root cause 4: `which` searches the *calling process's* PATH. A gwt GUI
+/// launched from Finder or the Dock inherits launchd's PATH, which lacks
+/// `/Applications/GWT.app/Contents/MacOS`, so the same fallback that resolves
+/// in a terminal — and always resolves for a gwt-launched agent, which gets
+/// `GWT_BIN_PATH` injected and its directory prepended to PATH — was reported
+/// as missing and turned every Work card red. Fall back to gwt's own
+/// PATH-independent resolver, and only accept a hit that actually names the
+/// binary the hook asks for.
+fn resolve_bare_hook_binary(actual: &str) -> Option<PathBuf> {
+    if let Ok(resolved) = which::which(actual) {
+        return Some(resolved);
+    }
+    crate::cli::gwtd_resolver::resolve_gwtd_path()
+        .filter(|resolved| binary_names_match(resolved, actual))
+}
+
+fn binary_names_match(resolved: &Path, actual: &str) -> bool {
+    let resolved = resolved.file_name().and_then(|name| name.to_str());
+    resolved.is_some_and(|resolved| {
+        strip_exe_suffix(resolved).eq_ignore_ascii_case(strip_exe_suffix(actual))
+    })
+}
+
+fn strip_exe_suffix(value: &str) -> &str {
+    value
+        .rsplit_once('.')
+        .filter(|(_, extension)| extension.eq_ignore_ascii_case("exe"))
+        .map_or(value, |(stem, _)| stem)
+}
+
+fn codex_root_of(hooks_path: &Path) -> PathBuf {
+    hooks_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".codex"))
+}
+
+/// Whether a generated managed event command degrades to a no-op when its
+/// binary cannot be resolved, instead of hard-failing the agent's hook.
+///
+/// #3474: the template committed before `b8fa26c04` / `2c660f11e` invoked
+/// `"$gwt_bin"` unconditionally, so a Codex started outside gwt (no
+/// `GWT_BIN_PATH`, no `gwtd` on PATH) failed every hook with
+/// `command not found`. The current POSIX template guards the call with
+/// `command -v`, and the PowerShell template wraps it in `try`/`catch`. A
+/// missing guard is its own issue class so the startup self-heal loop breaker —
+/// which skips a worktree whose issues are *only* `managed hook binary
+/// missing:` — can never strand a legacy config (root cause 3).
+fn has_runtime_guard(command: &str) -> bool {
+    command.contains("command -v ") || command.contains("catch {")
 }
 
 fn hook_commands_for_event(root: &Value, event: &str) -> Vec<String> {
@@ -357,14 +1048,93 @@ fn is_managed_event_command(command: &str, event: &str) -> bool {
     command.contains(&format!("hook event {event}"))
 }
 
-fn hook_command_binary_prefix(command: &str) -> Option<String> {
+fn hook_command_binary_fallback(command: &str) -> Option<String> {
+    if let Some(value) = posix_shell_assignment_value(command, "gwt_fallback") {
+        return Some(value);
+    }
+    if let Some(rest) = command
+        .split_once("gwt_bin=\"${GWT_BIN_PATH:-}\"")
+        .map(|(_, rest)| rest)
+    {
+        if let Some(value) = posix_shell_assignment_value(rest, "gwt_bin") {
+            return Some(value);
+        }
+    }
+    if let Some(rest) = command.split_once("${GWT_BIN_PATH:-").map(|(_, rest)| rest) {
+        let value = rest.split_once('}')?.0;
+        return nonempty_unquoted(value);
+    }
+    if let Some(rest) = command
+        .split_once("process.env.GWT_BIN_PATH ||")
+        .map(|(_, rest)| rest.trim_start())
+    {
+        let value = rest.split_once(';').map_or(rest, |(value, _)| value).trim();
+        if let Ok(value) = serde_json::from_str::<String>(value) {
+            return (!value.is_empty()).then_some(value);
+        }
+        return nonempty_unquoted(value);
+    }
+    if let Some(rest) = command.split_once("else {").map(|(_, rest)| rest) {
+        let value = rest.split_once('}')?.0;
+        return nonempty_powershell_quoted(value);
+    }
     let (prefix, _) = command.split_once(" hook ")?;
-    let prefix = prefix
+    nonempty_unquoted(prefix)
+}
+
+fn posix_shell_assignment_value(command: &str, variable: &str) -> Option<String> {
+    let assignment = format!("{variable}=");
+    let rest = command.split_once(&assignment)?.1.trim_start();
+    posix_shell_word(rest)
+}
+
+fn posix_shell_word(value: &str) -> Option<String> {
+    if value.starts_with('\'') {
+        let mut cursor = 1;
+        loop {
+            let closing = cursor + value.get(cursor..)?.find('\'')?;
+            if value
+                .get(closing + 1..)
+                .is_some_and(|rest| rest.starts_with("\\''"))
+            {
+                cursor = closing + 4;
+                continue;
+            }
+            let token = value.get(..=closing)?;
+            let decoded = token
+                .strip_prefix('\'')?
+                .strip_suffix('\'')?
+                .replace(r"'\''", "'");
+            return (!decoded.is_empty()).then_some(decoded);
+        }
+    }
+
+    let end = value
+        .find(|character: char| character == ';' || character.is_whitespace())
+        .unwrap_or(value.len());
+    nonempty_unquoted(value.get(..end)?)
+}
+
+fn nonempty_powershell_quoted(value: &str) -> Option<String> {
+    nonempty_unquoted(value).map(|value| value.replace("''", "'"))
+}
+
+fn nonempty_unquoted(value: &str) -> Option<String> {
+    let value = value
         .trim()
         .trim_matches('\'')
         .trim_matches('"')
-        .to_string();
-    (!prefix.is_empty()).then_some(prefix)
+        .replace("\\\"", "\"")
+        .replace("\\$", "$")
+        .replace("\\`", "`")
+        .replace("\\\\", "\\");
+    (!value.is_empty()).then_some(value)
+}
+
+fn looks_absolute(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("\\\\")
+        || value.as_bytes().get(1).is_some_and(|byte| *byte == b':')
 }
 
 fn needs_attention(health: &mut ManagedHookHealth, issue: impl Into<String>) {
@@ -374,12 +1144,18 @@ fn needs_attention(health: &mut ManagedHookHealth, issue: impl Into<String>) {
     {
         health.status = ManagedHookHealthStatus::NeedsAttention;
     }
-    health.issues.push(issue.into());
+    push_unique_issue(health, issue.into());
 }
 
 fn degraded(health: &mut ManagedHookHealth, issue: impl Into<String>) {
     health.status = ManagedHookHealthStatus::Degraded;
-    health.issues.push(issue.into());
+    push_unique_issue(health, issue.into());
+}
+
+fn push_unique_issue(health: &mut ManagedHookHealth, issue: String) {
+    if !health.issues.contains(&issue) {
+        health.issues.push(issue);
+    }
 }
 
 fn read_runtime_state(path: &Path) -> Result<RuntimeStateReadModel, String> {
@@ -388,20 +1164,58 @@ fn read_runtime_state(path: &Path) -> Result<RuntimeStateReadModel, String> {
 }
 
 pub fn repair_managed_hook_configs(worktree_root: &Path) -> io::Result<ManagedHookRepairOutcome> {
-    let claude_surface = worktree_root.join(".claude").exists()
-        || worktree_root.join(".claude/settings.local.json").exists();
-    let codex_surface =
-        worktree_root.join(".codex").exists() || worktree_root.join(".codex/hooks.json").exists();
-    let mut repaired = false;
+    let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree_root);
+    let assets = runtime.as_deref().unwrap_or(worktree_root);
+    let claude_surface =
+        assets.join(".claude").exists() || assets.join(".claude/settings.local.json").exists();
+    let codex_surface = assets.join(".codex").exists() || assets.join(".codex/hooks.json").exists();
+    let provider_surface = assets.join(".gwt/opencode").exists()
+        || assets.join(".gwt/openclaw").exists()
+        || assets.join(".gwt/hermes").exists();
+    // #4339: the Git hook directory belongs to the repository, not to any agent
+    // provider, so repair it even in a worktree with no agent surface at all.
+    let mut repaired = !gwt_skills::materialize_managed_git_hooks(worktree_root)?.is_empty();
 
-    if claude_surface {
-        gwt_skills::generate_settings_local(worktree_root)?;
-        repaired = true;
-    }
-    if codex_surface {
-        gwt_skills::generate_codex_hooks(worktree_root)?;
+    if claude_surface || codex_surface || provider_surface {
+        crate::managed_assets::regenerate_existing_managed_hook_configs(worktree_root)?;
+        record_managed_hook_self_healed(worktree_root)?;
         repaired = true;
     }
 
     Ok(ManagedHookRepairOutcome { repaired })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook_command_binary_fallback;
+
+    #[test]
+    fn posix_two_stage_runtime_fallback_decodes_embedded_apostrophes() {
+        let command = r#"gwt_bin="${GWT_BIN_PATH:-}"; if [ -z "$gwt_bin" ]; then gwt_bin='/opt/GWT O'\''Brien}/gwtd'; fi; if command -v "$gwt_bin" >/dev/null 2>&1; then "$gwt_bin" hook event Stop; else true; fi"#;
+
+        assert_eq!(
+            hook_command_binary_fallback(command).as_deref(),
+            Some("/opt/GWT O'Brien}/gwtd")
+        );
+    }
+
+    #[test]
+    fn posix_named_runtime_fallback_decodes_embedded_apostrophes() {
+        let command = r#"gwt_fallback='/opt/GWT O'\''Brien}/gwtd'; gwt_bin="${GWT_BIN_PATH:-$gwt_fallback}"; "$gwt_bin" hook event Stop"#;
+
+        assert_eq!(
+            hook_command_binary_fallback(command).as_deref(),
+            Some("/opt/GWT O'Brien}/gwtd")
+        );
+    }
+
+    #[test]
+    fn powershell_runtime_fallback_decodes_embedded_apostrophes() {
+        let command = "powershell -NoProfile -Command \"& { $gwtBin = if ($env:GWT_BIN_PATH) { $env:GWT_BIN_PATH } else { 'C:\\Users\\O''Brien\\GWT\\gwtd.exe' }; & $gwtBin hook event Stop }\"";
+
+        assert_eq!(
+            hook_command_binary_fallback(command).as_deref(),
+            Some("C:\\Users\\O'Brien\\GWT\\gwtd.exe")
+        );
+    }
 }

@@ -41,22 +41,34 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
+/// Called with each tick's account rows, in addition to the client broadcast.
+///
+/// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
+/// event loop can touch, so the caller supplies the hop. Taking a callback
+/// rather than an `EventLoopProxy` keeps this module free of the event enum.
+pub type AccountsObserver = Arc<dyn Fn(Vec<ProviderUsage>) + Send + Sync>;
+
 /// Spawn the usage poller onto the shared tokio runtime.
 pub fn spawn_usage_poller(
     runtime: &tokio::runtime::Runtime,
     clients: ClientHub,
     refresh: Arc<Notify>,
+    observe_accounts: AccountsObserver,
 ) {
-    drop(runtime.handle().spawn(run(clients, refresh)));
+    drop(
+        runtime
+            .handle()
+            .spawn(run(clients, refresh, observe_accounts)),
+    );
 }
 
-async fn run(clients: ClientHub, refresh: Arc<Notify>) {
+async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: AccountsObserver) {
     let mut poller = Poller::default();
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        // A refresh request forces an immediate Claude re-fetch (bypassing the
-        // 180s cadence gate); a normal tick respects it.
+        // A refresh request immediately rereads local authentication and usage. Claude
+        // automatic HTTP requests retain the 180s cadence floor.
         let forced = tokio::select! {
             _ = ticker.tick() => false,
             _ = refresh.notified() => true,
@@ -67,6 +79,10 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>) {
             continue;
         }
         let snapshot = poller.poll_once(Utc::now(), forced).await;
+        // Issue #3616: hand the account rows to the event loop before the
+        // broadcast. Both consumers need the same tick, and the classifier is
+        // the one whose absence lets a quota-dead pane hold a slot for days.
+        observe_accounts(snapshot.accounts.clone());
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
                 accounts: snapshot.accounts,
@@ -81,6 +97,10 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>) {
 /// consumption cache).
 #[derive(Default)]
 struct Poller {
+    codex_account_id: Option<String>,
+    codex_auth_observed: bool,
+    codex_authenticated_at: Option<DateTime<Utc>>,
+    claude_account_id: Option<String>,
     cached_claude: Option<ProviderUsage>,
     last_claude_fetch: Option<DateTime<Utc>>,
     cached_user_agent: Option<String>,
@@ -143,21 +163,42 @@ impl Poller {
         out
     }
 
-    fn codex_account(&self, config: &UsageConfig, now: DateTime<Utc>) -> ProviderUsage {
+    fn codex_account(&mut self, config: &UsageConfig, now: DateTime<Utc>) -> ProviderUsage {
         if !config.codex_enabled {
             return ProviderUsage::degraded(UsageProvider::Codex, UsageState::Disabled);
         }
         let Some(home) = codex::codex_home() else {
             return ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData);
         };
-        let mut account = codex::read_codex_account(&home, now);
-        account.state = apply_staleness(
-            account.state,
-            account.fetched_at,
-            now,
-            DEFAULT_STALE_AFTER_SECS,
-        );
+        let identity = codex::read_auth_account_identity(&home);
+        if !self.codex_auth_observed || self.codex_account_id != identity {
+            self.codex_authenticated_at = if self.codex_auth_observed {
+                Some(now)
+            } else {
+                codex::auth_modified_at(&home)
+            };
+            self.codex_account_id = identity;
+            self.codex_auth_observed = true;
+            self.last_consumption_at = None;
+        }
+        let account = codex::read_codex_account_since(&home, now, self.codex_authenticated_at);
+        if account.account_id != self.codex_account_id {
+            // The auth file changed during collection. Publish identity only;
+            // the next tick will establish the new observation boundary.
+            return ProviderUsage {
+                account_id: account.account_id,
+                ..ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData)
+            };
+        }
         account
+    }
+
+    fn observe_claude_identity(&mut self, identity: Option<String>) {
+        if self.claude_account_id != identity {
+            self.claude_account_id = identity;
+            self.cached_claude = None;
+            self.last_consumption_at = None;
+        }
     }
 
     async fn claude_account(
@@ -173,19 +214,17 @@ impl Poller {
             return ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData);
         };
 
+        let creds = claude::resolve_claude_creds(&home);
+        self.observe_claude_identity(creds.as_ref().and_then(|creds| creds.account_id.clone()));
+        let Some(creds) = creds else {
+            return ProviderUsage::degraded(
+                UsageProvider::ClaudeCode,
+                UsageState::Unavailable {
+                    reason: "no credentials".to_string(),
+                },
+            );
+        };
         if force || should_fetch_claude(self.last_claude_fetch, now) {
-            let Some(creds) = claude::resolve_claude_creds(&home) else {
-                return serve_stale_cached_or(
-                    &self.cached_claude,
-                    now,
-                    ProviderUsage::degraded(
-                        UsageProvider::ClaudeCode,
-                        UsageState::Unavailable {
-                            reason: "no credentials".to_string(),
-                        },
-                    ),
-                );
-            };
             let user_agent = match self.cached_user_agent.clone() {
                 Some(user_agent) => user_agent,
                 None => match claude::claude_user_agent() {
@@ -210,6 +249,14 @@ impl Poller {
             };
             let fresh = claude::fetch_claude_account(&creds, &user_agent, now).await;
             self.last_claude_fetch = Some(now);
+            let current_identity = claude::read_auth_account_identity(&home);
+            if current_identity != creds.account_id {
+                self.observe_claude_identity(current_identity);
+                return ProviderUsage {
+                    account_id: self.claude_account_id.clone(),
+                    ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
+                };
+            }
             // Only a successful fetch (has windows) replaces the cache. A
             // transient failure (429 / auth / network) keeps the last good
             // value shown as stale instead of wiping the display.
@@ -224,7 +271,10 @@ impl Poller {
         serve_cached_or(
             &self.cached_claude,
             now,
-            ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData),
+            ProviderUsage {
+                account_id: self.claude_account_id.clone(),
+                ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
+            },
         )
     }
 }
@@ -373,6 +423,7 @@ mod tests {
         let when = now();
         let good = ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            account_id: None,
             account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
             windows: vec![gwt_core::usage::UsageWindow::new(
@@ -424,8 +475,44 @@ mod tests {
     }
 
     #[test]
+    fn codex_lost_credentials_discard_previous_account_usage() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _codex = gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", home.path());
+        std::fs::create_dir(home.path().join("sessions")).unwrap();
+        std::fs::write(
+            home.path().join("auth.json"),
+            r#"{"tokens":{"account_id":"account-a"}}"#,
+        )
+        .unwrap();
+        let event = serde_json::json!({"timestamp":now().to_rfc3339(), "type":"event_msg", "payload":{"type":"token_count", "rate_limits":{"primary":{"used_percent":100,"window_minutes":300,"resets_at":1780003600}}}});
+        std::fs::write(
+            home.path().join("sessions/rollout-fixture.jsonl"),
+            event.to_string(),
+        )
+        .unwrap();
+        let mut poller = Poller {
+            codex_auth_observed: true,
+            codex_account_id: codex::read_auth_account_identity(home.path()),
+            codex_authenticated_at: Some(now() - chrono::Duration::seconds(1)),
+            ..Default::default()
+        };
+        let config = UsageConfig {
+            codex_enabled: true,
+            claude_account_enabled: false,
+        };
+        assert!(!poller.codex_account(&config, now()).windows.is_empty());
+        std::fs::remove_file(home.path().join("auth.json")).unwrap();
+        let lost = poller.codex_account(&config, now());
+        assert!(lost.windows.is_empty());
+        assert!(lost.account_id.is_none());
+    }
+
+    #[test]
     fn codex_disabled_yields_disabled_state() {
-        let poller = Poller::default();
+        let mut poller = Poller::default();
         let config = UsageConfig {
             codex_enabled: false,
             claude_account_enabled: false,
@@ -447,6 +534,59 @@ mod tests {
         assert_eq!(account.state, UsageState::Disabled);
         // No fetch should have happened.
         assert!(poller.last_claude_fetch.is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn claude_switch_invalidates_cache_during_http_cooldown() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", home.path());
+        std::fs::write(
+            home.path().join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accountId":"new-account","accessToken":"fixture-token"}}"#,
+        )
+        .unwrap();
+        let old = account_with_weekly_reset(UsageProvider::ClaudeCode, Some(now()));
+        let mut poller = Poller {
+            cached_claude: Some(old),
+            last_claude_fetch: Some(now()),
+            ..Default::default()
+        };
+        let config = UsageConfig {
+            codex_enabled: false,
+            claude_account_enabled: true,
+        };
+        let account = poller.claude_account(&config, now(), false).await;
+        assert!(
+            account.windows.is_empty(),
+            "a different account must never reuse old windows"
+        );
+        assert_eq!(
+            poller.last_claude_fetch,
+            Some(now()),
+            "switch must respect the HTTP floor"
+        );
+        assert!(poller.cached_claude.is_none());
+
+        let mut current = account_with_weekly_reset(UsageProvider::ClaudeCode, Some(now()));
+        current.account_id = account.account_id.clone();
+        poller.cached_claude = Some(current.clone());
+        std::fs::write(
+            home.path().join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accountId":"new-account","accessToken":"refreshed-token"}}"#,
+        )
+        .unwrap();
+        assert_eq!(poller.claude_account(&config, now(), false).await, current);
+
+        std::fs::remove_file(home.path().join(".credentials.json")).unwrap();
+        let lost = poller.claude_account(&config, now(), false).await;
+        assert!(lost.windows.is_empty());
+        assert!(poller.cached_claude.is_none());
+        assert!(lost.account_id.is_none());
     }
 
     #[cfg(windows)]
@@ -504,6 +644,7 @@ mod tests {
         };
         ProviderUsage {
             provider,
+            account_id: None,
             account_label: None,
             plan: None,
             windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],

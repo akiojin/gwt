@@ -24,14 +24,9 @@ export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
 // Snapshot kinds that must preserve multiplicity and their position relative
 // to coalesced state. They are not latency-sensitive streams: moving them
 // ahead of workspace_state can make project-scoped snapshots fail their
-// active-project fence.
-export const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(
-  new Set([
-    "improvement_candidates",
-    "improvement_action_result",
-    "improvement_action_error",
-  ]),
-);
+// active-project fence. Empty since Issue #3164 retired the Improvement Inbox
+// events; callers can still opt a kind in through `orderedStateKinds`.
+export const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set([]));
 
 // Idempotent kinds where only the latest occurrence carries information. Any
 // kind not in this set preserves original order and every occurrence.
@@ -39,6 +34,7 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
   new Set([
     "workspace_state",
     "active_work_projection",
+    "active_work_projection_patch",
     "window_list",
     "provider_usage",
     "runtime_health",
@@ -50,6 +46,7 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
     "knowledge_bridge_state",
     "system_status",
     "issue_monitor_status",
+    "pm_status",
   ]),
 );
 
@@ -63,6 +60,11 @@ export function createSocketReceiveDispatcher({
   maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
   onTrace,
   shouldTrace,
+  // Issue #3365 — continuing past a throwing receive() is the right
+  // resilience call, but the failure must not stay console-only. The
+  // dispatcher reports each swallowed error here so the app can surface a
+  // user-visible degradation notice.
+  onReceiveError,
 } = {}) {
   if (typeof receive !== "function") {
     throw new TypeError(
@@ -153,6 +155,13 @@ export function createSocketReceiveDispatcher({
           eventKind,
           error,
         );
+        if (typeof onReceiveError === "function") {
+          try {
+            onReceiveError(error, eventKind);
+          } catch (_) {
+            // The error reporter must never take down the event path.
+          }
+        }
       }
       cursor += 1;
       if (cursor < ready.length && nowImpl() - start > budgetMs) {

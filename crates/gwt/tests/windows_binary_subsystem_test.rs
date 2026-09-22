@@ -19,6 +19,29 @@ fn windows_gwt_binary_uses_gui_subsystem_without_changing_gwtd() {
     );
 }
 
+/// Issue #3631: `CreateProcess` only attaches console subsystem images to the
+/// pseudoconsole passed through `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. A start
+/// gate hosted by the GUI front door therefore has no console, and the agent it
+/// releases is given a brand new console that the OS default terminal
+/// (Windows Terminal) hosts outside the gwt pane.
+#[test]
+fn windows_pty_start_gate_runs_in_the_console_subsystem_companion() {
+    let gate =
+        gwt::pty_start_gate::resolve_pty_start_gate_program(Path::new(env!("CARGO_BIN_EXE_gwt")))
+            .expect("resolve the PTY start-gate program");
+
+    assert_eq!(
+        gate,
+        Path::new(env!("CARGO_BIN_EXE_gwtd")),
+        "the Windows start gate must run in the gwtd companion, not the GUI front door"
+    );
+    assert_eq!(
+        pe_subsystem(&gate),
+        IMAGE_SUBSYSTEM_WINDOWS_CUI,
+        "the PTY start-gate program must be a console app so the pane's pseudoconsole reaches the released agent"
+    );
+}
+
 fn pe_subsystem(path: &Path) -> u16 {
     let bytes = fs::read(path).unwrap_or_else(|error| {
         panic!("failed to read {}: {error}", path.display());

@@ -12,23 +12,25 @@
 //! sibling files and consume these types.
 
 pub mod action_obligation_stop_check;
+pub mod autonomous_question_guard;
 pub mod block_bash_policy;
 pub mod block_cd_command;
 pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
-pub mod context;
+mod context;
 pub mod coordination_event;
 pub mod diagnostics;
+pub mod effect_classifier;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;
 pub mod forward;
-pub mod gwt_self_improvement_stop;
 pub mod health;
 mod identity;
-pub mod intake_completion_stop_check;
+pub mod known_workarounds;
+pub mod pm_loop_stop_check;
 pub mod provider_event;
 pub mod runtime_state;
 pub mod segments;
@@ -40,6 +42,7 @@ pub mod state_file_stop_check;
 pub mod work_event_settlement_stop_check;
 pub mod workflow_policy;
 mod workspace_identity;
+pub(crate) use workspace_identity::register_session_in_projection;
 pub mod worktree;
 
 use std::io::{self, Read};
@@ -50,6 +53,38 @@ pub use envelope::{HookOutput, IntentBoundaryEvent};
 pub(crate) use identity::{
     resolve_hook_agent_session_id, GwtSessionId, HookAgentSessionId, HookSessionId, RawHookEvent,
 };
+
+/// SPEC-3431 FR-064: whether this hook is running for the resident PM.
+///
+/// The PM receives a byte-identical managed asset set to every other agent,
+/// including the hooks — but it is not an implementation agent. It never
+/// touches production code, never opens PRs, owns no Work item, and its window
+/// title is fixed. Reminders and gates written for implementation sessions
+/// either demand impossible settlements or bury the PM's actual contract under
+/// instructions that outrank it.
+///
+/// Keyed on the worktree path rather than an environment variable, for the
+/// same reason `worktree_form::is_ephemeral_intake_worktree` is: the decision
+/// must be deterministic per worktree so an ambient value from another session
+/// can never redirect policy.
+pub(crate) fn is_resident_pm_worktree(worktree: &std::path::Path) -> bool {
+    // Hooks may supply a nested cwd. Find the PM root without repeatedly
+    // spawning git on the warm prompt path, and retain the full canonical
+    // registry check so an ordinary branch named pm/worktree cannot match.
+    worktree.ancestors().any(|ancestor| {
+        if ancestor.file_name() != Some(std::ffi::OsStr::new("worktree"))
+            || ancestor.parent().and_then(std::path::Path::file_name)
+                != Some(std::ffi::OsStr::new("pm"))
+        {
+            return false;
+        }
+        if crate::pm_registry::is_pm_worktree(ancestor) {
+            return true;
+        }
+        let canonical = dunce::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+        crate::pm_registry::is_canonical_pm_worktree(&canonical)
+    })
+}
 
 /// Every hook name exposed via `gwtd hook <name>`.
 ///
@@ -66,11 +101,11 @@ pub enum HookKind {
     WorkflowPolicy,
     Forward,
     RegisterCodexManagedHookTrust,
+    RegisterCodexManagedProjectTrust,
     SkillDiscussionStopCheck,
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
     SkillRegisterSpecStopCheck,
-    GwtSelfImprovementStop,
 }
 
 impl HookKind {
@@ -89,11 +124,11 @@ impl HookKind {
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
             "register-codex-managed-hook-trust" => Some(Self::RegisterCodexManagedHookTrust),
+            "register-codex-managed-project-trust" => Some(Self::RegisterCodexManagedProjectTrust),
             "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
             "skill-register-spec-stop-check" => Some(Self::SkillRegisterSpecStopCheck),
-            "gwt-self-improvement-stop" => Some(Self::GwtSelfImprovementStop),
             _ => None,
         }
     }
@@ -105,8 +140,11 @@ impl HookKind {
 /// `session_id` into a required session id type before using it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookEvent {
+    #[serde(alias = "toolName")]
     pub tool_name: Option<String>,
+    #[serde(alias = "toolInput")]
     pub tool_input: Option<serde_json::Value>,
+    #[serde(alias = "transcriptPath")]
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
 }
@@ -149,6 +187,28 @@ pub enum HookError {
     MissingEnv(&'static str),
     #[error("invalid hook event: {0}")]
     InvalidEvent(String),
+    /// A named dispatcher step failed (Issue #3541). Wraps the underlying
+    /// error so diagnostics can attribute the failure to `event`/`handler`.
+    #[error("hook handler {handler} failed: {source}")]
+    HandlerFailure {
+        event: String,
+        handler: String,
+        #[source]
+        source: Box<HookError>,
+    },
+}
+
+impl HookError {
+    pub fn handler_failure(self, event: &str, handler: &str) -> Self {
+        match self {
+            already @ Self::HandlerFailure { .. } => already,
+            source => Self::HandlerFailure {
+                event: event.to_string(),
+                handler: handler.to_string(),
+                source: Box::new(source),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,40 +257,25 @@ pub(crate) fn write_internal_command_output<E: CliEnv>(
     Ok(output.status)
 }
 
-pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
+/// Prepare this process to act as the GUI front door for `project_root`.
+///
+/// The front door only converges managed hook assets. It deliberately leaves
+/// the project's daemon endpoint slot alone (Issue #2338): the GUI serves no
+/// IPC transport, so the `internal://gwt-front-door` sentinel it used to
+/// persist here was unusable for every consumer that resolves the endpoint —
+/// while overwriting a live `gwtd daemon start` endpoint, blocking a later
+/// `gwtd daemon start`, and making `gwtd daemon status` report a daemon that
+/// does not exist. Claiming, reusing and stale-cleaning that slot belongs to
+/// the callers that actually speak the transport (`crates/gwt/src/cli/daemon`
+/// and `crates/gwt/src/daemon_publisher.rs`), and filling it belongs to
+/// [`crate::daemon_supervisor::DaemonSupervisor`], which is what actually
+/// starts a daemon for this project (Issue #3633).
+pub fn prepare_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
     if !project_root.exists() {
         return Ok(());
     }
 
-    refresh_managed_assets_for_hook_front_door(project_root)?;
-
-    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
-        project_root,
-        gwt_core::daemon::RuntimeTarget::Host,
-    )
-    .map_err(|err| err.to_string())?;
-    let gwt_home = gwt_core::paths::gwt_home();
-    let action = gwt_core::daemon::resolve_bootstrap_action(
-        &gwt_home,
-        &scope,
-        gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
-        |pid| pid == std::process::id(),
-    )
-    .map_err(|err| err.to_string())?;
-
-    if let gwt_core::daemon::DaemonBootstrapAction::Spawn { endpoint_path } = action {
-        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
-            scope,
-            std::process::id(),
-            "internal://gwt-front-door".to_string(),
-            uuid::Uuid::new_v4().to_string(),
-            env!("CARGO_PKG_VERSION").to_string(),
-        );
-        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint)
-            .map_err(|err| err.to_string())?;
-    }
-
-    Ok(())
+    refresh_managed_assets_for_hook_front_door(project_root)
 }
 
 pub(crate) fn refresh_managed_assets_for_hook_front_door(
@@ -243,13 +288,36 @@ pub(crate) fn refresh_managed_assets_for_hook_front_door(
         .map_err(|err| err.to_string())
 }
 
+/// A denial does not park an Issue. Report only the owning Session's observed
+/// phase; missing identity or unreadable preferences cannot establish a park.
+fn parked_owner_issue() -> Option<u64> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    let session = gwt_agent::Session::load_and_migrate(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    let issue = session.linked_issue_number?;
+    let prefs = crate::issue_monitor::load_issue_monitor_prefs(
+        &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&session.worktree_path),
+    )
+    .ok()?;
+    prefs
+        .autonomous_records
+        .iter()
+        .any(|record| {
+            record.issue_number == issue
+                && record.phase == crate::issue_monitor::AutonomousPhase::NeedsHuman
+        })
+        .then_some(issue)
+}
+
 pub fn run_daemon_hook<E: CliEnv>(
     env: &mut E,
     name: &str,
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, gwt_self_improvement_stop, provider_event,
+        block_bash_policy, event_dispatcher, known_workarounds, provider_event, runtime_state,
         skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
         skill_register_spec_stop_check, workflow_policy, HookKind, HookOutput,
     };
@@ -261,16 +329,123 @@ pub fn run_daemon_hook<E: CliEnv>(
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
     fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        write_hook_output(env, output).unwrap_or_else(|code| code)
+    }
+    /// Issue #3541: an event only counts as completed once its protocol
+    /// output has been written, so stamp the runtime state on `Ok` only.
+    fn emit_event_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        match write_hook_output(env, output) {
+            Ok(code) => {
+                runtime_state::record_hook_event_completed_from_env();
+                code
+            }
+            Err(code) => code,
+        }
+    }
+    /// `Ok(exit_code)` when the envelope reached stdout, `Err(1)` otherwise.
+    fn write_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> Result<i32, i32> {
+        // Issue #4542: denials are constructed in a dozen gates but serialized
+        // only here, so the known-workaround advisory attaches once and every
+        // present and future gate inherits it. It is fail-open by construction:
+        // a missing index, an exhausted budget or an unwritable ledger returns
+        // the gate's own text untouched, so this can never turn a denial into
+        // an error or a stall.
+        let repo_root = env.repo_path().to_path_buf();
+        let output = &known_workarounds::augment_denial(&repo_root, output.clone());
         match output.serialize_to(env.stdout()) {
-            Ok(()) => output.exit_code(),
+            Ok(()) => {
+                if let HookOutput::PreToolUsePermission { deny_reason, .. } = output {
+                    // Grok's gate-hook runner uses exit 2 for denial but reads
+                    // the user-visible reason from stderr's first line rather
+                    // than Claude's hookSpecificOutput JSON envelope.
+                    let headline = deny_reason.lines().next().unwrap_or(deny_reason).trim();
+                    // Grok truncates the first stderr line to 256 characters.
+                    // Keep each gate's recovery in that bounded prefix; the
+                    // full provider-neutral detail remains in stdout for
+                    // adapters that consume the structured envelope.
+                    // Name which kind of gate this is, so the agent never has
+                    // to infer a park from a gate it can clear itself.
+                    let grok_reason = match parked_owner_issue() {
+                        Some(issue) => format!(
+                            "{headline}. Issue #{issue} is parked in NeedsHuman: a human must decide before it continues."
+                        ),
+                        None => format!(
+                            "{headline}. This denial does not park the Issue; clear the stated gate and keep working."
+                        ),
+                    };
+                    let _ = writeln!(env.stderr(), "{grok_reason}");
+                }
+                Ok(output.exit_code())
+            }
             Err(err) => {
                 let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
-                1
+                Err(1)
             }
         }
     }
+    /// Legacy per-kind hooks (runtime-state, forward, ...) keep the plain
+    /// ledger row from Issue #3778; the event dispatcher uses
+    /// `emit_event_error` below for handler-attributed diagnostics.
     fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
-        let _ = writeln!(env.stderr(), "gwtd hook {name}: {err}");
+        let message = gwt_core::error_ledger::sanitize_error_message(&format!("{err}"));
+        crate::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::HookFailure,
+            format!("{name}: {message}"),
+            gwt_core::error_ledger::ErrorTarget {
+                session_id: std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok(),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+        let _ = writeln!(env.stderr(), "gwtd hook {name}: {message}");
+        1
+    }
+    /// Issue #3541: persist the failure with event/handler context in the
+    /// host error ledger and tell the user where it is and that no Board /
+    /// Issue report has been sent for it.
+    fn emit_event_error<E: CliEnv>(env: &mut E, name: &str, event: &str, err: &HookError) -> i32 {
+        use gwt_core::error_ledger::{sanitize_error_message, ErrorKind, ErrorTarget};
+
+        let (event, handler, detail) = match err {
+            HookError::HandlerFailure {
+                event,
+                handler,
+                source,
+            } => (event.as_str(), handler.as_str(), source.to_string()),
+            other => (event, "dispatch", other.to_string()),
+        };
+        let detail = sanitize_error_message(&detail);
+        let linked_issue = runtime_state::linked_issue_from_env();
+        let context = std::collections::BTreeMap::from([
+            ("event".to_string(), event.to_string()),
+            ("handler".to_string(), handler.to_string()),
+            ("exit_status".to_string(), "1".to_string()),
+            ("fail_open".to_string(), "false".to_string()),
+        ]);
+        let recorded = crate::error_report::report_error_and_publish_with_context(
+            ErrorKind::HookFailure,
+            format!("{event}/{handler}: {detail}"),
+            ErrorTarget {
+                issue: linked_issue,
+                session_id: std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok(),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..ErrorTarget::default()
+            },
+            context,
+        );
+        let diagnostic = match recorded {
+            Some(record) => format!("errors.list id={}", record.id),
+            None => {
+                "errors.list (row not appended: recent duplicate or ledger unavailable)".to_string()
+            }
+        };
+        let report_target = linked_issue
+            .map(|number| format!("Board/Issue #{number}"))
+            .unwrap_or_else(|| "Board/owning Issue".to_string());
+        let _ = writeln!(
+            env.stderr(),
+            "gwtd hook {name}: {event}/{handler} failed: {detail} | diagnostic={diagnostic} report_status=not_sent report_target={report_target}"
+        );
         1
     }
 
@@ -282,21 +457,15 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let dispatch_result = {
-                let mut capture = |failure| {
-                    crate::cli::improvement_contract::capture_managed_hook_failure(env, failure)
-                };
-                event_dispatcher::handle_with_input_and_managed_capture(
-                    event,
-                    &stdin,
-                    &cwd,
-                    current_session.as_deref(),
-                    &mut capture,
-                )
-            };
+            let dispatch_result = event_dispatcher::handle_with_input(
+                event,
+                &stdin,
+                &cwd,
+                current_session.as_deref(),
+            );
             match dispatch_result {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
+                Ok(output) => Ok(emit_event_output(env, &output)),
+                Err(err) => Ok(emit_event_error(env, name, event, &err)),
             }
         }
         HookKind::ProviderEvent => {
@@ -316,22 +485,21 @@ pub fn run_daemon_hook<E: CliEnv>(
             };
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let dispatch_result = {
-                let mut capture = |failure| {
-                    crate::cli::improvement_contract::capture_managed_hook_failure(env, failure)
-                };
-                provider_event::handle_with_input_and_managed_capture(
-                    provider,
-                    native_event,
-                    &stdin,
-                    &cwd,
-                    current_session.as_deref(),
-                    &mut capture,
-                )
-            };
+            let dispatch_result = provider_event::handle_with_input(
+                provider,
+                native_event,
+                &stdin,
+                &cwd,
+                current_session.as_deref(),
+            );
             match dispatch_result {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
+                Ok(output) => Ok(emit_event_output(env, &output)),
+                Err(err) => Ok(emit_event_error(
+                    env,
+                    name,
+                    &format!("{provider}:{native_event}"),
+                    &err,
+                )),
             }
         }
         HookKind::RuntimeState => {
@@ -413,10 +581,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                 },
                 None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
             };
-            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+            // #3967: compare against the binary managed hook generation embeds,
+            // resolved the same way materialization resolves it. Guessing here
+            // is what left every hook untrusted for a gwt started from a
+            // development build.
+            let expected_hook_bin = match crate::managed_assets::managed_hook_bin() {
+                Ok(hook_bin) => hook_bin,
+                Err(err) => return Ok(emit_hook_error(env, name, err)),
+            };
+            match gwt_skills::register_codex_managed_hook_trust_for_mode_with_expected_bin(
                 &project_root,
                 &codex_config_path,
                 discovery_mode,
+                Some(expected_hook_bin.as_str()),
             ) {
                 Ok(report) => {
                     let _ = writeln!(
@@ -424,14 +601,101 @@ pub fn run_daemon_hook<E: CliEnv>(
                         "trusted {} gwt-managed Codex hooks",
                         report.trusted_entries.len()
                     );
-                    Ok(0)
+                    // #3967 AC-4: a silent success here is how an operator was
+                    // told the pre-registration had worked while Codex was
+                    // still going to stop the launch. Report the hooks gwt
+                    // could not vouch for, and fail — this is the front door an
+                    // operator runs to check a real machine.
+                    match report.hooks_need_review_reason() {
+                        Some(reason) => {
+                            let _ = writeln!(env.stdout(), "{reason}");
+                            Ok(1)
+                        }
+                        None => Ok(0),
+                    }
                 }
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
+        HookKind::RegisterCodexManagedProjectTrust => {
+            let project_root = option_value(rest, "--project-root")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let explicit_config =
+                option_value(rest, "--codex-config").map(std::path::PathBuf::from);
+            let docker_local = option_value(rest, "--runtime-target") == Some("docker");
+            let codex_config_path = if docker_local {
+                if explicit_config.is_some() {
+                    return Err(io_as_api_error(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Docker-local project trust derives its config from the effective environment; --codex-config is not accepted",
+                    )));
+                }
+                default_codex_config_path()
+            } else {
+                let stable_config =
+                    crate::managed_assets::process_stable_codex_config_path_for_worktree_with(
+                        &project_root,
+                        std::env::var_os("CODEX_HOME").as_deref(),
+                        dirs::home_dir().as_deref(),
+                    );
+                if let Some(explicit_config) = explicit_config {
+                    if !explicit_config.is_absolute() {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    let Some(stable_config) = stable_config else {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    };
+                    if !crate::managed_assets::codex_config_paths_equivalent(
+                        &explicit_config,
+                        &stable_config,
+                    ) {
+                        return Err(io_as_api_error(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "project trust is limited to the process-stable/default Host Codex config",
+                        )));
+                    }
+                    Some(stable_config)
+                } else {
+                    stable_config
+                }
+            };
+            let Some(codex_config_path) = codex_config_path else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "hook.register_codex_managed_project_trust: process-stable/default Codex config is unavailable"
+                );
+                return Ok(2);
+            };
+            match gwt_skills::register_codex_managed_project_trust(
+                &project_root,
+                &codex_config_path,
+            ) {
+                Ok(report) => {
+                    let _ = writeln!(
+                        env.stdout(),
+                        "trusted gwt-managed Codex worktree {}",
+                        report.project_path.display()
+                    );
+                    Ok(0)
+                }
+                Err(err) => Err(io_as_api_error(err)),
+            }
+        }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
-            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_discussion_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
             Ok(emit_hook_output(env, &output))
         }
         HookKind::SkillPlanSpecStopCheck => {
@@ -464,10 +728,6 @@ pub fn run_daemon_hook<E: CliEnv>(
             );
             Ok(emit_hook_output(env, &output))
         }
-        HookKind::GwtSelfImprovementStop => {
-            let output = gwt_self_improvement_stop::handle_with_input(env, &stdin);
-            Ok(emit_hook_output(env, &output))
-        }
     }
 }
 
@@ -478,9 +738,15 @@ fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn default_codex_config_path() -> Option<std::path::PathBuf> {
-    gwt_core::paths::gwt_home()
-        .parent()
-        .map(|home| home.join(".codex/config.toml"))
+    std::env::var_os("CODEX_HOME")
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("config.toml"))
+        .or_else(|| {
+            gwt_core::paths::gwt_home()
+                .parent()
+                .map(|home| home.join(".codex/config.toml"))
+        })
 }
 
 #[cfg(test)]
@@ -497,15 +763,106 @@ mod tests {
 
     use crate::cli::env::{InternalCommandOutput, TestEnv};
     use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
-    use gwt_core::test_support::ScopedGwtHome;
 
     use super::*;
+
+    #[test]
+    fn resident_pm_policy_recognizes_nested_cwd_only_under_canonical_pm_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let pm = gwt_core::paths::gwt_projects_dir().join("repo-hash/pm/worktree");
+        let nested = pm.join("crates/gwt/src");
+        fs::create_dir_all(&nested).expect("nested PM cwd");
+
+        assert!(is_resident_pm_worktree(&pm));
+        assert!(is_resident_pm_worktree(&nested));
+        assert!(is_resident_pm_worktree(
+            &dunce::canonicalize(&nested).expect("canonical cwd")
+        ));
+        assert!(!is_resident_pm_worktree(
+            &temp.path().join("production/pm/worktree/crates/gwt/src")
+        ));
+    }
+
+    #[test]
+    fn invalid_hook_event_is_written_to_the_error_ledger() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let code =
+            run_daemon_hook(&mut env, "event", &["NotARealEvent".to_string()]).expect("run hook");
+        assert_eq!(code, 1);
+        let listed = gwt_core::error_ledger::list_since(None).expect("list");
+        assert!(
+            listed.iter().any(|row| {
+                row.kind == gwt_core::error_ledger::ErrorKind::HookFailure
+                    && row.message.contains("NotARealEvent")
+            }),
+            "hook failure must land in the error ledger: {listed:?}"
+        );
+    }
+
+    /// Issue #4542 AC-1/AC-2: the known-workaround advisory hangs off the one
+    /// place every gate's denial is serialized. This asserts both halves of
+    /// that wiring from the outside: the funnel really runs the advisory (the
+    /// occurrence ledger gained this signature), and a repository with neither
+    /// corpus still emits the gate's own denial, unchanged and well-formed,
+    /// instead of an error.
+    #[test]
+    fn denials_run_the_known_workaround_advisory_and_stay_intact_without_a_corpus() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": temp
+                    .path()
+                    .join(".gwt/skill-state/execution-control.json")
+                    .display()
+                    .to_string()
+            },
+        })
+        .to_string();
+
+        let code = run_daemon_hook(&mut env, "workflow-policy", &[]).expect("run hook");
+
+        assert_eq!(code, 2, "the trusted-state write guard must still deny");
+        let stdout = String::from_utf8(env.stdout.clone()).expect("utf8 stdout");
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("deny envelope");
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("deny reason");
+        assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            reason.starts_with(
+                "Execution/evidence state files are written only by their canonical operations"
+            ),
+            "the gate's own summary must survive the advisory: {reason}"
+        );
+        assert!(
+            !reason.contains("Known workarounds"),
+            "no corpus means no advisory, not a broken denial: {reason}"
+        );
+
+        let ledger = gwt_core::paths::gwt_work_notes_dir(temp.path()).join("deny-signatures.json");
+        let recorded = fs::read_to_string(&ledger).unwrap_or_else(|err| {
+            panic!(
+                "the denial funnel must count the block signature at {}: {err}",
+                ledger.display()
+            )
+        });
+        assert!(
+            recorded.contains("execution evidence state files written only canonical operations"),
+            "the normalized block signature must be the ledger key: {recorded}"
+        );
+    }
 
     #[test]
     fn gui_front_door_does_not_bootstrap_project_index_before_server_start() {
         let source = include_str!("mod.rs");
         let front_door = source
-            .split_once("pub fn prepare_daemon_front_door_for_path")
+            .split_once("pub fn prepare_front_door_for_path")
             .expect("front-door function must exist")
             .1
             .split_once("pub(crate) fn refresh_managed_assets_for_hook_front_door")
@@ -513,8 +870,111 @@ mod tests {
             .0;
 
         assert!(
-            !front_door.contains("bootstrap_project_index_for_path"),
+            !front_door.contains("bootstrap_project_index_for_"),
             "GUI front door must not block server startup on Project Index bootstrap"
+        );
+    }
+
+    /// Build a daemon-shaped endpoint for `project_root` owned by `pid` and
+    /// persist it into the isolated gwt home, returning its path.
+    fn seed_daemon_endpoint(
+        project_root: &std::path::Path,
+        pid: u32,
+        bind: &str,
+    ) -> std::path::PathBuf {
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            project_root,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .expect("runtime scope");
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope,
+            pid,
+            bind.to_string(),
+            "daemon-auth-token".to_string(),
+            "9.9.9".to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint).expect("persist endpoint");
+        endpoint_path
+    }
+
+    fn read_endpoint(path: &std::path::Path) -> gwt_core::daemon::DaemonEndpoint {
+        let payload = fs::read(path)
+            .unwrap_or_else(|err| panic!("endpoint must exist at {}: {err}", path.display()));
+        serde_json::from_slice(&payload).expect("endpoint json")
+    }
+
+    /// Issue #2338: launching the GUI front door on a project whose
+    /// `gwtd daemon start` is already running must not touch the daemon's
+    /// persisted endpoint. The front door serves no IPC transport, so a
+    /// sentinel written into that slot silently breaks every consumer that
+    /// resolves the endpoint while the daemon process is still alive.
+    #[cfg(unix)]
+    #[test]
+    fn gui_front_door_leaves_a_running_daemons_endpoint_untouched() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+
+        // A live PID that is not this process: the narrow
+        // `|pid| pid == std::process::id()` predicate classified exactly this
+        // case as dead and deleted the endpoint file.
+        let daemon_pid = std::os::unix::process::parent_id();
+        let socket = temp.path().join("daemon.sock");
+        let endpoint_path =
+            seed_daemon_endpoint(&project, daemon_pid, &socket.display().to_string());
+        let before = read_endpoint(&endpoint_path);
+
+        prepare_front_door_for_path(&project).expect("front door preparation");
+
+        let after = read_endpoint(&endpoint_path);
+        assert_eq!(
+            before, after,
+            "GUI front door must not rewrite a running daemon's endpoint"
+        );
+        assert_eq!(after.pid, daemon_pid);
+        assert_eq!(after.bind, socket.display().to_string());
+    }
+
+    /// The front door owns no daemon slot at all: it neither claims a free one
+    /// nor performs stale cleanup on a dead owner's endpoint. Both of those
+    /// belong to the callers that actually speak the daemon transport
+    /// (`gwtd daemon start` / `status` / the publisher).
+    #[test]
+    fn gui_front_door_never_manages_the_daemon_endpoint_slot() {
+        let temp = tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+
+        let empty_slot = temp.path().join("empty-slot");
+        fs::create_dir_all(&empty_slot).expect("empty slot project dir");
+        let empty_scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            &empty_slot,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .expect("runtime scope");
+        let empty_endpoint_path = empty_scope.endpoint_path(&gwt_core::paths::gwt_home());
+
+        prepare_front_door_for_path(&empty_slot).expect("front door preparation");
+
+        assert!(
+            !empty_endpoint_path.exists(),
+            "GUI front door must not claim a free daemon endpoint slot at {}",
+            empty_endpoint_path.display()
+        );
+
+        let stale_slot = temp.path().join("stale-slot");
+        fs::create_dir_all(&stale_slot).expect("stale slot project dir");
+        let stale_path = seed_daemon_endpoint(&stale_slot, i32::MAX as u32, "/nonexistent.sock");
+        let before = read_endpoint(&stale_path);
+
+        prepare_front_door_for_path(&stale_slot).expect("front door preparation");
+
+        let after = read_endpoint(&stale_path);
+        assert_eq!(
+            before, after,
+            "stale endpoint cleanup belongs to the daemon transport callers"
         );
     }
 
@@ -665,80 +1125,5 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{provider}:{native}: {err}"));
             assert_eq!(normalized.event, expected, "{provider}:{native}");
         }
-    }
-
-    #[test]
-    fn daemon_stop_entrypoints_inject_registered_intake_failure_producer() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempdir().expect("home");
-        let _gwt_home = ScopedGwtHome::set(home.path());
-        let repo = tempdir().expect("repo");
-        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
-
-        let mut session =
-            gwt_agent::Session::new(repo.path(), "intake/daemon", gwt_agent::AgentId::Codex);
-        session.repo_hash = Some(gwt_core::paths::project_scope_hash(repo.path()).to_string());
-        let session_id = session.id.clone();
-        session
-            .save(&gwt_core::paths::gwt_sessions_dir())
-            .expect("save session");
-        let runtime_path =
-            gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &session_id);
-        let _session_env = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session_id);
-        let _runtime_env =
-            ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
-        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
-        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
-        crate::cli::intake_outcome::mark_required_since(
-            repo.path(),
-            &session_id,
-            chrono::Utc::now(),
-        )
-        .expect("arm intake gate");
-
-        let mut env = TestEnv::new(repo.path().join("cache"));
-        env.repo_path = repo.path().to_path_buf();
-        env.improvement_source_scope_nonce =
-            crate::cli::improvement_store::source_scope_nonce(repo.path())
-                .expect("source scope nonce");
-        env.stdin = r#"{"stop_hook_active":false}"#.to_string();
-        let code = run_daemon_hook(&mut env, "event", &["Stop".to_string()])
-            .expect("daemon hook dispatch");
-
-        assert_eq!(code, 0);
-        let stdout = String::from_utf8(env.stdout.clone()).expect("hook output");
-        assert!(stdout.contains("fingerprint: v2:"), "{stdout}");
-        let candidates = crate::cli::improvement::candidate_public_values(repo.path());
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0]["target_artifact"], "issue-spec-workflow");
-        assert_eq!(candidates[0]["eligibility"], "deterministic");
-        assert_eq!(candidates[0]["occurrences"], 1);
-        assert_eq!(env.owner_client_access_count(), 1);
-
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        crate::cli::intake_outcome::mark_required_since(
-            repo.path(),
-            &session_id,
-            chrono::Utc::now(),
-        )
-        .expect("arm next intake event");
-        env.stdout.clear();
-        env.stdin = r#"{"stop_hook_active":false}"#.to_string();
-        let code = run_daemon_hook(
-            &mut env,
-            "provider-event",
-            &["opencode".to_string(), "session.idle".to_string()],
-        )
-        .expect("provider daemon hook dispatch");
-
-        assert_eq!(code, 0);
-        let stdout = String::from_utf8(env.stdout.clone()).expect("provider hook output");
-        assert!(stdout.contains("fingerprint: v2:"), "{stdout}");
-        let candidates = crate::cli::improvement::candidate_public_values(repo.path());
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0]["occurrences"], 2);
-        assert_eq!(env.owner_client_access_count(), 2);
     }
 }

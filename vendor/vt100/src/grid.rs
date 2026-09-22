@@ -259,16 +259,16 @@ impl Grid {
         crate::term::ClearAttrs.write_buf(contents);
         crate::term::ClearScreen.write_buf(contents);
 
-        let history_start = self.scrollback.len().saturating_sub(max_scrollback);
-        let history_len = self.scrollback.len() - history_start;
+        let reflowed_scrollback = self.reflowed_scrollback();
+        let history_start = reflowed_scrollback.len().saturating_sub(max_scrollback);
+        let history_len = reflowed_scrollback.len() - history_start;
         let total_rows = history_len + self.rows.len();
         let last_screen_row = self.size.rows - 1;
         let mut prev_attrs = crate::attrs::Attrs::default();
         let mut prev_pos = Pos::default();
         let mut wrapping = false;
 
-        for (index, row) in self
-            .scrollback
+        for (index, row) in reflowed_scrollback
             .iter()
             .skip(history_start)
             .chain(self.rows.iter())
@@ -315,6 +315,94 @@ impl Grid {
         );
 
         prev_attrs
+    }
+
+    fn reflowed_scrollback(&self) -> Vec<crate::row::Row> {
+        let mut reflowed = Vec::new();
+        let mut logical_line = Vec::new();
+
+        for row in &self.scrollback {
+            logical_line.extend_from_slice(row.snapshot_cells());
+            if !row.wrapped() {
+                Self::push_reflowed_snapshot_line(
+                    &mut reflowed,
+                    &logical_line,
+                    self.size.cols,
+                    false,
+                );
+                logical_line.clear();
+            }
+        }
+
+        if !logical_line.is_empty() {
+            Self::push_reflowed_snapshot_line(
+                &mut reflowed,
+                &logical_line,
+                self.size.cols,
+                true,
+            );
+        }
+
+        reflowed
+    }
+
+    fn push_reflowed_snapshot_line(
+        reflowed: &mut Vec<crate::row::Row>,
+        logical_line: &[crate::Cell],
+        cols: u16,
+        continues_into_drawing_rows: bool,
+    ) {
+        if logical_line.is_empty() {
+            reflowed.push(crate::row::Row::new(cols));
+            return;
+        }
+
+        let width = usize::from(cols);
+        if width == 1 {
+            let mut start = 0;
+            while start < logical_line.len() {
+                let mut cell = logical_line[start].clone();
+                let cell_width = if cell.is_wide()
+                    && logical_line
+                        .get(start + 1)
+                        .is_some_and(crate::Cell::is_wide_continuation)
+                {
+                    2
+                } else {
+                    1
+                };
+                cell.set_effective_width(1);
+                let end = (start + cell_width).min(logical_line.len());
+                let wrapped =
+                    end < logical_line.len() || continues_into_drawing_rows;
+                reflowed.push(crate::row::Row::from_snapshot_cells(
+                    std::slice::from_ref(&cell),
+                    cols,
+                    wrapped,
+                ));
+                start = end;
+            }
+            return;
+        }
+
+        let mut start = 0;
+        while start < logical_line.len() {
+            let mut end = (start + width).min(logical_line.len());
+            if end < logical_line.len() && logical_line[end].is_wide_continuation() {
+                end -= 1;
+            }
+            if end == start {
+                end = (start + width).min(logical_line.len());
+            }
+
+            let wrapped = end < logical_line.len() || continues_into_drawing_rows;
+            reflowed.push(crate::row::Row::from_snapshot_cells(
+                &logical_line[start..end],
+                cols,
+                wrapped,
+            ));
+            start = end;
+        }
     }
 
     pub(crate) fn write_snapshot_continuation_formatted(

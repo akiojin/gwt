@@ -126,7 +126,7 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
     env.stdin = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {
-            "command": "gh issue view 123"
+            "command": "gh issue edit 123 --title updated"
         }
     })
     .to_string();
@@ -153,11 +153,11 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
         "stdout must deny the tool, got: {stdout}"
     );
     assert!(
-        stdout.contains("Direct GitHub workflow CLI commands are not allowed"),
+        stdout.contains("Direct GitHub workflow mutations are not allowed"),
         "short summary must remain in the visible reason: {stdout}"
     );
     assert!(
-        stdout.contains("pr.view"),
+        stdout.contains("issue.edit"),
         "canonical gwt JSON operation alternative must be present in the visible reason: {stdout}"
     );
     assert!(
@@ -176,12 +176,13 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.stdin = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {
-            "command": "gh issue view 123"
+            "command": "gh issue edit 123 --title updated"
         }
     })
     .to_string();
@@ -209,6 +210,120 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
         stdout.lines().count() == 1,
         "event dispatcher must emit exactly one JSON line, got: {stdout}"
     );
+    let stderr = String::from_utf8(env.stderr).unwrap();
+    assert!(!stderr.contains("parked in NeedsHuman"), "{stderr}");
+    assert!(
+        !stderr.contains("Stop working on this Issue now"),
+        "{stderr}"
+    );
+    // AC-3: a denial the agent can clear itself must say so, otherwise the
+    // agent reads the bare gate reason as a park and stops (Issue #4488).
+    let visible = stderr
+        .lines()
+        .next()
+        .expect("gate reason")
+        .chars()
+        .take(256)
+        .collect::<String>();
+    assert!(visible.contains("does not park the Issue"), "{visible}");
+}
+
+/// Issue #3716: Grok treats exit 2 as a gate denial but reads the visible
+/// reason from stderr rather than Claude's hookSpecificOutput envelope.
+#[test]
+fn grok_question_denial_exposes_the_handoff_reason_on_stderr() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let worktree = home.path().join("repo");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _autonomous = ScopedEnvVar::set(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV, "1");
+    let _issue = ScopedEnvVar::set(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV, "3716");
+    let mut session = Session::new(&worktree, "work/issue-3716", AgentId::GrokBuild);
+    session.id = "grok-question-session".to_string();
+    session.linked_issue_number = Some(3716);
+    session
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("save Grok Session");
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+
+    let prefs_path = gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+    let mut prefs = gwt::IssueMonitorPrefs::default();
+    let mut other = gwt::issue_monitor::AutonomousIssueRecord::new(4474);
+    other.phase = gwt::issue_monitor::AutonomousPhase::NeedsHuman;
+    prefs.autonomous_records.push(other);
+    gwt::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+
+    let mut env = TestEnv::new(worktree);
+    env.stdin = serde_json::json!({
+        "hookEventName": "pre_tool_use",
+        "sessionId": "native-grok-session",
+        "toolName": "ask_user_question",
+        "toolInput": {
+            "questions": [{
+                "question": "Proceed with the release?",
+                "options": []
+            }]
+        }
+    })
+    .to_string();
+
+    let question_input = env.stdin.clone();
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"]));
+
+    assert_eq!(code, 2, "Grok question must be denied before its UI opens");
+    let stderr = String::from_utf8(env.stderr.clone()).expect("stderr UTF-8");
+    let reason = stderr.lines().next().expect("Grok gate reason");
+    let visible_reason = reason.chars().take(256).collect::<String>();
+    assert!(
+        visible_reason
+            .starts_with(gwt::cli::hook::autonomous_question_guard::QUESTION_HANDOFF_SUMMARY),
+        "Grok reads the first stderr line as its visible gate reason: {stderr:?}",
+    );
+    assert!(
+        !visible_reason.contains("parked in NeedsHuman"),
+        "another Issue's park and this pending handoff are not this owner's park: {visible_reason:?}",
+    );
+    let stdout = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(!stdout.contains("It is parked for a human"), "{stdout}");
+    assert!(!stdout.contains("slot has been released"), "{stdout}");
+
+    let mut prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let mut owner = gwt::issue_monitor::AutonomousIssueRecord::new(3716);
+    owner.phase = gwt::issue_monitor::AutonomousPhase::NeedsHuman;
+    owner.needs_human_kind = Some(gwt::issue_monitor::NeedsHumanKind::StrandedExecutionGeneration);
+    prefs.autonomous_records.push(owner);
+    gwt::issue_monitor::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    env.stdout.clear();
+    env.stderr.clear();
+    env.stdin = question_input;
+    assert_eq!(
+        dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"])),
+        2
+    );
+    let stderr = String::from_utf8(env.stderr).unwrap();
+    let visible = stderr
+        .lines()
+        .next()
+        .unwrap()
+        .chars()
+        .take(256)
+        .collect::<String>();
+    assert!(
+        visible.contains("Issue #3716 is parked in NeedsHuman"),
+        "{visible}"
+    );
+    // AC-3: the park branch names the human decision instead of leaving the
+    // agent to infer it from the gate reason.
+    assert!(visible.contains("a human must decide"), "{visible}");
+    assert!(!visible.contains("does not park the Issue"), "{visible}");
+    assert!(!visible.contains("human judgment is required"), "{visible}");
 }
 
 #[test]
@@ -239,8 +354,6 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
-    gwt_skills::write_lane_file(tmp.path(), gwt_skills::LaneRegistry::default_profile())
-        .expect("pin execution lane");
     let sessions_dir = tmp.path().join(".gwt").join("sessions");
     let mut session = Session::new(tmp.path(), "feature/demo", AgentId::Codex);
     session.agent_session_id = Some("agent-123".to_string());
@@ -375,6 +488,9 @@ fn event_dispatcher_user_prompt_fails_open_when_session_toml_is_corrupt() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _autonomous_execution =
+        ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+    let _autonomous_issue = ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
     let tmp = tempfile::tempdir().unwrap();
     let _home = ScopedEnvVar::set("HOME", tmp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
@@ -424,4 +540,72 @@ fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
     let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
     assert_eq!(runtime_state.status, "Idle");
     assert_eq!(runtime_state.source_event, "Stop");
+}
+
+// SPEC #3245 AC-1/AC-4 (T-107): the lane mechanism is gone — a leftover
+// `.gwt/session-kind.json` from a pre-removal worktree is inert. PreToolUse
+// lets a production edit through and Stop does not block, with or without
+// the stale file.
+#[test]
+fn stale_lane_file_does_not_alter_hook_dispatch_behavior() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
+
+    fn run(stale_lane_file: bool, event: &str, stdin: String) -> (i32, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        if stale_lane_file {
+            // SPEC #3245 FR-007: a leftover pre-removal lane file is inert.
+            let lane = tmp.path().join(".gwt/session-kind.json");
+            std::fs::create_dir_all(lane.parent().unwrap()).unwrap();
+            std::fs::write(&lane, r#"{"version":1,"id":"intake"}"#).unwrap();
+        }
+        let mut env = TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = tmp.path().to_path_buf();
+        env.stdin = stdin;
+        let code = dispatch(
+            &mut env,
+            &argv(&["gwt", "__internal", "daemon-hook", "event", event]),
+        );
+        (code, String::from_utf8(env.stdout).unwrap())
+    }
+
+    let edit_stdin = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "crates/gwt/src/lib.rs",
+            "old_string": "a",
+            "new_string": "b"
+        }
+    })
+    .to_string();
+    let stop_stdin = serde_json::json!({
+        "session_id": "agent-x",
+        "stop_hook_active": false
+    })
+    .to_string();
+
+    for stale_lane_file in [true, false] {
+        let (code, stdout) = run(stale_lane_file, "PreToolUse", edit_stdin.clone());
+        assert_eq!(
+            code, 0,
+            "a production edit must pass (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"deny\""),
+            "no code-edit guard may fire (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+
+        let (code, stdout) = run(stale_lane_file, "Stop", stop_stdin.clone());
+        assert_ne!(
+            code, 2,
+            "Stop must not block (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"decision\":\"block\""),
+            "no Stop gate may fire (stale_lane_file={stale_lane_file}): {stdout}"
+        );
+    }
 }

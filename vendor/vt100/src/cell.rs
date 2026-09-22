@@ -118,6 +118,11 @@ impl Cell {
         }
     }
 
+    pub(crate) fn set_effective_width(&mut self, width: u16) {
+        self.set_wide(width > 1);
+        self.set_wide_continuation(false);
+    }
+
     pub(crate) fn set_wide_continuation(&mut self, wide: bool) {
         if wide {
             self.len |= IS_WIDE_CONTINUATION;
