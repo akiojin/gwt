@@ -559,6 +559,16 @@ impl HookForwardTarget {
         Ok(url)
     }
 
+    pub fn host_contract_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/host-contract");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
     pub fn execution_continuation_url(&self) -> Result<Url, String> {
         self.validate()?;
         let mut url =
@@ -570,11 +580,84 @@ impl HookForwardTarget {
     }
 }
 
+/// Ask the running Host which execution contract it serves (SPEC #3248
+/// FR-242).
+///
+/// Unlike every other bridge call this one never returns an error: the point
+/// of a preflight is to *classify* the failure, and collapsing "no Host",
+/// "no route" and "wrong Host" into one `Err(String)` would throw away exactly
+/// the distinctions AS-220 has to act on. The verdict is
+/// [`crate::cli::host_contract::classify`]'s job.
+#[must_use]
+pub fn fetch_host_contract_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentHostContractRequest,
+) -> crate::cli::host_contract::HostContractProbe {
+    use crate::cli::host_contract::HostContractProbe;
+
+    let url = match target.host_contract_url() {
+        Ok(url) => url,
+        Err(detail) => return HostContractProbe::Unreachable { detail },
+    };
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return HostContractProbe::Unreachable {
+                detail: format!("the Host contract client could not be built: {error}"),
+            }
+        }
+    };
+    let response = match client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return HostContractProbe::Unreachable {
+                detail: format!("the Host contract route could not be reached: {error}"),
+            }
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let detail = read_bounded_agent_bridge_error_body(
+            response,
+            "the Host contract rejection body could not be read safely",
+        )
+        .map(|body| {
+            serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body)
+                .ok()
+                .and_then(|error| error.reason.or(error.diagnostic_reason))
+                .unwrap_or_else(|| format!("http_status={}", status.as_u16()))
+        })
+        .unwrap_or_else(|error| error.to_string());
+        return HostContractProbe::Rejected {
+            http_status: status.as_u16(),
+            detail,
+        };
+    }
+    match response.json::<crate::AgentHostContractReceipt>() {
+        Ok(receipt) => HostContractProbe::Answered(Box::new(receipt)),
+        Err(error) => HostContractProbe::Malformed {
+            detail: format!("the Host contract receipt could not be parsed: {error}"),
+        },
+    }
+}
+
 pub fn send_execution_adoption_via_agent_bridge(
     target: &HookForwardTarget,
     request: &crate::AgentExecutionAdoptionRequest,
     expected_session: &gwt_agent::Session,
 ) -> Result<crate::AgentExecutionAdoptionReceipt, String> {
+    // SPEC #3248 FR-242: adoption transfers an execution binding and reissues
+    // the capability, so the receiving Host proves its contract first.
+    crate::cli::host_contract::require("execution-adoption").map_err(|error| error.to_string())?;
     let mut url = target.execution_continuation_url()?;
     url.set_path("/internal/execution-adoption");
     let client = reqwest::blocking::Client::builder()
@@ -645,6 +728,18 @@ pub(crate) fn send_execution_continuation_via_agent_bridge_detailed(
     target: &HookForwardTarget,
     request: &crate::AgentExecutionContinuationRequest,
 ) -> Result<crate::AgentExecutionContinuationReceipt, AgentBridgeFailure> {
+    // SPEC #3248 FR-242: this request asks the Host to mint a successor
+    // generation, bind the Session to it and issue the capability. The
+    // contract is proven first, so a Host that cannot carry that authority is
+    // never asked to create it.
+    crate::cli::host_contract::require("execution-continuation").map_err(|error| {
+        let mut failure = AgentBridgeFailure::new(
+            AgentBridgeFailureReason::AuthorityMismatch,
+            "the running Host does not serve the required execution contract",
+        );
+        failure.diagnostic_reason = Some(error.to_string());
+        failure
+    })?;
     let url = target.execution_continuation_url().map_err(|_| {
         AgentBridgeFailure::new(
             AgentBridgeFailureReason::TransportFailure,
