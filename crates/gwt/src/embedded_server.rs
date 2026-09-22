@@ -9052,6 +9052,7 @@ mod tests {
             &repo,
             "build-spec",
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: Some(owner.number),
                 started_at: now,

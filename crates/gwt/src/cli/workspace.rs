@@ -8718,6 +8718,7 @@ pub(crate) mod tests {
             &worktree,
             crate::cli::build::SKILL_NAME,
             &gwt_core::skill_state::SkillState {
+                start_evidence: None,
                 active: true,
                 owner_spec: Some(3587),
                 started_at: Utc::now(),

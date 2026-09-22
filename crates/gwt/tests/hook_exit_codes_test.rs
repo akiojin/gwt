@@ -368,6 +368,7 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
         tmp.path(),
         "build-spec",
         &SkillState {
+            start_evidence: None,
             active: true,
             owner_spec: Some(2077),
             started_at: Utc::now(),

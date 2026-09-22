@@ -458,6 +458,7 @@ impl std::fmt::Debug for HookForwardTarget {
 
 #[derive(Debug)]
 pub(crate) enum AgentBridgeRequestError {
+    OperationUnavailable,
     NotSent(String),
     Rejected(crate::AgentWorkspaceUpdateError),
     Unknown(String),
@@ -466,6 +467,8 @@ pub(crate) enum AgentBridgeRequestError {
 impl std::fmt::Display for AgentBridgeRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::OperationUnavailable => formatter
+                .write_str("Host Work materialization probe endpoint is unavailable (HTTP 404)"),
             Self::NotSent(message) | Self::Unknown(message) => formatter.write_str(message),
             Self::Rejected(error) => write!(
                 formatter,
@@ -1048,6 +1051,12 @@ fn send_terminalization_via_agent_bridge(
     Ok(receipt)
 }
 
+// Host contract compatibility policy: checkout clients can be newer than the
+// installed Host. Distinguish explicit operation absence from authentication,
+// server and transport failures. Absence never proves the requested invariant:
+// a caller may continue only through an equivalent, bounded validation path,
+// with durable evidence identifying that path. Otherwise refuse with recovery
+// guidance. Never infer success or retry a mutation locally from a missing API.
 pub(crate) fn send_work_materialization_probe_via_agent_bridge(
     target: &HookForwardTarget,
     request: &crate::AgentWorkMaterializationProbeRequest,
@@ -1076,6 +1085,9 @@ pub(crate) fn send_work_materialization_probe_via_agent_bridge(
             )
         })?;
     let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(AgentBridgeRequestError::OperationUnavailable);
+    }
     if !status.is_success() {
         let body = read_bounded_agent_bridge_error_body(
             response,
