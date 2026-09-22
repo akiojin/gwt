@@ -200,6 +200,7 @@ fn inject_repair_binding_authority_race_if_requested(worktree: &Path) -> io::Res
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
+        permission_decision: None,
     };
     let projection = String::from_utf8(serialize_execution_control(&record)?).map_err(|error| {
         invalid_generation_data(format!("foreign race projection is not UTF-8: {error}"))
@@ -559,6 +560,17 @@ pub struct ExecutionControlRecord {
     /// guard independently blocks agent edits to this file).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
+    /// Issue #4543 AC-5: the Permission Mode Decision this launch was accepted
+    /// under — provider, source profile, forced/effective skip, provider
+    /// support, the exact custom skip args or config overlay, the reason, and
+    /// any unsupported / dropped-flag diagnostic.
+    ///
+    /// `None` on every record written before this field existed, and on
+    /// records not created by a launch (repair, successor activation), so
+    /// those serialize byte-identically and keep the same content hash. Only a
+    /// launch that actually decided its permission mode fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_decision: Option<gwt_agent::PermissionModeDecision>,
 }
 
 /// Stable owner key within one canonical repository identity.
@@ -6047,6 +6059,8 @@ fn invalid_generation_authority_record(hint: &GenerationAuthorityHint) -> Execut
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
+            // Issue #4543: a synthetic authority placeholder never ran a launch.
+            permission_decision: None,
         });
     record.owner_kind = owner.kind;
     record.owner_number = owner.number;
@@ -6992,6 +7006,11 @@ fn build_successor_generation(
         transfers: Vec::new(),
         recoveries: Vec::new(),
         content_hash: String::new(),
+        // Issue #4543: a successor generation is a re-bind of an existing
+        // execution, not a newly accepted launch, so it records no decision
+        // of its own. Threading the successor's own decision through
+        // activation is the dependent follow-up.
+        permission_decision: None,
     };
     let projection =
         String::from_utf8(serialize_execution_control(&successor_record)?).map_err(|error| {
@@ -10621,6 +10640,33 @@ pub fn materialize_at_launch(
     entrypoint: &str,
     resume: bool,
 ) -> io::Result<()> {
+    materialize_at_launch_with_permission_decision(
+        worktree,
+        owner_kind,
+        owner_number,
+        session_id,
+        entrypoint,
+        resume,
+        None,
+    )
+}
+
+/// Issue #4543 AC-5: the same materialization, recording the Permission Mode
+/// Decision the launch was accepted under.
+///
+/// Split from [`materialize_at_launch`] rather than added to it because every
+/// other caller — recovery, repair, and the tests that stand a record up
+/// directly — has no launch decision to record, and passing `None` at each of
+/// them would say the same thing more loudly.
+pub fn materialize_at_launch_with_permission_decision(
+    worktree: &Path,
+    owner_kind: ExecutionOwnerKind,
+    owner_number: u64,
+    session_id: &str,
+    entrypoint: &str,
+    resume: bool,
+    permission_decision: Option<&gwt_agent::PermissionModeDecision>,
+) -> io::Result<()> {
     // T-149: the load-modify-save cycle runs under the owner write lease so
     // concurrent launches cannot interleave into a lost update.
     crate::cli::trusted_store::with_write_lease(worktree, || {
@@ -10631,6 +10677,7 @@ pub fn materialize_at_launch(
             session_id,
             entrypoint,
             resume,
+            permission_decision,
         )
     })?;
     // T-181: launch is the cheap moment to sweep orphaned trusted entries
@@ -10656,6 +10703,7 @@ fn materialize_at_launch_locked(
     session_id: &str,
     entrypoint: &str,
     resume: bool,
+    permission_decision: Option<&gwt_agent::PermissionModeDecision>,
 ) -> io::Result<()> {
     // Carry the audited transfer chain forward (P9a, T-118/T-123): taking
     // over another session's ACTIVE record — fresh launch or resume — is an
@@ -10708,6 +10756,7 @@ fn materialize_at_launch_locked(
             transfers,
             recoveries: Vec::new(),
             content_hash: String::new(),
+            permission_decision: permission_decision.cloned(),
         },
     )
 }
@@ -10747,19 +10796,10 @@ pub fn detect_owner_kind_evidence(repo_path: &Path, number: u64) -> Option<Execu
 /// sessions, `launch` otherwise.
 #[must_use]
 pub fn entrypoint_from_launch(args: &[String], resume: bool) -> String {
-    for arg in args.iter().rev() {
-        let trimmed = arg.trim_start();
-        if trimmed.starts_with("$gwt-") {
-            if let Some(token) = trimmed.split_whitespace().next() {
-                return token.trim_start_matches('$').to_string();
-            }
-        }
-    }
-    if resume {
-        "resume".to_string()
-    } else {
-        "launch".to_string()
-    }
+    // Issue #4543: shared with the Permission Mode Decision, which records the
+    // same entrypoint for the same launch. Two copies of this rule would let
+    // the record and the decision disagree about what started the session.
+    gwt_agent::permission_mode::entrypoint_from_launch_args(args, resume)
 }
 
 /// Settlement outcome for [`settle`].
@@ -11642,6 +11682,16 @@ pub struct ExecutionDiagnosisSnapshot {
     /// callers must treat as attended rather than guessing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_route: Option<String>,
+    /// Issue #4543 AC-5: the Permission Mode Decision this execution was
+    /// launched under, as recorded on the Execution Control Record.
+    ///
+    /// `None` for a worktree with no record, and for records written before
+    /// the decision existed. A decision whose `outcome` is diagnostic
+    /// (`unsupported_provider` / `missing_custom_skip_mapping` /
+    /// `skip_flag_dropped`) is why an agent that should be running unattended
+    /// is sitting at a prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_decision: Option<gwt_agent::PermissionModeDecision>,
 }
 
 fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus) -> &'static str {
@@ -12118,6 +12168,7 @@ fn diagnose_with_mode(
         // reported even when this worktree carries no Execution Control
         // Record at all.
         launch_route: session_launch_route(session_id).map(|route| route.as_str().to_string()),
+        permission_decision: None,
     };
 
     let record = match load(worktree) {
@@ -12155,6 +12206,9 @@ fn diagnose_with_mode(
     snapshot
         .missing_verification
         .clone_from(&record.missing_verification);
+    snapshot
+        .permission_decision
+        .clone_from(&record.permission_decision);
     if !integrity_ok(&record) {
         snapshot.ecr_status = ExecutionDiagnosisState::Corrupt;
         snapshot.binding_state = ExecutionBindingState::Corrupt;
@@ -14341,6 +14395,9 @@ fn repair_corrupt_execution_impl(
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
+                // Issue #4543: `execution.repair` materializes a fresh record
+                // from a quarantined one, it does not run a launch.
+                permission_decision: None,
             };
             let projection =
                 String::from_utf8(serialize_execution_control(&record)?).map_err(|error| {
@@ -16495,6 +16552,7 @@ mod tests {
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
+            permission_decision: None,
         }
     }
 
@@ -23644,6 +23702,88 @@ mod tests {
             load(dir.path()).unwrap().unwrap().status,
             ExecutionControlStatus::Active
         );
+    }
+
+    /// Issue #4543 AC-5: an accepted launch records the Permission Mode
+    /// Decision on the Execution Control Record, and `execution.status`
+    /// reports it.
+    #[test]
+    fn materialize_at_launch_records_the_permission_mode_decision() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        // The exact launch the contract is about: a producing-work Issue
+        // Monitor launch whose saved profile said "interactive".
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .linked_issue_number(4543)
+            .permission_launch_source(gwt_agent::PermissionLaunchSource::SilentIssueMonitor)
+            .skip_permissions(false)
+            .build();
+        assert!(config.skip_permissions);
+
+        materialize_at_launch_with_permission_decision(
+            dir.path(),
+            ExecutionOwnerKind::Issue,
+            4543,
+            "sess-4543",
+            "gwt-execute",
+            false,
+            Some(&config.permission_decision),
+        )
+        .unwrap();
+
+        let record = load(dir.path()).unwrap().expect("record materialized");
+        assert!(integrity_ok(&record));
+        let decision = record
+            .permission_decision
+            .as_ref()
+            .expect("the launch decision is recorded");
+        assert_eq!(decision.provider, "codex");
+        assert_eq!(
+            decision.source,
+            gwt_agent::PermissionLaunchSource::SilentIssueMonitor
+        );
+        assert_eq!(
+            decision.outcome,
+            gwt_agent::PermissionModeOutcome::SkipForcedReady
+        );
+        assert!(decision.skip_forced);
+        assert!(decision.effective_skip_permissions);
+        assert_eq!(decision.requested_skip_permissions, Some(false));
+        assert_eq!(decision.provider_mapping.args, vec!["--yolo"]);
+        assert!(decision.dropped_evidence.is_none());
+
+        let snapshot = diagnose(dir.path(), Some("sess-4543"));
+        assert_eq!(
+            snapshot
+                .permission_decision
+                .as_ref()
+                .map(|decision| decision.provider.as_str()),
+            Some("codex"),
+            "execution.status must report the decision"
+        );
+    }
+
+    /// Issue #4543 AC-5, compatibility: a record with no decision serializes
+    /// exactly as it did before the field existed, so an older binary reading
+    /// it recomputes the same content hash instead of calling it corrupt.
+    #[test]
+    fn a_record_without_a_permission_decision_serializes_unchanged() {
+        let record = active_record("sess-legacy");
+        assert!(record.permission_decision.is_none());
+        let json = String::from_utf8(serialize_execution_control(&record).unwrap()).unwrap();
+        assert!(
+            !json.contains("permission_decision"),
+            "an absent decision must not appear on disk: {json}"
+        );
+        let restored: ExecutionControlRecord = serde_json::from_str(&json).unwrap();
+        assert!(integrity_ok(&restored));
     }
 
     // T-182 core: resuming a settled pre-P9b worktree promotes the valid

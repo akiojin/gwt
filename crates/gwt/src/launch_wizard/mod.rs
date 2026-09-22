@@ -702,6 +702,29 @@ impl LaunchWizardLaunchRequest {
         }
     }
 
+    /// Issue #4543 AC-6: record which launch surface this request came from,
+    /// and re-run the shared validator against the argv and environment the
+    /// request actually carries.
+    ///
+    /// The Issue Monitor identifies itself — and may force skip-permissions —
+    /// only after the wizard has already built the config. Without this the
+    /// recorded decision would describe the wizard's guess rather than the
+    /// launch that ships, and a post-build `skip_permissions = true` on a
+    /// provider with no mapping would go back to being invisible.
+    ///
+    /// A no-op for non-agent (shell) launches.
+    pub fn record_permission_launch_source(&mut self, source: gwt_agent::PermissionLaunchSource) {
+        if let LaunchWizardLaunchRequest::Agent(config) = self {
+            config.permission_decision = gwt_agent::redecide_for_materialized_launch(
+                &config.permission_decision,
+                source,
+                config.skip_permissions,
+                &config.args,
+                &config.env_vars,
+            );
+        }
+    }
+
     /// Issue #3478 (AC-1): inject the machine-readable autonomous execution
     /// context so the agent's hooks can recognize an unattended session and
     /// convert its confirmation questions into NeedsHuman handoffs.
@@ -1137,6 +1160,10 @@ pub struct LaunchWizardState {
     pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
     start_method_selected: bool,
+    /// Issue #4543 AC-3: which stored preference this wizard's permission
+    /// setting came from. Recorded on the launch so a forced skip names the
+    /// setting it overrode instead of appearing out of nowhere.
+    permission_launch_source: gwt_agent::PermissionLaunchSource,
     manual_setup_initialized: bool,
     /// SPEC-2014 FR-126/FR-127: ManualSetup で Runtime ステップから Confirm へ
     /// 進んだか。Runtime(編集) と Confirm(サマリ+Launch) を区別する。QuickStart /

@@ -9153,6 +9153,7 @@ mod tests {
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
+                permission_decision: None,
             },
         )
         .expect("save execution record");
