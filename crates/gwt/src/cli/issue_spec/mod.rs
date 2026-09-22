@@ -617,6 +617,14 @@ fn run_spec_lint<E: CliEnv>(
     // cache happened to hold.
     ops.refresh_cache(IssueNumber(number))?;
 
+    let index_diagnostics = ops.diagnose(IssueNumber(number))?;
+    if !index_diagnostics.is_empty() {
+        out.push_str(&format!(
+            "lint #{number}: index health check failed\n{index_diagnostics}\n"
+        ));
+        return Ok(1);
+    }
+
     let names: Vec<String> = if requested_sections.is_empty() {
         DEFAULT_LINT_SECTIONS
             .iter()
