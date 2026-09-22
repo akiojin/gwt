@@ -100,8 +100,26 @@ fn pty_start_gate_helper() {
     if std::env::var_os("GWT_INTERNAL_PTY_GATE_ENDPOINT").is_none() {
         return;
     }
-    let exit_code = gwt_terminal::pty::run_start_gate_from_env().expect("run test PTY start gate");
-    assert_eq!(exit_code, 0, "released PTY target failed");
+    let outcome = gwt_terminal::pty::run_start_gate_from_env();
+    // Issue #4628: a released helper execs its target, so it only returns
+    // here on an aborted or failed gate — exactly when the owner SIGKILLs the
+    // group without waiting (#3705). Exiting through libtest would run the
+    // coverage runtime's exit handler, and a kill in the middle of that write
+    // leaves a truncated raw profile that fails the whole coverage merge.
+    #[cfg(unix)]
+    {
+        if let Err(error) = &outcome {
+            eprintln!("test PTY start gate failed: {error}");
+        }
+        // SAFETY: `_exit` only ends this helper process; skipping exit
+        // handlers is the point.
+        unsafe { libc::_exit(if matches!(outcome, Ok(0)) { 0 } else { 1 }) }
+    }
+    #[cfg(not(unix))]
+    {
+        let exit_code = outcome.expect("run test PTY start gate");
+        assert_eq!(exit_code, 0, "released PTY target failed");
+    }
 }
 
 #[test]
