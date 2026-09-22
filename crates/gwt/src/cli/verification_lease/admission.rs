@@ -851,8 +851,19 @@ mod tests {
                 Ok(status) => format!("free ({} waiting)", status.pending),
                 Err(err) => format!("unreadable: {err}"),
             };
+            let targets = self
+                .lock_paths()
+                .into_iter()
+                .skip(1)
+                .map(|path| {
+                    let state = std::fs::read_to_string(path.with_extension("state.json"))
+                        .unwrap_or_else(|err| format!("unreadable holder state: {err}"));
+                    format!("target lock {}; holder state {state}", path.display())
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
             format!(
-                "verification lease {holder}; this process is pid {}; lock {}; ticket {}",
+                "verification lease {holder}; this process is pid {}; lock {}; ticket {}; {targets}",
                 std::process::id(),
                 self.coordinator.heavy_lock_path().display(),
                 self.coordinator.heavy_ticket_path().display()
@@ -860,15 +871,68 @@ mod tests {
         }
 
         fn status(&self) -> HeavyLeaseStatus {
-            self.coordinator
-                .heavy_lease_status()
-                .unwrap_or_else(|err| panic!("the lease status must stay readable: {err}"))
+            self.coordinator.heavy_lease_status().unwrap_or_else(|err| {
+                panic!(
+                    "the lease status must stay readable: {err}; {}",
+                    self.describe()
+                )
+            })
+        }
+
+        fn admit(
+            &self,
+            env: &mut crate::cli::TestEnv,
+            worktree: &Path,
+            budget: Duration,
+        ) -> Result<Admission, SpecOpsError> {
+            super::admit(env, worktree, budget)
+                .map_err(|err| unexpected(format!("{err}; {}", self.describe())))
+        }
+
+        /// Include every target in this private coordinator, so future
+        /// acquisition tests inherit the same release observation.
+        fn lock_paths(&self) -> Vec<PathBuf> {
+            let mut paths = vec![self.coordinator.heavy_lock_path()];
+            for entry in std::fs::read_dir(self.coordinator.root().join("targets")).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|ext| ext == "lock") {
+                    paths.push(path);
+                }
+            }
+            paths
+        }
+
+        fn is_free(&self) -> bool {
+            self.lock_paths().iter().all(|path| {
+                let probe = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(path)
+                    .unwrap();
+                match fs2::FileExt::try_lock_exclusive(&probe) {
+                    Ok(()) => {
+                        // Explicit unlock also releases any fork-inherited
+                        // copy of this probe's own file description.
+                        fs2::FileExt::unlock(&probe).unwrap();
+                        true
+                    }
+                    Err(err)
+                        if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                    {
+                        false
+                    }
+                    Err(err) => panic!("lock probe failed: {err}; {}", self.describe()),
+                }
+            })
         }
 
         /// Wait for the release to become observable.
         ///
-        /// `heavy_lease_status` probes the kernel lock rather than the ticket,
-        /// and every `Command::spawn` on any thread of this test binary
+        /// Probe both the heavy and target kernel locks: status metadata can
+        /// already say free while an inherited descriptor remains locked.
+        /// Every `Command::spawn` on any thread of this test binary
         /// duplicates the holder's descriptor into the forked child —
         /// `O_CLOEXEC` closes it at `exec`, not at `fork`. So for the length of
         /// one fork/exec window an unrelated child keeps the `flock` alive and
@@ -882,7 +946,7 @@ mod tests {
         fn assert_free(&self, context: &str) {
             let deadline = Instant::now() + RELEASE_OBSERVATION_BUDGET;
             loop {
-                if !self.status().held {
+                if self.is_free() {
                     return;
                 }
                 assert!(
@@ -891,7 +955,7 @@ mod tests {
                     RELEASE_OBSERVATION_BUDGET.as_secs(),
                     self.describe()
                 );
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(100));
             }
         }
 
@@ -944,6 +1008,12 @@ mod tests {
                 .heavy_ticket_path()
                 .display()
                 .to_string(),
+            lease_root
+                .coordinator
+                .target_lock_path(&key)
+                .display()
+                .to_string(),
+            "holder state".to_string(),
         ] {
             assert!(
                 described.contains(&expected),
@@ -972,8 +1042,9 @@ mod tests {
         let worktree = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
 
-        let admission =
-            admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap_or_else(|err| {
+        let admission = lease_root
+            .admit(&mut env, worktree.path(), Duration::from_secs(5))
+            .unwrap_or_else(|err| {
                 panic!(
                     "a private lease root must grant admission: {err} — {}",
                     lease_root.describe()
@@ -1015,7 +1086,9 @@ mod tests {
         let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let admission = admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap();
+        let admission = lease_root
+            .admit(&mut env, worktree.path(), Duration::from_secs(5))
+            .unwrap();
 
         admission.publish_progress(0, 4, Duration::ZERO);
         let status = lease_root.assert_held("the run holds the lease");
@@ -1037,18 +1110,112 @@ mod tests {
         let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let first = admit(&mut env, worktree.path(), Duration::ZERO).unwrap();
-        let second = admit(&mut env, worktree.path(), Duration::ZERO);
+        let first = lease_root
+            .admit(&mut env, worktree.path(), Duration::ZERO)
+            .unwrap();
+        let second = lease_root.admit(&mut env, worktree.path(), Duration::ZERO);
         assert!(
             second.is_err(),
-            "a second canonical run must not borrow the first run's lease: {second:?}"
+            "a second canonical run must not borrow the first run's lease: {second:?}; {}",
+            lease_root.describe()
         );
-        assert!(second.unwrap_err().to_string().contains("deferred"));
+        let refusal = second.unwrap_err().to_string();
+        assert!(refusal.contains("deferred"), "{refusal}");
         drop(first);
         lease_root.assert_free("the first run releases its own lease");
-        let next = admit(&mut env, worktree.path(), Duration::ZERO).unwrap();
+        let next = lease_root
+            .admit(&mut env, worktree.path(), Duration::ZERO)
+            .unwrap();
         drop(next);
         lease_root.assert_free("the next run releases its own lease");
+    }
+
+    /// Issue #4593: a concurrent fork between the two drops in Admission::settle
+    /// can keep only the target lock alive. A free heavy lock is not enough.
+    #[cfg(unix)]
+    #[test]
+    fn release_observation_waits_for_a_fork_inherited_target_lock() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let lease_root = IsolatedLeaseRoot::new();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let key = verification_key_for(worktree.path());
+        // Construct the state after the heavy lease has been released, so
+        // an unrelated fork cannot inherit a heavy lock from this test.
+        let JobAdmission::Owner(first) = lease_root
+            .coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("private target must be free; {}", lease_root.describe());
+        };
+
+        let (reader, release) = UnixStream::pair().unwrap();
+        let read_fd = reader.as_raw_fd();
+        let release_fd = release.as_raw_fd();
+        // SAFETY: the fork child only uses async-signal-safe libc calls and
+        // _exit; it never enters Rust allocation, unwinding, or destructors.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "{}", std::io::Error::last_os_error());
+        if child == 0 {
+            unsafe {
+                libc::close(release_fd);
+                let mut byte = 0u8;
+                // EOF is the parent's release signal; an interrupted read
+                // must not release the inherited lock early.
+                while libc::read(read_fd, (&mut byte as *mut u8).cast(), 1) != 0 {}
+                libc::_exit(0);
+            }
+        }
+        drop(reader);
+        // Always release and reap the child, including when the regression
+        // assertion fails. No wall-clock deadline controls the interleaving.
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            first.complete(JobOutcome::Completed).unwrap();
+            assert!(!lease_root.status().held, "heavy lock must already be free");
+            assert!(
+                matches!(
+                    lease_root
+                        .coordinator
+                        .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+                        .unwrap(),
+                    JobAdmission::Joined(_)
+                ),
+                "the child must retain the target lock; {}",
+                lease_root.describe()
+            );
+            assert!(
+                !lease_root.is_free(),
+                "the inherited target lock must prevent a free observation: {}",
+                lease_root.describe()
+            );
+        }));
+        // A different concurrent fork may inherit the parent's socket too.
+        // Shutdown affects the socket itself, unlike dropping one descriptor.
+        let released = release.shutdown(std::net::Shutdown::Write);
+        drop(release);
+        loop {
+            let waited = unsafe { libc::waitpid(child, std::ptr::null_mut(), 0) };
+            if waited == child {
+                break;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+        }
+        released.unwrap();
+        if let Err(panic) = observed {
+            std::panic::resume_unwind(panic);
+        }
+        lease_root.assert_free("the child's exit releases the inherited target lock");
+        let next = lease_root
+            .admit(&mut env, worktree.path(), Duration::ZERO)
+            .unwrap();
+        drop(next);
+        lease_root.assert_free("the next admission releases both locks");
     }
 
     /// Issue #4285 AC-1 / AC-3 / AC-4: a canonical verification holding its
@@ -1060,7 +1227,9 @@ mod tests {
         let lease_root = IsolatedLeaseRoot::new();
         let worktree = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let admission = admit(&mut env, worktree.path(), Duration::from_secs(5)).unwrap();
+        let admission = lease_root
+            .admit(&mut env, worktree.path(), Duration::from_secs(5))
+            .unwrap();
         lease_root.assert_held("admission must hold the verification lease");
 
         let model_lane = IndexCoordinator::open_default().unwrap();
@@ -1118,8 +1287,9 @@ mod tests {
             .unwrap();
 
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let admission =
-            admit(&mut env, worktree.path(), Duration::from_secs(1)).unwrap_or_else(|err| {
+        let admission = lease_root
+            .admit(&mut env, worktree.path(), Duration::from_secs(1))
+            .unwrap_or_else(|err| {
                 panic!(
                     "verification must not wait for a search: {err} — {}",
                     lease_root.describe()
@@ -1156,7 +1326,9 @@ mod tests {
             .unwrap();
 
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        let err = admit(&mut env, worktree.path(), Duration::from_secs(1)).unwrap_err();
+        let err = lease_root
+            .admit(&mut env, worktree.path(), Duration::from_secs(1))
+            .unwrap_err();
 
         let message = err.to_string();
         assert!(message.contains("deferred"), "{message}");

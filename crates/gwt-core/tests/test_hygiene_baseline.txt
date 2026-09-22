@@ -162,7 +162,6 @@ short-wall-clock|crates/gwt/src/cli/pane.rs|request_window_list_recovers_on_retr
 short-wall-clock|crates/gwt/src/cli/pane.rs|self_pane_close_absolute_deadline_is_not_extended_by_unrelated_frames
 short-wall-clock|crates/gwt/src/cli/search.rs|run_reports_stale_metadata_and_not_ready_exit
 short-wall-clock|crates/gwt/src/cli/trusted_store.rs|write_lease_refuses_second_writer_with_explicit_retry
-short-wall-clock|crates/gwt/src/cli/verification_lease/admission.rs|assert_free
 short-wall-clock|crates/gwt/src/cli/workspace.rs|start
 short-wall-clock|crates/gwt/src/daemon_publisher.rs|active_authority_fence_routes_control_to_sibling_worktree_endpoint
 short-wall-clock|crates/gwt/src/daemon_publisher.rs|bootstrap_elapsed_time_consumes_the_control_budget
