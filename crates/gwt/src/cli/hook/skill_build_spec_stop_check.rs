@@ -1,11 +1,9 @@
 //! `gwtd hook skill-build-spec-stop-check` — Stop-block handler for the
 //! `gwt-build-spec` skill (SPEC-1935 Phase 10, FR-014r).
 //!
-//! Mirrors the `skill_plan_spec_stop_check` structure but targets the
-//! `build-spec` state file. The shared decision body lives in the
-//! sibling `skill_plan_spec_stop_check::decide` (private) so both
-//! handlers stay in lock-step regarding `stop_hook_active`, session
-//! isolation, and fail-open policy.
+//! Uses the shared state-file gate for `stop_hook_active`, session isolation,
+//! and fail-open policy. A stranded Blocked build whose abort is unreachable
+//! releases this gate with a durable diagnostic, retaining its active marker.
 
 use std::{
     io::{self, Read},
@@ -32,13 +30,78 @@ pub fn handle_with_input(
     input: &str,
     current_session_id: Option<&str>,
 ) -> HookOutput {
-    super::state_file_stop_check::decide(
+    let output = super::state_file_stop_check::decide(
         worktree,
         input,
         current_session_id,
         SKILL_NAME,
         SKILL_DISPLAY,
-    )
+    );
+    if matches!(output, HookOutput::StopBlock { .. })
+        && release_unabortable_build(worktree, current_session_id)
+    {
+        return HookOutput::Silent;
+    }
+    output
+}
+
+/// A Blocked execution can retain an active compatibility build marker when
+/// canonical Work authority makes abort unreachable. Preserve that marker;
+/// releasing this gate neither terminalizes Work nor claims successful delivery.
+fn release_unabortable_build(worktree: &Path, current_session_id: Option<&str>) -> bool {
+    use crate::cli::{
+        execution_state::{self, ExecutionControlStatus},
+        governance::RecoveryProbeState,
+    };
+
+    let Some(session) = current_session_id.filter(|session| !session.trim().is_empty()) else {
+        return false;
+    };
+    let Ok(Some(state)) = gwt_core::skill_state::load(worktree, SKILL_NAME) else {
+        return false;
+    };
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let Ok(Some(record)) = execution_state::load(&resolved) else {
+        return false;
+    };
+    // The recovery probe describes the Blocked-only abort path. In Active
+    // executions it also returns unavailable/retryable:false (requires_blocked),
+    // which must never exempt an ordinary unfinished build from Stop.
+    if !state.active
+        || state.session_id != session
+        || record.primary_session_id != session
+        || state.owner_spec != Some(record.owner_number)
+        || record.status != ExecutionControlStatus::Blocked
+        || !execution_state::integrity_ok(&record)
+    {
+        return false;
+    }
+    let diagnosis = execution_state::diagnose(&resolved, Some(session));
+    let Some(probe) = diagnosis.recovery_probes.iter().find(|probe| {
+        probe.operation == "build.abort"
+            && probe.state == RecoveryProbeState::Unavailable
+            && probe.governance.retryable == Some(false)
+    }) else {
+        return false;
+    };
+    super::diagnostics::record_stop_gate_decision(
+        &resolved,
+        serde_json::json!({
+            "message": "Build Stop gate released with lifecycle still active: build.abort is unavailable and non-retryable",
+            "gate": "skill-build-spec-stop-check",
+            "issue": 4623,
+            "session_id": session,
+            "owner_number": record.owner_number,
+            "owner_kind": record.owner_kind.as_str(),
+            "build_active": state.active,
+            "build_started_at": state.started_at,
+            "phase": state.phase,
+            "execution_status": record.status,
+            "execution_generation": diagnosis.generation_id,
+            "abort_probe": probe,
+        }),
+    );
+    true
 }
 
 #[cfg(test)]
