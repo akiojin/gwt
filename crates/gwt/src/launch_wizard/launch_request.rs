@@ -1,6 +1,20 @@
 use super::*;
 
 impl LaunchWizardState {
+    /// Issue #4543 AC-3: which stored preference decided this launch's
+    /// permission setting.
+    ///
+    /// A Resume / Continue launch outranks the recorded start method: its
+    /// preference comes from the session being continued, which is the exact
+    /// surface that used to hand a producing agent back its old
+    /// `skip_permissions = false` (Issue #3462).
+    fn permission_launch_source(&self) -> gwt_agent::PermissionLaunchSource {
+        if matches!(self.mode.as_str(), "resume" | "continue") {
+            return gwt_agent::PermissionLaunchSource::ResumeOrAdopt;
+        }
+        self.permission_launch_source
+    }
+
     pub fn build_launch_config(&self) -> Result<gwt_agent::LaunchConfig, String> {
         if self.is_hydrating {
             return Err("Launch options are still loading".to_string());
@@ -97,9 +111,13 @@ impl LaunchWizardState {
             builder = builder.reasoning_level(reasoning_level.to_string());
         }
 
-        if self.effective_skip_permissions() {
-            builder = builder.skip_permissions(true);
-        }
+        // Issue #4543 AC-3 / AC-6: always tell the builder what this surface
+        // stored, including an explicit `false`. Only calling the setter when
+        // the answer is `true` is what made "the user turned it off" and "no
+        // preference was ever saved" the same input to launch materialization.
+        builder = builder
+            .permission_launch_source(self.permission_launch_source())
+            .skip_permissions(self.effective_skip_permissions());
 
         if self.fast_mode_enabled_for_current_agent() {
             builder = builder.fast_mode(true);
@@ -671,6 +689,136 @@ mod tests {
         // Codex builder must produce `codex resume` (picker) — no `--last`.
         assert!(!config.args.contains(&"--last".to_string()));
         assert!(config.args.iter().any(|arg| arg == "resume"));
+    }
+
+    /// Issue #4543 AC-3 / AC-4 / AC-6: the wizard is one of the surfaces whose
+    /// stored `false` used to decide a producing-work launch. It now reports
+    /// the preference *and* its source into launch materialization, and the
+    /// forced skip wins.
+    #[test]
+    fn wizard_linked_owner_launch_forces_skip_over_a_stored_interactive_preference() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-4543"), "work/issue-4543"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.skip_permissions = false;
+        state.linked_issue_number = Some(4543);
+
+        let config = state.build_launch_config().expect("launch config");
+
+        assert!(
+            config.skip_permissions,
+            "a producing-work wizard launch must not inherit the stored interactive preference"
+        );
+        assert!(config.args.contains(&"--yolo".to_string()));
+        let decision = &config.permission_decision;
+        assert_eq!(
+            decision.outcome,
+            gwt_agent::PermissionModeOutcome::SkipForcedReady
+        );
+        assert_eq!(
+            decision.source,
+            gwt_agent::PermissionLaunchSource::StartWork
+        );
+        assert!(decision.skip_forced);
+        assert!(decision.interactive_request_ignored);
+        assert_eq!(decision.requested_skip_permissions, Some(false));
+    }
+
+    /// The same wizard, launching a branch with no owner, is untouched.
+    #[test]
+    fn wizard_unlinked_launch_keeps_its_stored_interactive_preference() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.skip_permissions = false;
+
+        let config = state.build_launch_config().expect("launch config");
+
+        assert!(!config.skip_permissions);
+        assert!(!config.args.contains(&"--yolo".to_string()));
+        assert_eq!(
+            config.permission_decision.outcome,
+            gwt_agent::PermissionModeOutcome::InteractiveRetained
+        );
+    }
+
+    /// AC-3: a Resume launch names the surface it inherited from, so a forced
+    /// skip on a resumed producing session is attributable (Issue #3462).
+    #[test]
+    fn wizard_resume_launch_records_the_resume_source() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("work/issue-4543"), "work/issue-4543"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("session-123".to_string());
+        state.linked_issue_number = Some(4543);
+
+        let config = state.build_launch_config().expect("launch config");
+
+        assert_eq!(
+            config.permission_decision.source,
+            gwt_agent::PermissionLaunchSource::ResumeOrAdopt
+        );
+        assert!(config.skip_permissions);
+    }
+
+    /// AC-6: the Issue Monitor identifies itself after the config is built,
+    /// and the re-decision describes the launch that actually ships.
+    #[test]
+    fn recording_the_launch_source_after_build_redecides_the_permission_mode() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.skip_permissions = false;
+
+        let mut request = state.build_launch_request().expect("launch request");
+        // An unlinked launch is interactive until the monitor forces it.
+        match &request {
+            LaunchWizardLaunchRequest::Agent(config) => assert_eq!(
+                config.permission_decision.outcome,
+                gwt_agent::PermissionModeOutcome::InteractiveRetained
+            ),
+            other => panic!("expected agent request, got {other:?}"),
+        }
+
+        request.force_skip_permissions_for_autonomous(true);
+        request
+            .record_permission_launch_source(gwt_agent::PermissionLaunchSource::SilentIssueMonitor);
+
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                let decision = &config.permission_decision;
+                assert_eq!(
+                    decision.source,
+                    gwt_agent::PermissionLaunchSource::SilentIssueMonitor
+                );
+                assert!(decision.skip_forced);
+                // The argv was materialized before the monitor forced the
+                // skip, so the flag really is absent — and the shared
+                // validator says so instead of letting the launch stall.
+                assert_eq!(
+                    decision.outcome,
+                    gwt_agent::PermissionModeOutcome::SkipFlagDropped
+                );
+                assert!(decision
+                    .dropped_evidence
+                    .as_deref()
+                    .is_some_and(|evidence| evidence.contains("--yolo")));
+            }
+            other => panic!("expected agent request, got {other:?}"),
+        }
     }
 
     #[test]

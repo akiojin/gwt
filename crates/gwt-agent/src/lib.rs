@@ -14,6 +14,7 @@ pub mod detect;
 pub mod environment;
 pub mod launch;
 pub mod migration;
+pub mod permission_mode;
 pub mod prepare;
 pub mod presets;
 pub mod session;
@@ -50,6 +51,12 @@ pub use launch::{
     ManualLaunchRuntimeProof, ManualLaunchSuccessorPredecessor, ResolvedRunner,
 };
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
+pub use permission_mode::{
+    decide as decide_permission_mode, provider_key, provider_skip_mapping,
+    redecide_for_materialized_launch, validate_materialized_launch, PermissionLaunchSource,
+    PermissionModeDecision, PermissionModeInputs, PermissionModeOutcome, ProviderEnvOverlay,
+    ProviderSkipMapping,
+};
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,

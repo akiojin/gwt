@@ -20,6 +20,16 @@ pub const AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_HOST_CONTRACT_SCHEMA_VERSION: u32 = 1;
+
+/// The execution-generation contract a Host must serve before a client may let
+/// it mint a generation (SPEC #3248 FR-242).
+///
+/// Separate from the wire `schema_version` above: the envelope shape and the
+/// authority semantics carried inside it move independently, and the whole
+/// value of the preflight is being able to say "this Host speaks the envelope
+/// but not the contract" instead of failing later at an opaque route.
+pub const EXECUTION_GENERATION_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +151,79 @@ pub struct AgentExecutionBindingProbeReceipt {
     pub host_instance_id: String,
     pub execution_binding: ExecutionBindingIdentity,
     pub capability_generation: u64,
+}
+
+/// One side-effect-free question for a running Host: "which execution
+/// contract do you serve?" (SPEC #3248 FR-242, AS-220).
+///
+/// The `operation_id` / `nonce` pair is echoed back verbatim so the caller can
+/// tell this Host's answer from a replayed or cross-wired one. It carries no
+/// owner, Session, or Work identity because the preflight runs *before* any of
+/// those exist — that is the whole point of the route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHostContractRequest {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub nonce: String,
+}
+
+/// The running Host's own statement of the contract it serves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHostContractReceipt {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub nonce: String,
+    /// Identifies the Host *process*, so a restart is visible as a different
+    /// authority rather than as the same one answering twice.
+    pub host_instance_id: String,
+    /// The Host binary's version, quoted back to the user in the update
+    /// instruction when the contract does not match.
+    pub host_version: String,
+    /// The execution-generation contract this Host implements.
+    pub execution_generation_contract_version: u32,
+    /// The Session the presented capability authenticates as. The caller
+    /// compares it against its own Session: a Host that names someone else is
+    /// not this caller's authority.
+    pub session_id: String,
+    pub capability_generation: u64,
+}
+
+/// Answer the Host contract question from constants and the authenticated
+/// principal alone (FR-242).
+///
+/// This reads no store and writes nothing: the preflight must be provably
+/// side-effect free, and the cheapest proof is a function with nothing to
+/// touch. Everything it returns is either a compile-time constant or a value
+/// the caller already presented.
+pub fn describe_authenticated_host_contract(
+    request: &AgentHostContractRequest,
+    session_id: &str,
+    host_instance_id: &str,
+    capability_generation: u64,
+) -> std::result::Result<AgentHostContractReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_HOST_CONTRACT_SCHEMA_VERSION
+        || request.operation_id.trim().is_empty()
+        || request.nonce.trim().is_empty()
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            format!(
+                "host contract preflight requires schema version {AGENT_HOST_CONTRACT_SCHEMA_VERSION} with a non-empty operation id and nonce"
+            ),
+        ));
+    }
+    Ok(AgentHostContractReceipt {
+        schema_version: AGENT_HOST_CONTRACT_SCHEMA_VERSION,
+        operation_id: request.operation_id.clone(),
+        nonce: request.nonce.clone(),
+        host_instance_id: host_instance_id.to_string(),
+        host_version: env!("CARGO_PKG_VERSION").to_string(),
+        execution_generation_contract_version: EXECUTION_GENERATION_CONTRACT_VERSION,
+        session_id: session_id.to_string(),
+        capability_generation,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4400,6 +4483,7 @@ mod tests {
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
+                permission_decision: None,
             },
         )
         .expect("save completed execution fixture");
