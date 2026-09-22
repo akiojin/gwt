@@ -228,6 +228,11 @@ fn docker_probe_diagnostics_with_binary(
     args: &[&str],
     label: &str,
 ) -> std::result::Result<(), String> {
+    // Bound CLI and daemon probes, including retries and process-tree cleanup.
+    // The scope preserves a shorter deadline inherited from the caller.
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        Instant::now() + CONTAINER_RUNTIME_PROBE_TIMEOUT,
+    );
     // SPEC-2809 / SPEC-1924 Phase D-docker — route docker probes through
     // `spawn_logged_blocking` so the docker tab of the Console window /
     // Logs Process facet sees them. The `binary` may be a `GWT_DOCKER_BIN`
@@ -768,20 +773,40 @@ esac
         assert!(files.dockerfile.is_none());
     }
 
-    // Smoke tests — just verify the functions return without panic.
+    #[cfg(unix)]
     #[test]
-    fn docker_available_returns_bool() {
-        let _ = docker_available();
+    fn docker_probe_times_out_without_a_caller_deadline() {
+        let temp = TempDir::new().expect("tempdir");
+        let wrapper = temp.path().join("slow-docker");
+        // Finite even before the fix, so the regression test cannot hang CI.
+        write_executable(&wrapper, "#!/bin/sh\nexec sleep 6\n");
+
+        let error = docker_probe_diagnostics_with_binary(wrapper.as_os_str(), &["info"], "daemon")
+            .expect_err("a Docker probe must time out before the fake CLI succeeds");
+
+        assert!(error.contains("deadline expired"), "{error}");
     }
 
     #[test]
-    fn compose_available_returns_bool() {
-        let _ = compose_available();
-    }
+    fn docker_probes_use_fake_cli_and_handle_missing_binary() {
+        let _lock = crate::docker_env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = TempDir::new().expect("tempdir");
+        let binary = write_compose_failing_fake_docker(temp.path());
+        let previous = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", &binary);
+        let fake = (docker_available(), compose_available(), daemon_running());
 
-    #[test]
-    fn daemon_running_returns_bool() {
-        let _ = daemon_running();
+        std::env::set_var("GWT_DOCKER_BIN", temp.path().join("missing-docker"));
+        let missing = (docker_available(), compose_available(), daemon_running());
+        match previous {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        assert_eq!(fake, (true, false, true));
+        assert_eq!(missing, (false, false, false));
     }
 
     #[test]
