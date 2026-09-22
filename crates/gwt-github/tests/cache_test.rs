@@ -846,3 +846,79 @@ fn load_entry_surfaces_plain_issue_with_empty_spec_body() {
     assert_eq!(entry.snapshot.body, body);
     assert!(entry.spec_body.sections.is_empty());
 }
+
+// Issue #4392 AC-3: the recovery primitive writes the snapshot and publishes
+// its receipt under one lock, so no caller can be left holding a cached entry
+// that carries no proof.
+#[test]
+fn write_snapshot_with_receipt_publishes_proof_in_one_step() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+
+    assert_eq!(
+        cache.write_snapshot_with_receipt(&snapshot).unwrap(),
+        ValidationReceiptRenewal::Renewed
+    );
+    assert!(cache.validation_receipt_path(snapshot.number).exists());
+    match cache
+        .load_validated_entry(snapshot.number, Duration::from_secs(60))
+        .unwrap()
+    {
+        ValidatedCacheEntry::Fresh(entry) => assert_eq!(entry.entry.snapshot, snapshot),
+        other => panic!("expected fresh validated entry, got {other:?}"),
+    }
+}
+
+// Issue #4392 AC-3 / AC-5: an entry whose receipt was deleted (every
+// `write_snapshot` leaves that state) is repaired without a second round trip.
+#[test]
+fn write_snapshot_with_receipt_repairs_an_entry_that_lost_its_receipt() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let snapshot = mk_snapshot(42, mk_body_with_spec_and_tasks_in_body("spec", "tasks"));
+    cache.write_snapshot(&snapshot).unwrap();
+    assert!(
+        !cache.validation_receipt_path(snapshot.number).exists(),
+        "write_snapshot is the state this repair has to recover from"
+    );
+
+    assert_eq!(
+        cache.write_snapshot_with_receipt(&snapshot).unwrap(),
+        ValidationReceiptRenewal::Renewed
+    );
+    assert!(matches!(
+        cache
+            .load_validated_entry(snapshot.number, Duration::from_secs(60))
+            .unwrap(),
+        ValidatedCacheEntry::Fresh(_)
+    ));
+}
+
+// Issue #4392 AC-4: `reason()` says what went wrong; a caller also has to be
+// able to say what to do. Every outcome a retry cannot clear must name the
+// repair operation instead of repeating that a retry will not help.
+#[test]
+fn every_renewal_outcome_names_the_operation_that_recovers_it() {
+    assert!(ValidationReceiptRenewal::Renewed.remedy().is_empty());
+    assert_eq!(
+        ValidationReceiptRenewal::GenerationChanged.remedy(),
+        "retry the operation"
+    );
+
+    for outcome in [
+        ValidationReceiptRenewal::GenerationMissing,
+        ValidationReceiptRenewal::EntryUnreadable,
+        ValidationReceiptRenewal::SnapshotMismatch,
+    ] {
+        assert!(
+            !outcome.cache_changed(),
+            "{outcome:?} is not a concurrent writer"
+        );
+        assert!(
+            outcome.remedy().contains("issue.cache.repair"),
+            "{outcome:?} never clears on a retry, so it must name the repair operation, got {:?}",
+            outcome.remedy()
+        );
+    }
+}

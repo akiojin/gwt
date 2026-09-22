@@ -4935,6 +4935,7 @@ pub(crate) mod tests {
             transfers: Vec::new(),
             recoveries: Vec::new(),
             content_hash: String::new(),
+            permission_decision: None,
         };
         crate::cli::execution_state::save(worktree, &record).expect("save execution record");
     }

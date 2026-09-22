@@ -2675,6 +2675,11 @@ impl AppRuntime {
         .map(|prefs| prefs.autonomous_mode)
         .unwrap_or(false);
         launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
+        // Issue #4543 AC-6: nothing else names this launch surface, and both
+        // steps above changed what the already-built config means. Re-decide
+        // now so the Execution Control Record describes the launch that ships.
+        launch_request
+            .record_permission_launch_source(gwt_agent::PermissionLaunchSource::SilentIssueMonitor);
         // Issue #3478 (AC-1): the unattended agent must know it is unattended,
         // so its hooks can convert a confirmation question into a NeedsHuman
         // handoff instead of letting it hold this slot until the stuck timeout.

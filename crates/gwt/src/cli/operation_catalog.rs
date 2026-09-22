@@ -226,6 +226,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["intake.outcome-record"],
     },
     Operation {
+        name: "issue.cache.repair",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.close",
         aliases: &[],
     },

@@ -124,12 +124,8 @@ pub(super) fn run<E: CliEnv>(
                 super::intake_outcome::IntakeOutcomeKind::IssueCreated,
                 snapshot.number.0,
             );
-            Cache::new(env.cache_root()).write_snapshot(&snapshot)?;
-            out.push_str(&format!(
-                "created issue #{} with labels {:?}\n",
-                snapshot.number.0, snapshot.labels
-            ));
-            0
+            let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
+            finish_issue_create(&snapshot, renewal, out)
         }
         IssueCommand::CreateBody {
             title,
@@ -144,12 +140,11 @@ pub(super) fn run<E: CliEnv>(
                 super::intake_outcome::IntakeOutcomeKind::IssueCreated,
                 snapshot.number.0,
             );
-            Cache::new(env.cache_root()).write_snapshot(&snapshot)?;
-            out.push_str(&format!(
-                "created issue #{} with labels {:?}\n",
-                snapshot.number.0, snapshot.labels
-            ));
-            0
+            let renewal = Cache::new(env.cache_root()).write_snapshot_with_receipt(&snapshot)?;
+            finish_issue_create(&snapshot, renewal, out)
+        }
+        IssueCommand::CacheRepair { number } => {
+            run_issue_cache_repair(env, IssueNumber(number), out)?
         }
         IssueCommand::Edit {
             number,
@@ -4144,7 +4139,8 @@ where
         cache.write_snapshot_if_generation(&snapshot, expected_generation)?
     else {
         return Err(SpecOpsError::from(ApiError::Network(format!(
-            "issue #{} cache changed while fetching remote snapshot",
+            "issue #{} cache changed while fetching remote snapshot: another cache writer \
+             committed a newer generation; retry the operation",
             number.0
         ))));
     };
@@ -4192,20 +4188,25 @@ where
 /// the rest describe the persisted entry and are unchanged by a retry, so
 /// telling an operator to retry sent them into a loop against a cache that was
 /// never moving.
+///
+/// Issue #4392 AC-4 extends that with what to do next. Saying "a retry cannot
+/// resolve it" told an operator only that the door was shut; the message now
+/// names the operation that opens it.
 fn validation_receipt_refusal(number: IssueNumber, renewal: ValidationReceiptRenewal) -> String {
     if renewal.cache_changed() {
         return format!(
-            "issue #{} cache changed before validation receipt publication: {}; retry the \
-             operation",
+            "issue #{} cache changed before validation receipt publication: {}; {}",
             number.0,
-            renewal.reason()
+            renewal.reason(),
+            renewal.remedy()
         );
     }
     format!(
         "issue #{} validation receipt could not be published: {}; the cached Issue did not \
-         change under this operation, so a retry cannot resolve it",
+         change under this operation, so a retry cannot resolve it — {}",
         number.0,
-        renewal.reason()
+        renewal.reason(),
+        renewal.remedy()
     )
 }
 
@@ -4215,11 +4216,82 @@ fn load_fresh_validated_entry(
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
     match cache.load_validated_entry(number, crate::issue_cache::ISSUE_CACHE_TTL)? {
         ValidatedCacheEntry::Fresh(entry) => Ok(entry.entry),
+        // Issue #4392 AC-4: this is where an Issue became permanently
+        // unreadable, and the message said nothing about how to leave that
+        // state. Name the operation that rewrites the entry and its receipt.
         _ => Err(SpecOpsError::from(ApiError::Network(format!(
-            "issue #{} cache validation receipt is unstable",
+            "issue #{} cache validation receipt is unstable: the receipt this read just \
+             published did not survive; run issue.cache.repair for this Issue",
             number.0
         )))),
     }
+}
+
+/// Report an `issue.create` whose cache receipt could not be published.
+///
+/// Issue #4392 AC-1: creation used to leave the cache entry unproven and still
+/// report success, so the defect surfaced only on a later read. A refusal here
+/// must still carry the Issue number and the repair operation, because a caller
+/// that reads "failed" and creates the Issue again is a worse outcome than the
+/// unproven cache entry.
+fn finish_issue_create(
+    snapshot: &IssueSnapshot,
+    renewal: ValidationReceiptRenewal,
+    out: &mut String,
+) -> i32 {
+    out.push_str(&format!(
+        "created issue #{} with labels {:?}\n",
+        snapshot.number.0, snapshot.labels
+    ));
+    if renewal.renewed() {
+        return 0;
+    }
+    out.push_str(&format!(
+        "warning: issue #{} exists on GitHub but its cache validation receipt was not \
+         published: {}; {}. Do not create this Issue again.\n",
+        snapshot.number.0,
+        renewal.reason(),
+        renewal.remedy()
+    ));
+    1
+}
+
+/// Rewrite an Issue's cache entry and republish its validation receipt.
+///
+/// Issue #4392 AC-3: `issue.spec.repair` routes through `write_snapshot`, which
+/// deletes the receipt, and the only writer of one was the read path — so an
+/// entry that path refused could not be repaired by any operation. This fetches
+/// the Issue unconditionally and commits the snapshot together with its receipt.
+fn run_issue_cache_repair<E: CliEnv>(
+    env: &mut E,
+    number: IssueNumber,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let snapshot = match env.client().fetch(number, None)? {
+        gwt_github::FetchResult::Updated(snapshot) => snapshot,
+        gwt_github::FetchResult::NotModified => {
+            return Err(SpecOpsError::from(ApiError::Network(format!(
+                "issue #{} returned NotModified to an unconditional fetch; retry the \
+                 operation",
+                number.0
+            ))))
+        }
+    };
+    let cache = Cache::new(env.cache_root());
+    let renewal = cache.write_snapshot_with_receipt(&snapshot)?;
+    if !renewal.renewed() {
+        return Err(SpecOpsError::from(ApiError::Network(format!(
+            "issue #{} cache repair could not publish a validation receipt: {}; {}",
+            number.0,
+            renewal.reason(),
+            renewal.remedy()
+        ))));
+    }
+    out.push_str(&format!(
+        "repaired issue cache for #{}: snapshot and validation receipt republished\n",
+        number.0
+    ));
+    Ok(0)
 }
 
 pub(super) fn load_or_refresh_linked_prs<E: CliEnv>(
@@ -9156,6 +9228,7 @@ mod tests {
                 transfers: Vec::new(),
                 recoveries: Vec::new(),
                 content_hash: String::new(),
+                permission_decision: None,
             },
         )
         .expect("save execution record");
@@ -9981,6 +10054,139 @@ mod tests {
         assert!(Cache::new(env.cache_root())
             .validation_receipt_path(remote.number)
             .exists());
+    }
+
+    /// Issue #4392 AC-2 / AC-5: a cache entry with no validation receipt is
+    /// the state every `write_snapshot` leaves behind, so a read must serve it
+    /// rather than refuse. This is the case the PM could not get past on
+    /// #4388 / #4390.
+    #[test]
+    fn issue_view_succeeds_when_the_validation_receipt_is_absent() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let remote = sample_issue_snapshot();
+        env.client.seed(remote.clone());
+        let cache = Cache::new(env.cache_root());
+        cache.write_snapshot(&remote).expect("seed cache");
+        assert!(
+            !cache.validation_receipt_path(remote.number).exists(),
+            "the fixture must start from a receipt-less entry"
+        );
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::View {
+                number: remote.number.0,
+                refresh: false,
+            },
+            &mut out,
+        )
+        .expect("a missing receipt must not refuse the read");
+
+        assert_eq!(code, 0);
+        assert!(out.contains(&remote.title), "out = {out}");
+    }
+
+    /// Issue #4392 AC-3 / AC-5: `issue.cache.repair` regenerates the receipt.
+    /// Before this existed the only writer of a receipt was the read path, and
+    /// `issue.spec.repair` actively deleted one, so an entry the read path
+    /// refused had no recovery at all.
+    #[test]
+    fn issue_cache_repair_regenerates_a_missing_validation_receipt() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let remote = sample_issue_snapshot();
+        env.client.seed(remote.clone());
+        let cache = Cache::new(env.cache_root());
+        cache.write_snapshot(&remote).expect("seed cache");
+        assert!(!cache.validation_receipt_path(remote.number).exists());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CacheRepair {
+                number: remote.number.0,
+            },
+            &mut out,
+        )
+        .expect("repair must republish the receipt");
+
+        assert_eq!(code, 0);
+        assert!(
+            cache.validation_receipt_path(remote.number).exists(),
+            "out = {out}"
+        );
+        assert!(
+            matches!(
+                cache
+                    .load_validated_entry(remote.number, crate::issue_cache::ISSUE_CACHE_TTL)
+                    .expect("load validated entry"),
+                ValidatedCacheEntry::Fresh(_)
+            ),
+            "the repaired entry must read back as fresh"
+        );
+        assert!(out.contains("repaired issue cache for #42"), "out = {out}");
+    }
+
+    /// Issue #4392 AC-1: creation publishes the receipt, so the Issue is
+    /// readable from the moment it exists.
+    #[test]
+    fn issue_create_publishes_the_validation_receipt() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::CreateBody {
+                title: "docs: typo".to_string(),
+                body: "free text".to_string(),
+                labels: vec!["documentation".to_string()],
+            },
+            &mut out,
+        )
+        .expect("create succeeds");
+
+        assert_eq!(code, 0);
+        assert!(!out.contains("warning:"), "out = {out}");
+        let number = env
+            .client
+            .call_log()
+            .iter()
+            .find_map(|call| call.strip_prefix("create_issue:#").map(str::to_string))
+            .expect("created issue number")
+            .parse::<u64>()
+            .expect("numeric issue number");
+        assert!(Cache::new(env.cache_root())
+            .validation_receipt_path(IssueNumber(number))
+            .exists());
+    }
+
+    /// Issue #4392 AC-1 / AC-5: when the receipt cannot be published the
+    /// operation must not report success. The created Issue number and the
+    /// repair operation stay in the output so the caller never answers a
+    /// refusal by creating the Issue a second time.
+    #[test]
+    fn issue_create_refuses_success_when_the_receipt_cannot_be_published() {
+        let snapshot = sample_issue_snapshot();
+        let mut out = String::new();
+        let code = finish_issue_create(
+            &snapshot,
+            ValidationReceiptRenewal::GenerationMissing,
+            &mut out,
+        );
+
+        assert_eq!(code, 1, "a receipt-less create must not report success");
+        assert!(out.contains("created issue #42"), "out = {out}");
+        assert!(out.contains("warning:"), "out = {out}");
+        assert!(out.contains("issue.cache.repair"), "out = {out}");
+
+        let mut published = String::new();
+        assert_eq!(
+            finish_issue_create(&snapshot, ValidationReceiptRenewal::Renewed, &mut published),
+            0
+        );
+        assert!(!published.contains("warning:"), "out = {published}");
     }
 
     // Issue #3873 AC-1: `issue.create` with the auto-merge label refuses a

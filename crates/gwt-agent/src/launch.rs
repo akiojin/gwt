@@ -10,6 +10,7 @@ use crate::environment::hydrate_host_base_env;
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
     environment::host_process_env,
+    permission_mode::{PermissionLaunchSource, PermissionModeDecision, PermissionModeInputs},
     session::{SessionExecutionBinding, ToolRuntimeProvenance, GWT_SESSION_RUNTIME_PATH_ENV},
     types::{
         AgentColor, AgentId, DockerLifecycleIntent, LaunchRoute, LaunchRuntimeTarget, SessionMode,
@@ -1176,6 +1177,13 @@ pub struct LaunchConfig {
     /// so it is stamped here and persisted onto the Session rather than being
     /// re-derived later from the agent's environment.
     pub launch_route: LaunchRoute,
+    /// Issue #4543: the Permission Mode Decision this launch was materialized
+    /// under, already checked against the argv and environment above.
+    ///
+    /// Every launch entry point reaches `build()`, so this is the one place
+    /// the forced-skip contract is decided and the one place the per-provider
+    /// mapping is verified to have survived materialization.
+    pub permission_decision: PermissionModeDecision,
 }
 
 /// Permission mode for agent launch.
@@ -1202,6 +1210,13 @@ pub struct AgentLaunchBuilder {
     tool_runtime_source_session_id: Option<String>,
     fast_mode: bool,
     skip_permissions: bool,
+    /// Issue #4543: the permission preference the launch *source* carried, as
+    /// a tri-state. `None` means the source stored nothing at all, which the
+    /// bare `skip_permissions` bool above cannot distinguish from an explicit
+    /// "interactive, please".
+    requested_skip_permissions: Option<bool>,
+    /// Issue #4543 AC-3: which launch surface supplied that preference.
+    permission_launch_source: PermissionLaunchSource,
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
@@ -1257,6 +1272,8 @@ impl AgentLaunchBuilder {
             tool_runtime_source_session_id: None,
             fast_mode: false,
             skip_permissions: false,
+            requested_skip_permissions: None,
+            permission_launch_source: PermissionLaunchSource::Unspecified,
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
@@ -1379,6 +1396,17 @@ impl AgentLaunchBuilder {
 
     pub fn skip_permissions(mut self, enabled: bool) -> Self {
         self.skip_permissions = enabled;
+        // Issue #4543: setting the toggle at all is itself the signal that the
+        // source carried a preference. An unset source stays `None` so the
+        // recorded decision can say which one the forced skip overrode.
+        self.requested_skip_permissions = Some(enabled);
+        self
+    }
+
+    /// Issue #4543 AC-3: tag which launch surface supplied the permission
+    /// preference, so the recorded decision names the setting it overrode.
+    pub fn permission_launch_source(mut self, source: PermissionLaunchSource) -> Self {
+        self.permission_launch_source = source;
         self
     }
 
@@ -1526,11 +1554,44 @@ impl AgentLaunchBuilder {
             .as_ref()
             .map(|dir| gwt_core::paths::normalize_windows_child_process_path(dir));
         let mut env_vars = HashMap::new();
-        let skip_permissions = self.skip_permissions
-            || matches!(
-                self.permission_mode,
-                Some(PermissionMode::BypassPermissions)
-            );
+        // Issue #4543: every launch entry point reaches this builder, so the
+        // forced-skip contract is decided here once instead of being
+        // re-derived (and forgotten) per surface.
+        //
+        // A launch produces work when it carries a linked owner whose
+        // execution it owns. That is exactly the case where an agent is
+        // expected to land a change and therefore cannot stop at a permission
+        // prompt, whatever a saved profile / last settings / resumed session
+        // stored. `suppress_execution_control` launches are subordinate to
+        // another session's execution and keep their own preference.
+        let producing_work = self.linked_issue_number.is_some() && !self.suppress_execution_control;
+        let requested_skip_permissions = if matches!(
+            self.permission_mode,
+            Some(PermissionMode::BypassPermissions)
+        ) {
+            Some(true)
+        } else {
+            self.requested_skip_permissions
+        };
+        let entrypoint = crate::permission_mode::entrypoint_from_launch_args(
+            &self.extra_args,
+            self.session_mode == SessionMode::Resume,
+        );
+        let permission_decision = crate::permission_mode::decide(&PermissionModeInputs {
+            agent_id: &self.agent_id,
+            custom_agent: self.custom_agent.as_ref(),
+            source: self.permission_launch_source,
+            entrypoint: &entrypoint,
+            launch_route: self.launch_route,
+            requested_skip_permissions,
+            producing_work,
+        });
+        let skip_permissions = permission_decision.skip_permissions_requested();
+        // The per-provider argument builders below read `self.skip_permissions`
+        // directly, so the decision has to land on the builder — not just on
+        // the resulting config — or a forced skip would be recorded without
+        // ever reaching the CLI flag it stands for.
+        self.skip_permissions = skip_permissions;
 
         // Common env vars
         env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
@@ -1653,6 +1714,15 @@ impl AgentLaunchBuilder {
         let predecessor_session_id = self.predecessor_session_id.clone();
         let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
+        // Issue #4543 AC-6: the shared validator runs on the materialized argv
+        // and environment, so a provider builder that silently stopped
+        // emitting its skip flag is caught here rather than at a prompt nobody
+        // is watching.
+        let permission_decision = crate::permission_mode::validate_materialized_launch(
+            permission_decision,
+            &args,
+            &env_vars,
+        );
 
         LaunchConfig {
             agent_id,
@@ -1687,6 +1757,7 @@ impl AgentLaunchBuilder {
             explicit_follow_up: self.explicit_follow_up,
             execution_intent: self.execution_intent,
             launch_route: self.launch_route,
+            permission_decision,
         }
     }
 
