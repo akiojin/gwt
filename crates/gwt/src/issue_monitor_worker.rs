@@ -1894,7 +1894,26 @@ fn advance_one_autonomous_issue(
             else {
                 return Ok(()); // verdict not back yet → wait
             };
-            match crate::issue_monitor_gate::route_autonomous_gate(&inputs) {
+            // Issue #4544 AC-3: a launch that stopped at a provider permission
+            // prompt must not reach Deliver or merge. The PR gates already
+            // refuse Ready for such an execution, so this closes the one
+            // remaining order — a PR readied before the pane prompted.
+            //
+            // Held rather than remediated: a prompt regression is an
+            // environment fact about the launch, and Issue #3944 AC-1 reserves
+            // the retry counter for the agent's own failures.
+            let mut routed = crate::issue_monitor_gate::route_autonomous_gate(&inputs);
+            if matches!(routed, crate::issue_monitor_gate::GateAction::Deliver) {
+                if let Some(reason) =
+                    crate::cli::permission_readiness::owner_settlement_refusal(
+                        repo_path,
+                        issue_number,
+                    )
+                {
+                    routed = crate::issue_monitor_gate::GateAction::Hold(reason);
+                }
+            }
+            match routed {
                 crate::issue_monitor_gate::GateAction::Deliver => {
                     // Audit: a daemon-signed authorization record bound to the
                     // reviewed SHA (control-plane proof the gate authorized it).

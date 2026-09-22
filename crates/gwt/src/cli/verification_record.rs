@@ -3118,6 +3118,14 @@ fn run_verification_for_caller(
     prepared_quarantines: &[PreparedQuarantineRequest],
     options: RunOptions<'_>,
 ) -> Result<(VerificationRunRecord, String), String> {
+    // Issue #4544 AC-3: canonical verification is the evidence every later
+    // gate settles on. A session that stopped at a provider permission prompt
+    // did not run unattended, so a passing record from it would assert
+    // something nobody observed. Refused before the commands run rather than
+    // after, because the run itself costs the host lease.
+    if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(worktree) {
+        return Err(format!("verification refused: {reason}"));
+    }
     run_verification_inner(
         worktree,
         session_id,

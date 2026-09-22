@@ -10633,6 +10633,12 @@ pub fn materialize_at_launch(
             resume,
         )
     })?;
+    // Issue #4544 AC-3: a permission-readiness record describes the launch
+    // that produced it. A fresh launch re-establishes the contract, so the
+    // previous launch's prompt must not keep refusing this one's settlement —
+    // otherwise the recovery action the record names ("relaunch") would not
+    // work, and the gate would be a dead end rather than a gate.
+    let _ = crate::cli::permission_readiness::clear(worktree);
     // T-181: launch is the cheap moment to sweep orphaned trusted entries
     // (runs outside the lease; GC only touches sibling directories whose
     // recorded worktree is gone).
@@ -11163,6 +11169,15 @@ fn evaluate_pr_handoff(
             integrity_repair_guidance(record.status),
         ));
     }
+    // Issue #4544 AC-3: Ready is the handoff that says "this ran unattended and
+    // is finished". A launch that sat at a provider permission prompt cannot
+    // make that claim. Draft PRs stay open mid-work, exactly as they do for
+    // every other evidence gate here.
+    if ready_handoff {
+        if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(&worktree) {
+            return Err(format!("PR handoff refused: {reason}"));
+        }
+    }
     let caller_authenticated = match record.status {
         ExecutionControlStatus::Completed => {
             snapshot_pr_mutation_execution_binding(&worktree, session_id.as_deref()).map(|_| ())
@@ -11642,6 +11657,17 @@ pub struct ExecutionDiagnosisSnapshot {
     /// callers must treat as attended rather than guessing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_route: Option<String>,
+    /// Issue #4544 AC-4: the permission-readiness gate decision standing
+    /// against this worktree, if any.
+    ///
+    /// It carries the gate id, the owner and session, the provider, the
+    /// expected and observed permission modes, and a concrete recovery
+    /// action — everything an operator needs to answer "why will this not
+    /// settle?" without reading a pane. Absent when the execution is clear,
+    /// which is the ordinary case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_readiness:
+        Option<crate::cli::permission_readiness::PermissionReadinessRecord>,
 }
 
 fn evidence_status_name(status: crate::cli::verification_record::EvidenceStatus) -> &'static str {
@@ -12118,6 +12144,13 @@ fn diagnose_with_mode(
         // reported even when this worktree carries no Execution Control
         // Record at all.
         launch_route: session_launch_route(session_id).map(|route| route.as_str().to_string()),
+        // Issue #4544 AC-4: reported alongside the route and for the same
+        // reason — a permission-readiness block is a fact about the launch,
+        // so it must be visible even in a worktree whose Execution Control
+        // Record cannot be read.
+        permission_readiness: crate::cli::permission_readiness::load(worktree)
+            .ok()
+            .flatten(),
     };
 
     let record = match load(worktree) {
@@ -15367,6 +15400,18 @@ fn run_impl<E: CliEnv>(
         return run_no_action(&worktree, &session_id, reason, out, refusal);
     }
     if matches!(&command, ExecutionCommand::Complete) {
+        // Issue #4544 AC-3: a launch that stopped at a provider permission
+        // prompt did not run unattended, whatever else it produced. Checked
+        // before the Work-event gate because it is about the whole execution
+        // rather than about one artifact being unpushed.
+        if let Some(reason) = crate::cli::permission_readiness::settlement_refusal(&worktree) {
+            out.push_str(&format!("execution: completion refused — {reason}\n"));
+            *refusal = Some(agent_recoverable_refusal(
+                "permission_prompt_regression",
+                "relaunch",
+            ));
+            return Ok(2);
+        }
         if let Some(reason) =
             crate::cli::verification_record::work_event_settlement_refusal(&worktree)
         {
@@ -29339,6 +29384,131 @@ exit 1
                     .prior_missing_verification
                     .as_deref(),
                 Some("second matrix")
+            );
+        }
+
+        /// Issue #4544 AC-3: a provider permission prompt on a launch that had
+        /// to be prompt-free refuses completion, and AC-4's fields reach
+        /// `execution.status` so an operator can see why without a pane.
+        #[test]
+        fn a_permission_prompt_regression_refuses_completion_and_is_reported_by_status() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-4544");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-4544")).unwrap();
+
+            crate::cli::permission_readiness::record_prompt_regression(
+                dir.path(),
+                "issue",
+                4544,
+                "sess-4544",
+                "codex",
+                0x1234,
+            )
+            .unwrap();
+
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("permission_prompt_regression"), "{out}");
+            assert!(out.contains("codex"), "{out}");
+            assert!(out.contains("Recovery:"), "{out}");
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active,
+                "a refused completion must not settle the record"
+            );
+
+            // AC-4: the same facts, machine-readable.
+            let snapshot = status_snapshot(dir.path(), "sess-4544");
+            let readiness = &snapshot["permission_readiness"];
+            assert_eq!(readiness["kind"], "permission_prompt_regression");
+            assert_eq!(readiness["provider"], "codex");
+            assert_eq!(readiness["owner_number"], 4544);
+            assert_eq!(readiness["session_id"], "sess-4544");
+            assert!(readiness["gate_id"].as_str().is_some_and(|id| !id.is_empty()));
+            assert!(readiness["expected_permission_mode"]
+                .as_str()
+                .is_some_and(|mode| !mode.is_empty()));
+            assert!(readiness["observed_permission_mode"]
+                .as_str()
+                .is_some_and(|mode| !mode.is_empty()));
+            assert!(readiness["recovery_action"]
+                .as_str()
+                .is_some_and(|action| !action.is_empty()));
+
+            // AC-4: the rendering must not imply that anything was attempted.
+            let rendered = serde_json::to_string(readiness).unwrap().to_ascii_lowercase();
+            for misleading in ["tests ran", "tests passed", "verification passed"] {
+                assert!(!rendered.contains(misleading), "{rendered}");
+            }
+        }
+
+        /// AC-3: Ready is refused while the regression stands; a Draft handoff
+        /// stays available so the work in flight is not stranded.
+        #[test]
+        fn a_permission_prompt_regression_refuses_ready_but_not_draft() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-4544");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-4544")).unwrap();
+            crate::cli::permission_readiness::record_prompt_regression(
+                dir.path(),
+                "issue",
+                4544,
+                "sess-4544",
+                "codex",
+                1,
+            )
+            .unwrap();
+
+            let ready = pr_handoff_refusal(dir.path(), true).expect("Ready is refused");
+            assert!(ready.contains("permission_prompt_regression"), "{ready}");
+            assert!(ready.contains("Recovery:"), "{ready}");
+
+            let draft = pr_handoff_refusal(dir.path(), false);
+            assert!(
+                draft.is_none_or(|reason| !reason.contains("permission_prompt_regression")),
+                "a Draft handoff must not be refused by this gate"
+            );
+        }
+
+        /// AC-3: the recovery action the record names has to actually work, or
+        /// the gate is a dead end. A fresh launch clears it.
+        #[test]
+        fn a_fresh_launch_clears_the_permission_prompt_regression() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            crate::cli::permission_readiness::record_prompt_regression(
+                dir.path(),
+                "issue",
+                4544,
+                "sess-old",
+                "codex",
+                1,
+            )
+            .unwrap();
+            assert!(crate::cli::permission_readiness::settlement_refusal(dir.path()).is_some());
+
+            materialize_at_launch(
+                dir.path(),
+                ExecutionOwnerKind::Issue,
+                4544,
+                "sess-new",
+                "gwt-execute",
+                false,
+            )
+            .unwrap();
+
+            assert!(
+                crate::cli::permission_readiness::settlement_refusal(dir.path()).is_none(),
+                "the relaunch the record recommends must clear it"
             );
         }
 

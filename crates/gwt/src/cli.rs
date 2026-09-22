@@ -36,6 +36,7 @@ pub mod open;
 pub mod operation_catalog;
 mod pane;
 pub(crate) mod perf;
+pub mod permission_readiness;
 mod plan;
 mod pm;
 mod pr;
