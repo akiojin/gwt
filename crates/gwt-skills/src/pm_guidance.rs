@@ -250,7 +250,9 @@ drive them.
   (the window's state as the canvas last observed it) and
   `runtime_consistency`. Read them together: `consistent` with
   `pane_state` `waiting` plus `retry_hold_reason` is a provider limit;
-  `consistent` with `waiting` and no hold is an approval prompt, so read
+  `consistent` with `waiting` plus `pane_hold_reason` is a pane the
+  canvas stopped — read that field, it names the cause; `consistent`
+  with `waiting` and neither hold is an approval prompt, so read
   the pane; `consistent` with `idle` past the stuck timeout is an agent
   that stopped responding; `terminal` (the pane reads `stopped` or
   `error`) or `missing` (the pane is gone from a fresh canvas
@@ -276,6 +278,15 @@ drive them.
   fail differently — one exits, one keeps its process alive and stops
   responding — so the pane state is the reliable signal, not whether the
   process is gone.
+- A turn that died on a provider API error also reads as `waiting`, with
+  `pane_hold_reason` carrying the HTTP status and the message. Nothing
+  recovers this one for you: the process is alive and the conversation
+  is intact, but the agent is sitting at its prompt and will stay there.
+  A transient error (`529`, `500`, a dropped connection) needs only
+  `pm.message.send` telling it to continue; an authentication failure
+  (`401`, an expired token) needs a person, and the reason says which.
+  The row keeps no `retry_not_before`, because nothing is scheduled to
+  retry — if you do not act, nobody does.
 - A stall is not automatically resolved for you. Decide: wait, demote it
   with `issue.monitor.priority.move`, close the pane, or raise it with
   the user. Rate limits are the exception — those are recovered without

@@ -487,6 +487,7 @@ mod idle_windows {
             issue_number: Some(issue_number),
             status,
             review_dispatch,
+            hold_reason: None,
         }
     }
 

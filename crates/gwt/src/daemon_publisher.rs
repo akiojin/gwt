@@ -572,6 +572,7 @@ mod window_snapshot_publish_tests {
                 issue_number: Some(4009),
                 status: crate::WindowState::Stopped,
                 review_dispatch: false,
+                hold_reason: None,
             }],
         };
 
