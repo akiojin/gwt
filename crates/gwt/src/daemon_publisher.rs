@@ -401,7 +401,7 @@ fn publish_issue_monitor_control_to_endpoint(
     timeout: Duration,
     started: std::time::Instant,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    use IssueMonitorControlPublishError::{Busy, OutcomeUnknown, RecoveryBlocked, Rejected};
+    use IssueMonitorControlPublishError::{OutcomeUnknown, RecoveryBlocked, Rejected};
 
     let remaining_budget = || -> Result<Duration, IssueMonitorControlPublishError> {
         timeout
@@ -459,17 +459,7 @@ fn publish_issue_monitor_control_to_endpoint(
                     return Err(RecoveryBlocked);
                 }
                 DaemonFrame::Error { message } if message == ISSUE_MONITOR_CONTROL_BUSY_ERROR => {
-                    let now = tokio::time::Instant::now();
-                    let Some(remaining) = deadline.checked_duration_since(now) else {
-                        return Err(Busy(message));
-                    };
-                    if remaining.is_zero() {
-                        return Err(Busy(message));
-                    }
-                    tokio::time::sleep(remaining.min(busy_backoff)).await;
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(Busy(message));
-                    }
+                    wait_for_control_retry(deadline, busy_backoff, message).await?;
                     busy_backoff = busy_backoff
                         .saturating_mul(2)
                         .min(Duration::from_millis(50));
@@ -481,6 +471,30 @@ fn publish_issue_monitor_control_to_endpoint(
             }
         }
     })
+}
+
+/// Wait only within the remaining control budget. Kept separate from IPC so
+/// budget exhaustion can be observed with a stopped clock, without racing a
+/// final socket exchange against the deadline (Issue #4599).
+async fn wait_for_control_retry(
+    deadline: tokio::time::Instant,
+    backoff: Duration,
+    message: String,
+) -> Result<(), IssueMonitorControlPublishError> {
+    use IssueMonitorControlPublishError::Busy;
+
+    let now = tokio::time::Instant::now();
+    let Some(remaining) = deadline.checked_duration_since(now) else {
+        return Err(Busy(message));
+    };
+    if remaining.is_zero() {
+        return Err(Busy(message));
+    }
+    tokio::time::sleep(remaining.min(backoff)).await;
+    if tokio::time::Instant::now() >= deadline {
+        return Err(Busy(message));
+    }
+    Ok(())
 }
 
 /// Same as [`publish_event`] but lets the caller override the
@@ -618,27 +632,8 @@ mod tests {
         publish_issue_monitor_control_with_timeout_and_liveness,
     };
 
-    /// The publish budget for tests whose subject is the retry *behaviour*
-    /// rather than the size of the budget.
-    ///
-    /// Issue #3921: both busy-control tests ran on the production 200-500 ms
-    /// budget, which has to cover scope resolution, endpoint readback, runtime
-    /// construction and at least one socket round trip. On a host that is also
-    /// compiling several other worktrees it does not, and the budget then
-    /// expires at a different point in the exchange than the test is about:
-    /// the retried publish never reaches its ACK, and the exhaustion test
-    /// reports `OutcomeUnknown("budget exhausted during scope/bootstrap
-    /// resolution")` instead of the explicit `Busy` it exists to pin. Both
-    /// subjects survive a budget this size - the fixture daemon in the
-    /// exhaustion test never ACKs, so the budget still expires - while the
-    /// runner can no longer decide which outcome appears.
-    ///
-    /// Unlike a hang guard on an awaited event, this one is *spent*: the
-    /// exhaustion test retries until it expires, so the number is real suite
-    /// time rather than a ceiling that is never reached. Five seconds buys
-    /// roughly twenty-five times the margin those failures needed while costing
-    /// the suite five seconds once. The retry test returns on its ACK and costs
-    /// nothing.
+    /// Safety ceiling for the real-IPC retry-to-ACK test, not a budget that
+    /// successful tests must exhaust. Exhaustion uses a stopped clock below.
     const PUBLISH_HANG_GUARD: Duration = Duration::from_secs(5);
 
     #[test]
@@ -1337,115 +1332,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn busy_control_budget_exhaustion_is_a_non_fallback_busy_error() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let project = TempDir::new().expect("project tempdir");
-        let home = TempDir::new().expect("home tempdir");
-        let _home_guard = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
-        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
-            .expect("runtime scope");
-        let socket_path = home.path().join("busy-exhausted.sock");
-        let listener = UnixListener::bind(&socket_path).expect("bind test daemon");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking test listener");
-        let endpoint = DaemonEndpoint::new(
-            scope.clone(),
-            std::process::id(),
-            socket_path.to_string_lossy().to_string(),
-            "busy-exhausted-token".to_string(),
-            "test-daemon".to_string(),
+    #[tokio::test(start_paused = true)]
+    async fn busy_control_budget_exhaustion_is_a_non_fallback_busy_error() {
+        use crate::runtime_daemon_events::{
+            IssueMonitorControlPublishError, ISSUE_MONITOR_CONTROL_BUSY_ERROR,
+        };
+
+        let budget = Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        let retry = super::wait_for_control_retry(
+            started + budget,
+            budget,
+            ISSUE_MONITOR_CONTROL_BUSY_ERROR.to_string(),
         );
-        persist_endpoint(
-            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
-            &endpoint,
-        )
-        .expect("persist live endpoint");
-        let stop = Arc::new(AtomicBool::new(false));
-        let server_stop = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            while !server_stop.load(Ordering::Acquire) {
-                let (stream, _) = match listener.accept() {
-                    Ok(accepted) => accepted,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    Err(error) => panic!("accept publisher: {error}"),
-                };
-                stream
-                    .set_nonblocking(false)
-                    .expect("blocking publisher stream");
-                let mut reader =
-                    std::io::BufReader::new(stream.try_clone().expect("clone publisher stream"));
-                let mut writer = stream;
-                let mut line = String::new();
-                if reader.read_line(&mut line).expect("read handshake") == 0 {
-                    continue;
-                }
-                let request: IpcHandshakeRequest =
-                    serde_json::from_str(line.trim_end()).expect("parse handshake");
-                assert_eq!(request.scope, scope);
-                let handshake = IpcHandshakeResponse {
-                    protocol_version: DAEMON_PROTOCOL_VERSION,
-                    daemon_version: "test-daemon".to_string(),
-                    accepted: true,
-                    rejection_reason: None,
-                };
-                if let Err(error) = writeln!(
-                    writer,
-                    "{}",
-                    serde_json::to_string(&handshake).expect("serialize handshake")
-                ) {
-                    assert_eq!(
-                        error.kind(),
-                        std::io::ErrorKind::BrokenPipe,
-                        "write handshake: {error}"
-                    );
-                    continue;
-                }
-                line.clear();
-                if reader.read_line(&mut line).expect("read publish") == 0 || line.trim().is_empty()
-                {
-                    continue;
-                }
-                let _: ClientFrame = serde_json::from_str(line.trim_end()).expect("parse publish");
-                let response = DaemonFrame::Error {
-                    message: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR
-                        .to_string(),
-                };
-                if let Err(error) = writeln!(
-                    writer,
-                    "{}",
-                    serde_json::to_string(&response).expect("serialize response")
-                ) {
-                    assert_eq!(
-                        error.kind(),
-                        std::io::ErrorKind::BrokenPipe,
-                        "write response: {error}"
-                    );
-                }
-            }
-        });
+        tokio::pin!(retry);
+        assert!(futures_util::poll!(&mut retry).is_pending());
 
-        let error = publish_issue_monitor_control_with_timeout(
-            project.path(),
-            json!({"enabled": false}),
-            PUBLISH_HANG_GUARD,
-        )
-        .expect_err("Busy must remain explicit when its retry budget expires");
-        stop.store(true, Ordering::Release);
-        server.join().expect("test daemon joins");
+        // Simulate a descheduled publisher. Real scheduler delay must not
+        // consume the stopped clock's budget or select a different outcome.
+        std::thread::sleep(budget);
+        assert_eq!(tokio::time::Instant::now(), started);
+        assert!(futures_util::poll!(&mut retry).is_pending());
 
+        tokio::time::advance(budget).await;
+        assert_eq!(tokio::time::Instant::now(), started + budget);
+        let error = retry
+            .await
+            .expect_err("observed budget exhaustion returns Busy");
         assert!(!error.allows_local_fallback());
         assert!(matches!(
             error,
-            crate::runtime_daemon_events::IssueMonitorControlPublishError::Busy(message)
-                if message == crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR
+            IssueMonitorControlPublishError::Busy(message)
+                if message == ISSUE_MONITOR_CONTROL_BUSY_ERROR
         ));
     }
 
