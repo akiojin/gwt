@@ -245,7 +245,7 @@ pub use protocol::{
     CustomAgentErrorCode, FileAttachment, FileContentErrorKind, FileContentMode,
     FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
     HubProjectView, HubStateView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-    IndexSearchTarget, ManagedHookHealthView, ManagedHookPendingDiscussionView,
+    IndexSearchTarget, LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
     ManagedHookPendingGoalView, ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView,
     ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
     RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary,

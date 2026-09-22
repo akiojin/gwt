@@ -30,7 +30,15 @@ impl AppRuntime {
         };
         let proxy = self.proxy.clone();
 
+        let project_scope = self.project_log_scope_for_tab(tab_id).cloned();
         std::thread::spawn(move || {
+            let _project_scope = project_scope
+                .as_ref()
+                .map(|scope| scope.enter())
+                .unwrap_or_else(|| {
+                    tracing::trace_span!(target: "gwt_log_scope", parent: None, "machine_migration")
+                        .entered()
+                });
             let progress_context = context.clone();
             let progress_proxy = proxy.clone();
             let outcome = gwt::migration::execute_migration(
@@ -122,6 +130,7 @@ impl AppRuntime {
             }
         }
         self.refresh_project_tab_incarnation(tab_id);
+        self.register_project_log_scope(tab_id);
         let _ = self.persist();
 
         // Deliver completion before the snapshot switches the client's project key.

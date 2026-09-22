@@ -620,6 +620,8 @@ pub enum FrontendEvent {
     },
     LoadLogs {
         id: String,
+        #[serde(default)]
+        scope: LogScopeSelection,
     },
     /// SPEC-2809 Phase F2 — Console window mounts and asks the backend for
     /// the current `ProcessConsoleHub` ring buffer so historical lines
@@ -1259,6 +1261,15 @@ pub struct WorkspaceView {
     pub work_items: Vec<WorkspaceHistoryView>,
 }
 
+/// Select the owning project's log or process-wide diagnostics.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogScopeSelection {
+    #[default]
+    Project,
+    Global,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectTabView {
     pub id: String,
@@ -1266,6 +1277,7 @@ pub struct ProjectTabView {
     pub project_key: String,
     pub title: String,
     pub project_root: String,
+    pub project_scope: String,
     pub kind: ProjectKind,
     pub workspace: WorkspaceView,
     #[serde(default)]
@@ -3353,8 +3365,8 @@ mod tests {
         backend_event_policy, AttachmentProgressPhase, BackendEvent,
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
-        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
+        IndexSearchScope, IndexSearchTarget, LogScopeSelection, ProfileEntryView,
+        ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
         RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
@@ -5328,6 +5340,85 @@ mod tests {
             value["entries"][0]["detail"],
             Value::String("tail retry".to_string())
         );
+    }
+
+    #[test]
+    fn load_logs_scope_selection_defaults_legacy_payload_to_project() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_logs",
+            "id": "logs-legacy"
+        }))
+        .expect("deserialize legacy load_logs payload");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::LoadLogs {
+                id,
+                scope: LogScopeSelection::Project,
+            } if id == "logs-legacy"
+        ));
+    }
+
+    #[test]
+    fn load_logs_scope_selection_accepts_global_snake_case() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_logs",
+            "id": "logs-global",
+            "scope": "global"
+        }))
+        .expect("deserialize global load_logs payload");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::LoadLogs {
+                id,
+                scope: LogScopeSelection::Global,
+            } if id == "logs-global"
+        ));
+    }
+
+    #[test]
+    fn log_entries_serializes_optional_project_scope_compatibly() {
+        let mut scoped = LogEvent::new(LogLevel::Info, "gwt::project", "project entry");
+        scoped.project_scope = Some("0123456789abcdef".to_string());
+        let scoped_value = serde_json::to_value(BackendEvent::LogEntries {
+            id: "logs-project".to_string(),
+            entries: vec![scoped],
+        })
+        .expect("serialize scoped log_entries");
+        assert_eq!(
+            scoped_value["entries"][0]["project_scope"],
+            Value::String("0123456789abcdef".to_string())
+        );
+
+        let legacy_value = serde_json::to_value(BackendEvent::LogEntries {
+            id: "logs-legacy".to_string(),
+            entries: vec![LogEvent::new(
+                LogLevel::Info,
+                "gwt::legacy",
+                "unscoped entry",
+            )],
+        })
+        .expect("serialize unscoped log_entries");
+        assert!(legacy_value["entries"][0].get("project_scope").is_none());
+    }
+
+    #[test]
+    fn log_entry_appended_serializes_optional_project_scope_compatibly() {
+        let mut scoped = LogEvent::new(LogLevel::Warn, "gwt::project", "live project entry");
+        scoped.project_scope = Some("fedcba9876543210".to_string());
+        let scoped_value = serde_json::to_value(BackendEvent::LogEntryAppended { entry: scoped })
+            .expect("serialize scoped log_entry_appended");
+        assert_eq!(
+            scoped_value["entry"]["project_scope"],
+            Value::String("fedcba9876543210".to_string())
+        );
+
+        let legacy_value = serde_json::to_value(BackendEvent::LogEntryAppended {
+            entry: LogEvent::new(LogLevel::Info, "gwt::legacy", "unscoped live entry"),
+        })
+        .expect("serialize unscoped log_entry_appended");
+        assert!(legacy_value["entry"].get("project_scope").is_none());
     }
 
     #[test]

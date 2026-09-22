@@ -261,9 +261,11 @@ impl ProjectIndexBootstrapService {
         let in_flight = self.in_flight.clone();
         let key_for_thread = key.clone();
         let service_for_thread = self.clone();
+        let log_span = tracing::Span::current();
         let spawn_result = thread::Builder::new()
             .name("gwt-index-full-status-refresh".to_string())
             .spawn(move || {
+                let _log_scope = log_span.enter();
                 let _guard = InFlightGuard {
                     in_flight,
                     key: key_for_thread,
@@ -369,9 +371,11 @@ impl ProjectIndexBootstrapService {
         let in_flight = self.in_flight.clone();
         let retry_key_for_thread = retry_key.clone();
         let service_for_thread = self.clone();
+        let log_span = tracing::Span::current();
         let spawn_result = thread::Builder::new()
             .name("gwt-index-full-status-retry".to_string())
             .spawn(move || {
+                let _log_scope = log_span.enter();
                 let _guard = InFlightGuard {
                     in_flight,
                     key: retry_key_for_thread,
@@ -589,9 +593,11 @@ impl ProjectIndexBootstrapService {
         let in_flight = self.in_flight.clone();
         let key_for_thread = key.clone();
         let service_for_thread = self.clone();
+        let log_span = tracing::Span::current();
         let spawn_result = thread::Builder::new()
             .name("gwt-index-bootstrap".to_string())
             .spawn(move || {
+                let _log_scope = log_span.enter();
                 let _guard = InFlightGuard {
                     in_flight,
                     key: key_for_thread,
@@ -732,9 +738,11 @@ impl ProjectIndexBootstrapService {
         let key_for_thread = key.clone();
         let service_for_thread = self.clone();
         let project_key_for_thread = project_key.clone();
+        let log_span = tracing::Span::current();
         let spawn_result = thread::Builder::new()
             .name("gwt-index-rebuild".to_string())
             .spawn(move || {
+                let _log_scope = log_span.enter();
                 let _guard = InFlightGuard {
                     in_flight,
                     key: key_for_thread,
@@ -1226,6 +1234,37 @@ mod tests {
 
     #[test]
     fn duplicate_background_bootstrap_requests_for_same_project_are_coalesced() {
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        #[derive(Clone)]
+        struct ScopeCapture(Arc<Mutex<Vec<String>>>, std::thread::ThreadId);
+        impl<S> Layer<S> for ScopeCapture
+        where
+            S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+        {
+            fn on_enter(
+                &self,
+                id: &tracing::span::Id,
+                ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if std::thread::current().id() != self.1 {
+                    if let Some(span) = ctx.span(id) {
+                        *self.0.lock().unwrap() = span
+                            .scope()
+                            .map(|span| span.metadata().name().to_owned())
+                            .collect();
+                    }
+                }
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(ScopeCapture(captured.clone(), std::thread::current().id())),
+        );
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let parent = tracing::info_span!("project_a");
+        assert!(!parent.is_disabled(), "test parent span must be enabled");
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -1239,21 +1278,23 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let first_call_count = call_count.clone();
 
-        let first = service.spawn_with(
-            proxy.clone(),
-            temp.path().to_path_buf(),
-            move |_project_root: &Path| {
-                first_call_count.fetch_add(1, Ordering::SeqCst);
-                started_tx.send(()).expect("signal bootstrap start");
-                release_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("release bootstrap");
-                Ok(())
-            },
-            |_project_root| {
-                gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "ready")
-            },
-        );
+        let first = parent.in_scope(|| {
+            service.spawn_with(
+                proxy.clone(),
+                temp.path().to_path_buf(),
+                move |_project_root: &Path| {
+                    first_call_count.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).expect("signal bootstrap start");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release bootstrap");
+                    Ok(())
+                },
+                |_project_root| {
+                    gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "ready")
+                },
+            )
+        });
         started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("background bootstrap should start");
@@ -1276,6 +1317,15 @@ mod tests {
             gwt::ProjectIndexStatusState::Ready,
         );
         assert_eq!(status.detail, "ready");
+        assert!(
+            captured
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|name| name == "project_a"),
+            "index worker must retain the requesting project span: {:?}",
+            captured.lock().unwrap()
+        );
     }
 
     // SPEC-2359 W-17 (FR-400): a reconnect storm replays frontend_ready on

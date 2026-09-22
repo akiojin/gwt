@@ -27,8 +27,8 @@ use gwt::{
     refresh_managed_gwt_assets_for_worktree, save_workspace_state, workspace_state_path,
     ArrangeMode, BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
     FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
-    LinkedIssueKind, ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState,
-    WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
+    LinkedIssueKind, LogScopeSelection, ProfileEnvEntryView, ProjectKind, UiTracePayload,
+    WindowCanvasState, WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -37,7 +37,7 @@ use gwt_core::{
         BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, BoardWorktreeForm,
         CoordinationEvent,
     },
-    logging::{current_log_file, LogLevel},
+    logging::{current_log_file, init as init_logging, LogLevel, LoggingConfig},
     paths::gwt_cache_dir,
     recovery::{
         RecoveryAcknowledgement, RecoveryConflictKind, RecoveryIntent, RecoveryProvider,
@@ -4259,6 +4259,8 @@ fn sample_runtime_with_events(
 
         session_state_path: temp_root.join("session-state.json"),
         log_dir,
+        project_log_router: None,
+        project_log_scopes: HashMap::new(),
         proxy,
         blocking_tasks,
         sessions_dir,
@@ -41488,7 +41490,7 @@ fn log_entry_events_drop_stream_without_logs_window() {
 }
 
 #[test]
-fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
+fn log_entry_events_send_global_to_consumers_and_project_only_to_owner() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo_a = temp.path().join("repo-a");
@@ -41500,7 +41502,7 @@ fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
         "A",
         repo_a,
         ProjectKind::Git,
-        &[WindowPreset::Shell],
+        &[WindowPreset::Logs],
     );
     let inactive = sample_project_tab(
         "tab-b",
@@ -41517,10 +41519,24 @@ fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
         "reader stalled",
     ));
 
-    assert_eq!(events.len(), 1);
-    assert!(
-        matches!(&events[0].target, DispatchTarget::Project(key) if Some(key) == runtime.project_key_for_tab("tab-b"))
+    assert_eq!(
+        events.len(),
+        2,
+        "global diagnostics reach both Logs consumers"
     );
+    let owner = runtime.project_key_for_tab("tab-b").unwrap();
+    let mut scoped =
+        gwt_core::logging::LogEvent::new(LogLevel::Warn, "pty", "B private diagnostic");
+    scoped.project_scope = Some(owner.as_str().to_string());
+    let owned_events = runtime.log_entry_events(scoped.clone());
+    assert_eq!(
+        owned_events.len(),
+        1,
+        "another project's diagnostics must not reach the A socket"
+    );
+    assert!(matches!(&owned_events[0].target, DispatchTarget::Project(key) if key == owner));
+    scoped.project_scope = Some("unopened-project".to_string());
+    assert!(runtime.log_entry_events(scoped).is_empty());
     assert!(matches!(
         &events[0].event,
         BackendEvent::LogEntryAppended { entry } if entry.message == "reader stalled"
@@ -44736,6 +44752,7 @@ fn app_runtime_load_logs_replies_with_current_log_snapshot() {
         "client-1".to_string(),
         FrontendEvent::LoadLogs {
             id: window_id.clone(),
+            scope: LogScopeSelection::default(),
         },
     );
 
@@ -44753,6 +44770,448 @@ fn app_runtime_load_logs_replies_with_current_log_snapshot() {
             && entries[0].source == "pty"
             && matches!(entries[0].severity, LogLevel::Warn)
     ));
+}
+
+#[test]
+fn frontend_project_log_tab_id_routes_non_window_owners() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project_a = temp.path().join("a");
+    let project_b = temp.path().join("b");
+    fs::create_dir_all(&project_a).expect("project A");
+    fs::create_dir_all(&project_b).expect("project B");
+    let tabs = vec![
+        sample_project_tab("tab-a", "A", project_a.clone(), ProjectKind::NonRepo, &[]),
+        sample_project_tab("tab-b", "B", project_b, ProjectKind::NonRepo, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-b"));
+    let context_a = runtime.project_context("tab-a").unwrap();
+    let context_b = runtime.project_context("tab-b").unwrap();
+    runtime.project_state_mut(&context_a).unwrap().launch_wizard =
+        Some(sample_launch_wizard_session("tab-a", &project_a));
+    let cases = [
+        (
+            FrontendEvent::RebuildIndexCell {
+                project_root: project_a.display().to_string(),
+                scope: gwt::IndexRebuildScope::Issues,
+                worktree_hash: None,
+            },
+            Some("tab-a"),
+        ),
+        (
+            FrontendEvent::RefreshIndexStatus {
+                project_root: project_a.display().to_string(),
+            },
+            Some("tab-a"),
+        ),
+        (
+            FrontendEvent::LaunchWizardAction {
+                action: gwt::LaunchWizardAction::Cancel,
+                bounds: None,
+            },
+            Some("tab-a"),
+        ),
+        (
+            FrontendEvent::OpenActiveWorkLaunchWizard {
+                branch_name: "work/example".into(),
+                linked_issue_number: None,
+            },
+            Some("tab-b"),
+        ),
+        (
+            FrontendEvent::RunWorkspaceCleanup {
+                branch: "work/example".into(),
+                delete_remote: false,
+                force_filesystem_delete: false,
+                operation_id: None,
+            },
+            Some("tab-b"),
+        ),
+        (
+            FrontendEvent::RefreshIndexStatus {
+                project_root: temp.path().join("unknown").display().to_string(),
+            },
+            None,
+        ),
+        (FrontendEvent::GetSystemSettings, None),
+    ];
+    let actual = cases
+        .iter()
+        .map(|(event, _)| {
+            let context = if matches!(event, FrontendEvent::LaunchWizardAction { .. }) {
+                &context_a
+            } else {
+                &context_b
+            };
+            runtime.frontend_project_log_tab_id(Some(context), event)
+        })
+        .collect::<Vec<_>>();
+    let expected = cases.iter().map(|(_, owner)| *owner).collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "project operations use their explicit owner, machine operations remain global"
+    );
+}
+
+/// SPEC-1924 US-17 / FR-050 / FR-054 — AppRuntime owns the lifecycle wiring
+/// between project tabs and the process-wide logging router. This is one
+/// integration contract because `logging::init` installs exactly one global
+/// subscriber: keeping registration, snapshot resolution, and spawn-time
+/// scope capture in the same test avoids a second global initialization.
+#[test]
+fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let machine_log_dir = temp.path().join("machine-logs");
+    let project_a = temp.path().join("project-a");
+    let project_b = temp.path().join("project-b");
+    fs::create_dir_all(&project_a).expect("create project A");
+    fs::create_dir_all(&project_b).expect("create project B");
+    fs::create_dir_all(&machine_log_dir).expect("create machine log dir");
+    fs::write(
+        current_log_file(&machine_log_dir),
+        "{\"timestamp\":\"2026-08-29T00:00:00Z\",\"level\":\"INFO\",\"fields\":{\"message\":\"snapshot-global\"},\"target\":\"gwt::logging_contract\"}\n",
+    )
+    .expect("write global log snapshot before the writer opens it");
+
+    let mut logging = init_logging(LoggingConfig {
+        log_dir: machine_log_dir,
+        default_level: LogLevel::Info,
+        config_file_level: Some(LogLevel::Info),
+        retention_days: 0,
+    })
+    .expect("initialize isolated logging router");
+    logging
+        .set_level(LogLevel::Info)
+        .expect("make contract markers observable regardless of RUST_LOG");
+    let mut live_logs = logging.take_ui_rx().expect("live log receiver");
+    let router = logging.router();
+
+    let restored_tab = sample_project_tab_with_window_at(
+        "tab-a",
+        "logs-a",
+        project_a.clone(),
+        WindowPreset::Logs,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![restored_tab], Some("tab-a"));
+    // The setter registers tabs restored before the router becomes available.
+    runtime.set_project_log_router(router);
+
+    let scope_a = runtime
+        .project_log_scope_for_tab("tab-a")
+        .expect("restored project is registered")
+        .clone();
+    assert_eq!(
+        scope_a.log_dir(),
+        gwt_core::paths::gwt_project_logs_dir_for_project_path(&project_a),
+        "restored project uses its canonical project log store"
+    );
+
+    runtime.open_project_path_events(project_b.clone());
+    let prepared = take_project_navigation_completion(&recorded_events);
+    runtime.handle_project_navigation_prepared(prepared);
+    let tab_b_id = runtime
+        .active_tab_id
+        .clone()
+        .expect("opened project becomes active");
+    let scope_b = runtime
+        .project_log_scope_for_tab(&tab_b_id)
+        .expect("opened project is registered")
+        .clone();
+    assert_eq!(
+        scope_b.log_dir(),
+        gwt_core::paths::gwt_project_logs_dir_for_project_path(&project_b),
+        "opened project uses its canonical project log store"
+    );
+
+    let context_b = runtime.project_context(&tab_b_id).unwrap();
+    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds());
+    let logs_b_raw_id = runtime
+        .tab(&tab_b_id)
+        .expect("opened project tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Logs)
+        .expect("project B Logs surface")
+        .id
+        .clone();
+    let logs_a_id = combined_window_id("tab-a", "logs-a");
+    let logs_b_id = combined_window_id(&tab_b_id, &logs_b_raw_id);
+
+    for (log_dir, marker) in [
+        (scope_a.log_dir(), "snapshot-project-a"),
+        (scope_b.log_dir(), "snapshot-project-b"),
+    ] {
+        fs::create_dir_all(log_dir).expect("create project log snapshot dir");
+        fs::write(
+            current_log_file(log_dir),
+            format!(
+                "{{\"timestamp\":\"2026-08-29T00:00:00Z\",\"level\":\"INFO\",\"fields\":{{\"message\":\"{marker}\"}},\"target\":\"gwt::logging_contract\"}}\n"
+            ),
+        )
+        .expect("write project log snapshot");
+    }
+
+    let loaded_entries = |window_id: &str| {
+        runtime
+            .load_logs_events("client-1", window_id)
+            .into_iter()
+            .find_map(|event| match event.event {
+                BackendEvent::LogEntries { entries, .. } => Some(entries),
+                _ => None,
+            })
+            .expect("Logs surface receives a snapshot")
+    };
+    let entries_a = loaded_entries(&logs_a_id);
+    assert_eq!(entries_a[0].message, "snapshot-project-a");
+    assert_eq!(
+        entries_a[0].project_scope.as_deref(),
+        Some(scope_a.as_str()),
+        "legacy project-file records inherit the selected project scope"
+    );
+    let entries_b = loaded_entries(&logs_b_id);
+    assert_eq!(entries_b[0].message, "snapshot-project-b");
+    assert_eq!(
+        entries_b[0].project_scope.as_deref(),
+        Some(scope_b.as_str()),
+        "legacy project-file records inherit the selected project scope"
+    );
+
+    let context_a = runtime.project_context("tab-a").unwrap();
+    let global_entries = runtime
+        .handle_frontend_event_for_project(
+            &context_a,
+            "client-1".to_string(),
+            FrontendEvent::LoadLogs {
+                id: logs_a_id.clone(),
+                scope: LogScopeSelection::Global,
+            },
+        )
+        .into_iter()
+        .find_map(|event| match event.event {
+            BackendEvent::LogEntries { entries, .. } => Some(entries),
+            _ => None,
+        })
+        .expect("Global Logs facet receives the machine snapshot");
+    assert!(global_entries
+        .iter()
+        .any(|entry| { entry.message == "snapshot-global" && entry.project_scope.is_none() }));
+    assert!(global_entries.iter().all(|entry| {
+        entry.message != "snapshot-project-a" && entry.message != "snapshot-project-b"
+    }));
+
+    runtime.select_project_tab_events("tab-a");
+    let ui_trace_path = runtime
+        .handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SaveUiTrace {
+                trace: serde_json::from_value::<UiTracePayload>(serde_json::json!({
+                    "session_id": "project-a-trace",
+                    "entries": [{ "kind": "trace_start", "ts": 1 }]
+                }))
+                .expect("typed project UI trace payload"),
+            },
+        )
+        .into_iter()
+        .find_map(|event| match event.event {
+            BackendEvent::UiTraceSaved { path, .. } => Some(PathBuf::from(path)),
+            _ => None,
+        })
+        .expect("project UI trace is saved");
+    assert_eq!(
+        ui_trace_path.parent(),
+        Some(scope_a.log_dir()),
+        "UI traces follow the active project's canonical log store"
+    );
+
+    // The connection owns the artifact even while the legacy test selection is A.
+    let project_b_trace = runtime.handle_frontend_event_for_project(
+        &context_b,
+        "client-b".to_string(),
+        FrontendEvent::SaveUiTrace {
+            trace: serde_json::from_value::<UiTracePayload>(serde_json::json!({
+                "session_id": "project-b-trace",
+                "entries": [{ "kind": "trace_start", "ts": 1 }]
+            }))
+            .expect("typed B trace"),
+        },
+    );
+    assert!(matches!(
+        &project_b_trace[..],
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::UiTraceSaved { path, entries }, ..
+        }] if client_id == "client-b" && *entries == 1
+            && Path::new(path).exists() && Path::new(path).parent() == Some(scope_b.log_dir())
+    ));
+
+    runtime.set_active_tab(tab_b_id.clone());
+    assert_eq!(
+        runtime
+            .frontend_project_log_scope(
+                Some(&context_a),
+                &FrontendEvent::FocusWindow {
+                    id: logs_a_id.clone(),
+                    bounds: Some(canvas_bounds()),
+                }
+            )
+            .as_ref(),
+        Some(&scope_a),
+        "an event from an inactive project keeps the window owner's scope"
+    );
+    assert!(runtime
+        .frontend_project_log_scope(Some(&context_a), &FrontendEvent::GetSystemSettings)
+        .is_none());
+    assert!(runtime
+        .frontend_project_log_scope(
+            Some(&context_a),
+            &FrontendEvent::LoadLogs {
+                id: logs_a_id.clone(),
+                scope: LogScopeSelection::Global,
+            }
+        )
+        .is_none());
+
+    // Capture A at enqueue time, then switch the active project before the
+    // queued work runs. Running it inside B's foreground scope makes the
+    // regression unambiguous: the spawn-time A scope must win for the task.
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    {
+        let _scope = scope_a.enter();
+        runtime.blocking_tasks.spawn(|| {
+            tracing::info!(
+                target: "gwt::logging_contract",
+                "queued-project-a-after-switch"
+            );
+        });
+    }
+    runtime.blocking_tasks.spawn(|| {
+        tracing::info!(target: "gwt::logging_contract", "queued-global-after-switch");
+    });
+    runtime.select_project_tab_events(&tab_b_id);
+    let queued_a = tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(0);
+    {
+        let _scope = scope_b.enter();
+        tracing::info!(target: "gwt::logging_contract", "foreground-project-b");
+        queued_a();
+        let queued_global = tasks.lock().expect("queue").remove(0);
+        queued_global();
+    }
+
+    let worker_runtime = tokio::runtime::Runtime::new().expect("worker runtime");
+    for (spawner, marker) in [
+        (
+            BlockingTaskSpawner::thread(),
+            "thread-project-a-after-switch",
+        ),
+        (
+            BlockingTaskSpawner::tokio(worker_runtime.handle().clone()),
+            "tokio-project-a-after-switch",
+        ),
+    ] {
+        let (done, finished) = std::sync::mpsc::channel();
+        {
+            let _scope = scope_a.enter();
+            spawner.spawn(move || {
+                tracing::info!(target: "gwt::logging_contract", "{marker}");
+                done.send(()).expect("worker completed");
+            });
+        }
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("worker log received");
+    }
+
+    let error_tab = sample_project_tab_with_window_at(
+        "tab-error",
+        "agent-error",
+        project_a.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut error_runtime, error_events) =
+        sample_runtime_with_events(temp.path(), vec![error_tab], Some("tab-error"));
+    error_runtime.set_project_log_router(logging.router());
+    let error_id = combined_window_id("tab-error", "agent-error");
+    {
+        let _other_project = scope_b.enter();
+        error_runtime.observe_provider_api_error(&error_id, Some(CLAUDE_API_ERROR_SCREEN));
+    }
+
+    error_runtime.close_project_tab_events("tab-error");
+    error_runtime.open_project_path_events(project_a.clone());
+    let reopened = take_project_navigation_completion(&error_events);
+    error_runtime.handle_project_navigation_prepared(reopened);
+    assert_eq!(
+        error_runtime
+            .active_tab_id
+            .as_deref()
+            .and_then(|id| error_runtime.project_log_scope_for_tab(id)),
+        Some(&scope_a),
+        "reopened projects recover the same canonical logging scope"
+    );
+
+    let migrated = temp.path().join("project-a-migrated");
+    fs::create_dir_all(&migrated).expect("create migrated project");
+    runtime.handle_migration_done(&context_a, &migrated);
+    let migrated_scope = runtime
+        .project_log_scope_for_tab("tab-a")
+        .expect("migrated scope");
+    assert_eq!(
+        migrated_scope.log_dir(),
+        gwt_core::paths::gwt_project_logs_dir_for_project_path(&migrated)
+    );
+    assert_ne!(migrated_scope.as_str(), scope_a.as_str());
+
+    let live = std::iter::from_fn(|| live_logs.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        live.iter().any(|event| {
+            event
+                .message
+                .contains("a provider API error ended this pane")
+                && event.project_scope.as_deref() == Some(scope_a.as_str())
+        }),
+        "runtime diagnostics use the affected pane's scope even under another project"
+    );
+    assert!(
+        live.iter().any(|event| {
+            event.message == "queued-project-a-after-switch"
+                && event.project_scope.as_deref() == Some(scope_a.as_str())
+        }),
+        "queued A scope missing: {:?}",
+        live.iter()
+            .filter(|entry| entry.source == "gwt::logging_contract")
+            .map(|entry| (&entry.message, &entry.project_scope))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        live.iter().any(|event| {
+            event.message == "queued-global-after-switch" && event.project_scope.is_none()
+        }),
+        "a task queued without a project must not inherit the executor's active scope"
+    );
+    for marker in [
+        "thread-project-a-after-switch",
+        "tokio-project-a-after-switch",
+    ] {
+        assert!(
+            live.iter().any(|event| event.message == marker
+                && event.project_scope.as_deref() == Some(scope_a.as_str())),
+            "{marker} preserves spawn scope"
+        );
+    }
+    assert!(live.iter().any(|event| {
+        event.message == "foreground-project-b"
+            && event.project_scope.as_deref() == Some(scope_b.as_str())
+    }));
 }
 
 /// SPEC-1924 US-14 / FR-036 / SC-010 — when canonical log file contains
@@ -44783,6 +45242,7 @@ fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
         "client-1".to_string(),
         FrontendEvent::LoadLogs {
             id: window_id.clone(),
+            scope: LogScopeSelection::default(),
         },
     );
 

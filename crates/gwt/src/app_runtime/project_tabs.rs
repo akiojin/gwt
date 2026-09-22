@@ -566,6 +566,9 @@ impl AppRuntime {
             .expect("opened project context");
         #[cfg(test)]
         self.set_active_tab(tab_id.clone());
+        self.register_project_log_scope(&tab_id);
+        let project_scope = self.project_log_scope_for_tab(&tab_id).cloned();
+        let _project_scope = project_scope.as_ref().map(|scope| scope.enter());
         if let ProjectNavigationSource::Clone { workspace_home } = &source {
             self.remember_recent_clone_workspace_home(workspace_home);
         }
@@ -847,6 +850,7 @@ impl AppRuntime {
         }
 
         self.tabs.remove(index);
+        self.project_log_scopes.remove(tab_id);
         let project_still_open = self
             .tabs
             .iter()

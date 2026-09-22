@@ -127,6 +127,8 @@ pub fn app_state_view_from_parts(
                         .to_string(),
                     title: tab.title.clone(),
                     project_root: tab.project_root.display().to_string(),
+                    project_scope: gwt_core::paths::project_scope_hash(&tab.project_root)
+                        .to_string(),
                     kind: tab.kind,
                     workspace: workspace_view_for_tab(tab),
                     running_agent_count: running_agents.len() as u32,

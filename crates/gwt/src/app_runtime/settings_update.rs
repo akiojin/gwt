@@ -332,10 +332,15 @@ impl AppRuntime {
 
     pub(super) fn save_ui_trace_events(
         &self,
+        context: Option<&super::ProjectContext>,
         client_id: ClientId,
         trace: UiTracePayload,
     ) -> Vec<OutboundEvent> {
-        let event = match save_ui_trace_to_log_dir(&self.log_dir, trace) {
+        let log_dir = context
+            .and_then(|context| self.project_log_scope_for_tab(&context.tab_id))
+            .map(|scope| scope.log_dir())
+            .unwrap_or(&self.log_dir);
+        let event = match save_ui_trace_to_log_dir(log_dir, trace) {
             Ok(result) => BackendEvent::UiTraceSaved {
                 path: result.path.display().to_string(),
                 entries: result.entries,
