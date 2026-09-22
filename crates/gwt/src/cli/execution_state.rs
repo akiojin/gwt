@@ -30087,13 +30087,9 @@ exit 1
                     },
                     ExecutionControlStatus::Active,
                 );
-                let mut env = TestEnv::new(dir.path().to_path_buf());
-                let (code, out) = run_collect(
-                    &mut env,
-                    CliCommand::Build(crate::cli::SkillStateAction::Start { spec: 3248 }),
-                )
-                .unwrap();
-                assert_eq!(code, 0, "{out}");
+                // This test exercises completion, not the managed start preflight.
+                // Starting without a Host/Work is correctly rejected; seed the fixture.
+                save_build_state(dir.path(), "sess-op", Some(3248), true);
 
                 let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
                 assert_eq!(code, 2, "{out}");
