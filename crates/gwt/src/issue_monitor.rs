@@ -2412,6 +2412,14 @@ pub struct IssueMonitorWindowObservation {
     pub status: WindowState,
     #[serde(default)]
     pub review_dispatch: bool,
+    /// Issue #4584: why this window is held, when something is holding it —
+    /// a provider API error that ended the turn, or a quota block.
+    ///
+    /// Carried on the observation rather than re-derived by the Monitor
+    /// because only the canvas has the pane's screen. Optional and omitted
+    /// when empty, so an older reader simply does not see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_reason: Option<String>,
 }
 
 /// Issue #4084: the complete set of agent windows on one project tab at
@@ -3941,6 +3949,16 @@ pub struct IssueMonitorInboxSummary {
     /// snapshot instead of matching `pane.list` by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_state: Option<WindowState>,
+    /// Issue #4584 AC-2/AC-3: why the bound window stopped, when something
+    /// stopped it.
+    ///
+    /// `pane_state: waiting` says a pane needs something from outside; this
+    /// says what, including the provider's HTTP status and message, and
+    /// whether clearing it takes a nudge or a person. Without it the only way
+    /// to tell a stalled window from a working one is to open and read each
+    /// one, which is what let two windows idle for twenty minutes apiece.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_hold_reason: Option<String>,
     /// Issue #3712 AC-2/AC-5: whether the Monitor's launch accounting agrees
     /// with the canvas for this row. Present only for rows holding a bound
     /// window; `missing` and `terminal` are the slot-leak shapes.
@@ -3949,10 +3967,14 @@ pub struct IssueMonitorInboxSummary {
 }
 
 /// Issue #3712 AC-5: the per-row join computed while projecting the status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueMonitorRowRuntime {
     pane_state: Option<WindowState>,
     consistency: Option<IssueMonitorRuntimeConsistency>,
+    /// Issue #4584: the observation's hold reason, carried through the same
+    /// join so state and cause can never disagree about which pane they
+    /// describe.
+    hold_reason: Option<String>,
 }
 
 /// Issue #3712 AC-2/AC-5: how the Monitor's launch accounting relates to
@@ -10530,6 +10552,7 @@ impl IssueMonitorState {
                             })
                             .flatten(),
                         pane_state: runtime.pane_state,
+                        pane_hold_reason: runtime.hold_reason.clone(),
                         runtime_consistency: runtime.consistency,
                     }
                 })
@@ -15571,6 +15594,7 @@ impl IssueMonitorState {
         let none = IssueMonitorRowRuntime {
             pane_state: None,
             consistency: None,
+            hold_reason: None,
         };
         if !self.active_launches.contains(&issue_number) {
             return none;
@@ -15581,6 +15605,7 @@ impl IssueMonitorState {
         let unavailable = IssueMonitorRowRuntime {
             pane_state: None,
             consistency: Some(IssueMonitorRuntimeConsistency::Unavailable),
+            hold_reason: None,
         };
         let Some(snapshot) = self.fresh_window_snapshot(now) else {
             return unavailable;
@@ -15604,9 +15629,11 @@ impl IssueMonitorState {
             None => IssueMonitorRowRuntime {
                 pane_state: None,
                 consistency: Some(IssueMonitorRuntimeConsistency::Missing),
+                hold_reason: None,
             },
             Some(observed) => IssueMonitorRowRuntime {
                 pane_state: Some(observed.status),
+                hold_reason: observed.hold_reason.clone(),
                 consistency: Some(match observed.status {
                     WindowState::Stopped | WindowState::Error => {
                         IssueMonitorRuntimeConsistency::Terminal
@@ -16826,6 +16853,7 @@ mod tests {
                     attempts: 0,
                     last_failure_message: None,
                     failure_kind: None,
+                    pane_hold_reason: None,
                     pane_state: None,
                     runtime_consistency: None,
                 }],
@@ -31330,6 +31358,7 @@ mod tests {
             issue_number,
             status,
             review_dispatch,
+            hold_reason: None,
         }
     }
 
@@ -31466,6 +31495,70 @@ mod tests {
             .expect("row serializes");
         assert_eq!(json["pane_state"], serde_json::json!("stopped"));
         assert_eq!(json["runtime_consistency"], serde_json::json!("terminal"));
+    }
+
+    /// Issue #4584 AC-2/AC-3: `waiting` alone only says the pane needs
+    /// something. The row has to say *what*, or the reader is back to opening
+    /// panes one by one — the twenty-minute cost this Issue reports.
+    #[test]
+    fn a_held_pane_reports_why_it_stopped_on_its_status_row() {
+        let mut monitor =
+            autonomous_launched_cohort(&[(41, "tab-1::api-error-41"), (42, "tab-1::healthy-42")]);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![
+                IssueMonitorWindowObservation {
+                    window_id: "tab-1::api-error-41".to_string(),
+                    issue_number: Some(41),
+                    status: WindowState::Waiting,
+                    review_dispatch: false,
+                    hold_reason: Some(
+                        "Provider API error (claude) HTTP 529: 529 Overloaded. This is a \
+                         server-side issue, usually temporary — the turn ended and the pane \
+                         is waiting for input; it resumes when told to continue."
+                            .to_string(),
+                    ),
+                },
+                idle_observation("tab-1::healthy-42", Some(42), WindowState::Running, false),
+            ],
+        ));
+
+        let status = monitor.agent_status_at(IDLE_NOW);
+        let row = |number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .cloned()
+                .expect("row present")
+        };
+
+        let held = row(41);
+        assert_eq!(held.pane_state, Some(WindowState::Waiting));
+        let reason = held
+            .pane_hold_reason
+            .as_deref()
+            .expect("a held pane names its cause on the row");
+        assert!(reason.contains("529"), "the HTTP status: {reason}");
+        assert!(reason.contains("Overloaded"), "the message: {reason}");
+        assert!(
+            reason.contains("resumes when told to continue"),
+            "AC-3: what it takes to clear it: {reason}"
+        );
+
+        assert_eq!(
+            row(42).pane_hold_reason,
+            None,
+            "a working pane must not spend a field saying nothing is wrong"
+        );
+
+        // The wire shape is what the PM reads.
+        let json = serde_json::to_value(row(42)).expect("row serializes");
+        assert!(json.get("pane_hold_reason").is_none());
+        let json = serde_json::to_value(held).expect("row serializes");
+        assert!(json["pane_hold_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("529")));
     }
 
     #[test]

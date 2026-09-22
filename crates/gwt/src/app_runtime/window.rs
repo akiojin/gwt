@@ -123,6 +123,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, provider_quota_holds);
         $visit!($runtime, $id, provider_quota_candidates);
         $visit!($runtime, $id, released_provider_quota_notices);
+        $visit!($runtime, $id, provider_api_error_holds);
         $visit!($runtime, $id, last_agent_activity);
     };
 }
