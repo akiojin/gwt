@@ -561,6 +561,23 @@ mod tests {
     }
 
     #[test]
+    fn model_response_wait_stays_running_until_turn_returns_to_prompt() {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"] {
+            let hook = runtime_hook_window_state(&runtime_event(None, Some(event)));
+            let state = compose_window_state(WindowState::Running, WindowPreset::Codex, hook);
+            assert_eq!(
+                state,
+                if event == "Stop" {
+                    WindowState::Idle
+                } else {
+                    WindowState::Running
+                },
+                "only a completed turn returning to its prompt is idle: {event}"
+            );
+        }
+    }
+
+    #[test]
     fn compose_window_state_defaults_live_agent_without_hook_state_to_starting() {
         let composed = compose_window_state(WindowState::Running, WindowPreset::Agent, None);
 

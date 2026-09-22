@@ -170,6 +170,7 @@
         presetSupportsWaitingStatus,
         selectNextAgentFocusWindowId,
         windowRuntimeLabel,
+        windowRuntimeDescription,
       } from "/window-runtime-state.js";
       import {
         applyWindowWorktreeData,
@@ -3566,10 +3567,14 @@
             recomputeOperatorTelemetry();
             refreshWindowTabTelemetry(windowData);
             label.textContent = windowRuntimeLabel(runtimeState);
+            const runtimeDescription = windowRuntimeDescription(runtimeState, windowData?.preset);
             const statusTitle = effectiveDetail
-              ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
-              : windowRuntimeLabel(runtimeState);
+              ? `${runtimeDescription}: ${effectiveDetail}`
+              : runtimeDescription;
             chip.title = statusTitle;
+            chip.setAttribute("aria-label", statusTitle === windowRuntimeLabel(runtimeState)
+              ? statusTitle
+              : `${windowRuntimeLabel(runtimeState)}: ${statusTitle}`);
             label.title = statusTitle;
             if (overlay) {
               const messageEl = overlay.querySelector(".overlay-message");
