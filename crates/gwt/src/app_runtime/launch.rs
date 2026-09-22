@@ -1143,6 +1143,8 @@ mod delivered_owner_launch_tests {
     // AC-1: a launch with no linked owner is untouched by the check.
     #[test]
     fn an_unlinked_launch_is_unaffected() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             producing_owner_after_delivery_check(dir.path(), None, false),
