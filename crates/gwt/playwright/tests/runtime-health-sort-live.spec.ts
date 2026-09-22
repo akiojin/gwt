@@ -22,7 +22,7 @@ test.describe("Runtime health sort controls", () => {
       }
     });
     page.on("pageerror", (error) => errors.push(`page: ${error.message}`));
-    await gotoLiveGwt(page, BASE);
+    await gotoLiveGwt(page, BASE, { suppressProjectSurfaces: true });
     await page.waitForFunction(() => Boolean((window as any).__operatorShell?.applyRuntimeHealth));
   });
 

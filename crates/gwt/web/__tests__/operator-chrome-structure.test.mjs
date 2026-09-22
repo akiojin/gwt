@@ -2159,6 +2159,166 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("shared overlays use semantic z-index tokens in interaction order", () => {
+  const projectSwitcherPanel = document.getElementById("project-switcher-panel");
+  assert.ok(projectSwitcherPanel, "expected project switcher popover");
+  assert.equal(
+    projectSwitcherPanel.parentElement?.id,
+    "app",
+    "fixed project popover must escape the project-bar stacking context",
+  );
+
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const baseTokens = tokensCss.match(/:root\s*\{([^}]*)\}/)?.[1];
+  assert.ok(baseTokens, "expected unthemed :root tokens");
+
+  const zIndexToken = (name) => {
+    const match = baseTokens.match(new RegExp(`${name}:\\s*(\\d+)\\s*;`));
+    assert.ok(match, `expected integer ${name} in the base token set`);
+    return Number(match[1]);
+  };
+
+  const popover = zIndexToken("--z-popover");
+  const projectOverlay = zIndexToken("--z-project-overlay");
+  const overlay = zIndexToken("--z-overlay");
+  const modal = zIndexToken("--z-modal");
+  const systemDegradation = zIndexToken("--z-system-degradation");
+  const systemConnection = zIndexToken("--z-system-connection");
+  const systemNotice = zIndexToken("--z-notice-stack");
+  const systemContextMenu = zIndexToken("--z-system-context-menu");
+  const systemPopover = zIndexToken("--z-system-popover");
+  const systemWindow = zIndexToken("--z-system-window");
+  const systemModal = zIndexToken("--z-system-modal");
+  assert.ok(
+    projectOverlay < popover,
+    "project popovers must stay above blocking project overlays",
+  );
+  assert.ok(
+    popover < overlay,
+    "blocking overlays must paint above non-modal popovers",
+  );
+  assert.ok(
+    overlay < modal,
+    "shared dialogs must stay above command palette overlays",
+  );
+  assert.ok(modal < systemDegradation);
+  assert.ok(systemDegradation < systemConnection);
+  assert.ok(systemConnection < systemNotice);
+  assert.ok(systemNotice < systemContextMenu);
+  assert.ok(systemContextMenu < systemPopover);
+  assert.ok(systemPopover < systemWindow);
+  assert.ok(systemWindow < systemModal);
+
+  const tokenizedRules = [
+    {
+      name: "project switcher popover",
+      rule: inlineStyle.match(/\.project-switcher-panel\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "shared modal backdrop",
+      rule: inlineStyle.match(/\.modal-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "project picker and onboarding overlay",
+      rule: inlineStyle.match(/\.project-picker,\s*\.project-onboarding\s*\{[^}]*\}/)?.[0],
+      token: "--z-project-overlay",
+    },
+    {
+      name: "command palette overlay",
+      rule: componentsStyle.match(/\.op-palette-backdrop\s*\{[^}]*\}/)?.[0],
+      token: "--z-overlay",
+    },
+    {
+      name: "runtime health popover",
+      rule: componentsStyle.match(/\.op-runtime-health-detail\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage popover",
+      rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
+      token: "--z-popover",
+    },
+    {
+      name: "usage modal overlay",
+      rule: componentsStyle.match(/\.op-usage-modal-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-modal",
+    },
+    {
+      name: "render degradation banner",
+      rule: componentsStyle.match(/\.render-degradation-banner\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-degradation",
+    },
+    {
+      name: "connection overlay",
+      rule: componentsStyle.match(/\.connection-overlay\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-connection",
+    },
+    {
+      name: "operator notice stack",
+      rule: inlineStyle.match(/\.operator-notice-stack\s*\{[^}]*\}/)?.[0],
+      token: "--z-notice-stack",
+    },
+    {
+      name: "terminal context menu",
+      rule: componentsStyle.match(/\.terminal-context-menu\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-context-menu",
+    },
+    {
+      name: "Board destination popover",
+      rule: inlineStyle.match(/\.board-destination-popover\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-popover",
+    },
+    {
+      name: "global surface window",
+      rule: componentsStyle.match(/\.op-global-window\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-window",
+    },
+    {
+      name: "update modal",
+      rule: componentsStyle.match(/\.update-modal\s*\{[^}]*\}/)?.[0],
+      token: "--z-system-modal",
+    },
+  ];
+
+  for (const { name, rule, token } of tokenizedRules) {
+    assert.ok(rule, `expected ${name} CSS rule`);
+    assert.match(rule, new RegExp(`z-index:\\s*var\\(${token}\\)`));
+    assert.doesNotMatch(rule, /z-index:\s*-?\d+/, `${name} must not use a raw z-index`);
+  }
+
+  assert.doesNotMatch(
+    `${inlineStyle}\n${componentsStyle}`,
+    /z-index:\s*[1-9]\d{3,}\b/,
+    "global interaction and safety tiers must not reintroduce raw high z-index values",
+  );
+  const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[^}]*\}/)?.[0];
+  assert.ok(modalShellRule, "expected shared modal shell rule");
+  assert.doesNotMatch(
+    modalShellRule,
+    /z-index:/,
+    "the modal backdrop owns the shared modal tier without a competing child tier",
+  );
+
+  const panelRule = tokenizedRules[0].rule;
+  for (const declaration of [
+    "font-family: var(--font-mono)",
+    "font-size: var(--type-xs)",
+    "font-stretch: 75%",
+    "color: var(--color-text-muted)",
+    "letter-spacing: var(--tracking-mono)",
+    "text-transform: none",
+    "font-weight: 500",
+  ]) {
+    assert.match(
+      panelRule,
+      new RegExp(declaration.replace(/[()]/g, "\\$&")),
+      `reparented project switcher must preserve ${declaration}`,
+    );
+  }
+});
+
 test("WebView modal text uses native selection and terminal overlays use explicit copy", () => {
   const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[\s\S]*?\}/);
   assert.ok(modalShellRule, "expected shared modal shell CSS rule");
