@@ -70,7 +70,7 @@ fn relieve(pty_writers: &PtyWriterRegistry, holder: Option<u32>) {
         return;
     };
     for (window_id, pty) in ptys.iter() {
-        match pty.relieve_cap_for_lease_holder(holder) {
+        match pty.handle.relieve_cap_for_lease_holder(holder) {
             Ok(true) => tracing::info!(
                 target: "gwt_verification",
                 window_id = %window_id,

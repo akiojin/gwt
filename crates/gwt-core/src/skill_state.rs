@@ -40,6 +40,9 @@ pub const SKILL_STATE_DIR: &str = ".gwt/skill-state";
 /// when a different agent session observes the file (see FR-014t).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillState {
+    /// Optional start-time compatibility evidence, retained through finalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_evidence: Option<SkillStartEvidence>,
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_spec: Option<u64>,
@@ -47,6 +50,12 @@ pub struct SkillState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillStartEvidence {
+    pub reason: String,
+    pub work_id: String,
 }
 
 /// Resolve the filesystem path for a given skill's state file.
@@ -102,6 +111,7 @@ mod tests {
 
     fn sample_state(session: &str) -> SkillState {
         SkillState {
+            start_evidence: None,
             active: true,
             owner_spec: Some(1935),
             started_at: Utc.with_ymd_and_hms(2026, 4, 21, 9, 0, 0).unwrap(),

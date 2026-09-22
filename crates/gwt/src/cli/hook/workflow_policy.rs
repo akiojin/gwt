@@ -204,20 +204,17 @@ fn evaluate_title_summary_guard(
 
     if is_title_sensitive_tool(event) && !is_read_only_exploration_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
-            "Agent Workspace identity is required before work starts. Run workspace.update with purpose + current_focus to set it",
+            "Agent Workspace identity is required before work starts. Run workspace.ensure with purpose + current_focus to set it",
             "Set both a short work name and current focus before exploration, implementation, or verification commands. This is required so Workspace can show which window is doing what.\n\n\
 Required command shape:\n\
   gwtd <<'JSON'\n\
-  {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<short work title>\",\"current_focus\":\"<current work focus>\"}}\n\
+  {\"schema_version\":1,\"operation\":\"workspace.ensure\",\"params\":{\"purpose\":\"<short work title>\",\"current_focus\":\"<current work focus>\"}}\n\
   JSON\n\n\
 Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
 Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
-If workspace.update itself is refused because this worktree holds another Session's Execution Control Record, take it over first and then set the identity, one single-segment gwtd command each:\n\
-  1. execution.adopt (params.reason)\n\
-  2. workspace.ensure (params.purpose + params.current_focus)\n\
-  3. workspace.update (params.purpose + params.current_focus)\n\
-While the gate is closed you may also run execution.repair, execution.reopen, execution.release_prepared, and memory.add. Shell commits and pushes stay blocked until the gate is lifted.",
+workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as a single-segment gwtd command.\n\n\
+While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, execution.release_prepared, and memory.add. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -537,7 +534,7 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 /// identity gate is closed, beyond the read-only set.
 ///
 /// The gate exists so an unregistered Session cannot change production code
-/// before Workspace can show which window is doing what. Two narrow classes do
+/// before Workspace can show which window is doing what. Narrow classes do
 /// not threaten that, and refusing them is what closed the interlock #4533
 /// reports:
 ///
@@ -552,6 +549,9 @@ fn is_identity_gate_exempt_event(event: &HookEvent) -> bool {
 ///   touches nothing under version control. Without it a trapped session
 ///   cannot even record why it is trapped, so the next generation repeats the
 ///   same path (AC-3).
+/// - `execution.blocked` records why work cannot proceed (Issue #4610).
+///   It does not claim delivery. `execution.complete` and `build.abort`
+///   remain gated: completion and discarding Work are not blocker reporting.
 ///
 /// `available_recoveries` can also name `verify.plan` / `verify.run`, and
 /// those stay gated on purpose: they take the host-wide verification lease and
@@ -585,6 +585,7 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             // is exactly the kind that cannot set a title yet needs to settle.
             | "execution.no_action"
             | "execution.no-action"
+            | "execution.blocked"
             | "memory.add"
     )
 }
@@ -647,10 +648,11 @@ fn is_workspace_identity_update_json_segment(segment: &str) -> bool {
         .get("purpose")
         .and_then(|value| value.as_str())
         .is_some_and(|value| !value.trim().is_empty())
-        && params
-            .get("current_focus")
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| !value.trim().is_empty())
+        && (operation == "workspace.ensure"
+            || params
+                .get("current_focus")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.trim().is_empty()))
 }
 
 fn is_json_envelope_operation(command: &str, allowed_operations: &[&str]) -> bool {
@@ -1141,7 +1143,20 @@ mod tests {
             panic!("expected PreToolUsePermission");
         };
         assert!(detail.contains("gwtd <<'JSON'"));
-        assert!(detail.contains(r#""operation":"workspace.update""#));
+        assert!(detail.contains(r#""operation":"workspace.ensure""#));
+        assert!(!detail.contains("workspace.update"), "{detail}");
+        let command = detail
+            .split("Required command shape:\n")
+            .nth(1)
+            .expect("recovery command")
+            .split("\n\n")
+            .next()
+            .unwrap();
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(command), true).unwrap(),
+            HookOutput::Silent,
+            "the advertised recovery must clear the gate"
+        );
         assert!(detail.contains(r#""purpose""#));
         assert!(detail.contains("work name"), "{detail}");
         assert!(detail.contains("which window is doing what"), "{detail}");
@@ -1802,7 +1817,7 @@ mod tests {
 
         let output = evaluate_with_context(&event, repo.path(), &context).expect("guard output");
         let visible = output.summary().chars().take(256).collect::<String>();
-        assert!(visible.contains("workspace.update"), "{visible}");
+        assert!(visible.contains("workspace.ensure"), "{visible}");
         assert!(
             visible.contains("purpose") && visible.contains("current_focus"),
             "{visible}"
@@ -1842,6 +1857,37 @@ mod tests {
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_workspace_ensure_with_only_purpose() {
+        let command = envelope_command("workspace.ensure", r#"{"purpose":"Identity recovery"}"#);
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+            HookOutput::Silent
+        );
+        let update = envelope_command("workspace.update", r#"{"purpose":"Identity recovery"}"#);
+        assert!(matches!(
+            evaluate_title_summary_guard(&bash_event(&update), true).unwrap(),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_allows_execution_blocked_before_identity_is_set() {
+        let command = envelope_command("execution.blocked", r#"{"reason":"identity unavailable"}"#);
+        assert_eq!(
+            evaluate_title_summary_guard(&bash_event(&command), true).unwrap(),
+            HookOutput::Silent
+        );
+        assert!(matches!(
+            evaluate_title_summary_guard(
+                &bash_event(&format!("{command}\ncargo test -p gwt")),
+                true
+            )
+            .unwrap(),
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     #[test]
@@ -2055,7 +2101,7 @@ mod tests {
     fn title_summary_guard_exemption_does_not_open_the_rest_of_the_execution_surface() {
         for command in [
             envelope_command("execution.complete", "{}"),
-            envelope_command("execution.blocked", r#"{"reason":"gate"}"#),
+            envelope_command("build.abort", r#"{"spec":4610,"reason":"gate"}"#),
             envelope_command("build.start", r#"{"spec":4533}"#),
             envelope_command("pr.create", r#"{"title":"x"}"#),
         ] {

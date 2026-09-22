@@ -24527,6 +24527,7 @@ mod tests {
                 crate::cli::build::SKILL_NAME,
                 &gwt_core::skill_state::SkillState {
                     active,
+                    start_evidence: None,
                     owner_spec,
                     started_at: Utc::now(),
                     phase: Some("verify".to_string()),
@@ -31207,6 +31208,7 @@ exit 1
                 dir.path(),
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(999),
                     started_at: Utc::now(),
@@ -31230,6 +31232,7 @@ exit 1
                 dir.path(),
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(3248),
                     started_at: Utc::now(),
@@ -31252,6 +31255,7 @@ exit 1
                 dir.path(),
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(3248),
                     started_at: Utc::now(),
@@ -31308,6 +31312,7 @@ exit 1
                 &fixture.repo,
                 "build-spec",
                 &gwt_core::skill_state::SkillState {
+                    start_evidence: None,
                     active: true,
                     owner_spec: Some(3248),
                     started_at: Utc::now(),
