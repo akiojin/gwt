@@ -3401,7 +3401,9 @@ mod tests {
             StatusCode::CONFLICT,
             serde_json::json!({
                 "code": "workspace_ensure_required",
-                "message": "untrusted Host diagnostic terminal-secret"
+                "reason": "workspace_ensure_required",
+                "message": "untrusted Host diagnostic terminal-secret",
+                "recovery_operations": ["workspace.ensure"]
             }),
         );
         let (code, output, fixture) =

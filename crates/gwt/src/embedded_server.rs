@@ -8679,12 +8679,23 @@ mod tests {
             std::fs::read(&work_items_path).expect("missing WorkItems before rejection");
         let missing_materialization = materialization_probe(&target_b);
         assert_eq!(missing_materialization.status(), HttpStatusCode::CONFLICT);
-        let missing_error: gwt::AgentWorkspaceUpdateError = missing_materialization
+        let missing_error: serde_json::Value = missing_materialization
             .json()
-            .expect("typed missing Work rejection");
+            .expect("missing Work rejection wire response");
+        let missing_code: gwt::AgentWorkspaceUpdateErrorCode =
+            serde_json::from_value(missing_error["code"].clone())
+                .expect("typed missing Work error code");
         assert_eq!(
-            missing_error.code,
+            missing_code,
             gwt::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
+        );
+        assert_eq!(missing_error["reason"], "workspace_ensure_required");
+        assert!(missing_error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("workspace.ensure")));
+        assert_eq!(
+            missing_error["recovery_operations"],
+            serde_json::json!(["workspace.ensure"])
         );
         assert_eq!(
             std::fs::read(&work_items_path).expect("WorkItems after missing rejection"),

@@ -1082,8 +1082,13 @@ pub(crate) fn send_work_materialization_probe_via_agent_bridge(
             "Host Work materialization probe rejection body could not be read safely; no build lifecycle state was created",
         )
         .map_err(|error| AgentBridgeRequestError::Unknown(error.to_string()))?;
-        return match serde_json::from_slice::<crate::AgentWorkspaceUpdateError>(&body) {
-            Ok(error) => Err(AgentBridgeRequestError::Rejected(error)),
+        return match serde_json::from_slice::<WorkspaceBridgeErrorResponse>(&body) {
+            Ok(error) => Err(AgentBridgeRequestError::Rejected(
+                crate::AgentWorkspaceUpdateError::new(
+                    error.code,
+                    "Host Work materialization probe rejected the request; no build lifecycle state was created",
+                ),
+            )),
             Err(_) => Err(AgentBridgeRequestError::Unknown(format!(
                 "Host Work materialization probe failed with HTTP {status}; no build lifecycle state was created"
             ))),
@@ -2033,6 +2038,25 @@ mod tests {
                     ),
                 )
                 .route(
+                    "/internal/work-materialization-probe",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture materialization probe request");
+                            (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response()
+                        },
+                    ),
+                )
+                .route(
                     "/internal/execution-continuation",
                     post(
                         |headers: HeaderMap,
@@ -2368,6 +2392,44 @@ mod tests {
             .expect_err("oversized continuation diagnostics must fail closed");
         assert!(error.contains("transport_failure"), "{error}");
         oversized_server.receive();
+    }
+
+    #[test]
+    fn work_materialization_probe_preserves_host_wire_rejection_code() {
+        let server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "workspace_ensure_required",
+                "reason": "workspace_ensure_required",
+                "message": "private-host-message-sentinel; run workspace.ensure",
+                "recovery_operations": ["workspace.ensure"]
+            }),
+        );
+        let target = HookForwardTarget {
+            url: server.forward_url.clone(),
+            token: "probe-private-token".to_string(),
+        };
+        let request = crate::AgentWorkMaterializationProbeRequest {
+            schema_version: crate::AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+            claimed_session_id: "session-materialization-rejection".to_string(),
+            owner_number: 3403,
+            observation: crate::AgentRuntimeObservation {
+                cwd: "/workspace/repo".to_string(),
+                git_toplevel: "/workspace/repo".to_string(),
+                repo_hash: "repo-hash".to_string(),
+                branch: "work/issue-3403".to_string(),
+            },
+        };
+        let error = send_work_materialization_probe_via_agent_bridge(&target, &request)
+            .expect_err("real Host rejection must remain a typed refusal");
+        assert!(
+            matches!(&error, AgentBridgeRequestError::Rejected(error)
+                if error.code == crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("private-host-message-sentinel"));
+        assert!(!error.to_string().contains("probe-private-token"));
+        server.receive();
     }
 
     #[test]
