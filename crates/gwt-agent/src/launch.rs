@@ -180,6 +180,10 @@ pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
             // launches. Use the tolerant config form so pre-0.106 Codex keeps
             // starting instead of rejecting an unknown `--enable` feature.
             "--config=features.default_mode_request_user_input=true".to_string(),
+            // Suppress startup warnings for the unstable feature enabled above,
+            // including with Backend Override's isolated CODEX_HOME. Codex only
+            // supports global suppression, so user-enabled feature warnings also disappear.
+            "--config=suppress_unstable_features_warning=true".to_string(),
         ],
         // Keep fullscreen coding agents out of the alternate screen so the PTY emits normal
         // scrollback instead of redraw-only fullscreen frames. Matches the
@@ -2281,6 +2285,7 @@ mod tests {
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
             ],
             "Codex canonical args must cover inline scrollback and Default-mode questions"
         );
@@ -2974,6 +2979,9 @@ mod tests {
         ];
 
         for config in configs {
+            assert!(config
+                .args
+                .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
             assert_eq!(
                 config
                     .args
@@ -3023,6 +3031,7 @@ mod tests {
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
             ]
         );
         assert!(!args
@@ -3059,6 +3068,7 @@ mod tests {
                 "@openai/codex@latest".to_string(),
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
                 "resume".to_string(),
                 "sess-123".to_string(),
             ]
@@ -3087,12 +3097,13 @@ mod tests {
             "canonical normalization must be idempotent"
         );
         assert_eq!(
-            &args[..4],
+            &args[..5],
             [
                 "--yes",
                 "@openai/codex@latest",
                 "--no-alt-screen",
                 "--config=features.default_mode_request_user_input=true",
+                "--config=suppress_unstable_features_warning=true",
             ],
             "canonical defaults must follow the package runner in stable order"
         );
@@ -5130,6 +5141,10 @@ mod tests {
                 .map(String::as_str),
             Some("sk-codex")
         );
+
+        assert!(config
+            .args
+            .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
 
         // Generated config.toml exists and contains the expected provider id.
         let body =
