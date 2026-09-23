@@ -8194,7 +8194,7 @@ mod tests {
     /// `IssueMonitorState` cannot catch a handler that writes prefs on a
     /// refusal or reports success it did not achieve.
     #[test]
-    fn monitor_stop_revokes_the_launch_and_refuses_a_stale_identity() {
+    fn monitor_stop_revokes_the_launch_from_a_caller_that_names_no_window() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -8214,8 +8214,9 @@ mod tests {
         .expect("save prefs");
         let mut env = crate::cli::TestEnv::new(repo.clone());
 
-        // A stale window id must change nothing on disk.
-        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        // SPEC #3590 FR-005 / Issue #3578: the PM calls from its own window and
+        // names none. That releases the slot and holds the issue durably, and
+        // the answer names the window the launch actually held.
         let mut out = String::new();
         let code = run(
             &mut env,
@@ -8225,31 +8226,7 @@ mod tests {
                 reason: "provider rate limit".to_string(),
                 claim_id: None,
                 delivery_id: None,
-                window_id: Some("tab-1::agent-9".to_string()),
-            },
-            &mut out,
-        )
-        .expect("stop runs");
-        assert_eq!(code, 1, "a refused stop is not a success");
-        assert!(out.contains("\"status\":\"refused\""), "{out}");
-        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
-        assert_eq!(
-            std::fs::read(&prefs_path).expect("prefs bytes"),
-            before,
-            "a refused stop must be zero-mutation"
-        );
-
-        // The exact identity releases the slot and holds the issue durably.
-        out.clear();
-        let code = run(
-            &mut env,
-            IssueCommand::MonitorStop {
-                project_root: Some(repo.clone()),
-                number: 42,
-                reason: "provider rate limit".to_string(),
-                claim_id: None,
-                delivery_id: None,
-                window_id: Some("tab-1::agent-1".to_string()),
+                window_id: None,
             },
             &mut out,
         )
@@ -8425,7 +8402,7 @@ mod tests {
     /// SPEC-3431 FR-029〜031 / T-081: the failover the PM calls when a provider
     /// runs out of quota.
     #[test]
-    fn monitor_failover_requeues_at_the_head_and_refuses_a_stale_identity() {
+    fn monitor_failover_requeues_at_the_head_whatever_window_is_named() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -8446,12 +8423,13 @@ mod tests {
         .expect("save prefs");
         let mut env = crate::cli::TestEnv::new(repo.clone());
 
-        let before = std::fs::read(&prefs_path).expect("prefs bytes");
+        // SPEC #3590 FR-005: a window other than the one the launch holds (the
+        // pane may already be gone) does not refuse the failover.
         let mut out = String::new();
         let code = run(
             &mut env,
             IssueCommand::MonitorFailover {
-                project_root: Some(repo.clone()),
+                project_root: Some(repo),
                 number: 42,
                 reason: "codex rate limit".to_string(),
                 claim_id: None,
@@ -8461,30 +8439,9 @@ mod tests {
             &mut out,
         )
         .expect("failover runs");
-        assert_eq!(code, 1);
-        assert!(out.contains("\"mismatch\":\"window_mismatch\""), "{out}");
-        assert_eq!(
-            std::fs::read(&prefs_path).expect("prefs bytes"),
-            before,
-            "a refused failover must be zero-mutation"
-        );
-
-        out.clear();
-        let code = run(
-            &mut env,
-            IssueCommand::MonitorFailover {
-                project_root: Some(repo),
-                number: 42,
-                reason: "codex rate limit".to_string(),
-                claim_id: None,
-                delivery_id: None,
-                window_id: Some("tab-1::agent-1".to_string()),
-            },
-            &mut out,
-        )
-        .expect("failover runs");
-        assert_eq!(code, 0);
+        assert_eq!(code, 0, "{out}");
         assert!(out.contains("\"status\":\"restarting\""), "{out}");
+        assert!(out.contains("tab-1::agent-1"), "{out}");
 
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
         assert!(
