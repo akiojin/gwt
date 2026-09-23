@@ -15524,18 +15524,13 @@ fn run_impl<E: CliEnv>(
             ));
             return Ok(2);
         }
+        // SPEC #3590 FR-026: bookkeeping is judged apart from delivery. An
+        // unsettled Work event log is reported, never a reason to refuse
+        // finishing the work; the Stop gate still carries the obligation.
         if let Some(reason) =
             crate::cli::verification_record::work_event_settlement_refusal(&worktree)
         {
-            out.push_str(&format!("execution: completion refused — {reason}\n"));
-            // Issue #3696 AC-1: the exact misfire this Issue was filed for. The
-            // agent clears this by committing and pushing its own Work events,
-            // so it must never reach the PM as "agent 側では解消不能".
-            *refusal = Some(agent_recoverable_refusal(
-                "work_event_delivery_unsettled",
-                "commit_and_push_work_events",
-            ));
-            return Ok(2);
+            out.push_str(&format!("execution: warning — {reason}\n"));
         }
     }
     // P11 review fix: `execution.blocked` must defer open obligations on
@@ -30793,7 +30788,9 @@ exit 1
         }
 
         #[test]
-        fn complete_op_refuses_dirty_work_event_before_terminal_mutation() {
+        fn complete_op_settles_while_work_event_bookkeeping_is_unsettled() {
+            // SPEC #3590 FR-026: bookkeeping that has not closed is a warning,
+            // never a reason to refuse finishing the delivered work.
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -30810,88 +30807,17 @@ exit 1
             env.stdin =
                 r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
             let code = crate::cli::json_envelope::dispatch(&mut env, "gwtd");
-            assert_eq!(code, 2);
             let payload: serde_json::Value =
                 serde_json::from_slice(&env.stdout).expect("parse JSON response");
+            assert_eq!(code, 0, "{payload}");
             let output = payload["output"].as_str().expect("completion output");
+            assert!(output.contains("warning"), "{payload}");
             assert!(output.contains(".gwt/work/events.jsonl"), "{payload}");
-            assert!(output.contains("commit"), "{payload}");
-            assert!(output.contains("push"), "{payload}");
-            assert_eq!(
-                payload["refusal"]["reason_code"],
-                "work_event_delivery_unsettled"
-            );
-            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
-            assert_eq!(
-                payload["refusal"]["recovery_action"],
-                "commit_and_push_work_events"
-            );
-            assert!(
-                gwt_core::coordination::load_open_escalations(&fixture.repo)
-                    .unwrap()
-                    .is_empty(),
-                "dirty Work delivery is resolved by commit/push/retry"
-            );
-            assert_eq!(
-                load(&fixture.repo).unwrap().unwrap().status,
-                ExecutionControlStatus::Active,
-                "the execution record must stay active when Work delivery is unsettled"
-            );
-        }
-
-        #[test]
-        fn dirty_work_refusal_stays_local_then_commit_push_retry_completes() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let home = tempfile::tempdir().unwrap();
-            let _home = ScopedEnvVar::set("HOME", home.path());
-            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
-            let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
-            save(&fixture.repo, &active_record("sess-op")).unwrap();
-            save_covering_evidence(&fixture.repo, "sess-op", false);
-            fixture.append_event("terminal-update-awaiting-delivery");
-
-            let mut refused = TestEnv::new(fixture.repo.clone());
-            refused.stdin =
-                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
-            assert_eq!(crate::cli::json_envelope::dispatch(&mut refused, "gwtd"), 2);
-            let payload: serde_json::Value =
-                serde_json::from_slice(&refused.stdout).expect("dirty refusal JSON response");
-            assert_eq!(
-                payload["refusal"]["reason_code"],
-                "work_event_delivery_unsettled"
-            );
-            assert_eq!(payload["refusal"]["recoverability"], "agent_recoverable");
-            assert_eq!(
-                payload["refusal"]["recovery_action"],
-                "commit_and_push_work_events"
-            );
-            assert!(
-                gwt_core::coordination::load_open_escalations(&fixture.repo)
-                    .unwrap()
-                    .is_empty(),
-                "a dirty Work event is the current agent's next action"
-            );
-            assert_eq!(
-                load(&fixture.repo).unwrap().unwrap().status,
-                ExecutionControlStatus::Active
-            );
-
-            fixture.stage_events();
-            fixture.commit("chore(work): settle terminal Work event");
-            fixture.push();
-            save_covering_evidence(&fixture.repo, "sess-op", false);
-
-            let mut retried = TestEnv::new(fixture.repo.clone());
-            retried.stdin =
-                r#"{"schema_version":1,"operation":"execution.complete","params":{}}"#.to_string();
-            assert_eq!(crate::cli::json_envelope::dispatch(&mut retried, "gwtd"), 0);
+            assert!(payload["refusal"].is_null(), "{payload}");
             assert_eq!(
                 load(&fixture.repo).unwrap().unwrap().status,
                 ExecutionControlStatus::Completed,
-                "the advertised commit/push/retry recovery must really complete"
+                "unsettled Work bookkeeping must not keep a delivered execution Active"
             );
         }
 
@@ -31338,59 +31264,6 @@ exit 1
                 load(dir.path()).unwrap().unwrap().status,
                 ExecutionControlStatus::Completed,
                 "a real matching finalize with fresh evidence must settle the execution"
-            );
-        }
-
-        #[test]
-        fn build_complete_refuses_dirty_work_event_before_finalizing_state() {
-            let _env_lock = crate::env_test_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let home = tempfile::tempdir().unwrap();
-            let _home = ScopedEnvVar::set("HOME", home.path());
-            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
-            let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
-            let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
-            save(&fixture.repo, &active_record("sess-op")).unwrap();
-            gwt_core::skill_state::save(
-                &fixture.repo,
-                "build-spec",
-                &gwt_core::skill_state::SkillState {
-                    start_evidence: None,
-                    active: true,
-                    owner_spec: Some(3248),
-                    started_at: Utc::now(),
-                    phase: None,
-                    session_id: "sess-op".to_string(),
-                },
-            )
-            .unwrap();
-            save_covering_evidence(&fixture.repo, "sess-op", false);
-            fixture.append_event("terminal-update-awaiting-delivery");
-
-            let mut env = TestEnv::new(fixture.repo.clone());
-            let (code, out) = run_collect(
-                &mut env,
-                CliCommand::Build(crate::cli::SkillStateAction::Complete { spec: 3248 }),
-            )
-            .expect("run build completion gate");
-
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains(".gwt/work/events.jsonl"), "{out}");
-            assert!(out.contains("commit"), "{out}");
-            assert!(out.contains("push"), "{out}");
-            assert!(
-                gwt_core::skill_state::load(&fixture.repo, "build-spec")
-                    .unwrap()
-                    .unwrap()
-                    .active,
-                "build state must remain active while Work delivery is unsettled"
-            );
-            assert_eq!(
-                load(&fixture.repo).unwrap().unwrap().status,
-                ExecutionControlStatus::Active,
-                "execution state must remain active while Work delivery is unsettled"
             );
         }
 

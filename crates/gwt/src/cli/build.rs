@@ -36,11 +36,11 @@ pub(super) fn run<E: CliEnv>(
     let mut completion_session_id = None;
     if matches!(&action, SkillStateAction::Complete { .. }) {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-        if let Some(refusal) =
+        // SPEC #3590 FR-026: an unsettled Work event log is a warning only.
+        if let Some(warning) =
             crate::cli::verification_record::work_event_settlement_refusal(&worktree)
         {
-            out.push_str(&format!("{VERB}: completion refused — {refusal}\n"));
-            return Ok(2);
+            out.push_str(&format!("{VERB}: warning — {warning}\n"));
         }
         let verification = crate::cli::verification_record::load(&worktree).map_err(|error| {
             gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(format!(
@@ -1763,6 +1763,52 @@ mod tests {
             repo.join("managed-runtime.json"),
         );
         operation(&crate::cli::TestEnv::new(repo.to_path_buf()))
+    }
+
+    #[test]
+    fn build_complete_does_not_refuse_on_unsettled_work_event_bookkeeping() {
+        // SPEC #3590 FR-026: the bookkeeping gate warns; it never refuses the
+        // completion of delivered work.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
+        gwt_core::skill_state::save(
+            &fixture.repo,
+            SKILL_NAME,
+            &gwt_core::skill_state::SkillState {
+                start_evidence: None,
+                active: true,
+                owner_spec: Some(3327),
+                started_at: chrono::Utc::now(),
+                phase: None,
+                session_id: "unsettled-bookkeeping-session".to_string(),
+            },
+        )
+        .expect("save active build state");
+        fixture.append_event("terminal-update-awaiting-delivery");
+        let _session = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "unsettled-bookkeeping-session",
+        );
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        let mut output = String::new();
+        let code = run(
+            &mut env,
+            SkillStateAction::Complete { spec: 3327 },
+            &mut output,
+        )
+        .expect("run build.complete");
+
+        assert_eq!(code, 0, "{output}");
+        assert!(!output.contains("completion refused"), "{output}");
+        assert!(output.contains("warning"), "{output}");
     }
 
     #[test]

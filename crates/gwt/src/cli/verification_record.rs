@@ -998,7 +998,7 @@ impl WorkEventSettlementStatus {
 /// `obligation_open` is sticky while settlement is blocked. Calling
 /// [`save_work_event_settlement_record`] with `open_obligation = false` only
 /// refreshes the status; it cannot close an existing obligation until the
-/// evaluator observes a clean event path and remotely contained HEAD. The originating
+/// evaluator observes a clean event path and remotely contained event commit. The originating
 /// `session_id` is retained through that settled record for auditability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkEventSettlementRecord {
@@ -1442,7 +1442,7 @@ pub(crate) fn pending_shard_refresh_failure_must_block(record: &WorkEventSettlem
 }
 
 pub(crate) fn pending_shard_refresh_failure_description() -> String {
-    "Work event settlement refused: the exact pending Work event shard could not be validated. Retry the terminal workspace.update to restore the canonical shard before retrying."
+    "Work event settlement is not closed: the exact pending Work event shard could not be validated. Retry the terminal workspace.update to restore the canonical shard before retrying."
         .to_string()
 }
 
@@ -1735,15 +1735,10 @@ fn evaluate_work_event_settlement_for_path(
     let (remote, merge_ref, upstream_ref) = match configured_upstream(worktree) {
         Ok(upstream) => upstream,
         Err(UpstreamFailure::Missing) => {
-            return terminal_work_integration_delivery(
-                worktree,
-                "origin",
-                &head_commit,
-                &event_commit,
-            )
-            .unwrap_or(WorkEventSettlementStatus::Blocked(
-                WorkEventSettlementBlocker::MissingUpstream,
-            ));
+            return terminal_work_integration_delivery(worktree, "origin", &event_commit)
+                .unwrap_or(WorkEventSettlementStatus::Blocked(
+                    WorkEventSettlementBlocker::MissingUpstream,
+                ));
         }
         Err(UpstreamFailure::Git) => {
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
@@ -1752,18 +1747,14 @@ fn evaluate_work_event_settlement_for_path(
     let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
         Ok(remote_tip) => remote_tip,
         Err(()) => {
-            return terminal_work_integration_delivery(
-                worktree,
-                &remote,
-                &head_commit,
-                &event_commit,
-            )
-            .unwrap_or(WorkEventSettlementStatus::Blocked(
-                WorkEventSettlementBlocker::RemoteReadbackError,
-            ));
+            return terminal_work_integration_delivery(worktree, &remote, &event_commit).unwrap_or(
+                WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteReadbackError),
+            );
         }
     };
-    let head_on_remote = match git_is_ancestor(worktree, &head_commit, &remote_tip) {
+    // SPEC #3590 FR-027: only the event commit has to be reachable. A later
+    // unpushed source commit is delivery's business, not bookkeeping's.
+    let event_on_remote = match git_is_ancestor(worktree, &event_commit, &remote_tip) {
         Ok(value) => value,
         Err(()) => {
             return WorkEventSettlementStatus::Blocked(
@@ -1771,13 +1762,13 @@ fn evaluate_work_event_settlement_for_path(
             );
         }
     };
-    if head_on_remote {
+    if event_on_remote {
         return WorkEventSettlementStatus::Settled {
             event_commit,
             upstream_ref,
         };
     }
-    let remote_on_head = match git_is_ancestor(worktree, &remote_tip, &head_commit) {
+    let remote_on_event = match git_is_ancestor(worktree, &remote_tip, &event_commit) {
         Ok(value) => value,
         Err(()) => {
             return WorkEventSettlementStatus::Blocked(
@@ -1785,7 +1776,7 @@ fn evaluate_work_event_settlement_for_path(
             );
         }
     };
-    if remote_on_head {
+    if remote_on_event {
         WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed)
     } else {
         WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged)
@@ -1796,11 +1787,10 @@ fn evaluate_work_event_settlement_for_path(
 /// fresh remote integration containment proves delivery independently of the
 /// predecessor's receipt or the deleted branch. Call after dirty/pending event
 /// checks; neither a local tracking ref nor a PR's historical state is proof
-/// that this exact HEAD was delivered.
+/// that this exact event commit was delivered.
 fn terminal_work_integration_delivery(
     worktree: &Path,
     remote: &str,
-    head_commit: &str,
     event_commit: &str,
 ) -> Option<WorkEventSettlementStatus> {
     if !canonical_work_for_worktree_is_terminal(worktree) {
@@ -1812,7 +1802,7 @@ fn terminal_work_integration_delivery(
             continue;
         };
         observed_base = true;
-        if git_is_ancestor(worktree, head_commit, &tip) == Ok(true) {
+        if git_is_ancestor(worktree, event_commit, &tip) == Ok(true) {
             return Some(WorkEventSettlementStatus::Settled {
                 event_commit: event_commit.to_string(),
                 upstream_ref: format!("{remote}/{branch}"),
@@ -1820,7 +1810,7 @@ fn terminal_work_integration_delivery(
         }
     }
     // A deleted upstream is no longer a mere network warning when the remote
-    // bases were read successfully and prove this HEAD has not landed there.
+    // bases were read successfully and prove this event commit has not landed there.
     observed_base.then_some(WorkEventSettlementStatus::Blocked(
         WorkEventSettlementBlocker::CommitNotPushed,
     ))
@@ -1957,7 +1947,7 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         // undelivered event log.
         None if current_binding.is_some() && !canonical_work_for_worktree_is_terminal(worktree) => {
             return Some(
-                "Work event settlement refused: the current execution generation has no generation-scoped Work event receipt. Complete its terminal Work update, commit it, and push it before retrying."
+                "Work event settlement is not closed: the current execution generation has no generation-scoped Work event receipt. Complete its terminal Work update, commit it, and push it before retrying."
                     .to_string(),
             );
         }
@@ -2075,11 +2065,11 @@ fn stale_work_event_receipt_description(
         current_binding.map_or("unknown", |binding| binding.generation_id.as_str());
     if receipt.execution_binding.is_some() && receipt_generation == current_generation {
         return format!(
-            "Work event settlement refused: the receipt names the current execution generation `{current_generation}`, but its Session or ledger binding does not authorize this execution. Record an authorized terminal workspace.update for the assigned Work, then commit and push its event before retrying."
+            "Work event settlement is not closed: the receipt names the current execution generation `{current_generation}`, but its Session or ledger binding does not authorize this execution. Record an authorized terminal workspace.update for the assigned Work, then commit and push its event before retrying."
         );
     }
     format!(
-        "Work event settlement refused: this receipt belongs to a legacy or predecessor execution generation (receipt `{receipt_generation}`, current generation `{current_generation}`) and the current generation has not recorded its own terminal Work update. Committing or pushing the predecessor's Work event cannot repair this: record this generation's terminal workspace.update for the canonical Work, then commit and push the Work event store before retrying."
+        "Work event settlement is not closed: this receipt belongs to a legacy or predecessor execution generation (receipt `{receipt_generation}`, current generation `{current_generation}`) and the current generation has not recorded its own terminal Work update. Committing or pushing the predecessor's Work event cannot repair this: record this generation's terminal workspace.update for the canonical Work, then commit and push the Work event store before retrying."
     )
 }
 
@@ -2089,7 +2079,7 @@ pub(crate) fn work_event_settlement_pending_description(
     journal_entry_id: &str,
 ) -> String {
     format!(
-        "Work event settlement refused: terminal event `{event_id}` for Work `{work_id}` (journal `{journal_entry_id}`) has not been persisted to its exact shard in `{WORK_EVENT_STORE_RELATIVE}/` (legacy receipts use `{WORK_EVENT_LOG_RELATIVE}`). Retry the terminal workspace.update so Host recovery can finish, then commit and push the event store before retrying."
+        "Work event settlement is not closed: terminal event `{event_id}` for Work `{work_id}` (journal `{journal_entry_id}`) has not been persisted to its exact shard in `{WORK_EVENT_STORE_RELATIVE}/` (legacy receipts use `{WORK_EVENT_LOG_RELATIVE}`). Retry the terminal workspace.update so Host recovery can finish, then commit and push the event store before retrying."
     )
 }
 
@@ -2097,10 +2087,49 @@ pub(crate) fn work_event_settlement_blocker_description(
     blocker: &WorkEventSettlementBlocker,
     worktree: &Path,
 ) -> String {
+    let comparison = matches!(
+        blocker,
+        WorkEventSettlementBlocker::CommitNotPushed | WorkEventSettlementBlocker::RemoteDiverged
+    )
+    .then(|| work_event_settlement_comparison(worktree));
     work_event_settlement_blocker_description_with_gate(
         blocker,
         crate::cli::hook::workflow_policy::identity_gate_closed(worktree),
+        comparison.as_deref(),
     )
+}
+
+/// SPEC #3590 FR-028: name the two refs and SHAs the delivery check compared.
+/// Read from local refs only: the evaluator has just fetched the upstream.
+fn work_event_settlement_comparison(worktree: &Path) -> String {
+    let resolve = |args: &[&str]| {
+        git_stdout(worktree, args)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unresolved".to_string())
+    };
+    let event_commit = resolve(&[
+        "rev-list",
+        "-1",
+        "HEAD",
+        "--",
+        WORK_EVENT_LOG_RELATIVE,
+        WORK_EVENT_STORE_RELATIVE,
+    ]);
+    match configured_upstream(worktree) {
+        Ok((_, _, upstream_ref)) => {
+            let upstream_tip = resolve(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{upstream_ref}^{{commit}}"),
+            ]);
+            format!("compared event commit `{event_commit}` with `{upstream_ref}` at `{upstream_tip}`")
+        }
+        Err(_) => format!(
+            "compared event commit `{event_commit}` with the remote `develop` / `main` (no configured upstream)"
+        ),
+    }
 }
 
 /// Issue #4533 (AC-1): the refusal demands a commit, and while the Agent
@@ -2111,6 +2140,7 @@ pub(crate) fn work_event_settlement_blocker_description(
 pub(crate) fn work_event_settlement_blocker_description_with_gate(
     blocker: &WorkEventSettlementBlocker,
     identity_gate_closed: bool,
+    comparison: Option<&str>,
 ) -> String {
     let reason = match blocker {
         WorkEventSettlementBlocker::PathDirty { states } => {
@@ -2147,13 +2177,13 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
             )
         }
         WorkEventSettlementBlocker::CommitNotPushed => {
-            "the current HEAD is not contained by its configured upstream".to_string()
+            "the latest Work event commit is not contained by its configured upstream".to_string()
         }
         WorkEventSettlementBlocker::MissingUpstream => {
             "the current branch has no usable configured upstream".to_string()
         }
         WorkEventSettlementBlocker::RemoteDiverged => {
-            "the current HEAD and configured upstream have diverged".to_string()
+            "the latest Work event commit and configured upstream have diverged".to_string()
         }
         WorkEventSettlementBlocker::GitStatusError => {
             format!(
@@ -2167,8 +2197,12 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
             "the commit containing only `.gwt/` bookkeeping does not use the exact `chore(work):` subject prefix"
                 .to_string(),
     };
+    let reason = match comparison {
+        Some(comparison) => format!("{reason} ({comparison})"),
+        None => reason,
+    };
     format!(
-        "Work event settlement refused: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push HEAD to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
+        "Work event settlement is not closed: {reason}. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
         identity_gate_escape_suffix(identity_gate_closed)
     )
 }
@@ -8467,9 +8501,11 @@ mod tests {
         fs::write(fixture.repo.join("src.txt"), "unpublished source\n").unwrap();
         fixture.git_ok(&["add", "src.txt"]);
         fixture.commit("fix: not delivered yet");
-        assert!(
-            work_event_settlement_refusal(&fixture.repo).is_some(),
-            "a remote base must not authorize an unpublished source commit"
+        assert_eq!(
+            work_event_settlement_refusal(&fixture.repo),
+            None,
+            "SPEC #3590 FR-027: an unpublished source commit is delivery's business; \
+             the event commit is already on the remote base"
         );
     }
 
@@ -8737,12 +8773,15 @@ mod tests {
     }
 
     #[test]
-    fn work_event_settlement_requires_head_containment_after_event_commit() {
+    fn work_event_settlement_needs_only_the_event_commit_on_upstream() {
+        // SPEC #3590 FR-027: the bookkeeping gate judges the event commit it
+        // records, not every later source commit on HEAD.
         let fixture = WorkEventGitFixture::tracked();
         fixture.append_event("pushed-event");
         fixture.stage_events();
         fixture.commit("chore(work): push final Work event");
         fixture.push();
+        let settled = fixture.settled_status();
 
         fs::write(fixture.repo.join("src.txt"), "local source after event\n")
             .expect("write source-only local change");
@@ -8750,16 +8789,34 @@ mod tests {
         fixture.commit("fix: source after final Work event");
         assert_eq!(
             evaluate_work_event_settlement(&fixture.repo),
-            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::CommitNotPushed),
-            "a pushed event commit cannot settle a later unpushed HEAD"
+            settled,
+            "an unpushed source commit after the pushed event commit must not block bookkeeping"
         );
 
         fixture.advance_remote_from_peer();
         assert_eq!(
             evaluate_work_event_settlement(&fixture.repo),
-            WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged),
-            "remote divergence after the event receipt must also block settlement"
+            settled,
+            "a remote that moved past the pushed event commit still contains it"
         );
+    }
+
+    #[test]
+    fn work_event_settlement_refusal_names_the_compared_refs_and_shas() {
+        // SPEC #3590 FR-028: an unpushed-event refusal must show what it
+        // compared, so "HEAD equals upstream yet refused" is diagnosable.
+        let fixture = WorkEventGitFixture::tracked();
+        let upstream_sha = fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]);
+        fixture.append_event("unpushed-event");
+        fixture.stage_events();
+        fixture.commit("chore(work): unpushed Work event");
+        let event_commit = fixture.latest_event_commit();
+
+        let refusal = work_event_settlement_refusal(&fixture.repo)
+            .expect("an unpushed event commit is refused");
+        assert!(refusal.contains(&event_commit), "{refusal}");
+        assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
+        assert!(refusal.contains(&upstream_sha), "{refusal}");
     }
 
     #[test]

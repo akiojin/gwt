@@ -413,7 +413,6 @@ fn legacy_refusal_eligible_operation(operation: &str) -> bool {
 ///
 /// | Refusal | Disposition | Escalates |
 /// | --- | --- | --- |
-/// | Work event store dirty / unpushed (`work_event_delivery_unsettled`) | agent-recoverable → commit and push the events | no |
 /// | Verification evidence missing / stale / failing / plan changed (`verification_*`) | agent-recoverable → `verify.run` | no |
 /// | Open action obligations (`open_action_obligations`) | agent-recoverable → `execution.blocked` | no |
 /// | Trusted store busy (`*_store_busy`) | agent-recoverable → retry the same operation | no |
