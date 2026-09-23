@@ -245,9 +245,16 @@ test.describe.serial("pane close latency (live backend)", () => {
       page.on("pageerror", (error) => pageErrors.push(String(error)));
       await withLiveGwtBackendLock(BASE, testInfo, async () => {
         await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+        // Issue #4538: binding to the Project route may reload the page, so
+        // the recorder is installed on the final Project page and the reopen
+        // that starts the work refresh cycle is sent after it.
+        await openLiveGwtProject(page);
         await installWindowStateRecorder(page);
         const projectionsBeforeOpen = await projectionBroadcastCount(page);
-        await openLiveGwtProject(page);
+        await sendLiveGwtEvent(page, {
+          kind: "reopen_recent_project",
+          path: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd(),
+        });
 
         const ids: string[] = [];
         for (let index = 0; index < PANE_COUNT; index += 1) {

@@ -128,10 +128,15 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
   開きます。
 - **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
 
-ブラウザの各タブでプロジェクトを選ぶと、そのワークスペースが開きます。
-異なるプロジェクトのウィンドウと起動ダイアログは独立し、同じプロジェクトを
-開いた複数のブラウザタブではワークスペースが同期します。プロジェクトの
-追加・削除は、表示中のプロジェクトにかかわらず一覧へ反映されます。
+ルート URL `http://127.0.0.1:<port>/` は **Hub** です。Open Folder、Clone from
+GitHub、Recent projects、開いているプロジェクトの一覧を表示します。各プロジェクトは
+固有の URL `http://127.0.0.1:<port>/p/<project-hash>` を持ち、プロジェクトへの
+リンクは新しいブラウザタブで開くため、1 つのブラウザタブには 1 つのプロジェクトが
+表示されます。異なるプロジェクトのウィンドウと起動ダイアログは独立し、同じ
+プロジェクト URL を開いた複数のブラウザタブではワークスペースが同期します。
+プロジェクト URL をブックマークやタブ復元で開くと、Recent のプロジェクトは自動で
+開き直され、未知のプロジェクト URL は Hub へのリンク付きの「Project not found」を
+表示します。プロジェクトのヘッダーにある **Hub** リンクは Hub を新しいタブで開きます。
 
 Autostart は **Settings > System > Launch GWT at login** で切り替えます。
 有効にすると `auto-launch` crate 経由で macOS LaunchAgent / Windows HKCU
@@ -141,7 +146,8 @@ Run registry / Linux XDG autostart を user scope に登録し、次回 OS ロ�
 ```bash
 gwt                                 # トレイ常駐 + 埋込サーバー起動 (loopback)
 gwt --bind 0.0.0.0 --port 60745     # 埋込サーバーを LAN / VPN 到達可能な IP/Port に bind
-gwt open                            # 起動中の tray インスタンスの URL を既定ブラウザで開く
+gwt open                            # 起動中の tray インスタンスの Hub URL を既定ブラウザで開く
+gwt open ~/src/my-repo              # そのプロジェクトを (必要なら開いてから) /p/<hash> URL で開く
 ```
 
 `--bind <ip>` の既定値は `127.0.0.1` です。`--port` を省略し、保存値がまだ

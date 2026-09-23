@@ -81,9 +81,10 @@ use super::{
     KnowledgeSearchRequest, LaunchFeedbackContext, LaunchPaneDisposition, LaunchWizardMemoryCache,
     LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
     PendingContinueWorkExecution, PendingFreshExecutionLaunch, PreparedProjectSwitch,
-    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectTabRuntime,
-    ReadinessDeadlineDecision, ReadinessPaneEvidence, ScheduledIssueMonitorScanOutcome, UserEvent,
-    WindowAddress, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenControlFailure,
+    ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision, ReadinessPaneEvidence,
+    RecentProjectKeysResolved, ScheduledIssueMonitorScanOutcome, UserEvent, WindowAddress,
+    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::app_runtime::initial_project_tab_incarnations;
 use crate::embedded_server::{
@@ -4271,6 +4272,7 @@ fn sample_runtime_with_events(
         next_project_incarnation,
         project_navigation_request: 0,
         pending_project_navigation: None,
+        project_route: Default::default(),
         recent_projects: Vec::new(),
         profile_selections: HashMap::new(),
         profile_config_path: Some(profile_config_path),
@@ -78062,6 +78064,8 @@ include!("project_request_tests.rs");
 include!("window_project_scope_tests.rs");
 
 include!("async_project_tests.rs");
+
+include!("project_route_tests.rs");
 
 // Handler unit tests inspect the payload; ingress-generation rejection is covered
 // separately through accept_project_completion in async_project_tests.rs.

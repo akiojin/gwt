@@ -46,7 +46,10 @@ if grep -q "release-guide" "$README_EN" "$README_JA"; then
   fail=1
 fi
 
-if ! grep -q '<script type="module" src="/app.js"></script>' "$INDEX_HTML"; then
+# Issue #4538: index.html boots the route bootstrap, which loads the shared
+# /app.js bundle for Project routes (`/p/<hash>`) and the Hub for `/`.
+if ! grep -q '<script type="module" src="/frontend-bootstrap.js"></script>' "$INDEX_HTML" \
+  || ! grep -q '"/app.js"' "$ROOT/crates/gwt/web/frontend-bootstrap.js"; then
   echo "[FAIL] index.html no longer points at the shared /app.js frontend bundle"
   fail=1
 fi

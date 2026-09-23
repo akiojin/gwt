@@ -898,11 +898,19 @@ struct ServerState {
     attachment_upload_token: String,
     attachment_uploads: AttachmentUploadStore,
     pty_writers: PtyWriterRegistry,
+    /// Issue #4538 AC-4: bearer token for `POST /internal/projects/open`,
+    /// published only through the `0600` tray lock file. `None` refuses every
+    /// control request.
+    control_token: Option<Arc<str>>,
+    project_open_timeout: Duration,
     // Held only so the in-process sink stays alive for the lifetime of the
     // server. Read directly through [`EmbeddedServer::access_log`] in tests.
     #[allow(dead_code)]
     access_log: AccessLogSink,
 }
+
+/// Upper bound on one `gwt open <path>` round trip through the runtime.
+const PROJECT_OPEN_CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct EmbeddedServer {
     url: String,
@@ -2751,6 +2759,31 @@ impl EmbeddedServer {
         )
     }
 
+    /// Test server that accepts `gwt open` control requests with `token`.
+    #[cfg(test)]
+    pub(super) fn start_with_control_token(
+        runtime: &Runtime,
+        proxy: AppEventProxy,
+        control_token: &str,
+        project_open_timeout: Duration,
+    ) -> std::io::Result<Self> {
+        let listener = runtime.block_on(TcpListener::bind(SocketAddr::new(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+        )))?;
+        Self::start_serving(
+            runtime,
+            listener.into_std()?,
+            0,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+            Some(control_token.to_string()),
+            project_open_timeout,
+        )
+    }
+
     /// SPEC-1942 FR-095 / FR-098: bind the embedded server to a caller-chosen
     /// IP / port and install the access-log middleware. Used by the current
     /// browser-server route for both loopback defaults and operator-chosen
@@ -2777,6 +2810,7 @@ impl EmbeddedServer {
             clients,
             pty_writers,
             attachment_uploads,
+            None,
         )
     }
 
@@ -2791,6 +2825,32 @@ impl EmbeddedServer {
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
+        control_token: Option<String>,
+    ) -> std::io::Result<Self> {
+        Self::start_serving(
+            runtime,
+            listener,
+            oauth_redirect_port,
+            proxy,
+            clients,
+            pty_writers,
+            attachment_uploads,
+            control_token,
+            PROJECT_OPEN_CONTROL_TIMEOUT,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_serving(
+        runtime: &Runtime,
+        listener: std::net::TcpListener,
+        oauth_redirect_port: u16,
+        proxy: AppEventProxy,
+        clients: ClientHub,
+        pty_writers: PtyWriterRegistry,
+        attachment_uploads: AttachmentUploadStore,
+        control_token: Option<String>,
+        project_open_timeout: Duration,
     ) -> std::io::Result<Self> {
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -2839,6 +2899,8 @@ impl EmbeddedServer {
             attachment_upload_token,
             attachment_uploads,
             pty_writers,
+            control_token: control_token.map(Arc::from),
+            project_open_timeout,
             access_log: access_log.clone(),
         };
 
@@ -2864,6 +2926,23 @@ impl EmbeddedServer {
                 post(attachment_upload_handler),
             )
             .route("/ws", get(websocket_handler))
+            // Issue #4538 AC-1: per-project URLs share the entrypoint.
+            .route(
+                "/p/{repo_hash}",
+                get(
+                    |axum::extract::Path(repo_hash): axum::extract::Path<String>| async move {
+                        embedded_web::project_route_response(&repo_hash)
+                    },
+                ),
+            )
+            .route(
+                "/p/{repo_hash}/{*rest}",
+                get(|| async { embedded_web::project_not_found_response() }),
+            )
+            .route(
+                gwt::project_open_control::PROJECT_OPEN_CONTROL_PATH,
+                post(project_open_control_handler),
+            )
             .with_state(server_state)
             .layer(middleware::from_fn_with_state(
                 AccessLogPolicy::browser(access_log.clone()),
@@ -3362,6 +3441,77 @@ async fn access_log_middleware(
 
 fn should_drop_access_log_record(record: &AccessLogRecord) -> bool {
     record.method == "POST" && record.path == "/internal/hook-live" && record.status == 204
+}
+
+/// Issue #4538 AC-4 / AC-5: `gwt open <path>` asks the runtime to open a
+/// Project and answers with its ProjectKey once the async open has committed.
+/// Nothing is dispatched to the runtime before authorization and validation.
+async fn project_open_control_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    use gwt::project_open_control::{
+        authorize_control_request, parse_control_request, project_url_path,
+        ProjectOpenControlRejection, ProjectOpenControlResponse,
+        PROJECT_OPEN_CONTROL_MAX_BODY_BYTES,
+    };
+    let header_text = |name| headers.get(name).and_then(|value| value.to_str().ok());
+    let result = async {
+        authorize_control_request(header_text(AUTHORIZATION), state.control_token.as_deref())?;
+        let mut body = Vec::new();
+        let mut stream = request.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                ProjectOpenControlRejection::BadRequest(format!("failed to read body: {error}"))
+            })?;
+            if body.len() + chunk.len() > PROJECT_OPEN_CONTROL_MAX_BODY_BYTES {
+                return Err(ProjectOpenControlRejection::PayloadTooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let path = parse_control_request(header_text(axum::http::header::CONTENT_TYPE), &body)?;
+        open_project_through_runtime(&state.proxy, path, state.project_open_timeout).await
+    }
+    .await;
+    match result {
+        Ok(project_key) => Json(ProjectOpenControlResponse {
+            url_path: project_url_path(project_key.as_str()),
+            project_key: project_key.to_string(),
+        })
+        .into_response(),
+        Err(rejection) => (
+            StatusCode::from_u16(rejection.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(gwt::project_open_control::ProjectOpenControlErrorBody {
+                error: rejection.message(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn open_project_through_runtime(
+    proxy: &AppEventProxy,
+    path: PathBuf,
+    timeout: Duration,
+) -> Result<ProjectKey, gwt::project_open_control::ProjectOpenControlRejection> {
+    use crate::app_runtime::{ProjectOpenControlFailure, ProjectOpenReply};
+    use gwt::project_open_control::ProjectOpenControlRejection as Rejection;
+    let (reply, outcome) = ProjectOpenReply::channel();
+    proxy.send(UserEvent::ControlProjectOpen { path, reply });
+    match tokio::time::timeout(timeout, outcome).await {
+        Err(_) => Err(Rejection::Timeout),
+        Ok(Err(_)) => Err(Rejection::Unavailable(
+            "gwt is not accepting project requests".to_string(),
+        )),
+        Ok(Ok(Ok(project_key))) => Ok(project_key),
+        Ok(Ok(Err(ProjectOpenControlFailure::Rejected(message)))) => {
+            Err(Rejection::Unprocessable(message))
+        }
+        Ok(Ok(Err(ProjectOpenControlFailure::Unavailable(message)))) => {
+            Err(Rejection::Unavailable(message))
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -5061,6 +5211,8 @@ mod tests {
                 attachment_upload_token: "upload-token".to_string(),
                 attachment_uploads: AttachmentUploadStore::in_system_temp(),
                 pty_writers: Arc::new(RwLock::new(HashMap::new())),
+                control_token: None,
+                project_open_timeout: Duration::from_secs(1),
                 access_log: super::AccessLogSink::default(),
             },
             events,
@@ -11667,6 +11819,281 @@ mod tests {
         assert_eq!(healthz.method, "GET");
         assert_eq!(healthz.status, 200);
 
+        server.shutdown();
+    }
+
+    // Issue #4538 AC-1: per-project URLs serve the shared entrypoint for a
+    // canonical ProjectKey and a deterministic, path-free 404 otherwise.
+    #[test]
+    fn per_project_routes_serve_the_entrypoint_or_a_path_free_not_found() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let client = reqwest::blocking::Client::new();
+        let get = |path: &str| {
+            let response = client
+                .get(format!("{}{path}", server.url()))
+                .send()
+                .expect("request");
+            let status = response.status();
+            (status, response.text().expect("body"))
+        };
+
+        let (hub_status, hub) = get("");
+        let (project_status, project) = get("p/0123456789abcdef");
+        assert_eq!(hub_status, HttpStatusCode::OK);
+        assert_eq!(project_status, HttpStatusCode::OK);
+        assert_eq!(project, hub, "Hub and Project share one route bootstrap");
+
+        let home = std::env::var("HOME").unwrap_or_default();
+        for path in [
+            "p/ZZZ",
+            "p/0123456789ABCDEF",
+            "p/0123456789abcdef0",
+            "p/..%2F..%2Fetc",
+            "p/0123456789abcdef/extra",
+        ] {
+            let (status, body) = get(path);
+            assert_eq!(status, HttpStatusCode::NOT_FOUND, "{path}");
+            assert!(body.contains("Project not found"), "{path}: {body}");
+            assert!(body.contains(r#"href="/""#), "not-found links to the Hub");
+            if !home.is_empty() {
+                assert!(!body.contains(&home), "no filesystem path in {path}");
+            }
+        }
+        assert!(
+            events.lock().expect("events").is_empty(),
+            "routing never reaches the runtime"
+        );
+        server.shutdown();
+    }
+
+    fn post_project_open(
+        server: &EmbeddedServer,
+        authorization: Option<&str>,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (HttpStatusCode, serde_json::Value) {
+        let mut request = reqwest::blocking::Client::new()
+            .post(format!("{}internal/projects/open", server.url()))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body);
+        if let Some(authorization) = authorization {
+            request = request.header(reqwest::header::AUTHORIZATION, authorization);
+        }
+        let response = request.send().expect("control request");
+        let status = response.status();
+        (status, response.json().unwrap_or(serde_json::Value::Null))
+    }
+
+    fn project_open_body(path: &std::path::Path) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "path": path.display().to_string() })).unwrap()
+    }
+
+    fn answer_control_open(
+        events: Arc<Mutex<Vec<UserEvent>>>,
+        answer: impl FnOnce(std::path::PathBuf, crate::app_runtime::ProjectOpenReply) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let request = {
+                    let mut events = events.lock().expect("events");
+                    events
+                        .iter()
+                        .position(|event| matches!(event, UserEvent::ControlProjectOpen { .. }))
+                        .map(|index| events.remove(index))
+                };
+                if let Some(UserEvent::ControlProjectOpen { path, reply }) = request {
+                    answer(path, reply);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            panic!("control open request never reached the runtime");
+        })
+    }
+
+    // Issue #4538 AC-4 / AC-5: the control request is authorized and fully
+    // validated before the runtime sees it; runtime outcomes map to fixed
+    // statuses and nothing speculative happens on failure.
+    #[test]
+    fn project_open_control_rejects_before_dispatching_to_the_runtime() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start_with_control_token(
+            &runtime,
+            proxy,
+            "secret-token",
+            Duration::from_secs(10),
+        )
+        .expect("embedded server");
+        let absolute = std::env::temp_dir().join("gwt-4538-project");
+        let valid = project_open_body(&absolute);
+        let cases: Vec<(Option<&str>, &str, Vec<u8>, HttpStatusCode)> = vec![
+            (
+                None,
+                "application/json",
+                valid.clone(),
+                HttpStatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("Bearer wrong"),
+                "application/json",
+                valid.clone(),
+                HttpStatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "text/plain",
+                valid.clone(),
+                HttpStatusCode::BAD_REQUEST,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                vec![b'{', 0xfe, b'}'],
+                HttpStatusCode::BAD_REQUEST,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                br#"{"path":"/x","unexpected":1}"#.to_vec(),
+                HttpStatusCode::BAD_REQUEST,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                vec![b' '; gwt::project_open_control::PROJECT_OPEN_CONTROL_MAX_BODY_BYTES + 1],
+                HttpStatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                Some("Bearer secret-token"),
+                "application/json",
+                br#"{"path":"relative/path"}"#.to_vec(),
+                HttpStatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ];
+        for (authorization, content_type, body, expected) in cases {
+            let (status, error) = post_project_open(&server, authorization, content_type, body);
+            assert_eq!(status, expected, "{authorization:?} {content_type}");
+            assert!(error["error"].is_string(), "{error}");
+        }
+        assert!(
+            events.lock().expect("events").is_empty(),
+            "no rejected request reaches the runtime"
+        );
+        server.shutdown();
+    }
+
+    #[test]
+    fn project_open_control_answers_with_the_committed_project_key() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start_with_control_token(
+            &runtime,
+            proxy,
+            "secret-token",
+            Duration::from_secs(10),
+        )
+        .expect("embedded server");
+        let target = std::env::temp_dir().join("gwt-4538-project");
+        let expected_path = target.clone();
+        let responder = answer_control_open(events.clone(), move |path, reply| {
+            assert_eq!(path, expected_path, "the exact path is forwarded");
+            reply.send(Ok(ProjectKey::parse("0123456789abcdef").unwrap()));
+        });
+        let (status, body) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&target),
+        );
+        responder.join().expect("responder");
+        assert_eq!(status, HttpStatusCode::OK);
+        assert_eq!(body["project_key"], "0123456789abcdef");
+        assert_eq!(body["url_path"], "/p/0123456789abcdef");
+
+        let responder = answer_control_open(events.clone(), |_, reply| {
+            reply.send(Err(
+                crate::app_runtime::ProjectOpenControlFailure::Rejected(
+                    "not a project".to_string(),
+                ),
+            ));
+        });
+        let (status, body) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&target),
+        );
+        responder.join().expect("responder");
+        assert_eq!(status, HttpStatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "not a project");
+
+        // The runtime dropped the request without answering (event loop gone).
+        let responder = answer_control_open(events, |_, reply| drop(reply));
+        let (status, _) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&target),
+        );
+        responder.join().expect("responder");
+        assert_eq!(status, HttpStatusCode::SERVICE_UNAVAILABLE);
+        server.shutdown();
+    }
+
+    #[test]
+    fn project_open_control_times_out_when_the_runtime_never_answers() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start_with_control_token(
+            &runtime,
+            proxy,
+            "secret-token",
+            Duration::from_millis(300),
+        )
+        .expect("embedded server");
+        let (status, body) = post_project_open(
+            &server,
+            Some("Bearer secret-token"),
+            "application/json",
+            project_open_body(&std::env::temp_dir().join("gwt-4538-project")),
+        );
+        assert_eq!(status, HttpStatusCode::GATEWAY_TIMEOUT);
+        assert!(body["error"].as_str().unwrap().contains("timed out"));
+        assert_eq!(events.lock().expect("events").len(), 1);
+        server.shutdown();
+    }
+
+    #[test]
+    fn project_open_control_refuses_everything_without_a_published_token() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let (status, _) = post_project_open(
+            &server,
+            Some("Bearer "),
+            "application/json",
+            project_open_body(&std::env::temp_dir()),
+        );
+        assert_eq!(status, HttpStatusCode::UNAUTHORIZED);
+        assert!(events.lock().expect("events").is_empty());
         server.shutdown();
     }
 }
