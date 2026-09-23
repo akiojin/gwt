@@ -2115,7 +2115,7 @@ fn compensate_genesis_workspace_projection(
         );
     }
 
-    gwt_core::workspace_projection::transact_workspace_state_for_work_event_root(
+    gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
         project_root,
         worktree_path,
         |projection, work_items, _persisted| {
