@@ -5,7 +5,8 @@
  * can be exercised end-to-end without a live gwt backend.
  */
 import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { APP_URL, installEmbeddedRoutes, APP_PROJECT_KEY } from "./_helpers/embedded-frontend";
+import { liveGwtProjectUrl } from "./_helpers/live-gwt";
 
 test.describe("Quiet Work UI surfaces (E2E)", () => {
   test.use({
@@ -48,7 +49,8 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     const liveUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installBackend(page);
-    await page.goto(liveUrl || APP_URL);
+    // Issue #4538: the live server serves the Project app at `/p/<key>`.
+    await page.goto(liveUrl ? liveGwtProjectUrl(liveUrl, APP_PROJECT_KEY) : APP_URL);
 
     const linkedWork = page.locator(".workspace-detail-section").filter({
       has: page.locator(".workspace-detail-section-title", { hasText: "Linked Work" }),

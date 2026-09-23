@@ -1,8 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { ORIGIN_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test.describe("Project tabs", () => {
@@ -56,14 +53,15 @@ test.describe("Project tabs", () => {
         }
       });
     });
+    // Issue #4538: the live page is bound to its `/p/<key>` route.
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
-    await expect(page.locator(".project-tab").first()).toBeVisible();
-    await page.locator(".project-tab").first().click();
+    await expect(page.locator(".project-tab[aria-current='page']")).toBeVisible();
     await expect.poll(() => scopedWorkspaceReceived).toBe(true);
     expect(projectKey).toMatch(/^[0-9a-f]{16}$/);
-    expect(sockets).toHaveLength(2);
-    expect(new URL(sockets[0]).searchParams.has("repo_hash")).toBe(false);
-    expect(new URL(sockets[1]).searchParams.get("repo_hash")).toBe(projectKey);
+    expect(new URL(page.url()).pathname).toBe(`/p/${projectKey}`);
+    const scoped = sockets.filter((url) => new URL(url).searchParams.has("repo_hash"));
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.every((url) => new URL(url).searchParams.get("repo_hash") === projectKey)).toBe(true);
     const shellSelector = '.workspace-window[data-preset="shell"]';
     const previousIds = new Set(backendWindowIds);
     await sendLiveGwtEvent(page, {
@@ -100,106 +98,12 @@ test.describe("Project tabs", () => {
     });
   });
 
-  test("live projects stay independent while two clients mirror the same project", async ({ page, context }, testInfo) => {
-    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
-    test.skip(!base, "requires browser-check isolated checkout server with two projects");
-    await withLiveGwtBackendLock(base!, testInfo, async () => {
-      const other = await context.newPage();
-      const mirror = await context.newPage();
-      const pages = [page, other, mirror];
-      const errors = pages.map(collectBrowserErrors);
-      const frames = pages.map(() => [] as Array<Record<string, any>>);
-      const created: Array<{ page: Page; id: string }> = [];
-      const theme = testInfo.project.name.includes("light") ? "light" : "dark";
-      const catalogProjectPath = await mkdtemp(join(tmpdir(), "gwt-4537-catalog-"));
-      let catalogProjectId: string | undefined;
-      try {
-        for (const [index, current] of pages.entries()) {
-          current.on("websocket", (socket) => {
-            socket.on("framereceived", ({ payload }) => {
-              const event = JSON.parse(String(payload));
-              if (event.kind === "hub_state" || event.kind === "workspace_state") {
-                frames[index].push({ ...event, socketProjectKey: new URL(socket.url()).searchParams.get("repo_hash") });
-              }
-            });
-          });
-          await gotoLiveGwt(current, base!, { enableTestBridge: true });
-          await expect.poll(() => frames[index].some((event) => event.kind === "hub_state")).toBe(true);
-          await expect(current.locator('.project-tab[aria-current="page"]')).toHaveCount(0);
-          await current.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
-          await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
-        }
-        const catalog = frames[0].find((event) => event.kind === "hub_state")!.hub.projects;
-        expect(catalog.length, "isolated session must seed projects A and B").toBeGreaterThanOrEqual(2);
-        expect(catalog.every((entry) => !("workspace" in entry))).toBe(true);
-        const selected = [catalog[0], catalog[1], catalog[0]];
-        for (const [index, current] of pages.entries()) {
-          await current.locator(`[data-project-tab-id="${selected[index].id}"]`).click();
-          await expect.poll(() => frames[index].some((event) =>
-            event.kind === "workspace_state" && event.socketProjectKey === selected[index].project_key
-          )).toBe(true);
-          await expect(current.locator(`[data-project-tab-id="${selected[index].id}"]`))
-            .toHaveAttribute("aria-current", "page");
-        }
+  // Live A/B isolation and A/A mirror moved to
+  // project-per-browser-tab.spec.ts with per-project URLs (Issue #4538).
 
-        // Hub navigation stays available while every browser is project-bound.
-        await sendLiveGwtEvent(page, { kind: "reopen_recent_project", path: catalogProjectPath });
-        await expect.poll(() => frames[0].filter((event) => event.kind === "hub_state")
-          .at(-1)?.hub.projects.length).toBe(catalog.length + 1);
-        catalogProjectId = frames[0].filter((event) => event.kind === "hub_state")
-          .at(-1)!.hub.projects.find((entry) => !catalog.some((old) => old.id === entry.id)).id;
-        for (const [index, current] of pages.entries()) {
-          await expect(current.locator(`[data-project-tab-id="${catalogProjectId}"]`)).toBeVisible();
-          await expect(current.locator(`[data-project-tab-id="${selected[index].id}"]`))
-            .toHaveAttribute("aria-current", "page");
-        }
-        await sendLiveGwtEvent(page, { kind: "close_project_tab", tab_id: catalogProjectId });
-        for (const current of pages) {
-          await expect(current.locator(`[data-project-tab-id="${catalogProjectId}"]`)).toHaveCount(0);
-        }
-        catalogProjectId = undefined;
-
-        const aWindow = await createLiveProjectShell(page);
-        created.push({ page, id: aWindow });
-        await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
-        await expect(other.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
-        const bWindow = await createLiveProjectShell(other);
-        created.push({ page: other, id: bWindow });
-        await expect(page.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
-        await expect(mirror.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
-        await expect(page.locator(`[data-project-tab-id="${catalog[0].id}"]`)).toHaveAttribute("aria-current", "page");
-        await expect(other.locator(`[data-project-tab-id="${catalog[1].id}"]`)).toHaveAttribute("aria-current", "page");
-        await page.screenshot({ path: testInfo.outputPath(`project-isolation-${theme}-a.png`) });
-        await other.screenshot({ path: testInfo.outputPath(`project-isolation-${theme}-b.png`) });
-
-        // Closing through one A client updates its mirror without touching B.
-        await sendLiveGwtEvent(page, { kind: "close_window", id: aWindow });
-        await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
-        await expect(other.locator(`.workspace-window[data-id="${bWindow}"]`)).toBeVisible();
-        for (const [index, received] of frames.entries()) {
-          const snapshots = received.filter((event) => event.kind === "workspace_state");
-          expect(snapshots.length).toBeGreaterThan(0);
-          expect(snapshots.every((event) => event.socketProjectKey === selected[index].project_key
-            && event.workspace.tabs[0].project_key === selected[index].project_key
-            && event.workspace.tabs.length === 1
-            && event.workspace.tabs[0].id === selected[index].id)).toBe(true);
-        }
-      } finally {
-        for (const window of created) {
-          await sendLiveGwtEvent(window.page, { kind: "close_window", id: window.id }).catch(() => {});
-        }
-        if (catalogProjectId) {
-          await sendLiveGwtEvent(page, { kind: "close_project_tab", tab_id: catalogProjectId }).catch(() => {});
-        }
-        await other.close();
-        await mirror.close();
-        await rm(catalogProjectPath, { recursive: true, force: true });
-      }
-      expect(errors.flat()).toEqual([]);
-    });
-  });
-
-  test("project switching reconnects with the selected immutable scope", async ({ page }) => {
+  // Issue #4538 AC-2: a `/p/<key>` tab binds its scope from the URL and
+  // opens every other Project in its own browser tab.
+  test("project route binds its scope from the URL and opens other projects in new tabs", async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => {
@@ -211,28 +115,22 @@ test.describe("Project tabs", () => {
       project_key: index === 0 ? "0123456789abcdef" : "fedcba9876543210",
     }));
     await installProjectTabsBackend(page, tabs);
-    await page.goto(APP_URL);
+    await page.goto(projectRoute("0123456789abcdef"));
     const urls = () => page.evaluate(() => window.__gwtProjectTabsSocketUrls);
-    await expect.poll(urls).toEqual(["ws://gwt-playwright.local/ws"]);
-    await page.locator(".project-tab").first().click();
     await expect.poll(urls).toEqual([
       "ws://gwt-playwright.local/ws",
       "ws://gwt-playwright.local/ws?repo_hash=0123456789abcdef",
     ]);
+    await expect(page.locator(".project-tab").first()).toHaveAttribute("aria-current", "page");
     await page.locator(".project-tab").nth(1).click();
-    await expect(page.locator(".project-tab").nth(1)).toHaveAttribute("aria-current", "page");
-    await expect.poll(urls).toEqual([
-      "ws://gwt-playwright.local/ws",
-      "ws://gwt-playwright.local/ws?repo_hash=0123456789abcdef",
-      "ws://gwt-playwright.local/ws?repo_hash=fedcba9876543210",
-    ]);
-    await page.locator(".project-tab").nth(0).click();
-    await expect.poll(urls).toHaveLength(4);
-    expect((await urls()).at(-1)).toContain("repo_hash=0123456789abcdef");
+    await expect.poll(() => openedWindows(page)).toEqual([["/p/fedcba9876543210", "_blank", "noopener"]]);
+    await expect(page.locator(".project-tab").first()).toHaveAttribute("aria-current", "page");
+    expect(page.url()).toBe(projectRoute("0123456789abcdef"));
+    expect(await urls()).toHaveLength(2);
     expect(errors).toEqual([]);
   });
 
-  test("tab switching stays responsive while streamed WebSocket output is backlogged", async ({
+  test("opening another project stays responsive while streamed WebSocket output is backlogged", async ({
     page,
   }) => {
     const burstSize = 500;
@@ -242,13 +140,12 @@ test.describe("Project tabs", () => {
       hotAgentWindowId: "agent-burst",
     }));
 
-    await page.goto(APP_URL);
+    await page.goto(projectRoute(projectKeyAt(0)));
     await expect(page.locator(".project-tab")).toHaveCount(12, {
       timeout: 10_000,
     });
     const first = page.locator(".project-tab").nth(0);
     const second = page.locator(".project-tab").nth(1);
-    await first.click();
     await expect(first).toHaveAttribute("aria-current", "page");
 
     expect(burstSize / streamedStateBoundary).toBeGreaterThanOrEqual(10);
@@ -268,9 +165,9 @@ test.describe("Project tabs", () => {
 
     const start = await page.evaluate(() => performance.now());
     await second.click();
-    await expect(second).toHaveAttribute("aria-current", "page", {
-      timeout: 1_000,
-    });
+    await expect.poll(() => openedWindows(page), { timeout: 1_000 })
+      .toEqual([[`/p/${projectKeyAt(1)}`, "_blank", "noopener"]]);
+    await expect(first).toHaveAttribute("aria-current", "page");
     const latencyMs = await page.evaluate((startedAt) => {
       return performance.now() - startedAt;
     }, start);
@@ -279,16 +176,16 @@ test.describe("Project tabs", () => {
     test.info().annotations.push({
       type: "measurement",
       description:
-        `tab switch latency under ${burstSize} streamed events: ` +
+        `project open latency under ${burstSize} streamed events: ` +
         `${latencyMs.toFixed(1)}ms`,
     });
     console.log(
-      `[project-tabs] high-load tab switch latency=${latencyMs.toFixed(1)}ms ` +
+      `[project-tabs] high-load project open latency=${latencyMs.toFixed(1)}ms ` +
         `burst=${burstSize} streamed_state_boundary=${streamedStateBoundary}`,
     );
   });
 
-  test("tab switching under streamed output stays within CPU and heap budgets", async ({
+  test("opening another project under streamed output stays within CPU and heap budgets", async ({
     page,
   }) => {
     const burstSize = 500;
@@ -302,13 +199,12 @@ test.describe("Project tabs", () => {
       hotAgentWindowId: "agent-burst",
     }));
 
-    await page.goto(APP_URL);
+    await page.goto(projectRoute(projectKeyAt(0)));
     await expect(page.locator(".project-tab")).toHaveCount(12, {
       timeout: 10_000,
     });
     const first = page.locator(".project-tab").nth(0);
     const second = page.locator(".project-tab").nth(1);
-    await first.click();
     await expect(first).toHaveAttribute("aria-current", "page");
 
     const heapBefore = await sampleBrowserHeap(page);
@@ -330,9 +226,9 @@ test.describe("Project tabs", () => {
 
     const start = await page.evaluate(() => performance.now());
     await second.click();
-    await expect(second).toHaveAttribute("aria-current", "page", {
-      timeout: latencyBudgetMs,
-    });
+    await expect.poll(() => openedWindows(page), { timeout: latencyBudgetMs })
+      .toEqual([[`/p/${projectKeyAt(1)}`, "_blank", "noopener"]]);
+    await expect(first).toHaveAttribute("aria-current", "page");
     const latencyMs = await page.evaluate((startedAt) => {
       return performance.now() - startedAt;
     }, start);
@@ -381,7 +277,7 @@ test.describe("Project tabs", () => {
     test.info().annotations.push({
       type: "measurement",
       description:
-        `tab switch latency=${latencyMs.toFixed(1)}ms ` +
+        `project open latency=${latencyMs.toFixed(1)}ms ` +
         `long_tasks=${overBudgetLongTasks.length} ` +
         `raf_gaps=${overBudgetRafGaps.length} ${memorySummary}`,
     });
@@ -395,13 +291,13 @@ test.describe("Project tabs", () => {
     );
   });
 
-  test("many project tabs keep project actions visible and remain switchable", async ({
+  test("many project tabs keep project actions visible and remain reachable", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
     await installProjectTabsBackend(page, 12);
 
-    await page.goto(APP_URL);
+    await page.goto(projectRoute(projectKeyAt(0)));
     await expect(page.locator(".project-tab")).toHaveCount(12, {
       timeout: 10_000,
     });
@@ -444,11 +340,12 @@ test.describe("Project tabs", () => {
 
     const first = page.locator(".project-tab").nth(0);
     const second = page.locator(".project-tab").nth(1);
-    await first.click();
     await expect(first).toHaveAttribute("aria-current", "page");
     await second.click();
-    await expect(second).toHaveAttribute("aria-current", "page");
-    await expect(first).not.toHaveAttribute("aria-current", "page");
+    await expect.poll(() => openedWindows(page))
+      .toEqual([[`/p/${projectKeyAt(1)}`, "_blank", "noopener"]]);
+    await expect(first).toHaveAttribute("aria-current", "page");
+    await expect(second).not.toHaveAttribute("aria-current", "page");
   });
 
   test("project tab cue appears only when the project has a running agent", async ({
@@ -478,9 +375,8 @@ test.describe("Project tabs", () => {
       },
     ]);
 
-    await page.goto(APP_URL);
-
-    await page.locator('[data-project-tab-id="tab-running"]').click();
+    await page.goto(projectRoute(projectKeyAt(0)));
+    await expect(page.locator('[data-project-tab-id="tab-running"]')).toHaveAttribute("aria-current", "page");
     const runningCue = page.locator(
       '[data-project-tab-id="tab-running"] [data-role="project-tab-state-cue"]',
     );
@@ -532,6 +428,21 @@ async function sampleBrowserHeap(page) {
   });
 }
 
+// Stub fixtures cannot serve a second browser tab, so `window.open` is
+// recorded instead; the live Project-per-tab spec opens real tabs.
+function openedWindows(page: Page) {
+  return page.evaluate(() => (window as any).__gwtOpenedWindows ?? []);
+}
+
+function projectRoute(projectKey: string): string {
+  return `${ORIGIN_URL}p/${projectKey}`;
+}
+
+// installProjectTabsBackend assigns `(index + 1)` as the default key.
+function projectKeyAt(index: number): string {
+  return (index + 1).toString(16).padStart(16, "0");
+}
+
 function projectTabsFixture(
   count: number,
   { hotAgentWindowId }: { hotAgentWindowId?: string } = {},
@@ -565,6 +476,10 @@ function projectTabsFixture(
 
 async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
   await page.addInitScript((fixture) => {
+    window.open = (...args) => {
+      ((window as any).__gwtOpenedWindows ??= []).push(args);
+      return null;
+    };
     const tabs = (Array.isArray(fixture)
       ? fixture
       : Array.from({ length: fixture }, (_, index) => {
@@ -674,17 +589,4 @@ function collectBrowserErrors(page: Page): string[] {
     if (message.type() === "error") errors.push(message.text());
   });
   return errors;
-}
-
-async function createLiveProjectShell(page: Page): Promise<string> {
-  const shells = page.locator('.workspace-window[data-preset="shell"]');
-  const before = new Set(await shells.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.id)));
-  await sendLiveGwtEvent(page, {
-    kind: "create_window", preset: "shell",
-    bounds: { x: 80, y: 80, width: 720, height: 420 },
-  });
-  const created = async () => (await shells.evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.id!)))
-    .filter((id) => !before.has(id));
-  await expect.poll(created, { timeout: 30_000 }).toHaveLength(1);
-  return (await created())[0];
 }

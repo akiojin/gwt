@@ -11,10 +11,20 @@ import path from "node:path";
 
 const WEB_ROOT = path.resolve(process.cwd(), "crates/gwt/web");
 
-export const APP_URL = "http://gwt-playwright.local/";
+// Issue #4538: `/` is the Hub; the Project workspace lives at
+// `/p/<repo-hash>`. Behaviour specs drive the Project app, so APP_URL is a
+// fixed Project route and HUB_URL is the root picker.
+export const ORIGIN_URL = "http://gwt-playwright.local/";
+export const APP_PROJECT_KEY = "0123456789abcdef";
+export const APP_URL = `${ORIGIN_URL}p/${APP_PROJECT_KEY}`;
+export const HUB_URL = ORIGIN_URL;
 
 const ROOT_MODULES = new Set([
   "app.js",
+  // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
+  "frontend-bootstrap.js",
+  "frontend-route.js",
+  "hub-app.js",
   // SPEC-2008 Phase 38 — Agent Kanban window surface.
   "agent-kanban-surface.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
@@ -120,7 +130,7 @@ const ROOT_MODULES = new Set([
 ]);
 
 export async function installEmbeddedRoutes(page: any): Promise<void> {
-  await page.route(`${APP_URL}**`, async (route: any) => {
+  await page.route(`${ORIGIN_URL}**`, async (route: any) => {
     const url = new URL(route.request().url());
     const assetPath = resolveAssetPath(url.pathname);
     if (!assetPath) {
@@ -139,7 +149,7 @@ export async function installEmbeddedRoutes(page: any): Promise<void> {
 }
 
 function resolveAssetPath(pathname: string): string | null {
-  if (pathname === "/" || pathname === "/index.html") {
+  if (pathname === "/" || pathname === "/index.html" || /^\/p\/[0-9a-f]{16}$/.test(pathname)) {
     return path.join(WEB_ROOT, "index.html");
   }
   if (pathname === "/assets/xterm/xterm.css") {

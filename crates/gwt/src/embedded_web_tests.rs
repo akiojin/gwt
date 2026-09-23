@@ -124,6 +124,8 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         include_str!("../web/app.js"),
         "\n",
+        include_str!("../web/frontend-route.js"),
+        "\n",
         include_str!("../web/branch-list-state.js"),
         "\n",
         include_str!("../web/board-surface.js"),
@@ -1990,13 +1992,18 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
 #[test]
 fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
     let html = frontend_bundle_source();
+    // Issue #4538: the Project app and the Hub share one route helper.
+    let delegation = regex::Regex::new(
+        r#"function websocketUrl\(projectKey = activeProjectKey\(\)\)\s*\{\s*return routeWebSocketUrl\(window\.location\.href, projectKey\);\s*\}"#,
+    )
+    .expect("valid regex");
     let websocket_url = regex::Regex::new(
-            r#"function websocketUrl\(projectKey = activeProjectKey\(\)\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*if \(projectKey\) url\.searchParams\.set\("repo_hash", projectKey\);\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
+            r#"export function routeWebSocketUrl\(locationHref, projectKey\)\s*\{\s*const url = new URL\(locationHref\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*if \(projectKey\) url\.searchParams\.set\("repo_hash", projectKey\);\s*return url\.toString\(\);\s*\}"#,
         )
         .expect("valid regex");
 
     assert!(
-            websocket_url.is_match(html),
+            delegation.is_match(html) && websocket_url.is_match(html),
             "expected embedded bundle to derive the websocket endpoint from window.location without host-specific branches",
         );
     assert!(
@@ -2157,7 +2164,8 @@ fn embedded_web_branches_surface_remains_branch_browser() {
 fn embedded_web_serves_every_root_module_import() {
     let embedded_web_source = include_str!("embedded_web.rs");
     let embedded_server_source = include_str!("embedded_server.rs");
-    let mut module_graph_source = String::from(app_js());
+    // index.html loads the route bootstrap, which loads app.js / hub-app.js.
+    let mut module_graph_source = format!("{}\n{}", index_html(), app_js());
     for asset in root_js_module_assets() {
         module_graph_source.push('\n');
         module_graph_source.push_str(asset.source);
