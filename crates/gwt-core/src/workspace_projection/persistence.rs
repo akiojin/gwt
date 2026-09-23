@@ -4930,12 +4930,13 @@ fn append_workspace_work_events_if_missing(path: &Path, events: &[WorkEvent]) ->
 /// The caller must hold the current owner/Session execution-binding lease
 /// throughout this call. This narrowly scoped writer does not grant generic
 /// cross-Work mutation authority or change the shared current projection.
+/// Returns the event actually written, or None when the metadata was unchanged.
 pub fn record_workspace_pr_metadata_for_execution(
     repo_path: &Path,
     owner: &str,
     session_id: &str,
     container: &WorkspaceExecutionContainerRef,
-) -> Result<()> {
+) -> Result<Option<WorkEvent>> {
     record_workspace_pr_metadata_for_execution_at(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
         &gwt_repo_local_work_events_dir(repo_path),
@@ -4951,7 +4952,7 @@ fn record_workspace_pr_metadata_for_execution_at(
     owner: &str,
     session_id: &str,
     container: &WorkspaceExecutionContainerRef,
-) -> Result<()> {
+) -> Result<Option<WorkEvent>> {
     let refusal =
         || GwtError::Other("PR metadata target is missing, ambiguous, or unauthorized".into());
     if owner.trim().is_empty()
@@ -5024,7 +5025,7 @@ fn record_workspace_pr_metadata_for_execution_at(
         updated.pr_url = container.pr_url.clone();
         updated.pr_state = container.pr_state.clone();
         if **existing == updated {
-            return Ok(());
+            return Ok(None);
         }
         let mut event = WorkEvent::new(WorkEventKind::Pr, item.id.clone(), Utc::now());
         event.agent_session_id = Some(session_id.to_string());
@@ -5033,8 +5034,9 @@ fn record_workspace_pr_metadata_for_execution_at(
         if projection.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Err(refusal());
         }
-        write_workspace_work_event_shards_to_dir(events_dir, &[event])?;
-        save_workspace_work_items_projection_to_path(works_path, &projection)
+        write_workspace_work_event_shards_to_dir(events_dir, std::slice::from_ref(&event))?;
+        save_workspace_work_items_projection_to_path(works_path, &projection)?;
+        Ok(Some(event))
     })
 }
 

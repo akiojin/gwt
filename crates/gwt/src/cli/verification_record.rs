@@ -2217,6 +2217,67 @@ fn identity_gate_escape_suffix(identity_gate_closed: bool) -> &'static str {
     " The Agent Workspace identity gate is closed for this session, so that commit and push are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then commit, push, and retry. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
 }
 
+/// Only the successful PR mutation path calls this with the event returned by
+/// its writer. A kind:pr payload alone is not producer provenance. Keep the
+/// exact canonical bytes outside the checkout, scoped to this worktree.
+pub(crate) fn certify_pr_delivery_event(
+    worktree: &Path,
+    event: &gwt_core::workspace_projection::WorkEvent,
+) -> io::Result<()> {
+    if event.kind != gwt_core::workspace_projection::WorkEventKind::Pr {
+        return Err(io::Error::other("delivery certificate requires a PR event"));
+    }
+    let path = gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id);
+    let mut bytes = serde_json::to_vec(event)?;
+    bytes.push(b'\n');
+    if fs::read(&path)? != bytes {
+        return Err(io::Error::other(
+            "PR delivery event changed before certification",
+        ));
+    }
+    let name = format!(
+        "pr-delivery-{}",
+        path.file_name().unwrap().to_string_lossy()
+    );
+    let Some(trusted_dir) = super::trusted_store::trusted_dir_for_worktree(worktree) else {
+        // Legacy/unmanaged repositories without a trusted scope retain their
+        // existing PR behavior and receive no settlement exemption.
+        return Ok(());
+    };
+    // This is a complete per-event write, not shared read-modify-write state.
+    // Ready PR dispatch already holds the non-reentrant trusted-store lease.
+    super::trusted_store::write_to_resolved_dir(&trusted_dir, &name, &bytes)?;
+    let saved = super::trusted_store::read_from_resolved_dir(&trusted_dir, &name)?
+        .ok_or_else(|| io::Error::other("PR delivery certificate disappeared"))?;
+    if saved.as_bytes() != bytes {
+        return Err(io::Error::other(
+            "PR delivery certificate readback mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn is_certified_pr_delivery_event(worktree: &Path, relative: &[u8]) -> bool {
+    if !is_canonical_bucketed_work_event_shard(relative) {
+        return false;
+    }
+    let Ok(relative) = std::str::from_utf8(relative) else {
+        return false;
+    };
+    let path = worktree.join(relative);
+    if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return false;
+    }
+    let name = format!(
+        "pr-delivery-{}",
+        path.file_name().unwrap().to_string_lossy()
+    );
+    match (super::trusted_store::read(worktree, &name), fs::read(path)) {
+        (Ok(Some(certified)), Ok(actual)) => certified.as_bytes() == actual,
+        _ => false,
+    }
+}
+
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
     let output = gwt_core::process::hidden_command("git")
         .args([
@@ -2242,6 +2303,9 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
         }
         let (index, worktree_state) = (bytes[0], bytes[1]);
         if index == b'?' && worktree_state == b'?' {
+            if is_certified_pr_delivery_event(worktree, &bytes[3..]) {
+                continue;
+            }
             states.push(WorkEventPathState::Untracked);
             continue;
         }
@@ -2275,7 +2339,10 @@ fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .any(is_canonical_bucketed_work_event_shard)
+        .any(|path| {
+            is_canonical_bucketed_work_event_shard(path)
+                && !is_certified_pr_delivery_event(worktree, path)
+        })
     {
         states.push(WorkEventPathState::Untracked);
     }

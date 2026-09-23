@@ -906,7 +906,9 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
     requested_head: Option<&str>,
 ) -> std::io::Result<()> {
     let Some(binding) = binding else {
-        sync_workspace_pr_metadata(env, pr, requested_head);
+        if let Some(event) = sync_workspace_pr_metadata(env, pr, requested_head) {
+            crate::cli::verification_record::certify_pr_delivery_event(env.repo_path(), &event)?;
+        }
         return Ok(());
     };
     let result = (|| {
@@ -930,13 +932,17 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
             pr_url: Some(pr.url.clone()),
             pr_state: Some(pr.state.to_string()),
         };
-        gwt_core::workspace_projection::record_workspace_pr_metadata_for_execution(
+        let event = gwt_core::workspace_projection::record_workspace_pr_metadata_for_execution(
             &worktree,
             &owner,
             &binding.session_id,
             &container,
         )
-        .map_err(|error| std::io::Error::other(error.to_string()))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if let Some(event) = event {
+            crate::cli::verification_record::certify_pr_delivery_event(&worktree, &event)?;
+        }
+        Ok(())
     })();
     result.map_err(|error| {
         std::io::Error::other(format!(
@@ -946,8 +952,12 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
     })
 }
 
-fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
-    sync_workspace_pr_metadata_for_target(env, pr, requested_head, false);
+fn sync_workspace_pr_metadata<E: CliEnv>(
+    env: &E,
+    pr: &PrStatus,
+    requested_head: Option<&str>,
+) -> Option<gwt_core::workspace_projection::WorkEvent> {
+    sync_workspace_pr_metadata_for_target(env, pr, requested_head, false)
 }
 
 fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
@@ -955,23 +965,19 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
     pr: &PrStatus,
     requested_head: Option<&str>,
     require_existing_pr: bool,
-) {
+) -> Option<gwt_core::workspace_projection::WorkEvent> {
     use gwt_core::workspace_projection::{
         transact_workspace_state_for_work_event_root, WorkEvent, WorkEventKind,
         WorkspaceExecutionContainerRef,
     };
 
-    let Some(branch) = current_branch_name(env.repo_path()) else {
-        return;
-    };
+    let branch = current_branch_name(env.repo_path())?;
     let worktree_root = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-    let Ok(worktree) = std::fs::canonicalize(&worktree_root) else {
-        return;
-    };
+    let worktree = std::fs::canonicalize(&worktree_root).ok()?;
     if requested_head.is_some_and(|head| {
         !requested_head_matches_workspace_branch(env.repo_path(), head, Some(&branch))
     }) {
-        return;
+        return None;
     }
     let matches_identity = |candidate_branch: Option<&str>,
                             candidate_path: Option<&std::path::Path>| {
@@ -984,7 +990,7 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let work_item_id = transact_workspace_state_for_work_event_root(
+    let recorded = transact_workspace_state_for_work_event_root(
         &worktree_root,
         &worktree_root,
         |projection, work_items, _| {
@@ -1089,7 +1095,7 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
                 event.execution_container = Some(container);
                 vec![event]
             };
-            Ok((Some(id), events))
+            Ok((Some((id, events.first().cloned())), events))
         },
     )
     .ok()
@@ -1097,15 +1103,16 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
 
     // SPEC-2359 US-37 / FR-117: merged polling remains idempotent for the
     // selected Work, including when another Work owns the shared current.
-    if let Some(work_item_id) = work_item_id {
+    if let Some((work_item_id, _)) = recorded.as_ref() {
         if pr.state.to_string().eq_ignore_ascii_case("merged") {
             let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
                 env.repo_path(),
-                &work_item_id,
+                work_item_id,
                 chrono::Utc::now(),
             );
         }
     }
+    recorded.and_then(|(_, event)| event)
 }
 
 fn requested_head_matches_workspace_branch(
@@ -2371,9 +2378,19 @@ mod tests {
             gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &pr_event.id)
                 .is_file()
         );
-        git(&["add", "--", ".gwt/work/events"]);
-        fixture.commit("chore(work): deliver PR metadata");
-        fixture.push();
+        // #4669: delivery must not require another commit for the shard
+        // produced by pr.create itself.
+        assert!(
+            crate::cli::verification_record::save_work_event_settlement_record(
+                &fixture.repo,
+                session_id,
+                true,
+            )
+            .unwrap()
+            .status
+            .is_settled(),
+            "producer-created PR metadata must not dirty settlement"
+        );
         assert_eq!(
             crate::cli::verification_record::evaluate_evidence(&fixture.repo, session_id, Some(42)),
             crate::cli::verification_record::EvidenceStatus::Fresh
@@ -2414,6 +2431,15 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
+            crate::cli::hook::work_event_settlement_stop_check::handle_with_input(
+                &fixture.repo,
+                r#"{"stop_hook_active":false}"#,
+                Some(session_id),
+            ),
+            crate::cli::hook::HookOutput::Silent,
+            "completed delivery must not be blocked by the untracked producer shard"
+        );
+        assert_eq!(
             completed
                 .completion_evidence
                 .unwrap()
@@ -2426,6 +2452,49 @@ mod tests {
                 .unwrap()
                 .content_hash,
             verified.content_hash
+        );
+
+        // The same kind and metadata are not proof of a delivery operation.
+        let mut unproven = pr_event.clone();
+        unproven.id = "agent-authored-pr-event".into();
+        let unproven_path =
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &unproven.id);
+        std::fs::create_dir_all(unproven_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &unproven_path,
+            format!("{}\n", serde_json::to_string(&unproven).unwrap()),
+        )
+        .unwrap();
+        let receipt = crate::cli::verification_record::save_work_event_settlement_record(
+            &fixture.repo,
+            session_id,
+            true,
+        )
+        .unwrap();
+        assert!(!receipt.status.is_settled());
+        assert!(matches!(
+            crate::cli::hook::work_event_settlement_stop_check::handle_with_input(
+                &fixture.repo,
+                r#"{"stop_hook_active":false}"#,
+                Some(session_id),
+            ),
+            crate::cli::hook::HookOutput::StopBlock { .. }
+        ));
+        std::fs::remove_file(unproven_path).unwrap();
+
+        // Even a certified path loses the exemption if its bytes change.
+        let path =
+            gwt_core::paths::gwt_repo_local_work_event_shard_path(&fixture.repo, &pr_event.id);
+        let mut changed = pr_event.clone();
+        changed.title = Some("modified by agent".into());
+        std::fs::write(
+            path,
+            format!("{}\n", serde_json::to_string(&changed).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            !crate::cli::verification_record::evaluate_work_event_settlement(&fixture.repo)
+                .is_settled()
         );
     }
 
