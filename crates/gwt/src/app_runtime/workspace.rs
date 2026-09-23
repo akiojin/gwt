@@ -462,6 +462,7 @@ fn workspace_work_event_from_launch_projection(
 /// struct so the reconnect bookkeeping (`operation_id`, `operations`) does not
 /// push the spawn helpers past clippy's argument budget.
 pub(super) struct WorkspaceCleanupAsyncTask {
+    pub(super) context: super::ProjectContext,
     pub(super) project_root: PathBuf,
     pub(super) active_session_branches: std::collections::HashSet<String>,
     pub(super) branch: String,
@@ -473,6 +474,7 @@ pub(super) struct WorkspaceCleanupAsyncTask {
 /// Issue #4433: same as [`WorkspaceCleanupAsyncTask`], for the Branches
 /// window cleanup worker.
 struct BranchCleanupAsyncTask {
+    context: super::ProjectContext,
     window_id: String,
     project_root: PathBuf,
     active_session_branches: std::collections::HashSet<String>,
@@ -484,6 +486,7 @@ struct BranchCleanupAsyncTask {
 
 pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: WorkspaceCleanupAsyncTask) {
     let WorkspaceCleanupAsyncTask {
+        context,
         project_root,
         active_session_branches,
         branch,
@@ -497,6 +500,7 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
             {
                 Ok(entries) => {
                     let progress_proxy = proxy.clone();
+                    let progress_context = context.clone();
                     let progress_operation_id = operation_id.clone();
                     let progress_operations = operations.clone();
                     let results = cleanup_selected_branches_with_progress(
@@ -512,18 +516,22 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                                 progress_operation_id.as_deref(),
                                 &progress,
                             );
-                            progress_proxy.send(UserEvent::Dispatch(vec![
-                                OutboundEvent::broadcast(BackendEvent::BranchCleanupProgress {
-                                    id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
-                                    operation_id: progress_operation_id.clone(),
-                                    branch: progress.branch,
-                                    execution_branch: progress.execution_branch,
-                                    index: progress.index,
-                                    total: progress.total,
-                                    phase: progress.phase,
-                                    message: progress.message,
-                                }),
-                            ]));
+                            progress_proxy.send(UserEvent::ProjectDispatch {
+                                context: progress_context.clone(),
+                                events: vec![OutboundEvent::project(
+                                    progress_context.project_key.clone(),
+                                    BackendEvent::BranchCleanupProgress {
+                                        id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
+                                        operation_id: progress_operation_id.clone(),
+                                        branch: progress.branch,
+                                        execution_branch: progress.execution_branch,
+                                        index: progress.index,
+                                        total: progress.total,
+                                        phase: progress.phase,
+                                        message: progress.message,
+                                    },
+                                )],
+                            });
                         },
                     );
                     operations.record_result(
@@ -531,7 +539,8 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                         operation_id.as_deref(),
                         &results,
                     );
-                    let mut events = vec![OutboundEvent::broadcast(
+                    let mut events = vec![OutboundEvent::project(
+                        context.project_key.clone(),
                         BackendEvent::BranchCleanupResult {
                             id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
                             operation_id: operation_id.clone(),
@@ -564,12 +573,15 @@ pub(super) fn spawn_workspace_cleanup_async(proxy: AppEventProxy, task: Workspac
                 }
                 // Issue #4433: broadcast so a reconnected client is not left
                 // waiting on a cleanup that already failed to start.
-                Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                    id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
-                    message: error.to_string(),
-                })],
+                Err(error) => vec![OutboundEvent::project(
+                    context.project_key.clone(),
+                    BackendEvent::BranchError {
+                        id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
+                        message: error.to_string(),
+                    },
+                )],
             };
-        proxy.send(UserEvent::Dispatch(events));
+        proxy.send(UserEvent::ProjectDispatch { context, events });
     });
 }
 
@@ -621,7 +633,8 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
             .iter()
             .map(|item| workspace_work_item_view_from_item(item, &session_index, resume_branches))
             .collect::<Vec<_>>();
-    Some(OutboundEvent::broadcast(
+    Some(OutboundEvent::project(
+        gwt_core::paths::resolve_project_scope(project_root).hash,
         BackendEvent::ActiveWorkProjection {
             projection: Box::new(active_work_projection_from_saved_with_journal(
                 projection,
@@ -662,6 +675,7 @@ fn branch_cleanup_snapshot_event(
 
 fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask) {
     let BranchCleanupAsyncTask {
+        context,
         window_id,
         project_root,
         active_session_branches,
@@ -676,6 +690,7 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
             {
                 Ok(entries) => {
                     let progress_proxy = proxy.clone();
+                    let progress_context = context.clone();
                     let progress_window_id = window_id.clone();
                     let progress_operation_id = operation_id.clone();
                     let progress_operations = operations.clone();
@@ -692,22 +707,27 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
                                 progress_operation_id.as_deref(),
                                 &progress,
                             );
-                            progress_proxy.send(UserEvent::Dispatch(vec![
-                                OutboundEvent::broadcast(BackendEvent::BranchCleanupProgress {
-                                    id: progress_window_id.clone(),
-                                    operation_id: progress_operation_id.clone(),
-                                    branch: progress.branch,
-                                    execution_branch: progress.execution_branch,
-                                    index: progress.index,
-                                    total: progress.total,
-                                    phase: progress.phase,
-                                    message: progress.message,
-                                }),
-                            ]));
+                            progress_proxy.send(UserEvent::ProjectDispatch {
+                                context: progress_context.clone(),
+                                events: vec![OutboundEvent::project(
+                                    progress_context.project_key.clone(),
+                                    BackendEvent::BranchCleanupProgress {
+                                        id: progress_window_id.clone(),
+                                        operation_id: progress_operation_id.clone(),
+                                        branch: progress.branch,
+                                        execution_branch: progress.execution_branch,
+                                        index: progress.index,
+                                        total: progress.total,
+                                        phase: progress.phase,
+                                        message: progress.message,
+                                    },
+                                )],
+                            });
                         },
                     );
                     operations.record_result(&window_id, operation_id.as_deref(), &results);
-                    let mut events = vec![OutboundEvent::broadcast(
+                    let mut events = vec![OutboundEvent::project(
+                        context.project_key.clone(),
                         BackendEvent::BranchCleanupResult {
                             id: window_id.clone(),
                             operation_id: operation_id.clone(),
@@ -719,31 +739,38 @@ fn spawn_branch_cleanup_async(proxy: AppEventProxy, task: BranchCleanupAsyncTask
                         &active_session_branches,
                     ) {
                         Ok(entries) => {
-                            events.push(OutboundEvent::broadcast(BackendEvent::BranchEntries {
-                                id: window_id.clone(),
-                                phase: BranchEntriesPhase::Hydrated,
-                                entries,
-                                // SPEC-2009 FR-067: fresh load id from the shared
-                                // sequence so the post-cleanup reload is never
-                                // dropped as stale by the frontend.
-                                load_id: gwt::next_branch_load_id(),
-                            }))
+                            events.push(OutboundEvent::project(
+                                context.project_key.clone(),
+                                BackendEvent::BranchEntries {
+                                    id: window_id.clone(),
+                                    phase: BranchEntriesPhase::Hydrated,
+                                    entries,
+                                    // SPEC-2009 FR-067: fresh load id from the shared
+                                    // sequence so the post-cleanup reload is never
+                                    // dropped as stale by the frontend.
+                                    load_id: gwt::next_branch_load_id(),
+                                },
+                            ))
                         }
-                        Err(error) => {
-                            events.push(OutboundEvent::broadcast(BackendEvent::BranchError {
+                        Err(error) => events.push(OutboundEvent::project(
+                            context.project_key.clone(),
+                            BackendEvent::BranchError {
                                 id: window_id.clone(),
                                 message: error.to_string(),
-                            }))
-                        }
+                            },
+                        )),
                     }
                     events
                 }
-                Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                    id: window_id,
-                    message: error.to_string(),
-                })],
+                Err(error) => vec![OutboundEvent::project(
+                    context.project_key.clone(),
+                    BackendEvent::BranchError {
+                        id: window_id,
+                        message: error.to_string(),
+                    },
+                )],
             };
-        proxy.send(UserEvent::Dispatch(events));
+        proxy.send(UserEvent::ProjectDispatch { context, events });
     });
 }
 
@@ -795,15 +822,22 @@ impl AppRuntime {
             )];
         }
 
+        let Some(context) = self.project_context(&address.tab_id) else {
+            return Vec::new();
+        };
+        let Some(state) = self.project_state(&context) else {
+            return Vec::new();
+        };
         spawn_branch_cleanup_async(
             self.proxy.clone(),
             BranchCleanupAsyncTask {
+                context: context.clone(),
                 window_id: id.to_string(),
                 project_root: tab.project_root.clone(),
                 active_session_branches: self.active_session_branches_for_tab(&address.tab_id),
                 branches: branches.to_vec(),
                 operation_id: operation_id.map(str::to_string),
-                operations: self.branch_cleanup_operations.clone(),
+                operations: state.branch_cleanup_operations.clone(),
                 options: BranchCleanupOptions {
                     delete_remote,
                     force_filesystem_delete,
@@ -815,21 +849,14 @@ impl AppRuntime {
 
     pub(crate) fn run_workspace_cleanup_events(
         &self,
+        context: &super::ProjectContext,
         client_id: &str,
         branch: &str,
         delete_remote: bool,
         force_filesystem_delete: bool,
         operation_id: Option<&str>,
     ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.as_deref() else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BranchError {
-                    id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
-                    message: "Project tab not found".to_string(),
-                },
-            )];
-        };
+        let tab_id = &context.tab_id;
         let Some(tab) = self.tab(tab_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
@@ -840,14 +867,18 @@ impl AppRuntime {
             )];
         };
 
+        let Some(state) = self.project_state(context) else {
+            return Vec::new();
+        };
         spawn_workspace_cleanup_async(
             self.proxy.clone(),
             WorkspaceCleanupAsyncTask {
+                context: context.clone(),
                 project_root: tab.project_root.clone(),
                 active_session_branches: self.active_session_branches_for_tab(tab_id),
                 branch: branch.to_string(),
                 operation_id: operation_id.map(str::to_string),
-                operations: self.branch_cleanup_operations.clone(),
+                operations: state.branch_cleanup_operations.clone(),
                 options: BranchCleanupOptions {
                     delete_remote,
                     force_filesystem_delete,
@@ -863,11 +894,15 @@ impl AppRuntime {
     /// silence must never be rendered as a cleanup failure.
     pub(crate) fn sync_branch_cleanup_events(
         &self,
+        context: &super::ProjectContext,
         client_id: &str,
         id: &str,
         operation_id: &str,
     ) -> Vec<OutboundEvent> {
-        let Some(snapshot) = self.branch_cleanup_operations.snapshot(id, operation_id) else {
+        let Some(state) = self.project_state(context) else {
+            return Vec::new();
+        };
+        let Some(snapshot) = state.branch_cleanup_operations.snapshot(id, operation_id) else {
             return Vec::new();
         };
         vec![OutboundEvent::reply(
@@ -879,8 +914,16 @@ impl AppRuntime {
     /// Issue #4433 AC-2: replay every live cleanup to a client during its
     /// initial sync. A reloaded page lost the operation ids it was watching, so
     /// it cannot ask for them by name.
-    pub(crate) fn live_branch_cleanup_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
-        self.branch_cleanup_operations
+    pub(crate) fn live_branch_cleanup_replies(
+        &self,
+        context: &super::ProjectContext,
+        client_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(state) = self.project_state(context) else {
+            return Vec::new();
+        };
+        state
+            .branch_cleanup_operations
             .live_operations()
             .into_iter()
             .map(|(id, operation_id, snapshot)| {
@@ -896,10 +939,13 @@ impl AppRuntime {
     /// the snapshot instead of replaying it into the next cleanup.
     pub(crate) fn clear_branch_cleanup_status_events(
         &self,
+        context: &super::ProjectContext,
         id: &str,
         operation_id: &str,
     ) -> Vec<OutboundEvent> {
-        self.branch_cleanup_operations.clear(id, operation_id);
+        if let Some(state) = self.project_state(context) {
+            state.branch_cleanup_operations.clear(id, operation_id);
+        }
         Vec::new()
     }
 }

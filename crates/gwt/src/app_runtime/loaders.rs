@@ -91,8 +91,12 @@ impl AppRuntime {
             )];
         }
 
+        let Some(context) = self.project_context(&address.tab_id) else {
+            return Vec::new();
+        };
         spawn_branch_load_async(
             self.proxy.clone(),
+            context,
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
@@ -131,8 +135,12 @@ impl AppRuntime {
                 },
             )];
         };
+        let Some(context) = self.project_context(&address.tab_id) else {
+            return Vec::new();
+        };
         spawn_remote_start_work_branches_async(
             self.proxy.clone(),
+            context,
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),

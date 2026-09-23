@@ -434,6 +434,57 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
     assert!(debug.contains("<redacted>"));
 }
 
+#[test]
+fn recovery_center_project_reload_preserves_other_project_handles() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tabs = vec![
+        sample_project_tab(
+            "tab-a",
+            "A",
+            temp.path().join("a"),
+            ProjectKind::NonRepo,
+            &[],
+        ),
+        sample_project_tab(
+            "tab-b",
+            "B",
+            temp.path().join("b"),
+            ProjectKind::NonRepo,
+            &[],
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-a"));
+    let a = runtime.project_context("tab-a").unwrap();
+    let b = runtime.project_context("tab-b").unwrap();
+    runtime
+        .project_state_mut(&a)
+        .unwrap()
+        .recovery_center_handles
+        .insert(
+            "handle-a".to_string(),
+            super::RecoveryCenterAction {
+                generation: 1,
+                board_entry_id: Some("entry-a".to_string()),
+            },
+        );
+    runtime.load_recovery_center_events(&b, "client-b", "load-b");
+    let a_reply =
+        runtime.open_recovery_center_board_entry_events(&a, "client-a", "open-a", 1, "handle-a");
+    assert!(
+        matches!(&a_reply[0].event, BackendEvent::RecoveryCenterBoardEntry { board_entry_id: Some(id), .. } if id == "entry-a")
+    );
+    let b_reply =
+        runtime.open_recovery_center_board_entry_events(&b, "client-b", "open-b", 1, "handle-a");
+    assert!(matches!(
+        &b_reply[0].event,
+        BackendEvent::RecoveryCenterBoardEntry {
+            board_entry_id: None,
+            ..
+        }
+    ));
+}
+
 fn recovery_center_test_intent(
     session_id: &str,
     recovery_id: &str,
@@ -1890,7 +1941,8 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.create_window_events(WindowPreset::Memo, canvas_bounds());
+    let events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Memo, canvas_bounds());
 
     assert!(events.is_empty());
     assert!(runtime.window_lookup.is_empty());
@@ -1916,7 +1968,8 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let first_events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let first_events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
     let first = runtime
         .tab("tab-1")
         .expect("tab")
@@ -1927,7 +1980,8 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         .expect("first Work window")
         .clone();
 
-    let repeated_events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let repeated_events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -1982,7 +2036,11 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(WindowPreset::Branches, canvas_bounds());
+    runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Branches,
+        canvas_bounds(),
+    );
     let legacy = runtime
         .tab("tab-1")
         .expect("tab")
@@ -1990,7 +2048,8 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
         .persisted()
         .windows[0]
         .clone();
-    let events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -2046,7 +2105,8 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
             .tab_group_active
     );
 
-    let events = runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    let events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
     let after = runtime.tab("tab-1").expect("tab").workspace.persisted();
     let work = after
         .windows
@@ -2090,7 +2150,7 @@ fn app_runtime_work_singleton_preserves_historical_duplicates() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(WindowPreset::Work, canvas_bounds());
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -2131,8 +2191,16 @@ fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(WindowPreset::Shell, canvas_bounds());
-    runtime.create_window_events(WindowPreset::Shell, canvas_bounds());
+    runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Shell,
+        canvas_bounds(),
+    );
+    runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Shell,
+        canvas_bounds(),
+    );
     let shell_ids = runtime
         .tab("tab-1")
         .expect("tab")
@@ -3563,7 +3631,7 @@ fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_
     wait_for_recorded_event("failed attachment progress", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
@@ -3583,9 +3651,10 @@ fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_
     {
         let events = recorded_events.lock().expect("event log");
         assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, UserEvent::AttachmentPromptReady { .. })),
+            !events.iter().any(|event| matches!(
+                recorded_project_payload(event),
+                UserEvent::AttachmentPromptReady { .. }
+            )),
             "failed staging must not enqueue terminal prompt injection"
         );
     }
@@ -3813,7 +3882,9 @@ fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkP
         .expect("active tab for projection completion");
     let recorded_events = match &runtime.proxy {
         AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_) => panic!("test runtime must use a stub event proxy"),
+        AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+            panic!("test runtime must use a stub event proxy")
+        }
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -3823,10 +3894,17 @@ fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkP
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             events
                 .iter()
-                .position(|event| matches!(event, UserEvent::ActiveWorkProjectionPrepared(_)))
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::ActiveWorkProjectionPrepared(_)
+                    )
+                })
                 .map(|index| events.remove(index))
         };
-        if let Some(UserEvent::ActiveWorkProjectionPrepared(completion)) = completion {
+        if let Some(UserEvent::ActiveWorkProjectionPrepared(completion)) =
+            completion.and_then(|event| runtime.accept_project_completion(event))
+        {
             let commit = runtime.handle_active_work_projection_prepared(*completion);
             if commit.prepared_dispatch.is_some() {
                 return runtime
@@ -3862,17 +3940,24 @@ fn wait_for_scheduled_scan_completion(
             events
                 .iter()
                 .position(|event| {
-                    matches!(event, UserEvent::IssueMonitorScheduledScanComplete { .. })
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::IssueMonitorScheduledScanComplete { .. }
+                    )
                 })
                 .map(|index| events.remove(index))
         } {
+            assert!(
+                matches!(&event, UserEvent::ProjectCompletion { .. }),
+                "scan worker completion must carry its project generation"
+            );
             let UserEvent::IssueMonitorScheduledScanComplete {
                 project_root,
                 prefs_path,
                 now,
                 outcome,
                 vanished_window_failures: _,
-            } = event
+            } = into_recorded_project_payload(event)
             else {
                 unreachable!("matched scheduled completion")
             };
@@ -4157,6 +4242,7 @@ fn sample_runtime_with_events(
     let mut runtime = AppRuntime {
         tabs,
         active_tab_id: active_tab_id.map(str::to_owned),
+        project_states: super::initial_project_states(&project_tab_incarnations),
         project_tab_incarnations,
         next_project_incarnation,
         project_navigation_request: 0,
@@ -4170,8 +4256,7 @@ fn sample_runtime_with_events(
         window_lookup: HashMap::new(),
         window_lifecycle_generations: Arc::new(Mutex::new(HashMap::new())),
         board_all_view_windows: std::collections::HashSet::new(),
-        recovery_center_handles: HashMap::new(),
-        recovery_center_generation: 0,
+
         session_state_path: temp_root.join("session-state.json"),
         log_dir,
         project_log_router: None,
@@ -4180,7 +4265,7 @@ fn sample_runtime_with_events(
         blocking_tasks,
         sessions_dir,
         launch_wizard_cache,
-        launch_wizard: None,
+
         pending_launch_wizard_materializations: HashMap::new(),
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
@@ -4212,15 +4297,13 @@ fn sample_runtime_with_events(
         pending_continue_work: HashMap::new(),
         pending_fresh_execution_launches: HashMap::new(),
         pending_tool_runtime_migrations: HashMap::new(),
-        continue_work_outcomes: HashMap::new(),
-        continue_work_waiters: HashMap::new(),
+
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_restore_log: None,
         pending_restore_summaries: Vec::new(),
         restore_launch_windows: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         update_resume_tab_ids: HashSet::new(),
-        update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner::default(),
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
@@ -4277,7 +4360,7 @@ fn sample_runtime_with_events(
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
         persist_dispatcher,
         file_tree_worktree_roots: HashMap::new(),
-        branch_cleanup_operations: std::sync::Arc::new(gwt::BranchCleanupOperationStore::new()),
+
         server_url: None,
         usage_refresh: None,
         image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -6722,7 +6805,12 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 events
                     .iter()
-                    .position(|event| matches!(event, UserEvent::AgentFrontend { .. }))
+                    .position(|event| {
+                        matches!(
+                            recorded_project_payload(event),
+                            UserEvent::AgentFrontend { .. }
+                        )
+                    })
                     .map(|position| events.remove(position))
             };
             let Some(UserEvent::AgentFrontend {
@@ -7549,7 +7637,12 @@ fn take_self_close_commit(
     let mut events = events.lock().expect("event log");
     let position = events
         .iter()
-        .position(|event| matches!(event, UserEvent::CommitAgentSelfClose { .. }))
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::CommitAgentSelfClose { .. }
+            )
+        })
         .expect("self-close acceptance drop must schedule a commit");
     match events.remove(position) {
         UserEvent::CommitAgentSelfClose { ticket } => ticket,
@@ -7565,7 +7658,12 @@ fn apply_recorded_window_close_finalized(
         let mut recorded = recorded.lock().expect("event log");
         let position = recorded
             .iter()
-            .position(|event| matches!(event, UserEvent::WindowCloseFinalized { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::WindowCloseFinalized { .. }
+                )
+            })
             .expect("window close finalizer completion");
         recorded.remove(position)
     };
@@ -8092,7 +8190,11 @@ fn wait_for_knowledge_view_dispatch(
         {
             let recorded = events.lock().expect("event log");
             for event in recorded.iter() {
-                if let UserEvent::Dispatch(dispatched) = event {
+                if let UserEvent::Dispatch(dispatched)
+                | UserEvent::ProjectDispatch {
+                    events: dispatched, ..
+                } = event
+                {
                     if dispatched.iter().any(|outbound| {
                         matches!(
                             &outbound.event,
@@ -8118,7 +8220,7 @@ fn dispatch_launch_materialization_request(
     wait_for_recorded_event(label, recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
             )
         })
@@ -8129,7 +8231,7 @@ fn dispatch_launch_materialization_request(
             .iter()
             .position(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -8155,9 +8257,15 @@ fn resolve_launch_wizard_runtime_confirmation(
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
     label: &str,
 ) {
-    let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
     assert_eq!(events.len(), 1);
     let pending_view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -8167,15 +8275,23 @@ fn resolve_launch_wizard_runtime_confirmation(
     assert!(!pending_view.runtime_context_resolved);
 
     wait_for_recorded_event(label, recorded_events, |events| {
-        events
-            .iter()
-            .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchWizardRuntimeResolved { .. }
+            )
+        })
     });
     let resolved_event = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("runtime resolved event")
     };
@@ -8261,7 +8377,7 @@ fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
     wait_for_recorded_event("project index status", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::ProjectIndexStatus {
                     project_root,
                     status,
@@ -8339,6 +8455,12 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
 
 fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
     LaunchWizardSession {
+        project_context: super::ProjectContext {
+            tab_id: tab_id.to_string(),
+            project_key: gwt_core::paths::resolve_project_scope(project_root).hash,
+            generation: 1,
+            project_root: project_root.to_path_buf(),
+        },
         tab_id: tab_id.to_string(),
         wizard_id: "wizard-1".to_string(),
         wizard: LaunchWizardState::open_loading(
@@ -8569,6 +8691,12 @@ fn append_workspace_resume_journal(
 
 fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
     LaunchWizardSession {
+        project_context: super::ProjectContext {
+            tab_id: tab_id.to_string(),
+            project_key: gwt_core::paths::resolve_project_scope(project_root).hash,
+            generation: 1,
+            project_root: project_root.to_path_buf(),
+        },
         tab_id: tab_id.to_string(),
         wizard_id: "wizard-unavailable-agent".to_string(),
         wizard: LaunchWizardState::open_with(
@@ -8666,6 +8794,12 @@ fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> Launc
     assert!(wizard.view().show_confirm);
 
     LaunchWizardSession {
+        project_context: super::ProjectContext {
+            tab_id: tab_id.to_string(),
+            project_key: gwt_core::paths::resolve_project_scope(project_root).hash,
+            generation: 1,
+            project_root: project_root.to_path_buf(),
+        },
         tab_id: tab_id.to_string(),
         wizard_id: "wizard-start-work-confirm".to_string(),
         wizard,
@@ -8684,6 +8818,12 @@ fn sample_ready_agent_launch_wizard_session(
     project_root: &Path,
 ) -> LaunchWizardSession {
     LaunchWizardSession {
+        project_context: super::ProjectContext {
+            tab_id: tab_id.to_string(),
+            project_key: gwt_core::paths::resolve_project_scope(project_root).hash,
+            generation: 1,
+            project_root: project_root.to_path_buf(),
+        },
         tab_id: tab_id.to_string(),
         wizard_id: "wizard-ready-agent".to_string(),
         wizard: LaunchWizardState::open_with(
@@ -8872,12 +9012,20 @@ fn manual_launch_live_local_holder_requires_typed_decision_before_materializatio
     );
     insert_test_pane_runtime(&mut runtime, &holder_window_id);
     install_manual_holder_capability(&mut runtime, &repo, &holder_window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let events =
-        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
 
     let wizard = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("holder decision keeps wizard open")
@@ -8903,7 +9051,7 @@ fn manual_launch_live_local_holder_requires_typed_decision_before_materializatio
         .iter()
         .any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
             )
         }));
@@ -8938,9 +9086,18 @@ fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_mate
     );
     insert_test_pane_runtime(&mut runtime, &holder_window_id);
     install_manual_holder_capability(&mut runtime, &repo, &holder_window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("holder decision wizard")
@@ -8951,6 +9108,7 @@ fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_mate
 
     settle_test_pane_child(&runtime, &holder_window_id);
     let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
             window_id: holder_window_id.clone(),
@@ -9003,7 +9161,7 @@ fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_mate
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                         if matches!(
                             config.as_ref(),
@@ -9077,15 +9235,25 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
     );
     insert_test_pane_runtime(&mut runtime, &holder_window_id);
     install_manual_holder_capability(&mut runtime, &repo, &holder_window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
     settle_test_pane_child(&runtime, &holder_window_id);
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
             window_id: holder_window_id,
@@ -9098,7 +9266,7 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -9110,7 +9278,7 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
             .iter()
             .position(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -9128,7 +9296,10 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
     };
     let mut replacement = sample_ready_agent_launch_wizard_session("tab-1", &repo);
     replacement.wizard_id = "replacement-wizard".to_string();
-    runtime.launch_wizard = Some(replacement);
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(replacement);
     let windows_before = runtime.tabs[0].workspace.persisted().windows.len();
 
     let first = runtime.handle_launch_wizard_launch_materialization_requested(
@@ -9144,6 +9315,8 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
     );
     assert_eq!(
         runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .launch_wizard
             .as_ref()
             .expect("replacement remains visible")
@@ -9186,9 +9359,12 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
         "replacement-safe launch completion",
         &recorded_events,
         |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchComplete { .. }
+                )
+            })
         },
     );
 }
@@ -9247,10 +9423,19 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
     runtime
         .agent_capability_tokens
         .insert(holder_window_id.clone(), capability.token.clone());
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
     settle_test_pane_child(&runtime, &holder_window_id);
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("holder decision wizard")
@@ -9314,7 +9499,8 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
             window_id: holder_window_id.clone(),
         },
     };
-    let events = runtime.handle_launch_wizard_action(action, Some(canvas_bounds()));
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), action, Some(canvas_bounds()));
 
     let current_runtime = runtime
         .runtimes
@@ -9370,6 +9556,8 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
     assert!(issuer.authenticates_token(&capability.token));
     assert!(recorded_events.lock().expect("event log").is_empty());
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.error.as_deref())
@@ -9423,9 +9611,18 @@ fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
     );
     insert_test_pane_runtime(&mut runtime, &window_id);
     install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
@@ -9447,6 +9644,7 @@ fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
 
     let logs = capture_tracing_events(|| {
         runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
             LaunchWizardAction::StopAndStartSuccessor {
                 fingerprint: decision.fingerprint.clone(),
                 window_id: window_id.clone(),
@@ -9540,9 +9738,18 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
     .expect("Active relaunch fence");
     insert_test_pane_runtime(&mut runtime, &window_id);
     install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
@@ -9554,6 +9761,7 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
 
     settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
             window_id: window_id.clone(),
@@ -9569,6 +9777,8 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
     );
     assert!(recorded_events.lock().expect("events").is_empty());
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.error.as_deref())
@@ -9614,15 +9824,25 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
     );
     insert_test_pane_runtime(&mut runtime, &window_id);
     install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
     settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
             window_id,
@@ -9655,18 +9875,26 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
         materialization.2,
         materialization.3,
     );
-    let session = runtime.launch_wizard.as_ref().expect("retry wizard");
+    let session = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("retry wizard");
     assert!(session.wizard.error.is_some());
     assert!(session.wizard.holder_decision.is_none());
     assert!(session.manual_holder_intent.is_some());
 
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::SetModel {
             model: "default".to_string(),
         },
         Some(canvas_bounds()),
     );
     assert!(!runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("mutable retry wizard")
@@ -9706,15 +9934,25 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
     );
     insert_test_pane_runtime(&mut runtime, &window_id);
     install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
     settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
             window_id,
@@ -9727,7 +9965,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -9739,7 +9977,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
             .iter()
             .position(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -9779,16 +10017,16 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         |events| {
             events
                 .iter()
-                .any(|event| matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_err()))
+                .any(|event| matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_err()))
         },
     );
     let (failed_window_id, failed_result) = {
         let mut events = recorded_events.lock().expect("events");
         let index = events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_err()))
+            .position(|event| matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_err()))
             .expect("failed completion");
-        match events.remove(index) {
+        match into_recorded_project_payload(events.remove(index)) {
             UserEvent::LaunchComplete { window_id, result } => (window_id, result),
             _ => unreachable!("matched above"),
         }
@@ -9810,13 +10048,20 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
     );
 
     runtime.profile_config_path = Some(temp.path().join("missing-default-profile.toml"));
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
 
     wait_for_recorded_event("manual successor exact retry", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                     if matches!(
                         config.as_ref(),
@@ -9899,15 +10144,25 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
     );
     insert_test_pane_runtime(&mut runtime, &window_id);
     install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
     settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
             window_id,
@@ -9917,7 +10172,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
     wait_for_recorded_event("sync failure request", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
             )
         })
@@ -9928,7 +10183,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
             .iter()
             .position(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -9955,6 +10210,8 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         intent => panic!("expected manual successor, got {intent:?}"),
     };
     let session = runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .take()
         .expect("materializing wizard remains visible");
@@ -9980,6 +10237,8 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
             if view.error.as_deref() == Some("injected synchronous spawn failure")
     )));
     let recovery = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.manual_holder_intent.as_ref())
@@ -10005,11 +10264,15 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         Some("none")
     );
 
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(bounds));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(bounds),
+    );
     wait_for_recorded_event("exact sync failure retry", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
             )
         })
@@ -10066,15 +10329,25 @@ fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop(
     );
     insert_test_pane_runtime(&mut runtime, &window_id);
     install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     let decision = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
         .expect("holder decision");
 
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::SetLaunchTarget {
             target: gwt::LaunchTargetKind::Shell,
         },
@@ -10082,6 +10355,8 @@ fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop(
     );
     assert_eq!(
         runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .launch_wizard
             .as_ref()
             .expect("wizard")
@@ -10091,6 +10366,7 @@ fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop(
     );
     settle_test_pane_child(&runtime, &window_id);
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::StopAndStartSuccessor {
             fingerprint: decision.fingerprint,
             window_id: window_id.clone(),
@@ -10120,10 +10396,16 @@ fn manual_launch_exact_terminal_holder_materializes_only_the_terminal_successor_
         gwt_agent::AgentStatus::Stopped,
         None,
     );
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let events =
-        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
 
     assert!(events.iter().any(|event| matches!(
         &event.event,
@@ -10136,7 +10418,7 @@ fn manual_launch_exact_terminal_holder_materializes_only_the_terminal_successor_
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                         if matches!(
                             config.as_ref(),
@@ -10214,14 +10496,21 @@ fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight(
         serde_json::to_vec_pretty(&fence).expect("encode manual handoff fence"),
     )
     .expect("persist exact manual handoff fence");
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
 
     wait_for_recorded_event("defunct holder successor", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                     if matches!(
                         config.as_ref(),
@@ -10321,10 +10610,16 @@ fn manual_launch_ambiguous_terminal_proof_refuses_before_pane_and_authority_muta
     )
     .expect("serialize projection");
     let windows_before = runtime.tabs[0].workspace.persisted().windows.len();
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let events =
-        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
 
     assert_eq!(
         runtime.tabs[0].workspace.persisted().windows.len(),
@@ -10332,6 +10627,8 @@ fn manual_launch_ambiguous_terminal_proof_refuses_before_pane_and_authority_muta
     );
     assert!(runtime.runtimes.is_empty());
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.error.as_deref())
@@ -10346,7 +10643,7 @@ fn manual_launch_ambiguous_terminal_proof_refuses_before_pane_and_authority_muta
         .expect("event log")
         .iter()
         .any(|event| matches!(
-            event,
+            recorded_project_payload(event),
             UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
         )));
     assert_eq!(
@@ -10422,14 +10719,21 @@ fn manual_launch_completed_and_blocked_use_typed_successor_routes_without_holder
         ));
         fs::remove_file(runtime.sessions_dir.join(format!("{holder_id}.toml")))
             .expect("remove terminal holder Session fixture");
-        runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+        runtime
+            .project_state_mut(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+        runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
+            LaunchWizardAction::Submit,
+            Some(canvas_bounds()),
+        );
 
         wait_for_recorded_event("terminal generation route", &recorded_events, |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                         if matches!(
                             config.as_ref(),
@@ -10513,14 +10817,21 @@ fn manual_launch_replays_existing_prepared_owner_successor_after_response_loss()
         },
     )
     .expect("prepare response-loss fixture");
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
 
     wait_for_recorded_event("existing Prepared replay", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                     if matches!(
                         config.as_ref(),
@@ -10568,9 +10879,16 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
         );
         let mut wizard = sample_ready_agent_launch_wizard_session("tab-1", &repo);
         wizard.origin = origin;
-        runtime.launch_wizard = Some(wizard);
+        runtime
+            .project_state_mut(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard = Some(wizard);
 
-        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+        runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
+            LaunchWizardAction::Submit,
+            Some(canvas_bounds()),
+        );
 
         wait_for_recorded_event(
             "origin-isolated automatic launch",
@@ -10578,7 +10896,7 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
             |events| {
                 events.iter().any(|event| {
                     matches!(
-                        event,
+                        recorded_project_payload(event),
                         UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                             if matches!(
                                 config.as_ref(),
@@ -10593,6 +10911,8 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
             },
         );
         assert!(runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .launch_wizard
             .as_ref()
             .is_some_and(|session| session.wizard.holder_decision.is_none()));
@@ -10605,12 +10925,19 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     wait_for_recorded_event("manual genesis", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
                     if matches!(
                         config.as_ref(),
@@ -10626,7 +10953,8 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
 }
 
 #[test]
-fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_workspace() {
+fn app_runtime_frontend_ready_replies_only_to_requesting_project_client_and_starts_with_workspace()
+{
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -10642,14 +10970,17 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_
     runtime
         .window_details
         .insert(window_id.clone(), "Shell ready".to_string());
-    runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
     runtime.pending_update = Some(gwt_core::update::UpdateState::UpToDate { checked_at: None });
 
     let events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
 
     assert!(matches!(
-        events.first(),
+        events.get(1),
         Some(event)
             if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
                 && matches!(event.event, BackendEvent::WindowCanvasState { .. })
@@ -10732,7 +11063,7 @@ fn app_runtime_apply_update_uses_pending_available_update_state() {
     wait_for_recorded_event("pending update apply", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::ApplyUpdate {
                     client_id,
                     state: gwt_core::update::UpdateState::Available {
@@ -11221,16 +11552,23 @@ fn app_runtime_open_agent_kanban_launch_wizard_records_launch_target() {
         ProjectKind::Git,
         &[WindowPreset::AgentKanban],
     );
-    let other_tab = sample_project_tab("tab-2", "Same Repo", repo, ProjectKind::Git, &[]);
+    let other_tab = sample_project_tab(
+        "tab-2",
+        "Other Repo",
+        temp.path().join("other"),
+        ProjectKind::NonRepo,
+        &[],
+    );
     let mut runtime = sample_runtime(temp.path(), vec![tab, other_tab], Some("tab-2"));
     let board_id = combined_window_id("tab-1", "agent-kanban-1");
 
-    let events = runtime.handle_frontend_event(
+    let events = runtime.handle_frontend_event_in_scope(
         "client-1".to_string(),
         FrontendEvent::OpenAgentKanbanLaunchWizard {
             board_id,
             lane_id: gwt::AgentKanbanLane::Blocked,
         },
+        &super::ClientScope::Project(runtime.project_context("tab-1").unwrap().project_key),
     );
 
     assert!(
@@ -11239,20 +11577,14 @@ fn app_runtime_open_agent_kanban_launch_wizard_records_launch_target() {
             .any(|event| matches!(event.event, BackendEvent::LaunchWizardState { .. })),
         "Kanban Launch Agent must open the normal Launch Agent wizard"
     );
-    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
-    assert!(runtime
-        .persist_dispatcher
-        .wait_idle(std::time::Duration::from_secs(5)));
-    let persisted = load_session_state(&temp.path().join("session-state.json"))
-        .expect("persisted wizard tab activation");
-    // Issue #4535 AC-4: which tab is active lives in the viewing browser tab,
-    // so it is no longer written to `session-state.json`; the tab itself is.
-    assert_eq!(persisted.legacy_active_tab_id, None);
-    assert!(persisted.tabs.iter().any(|tab| tab.id == "tab-1"));
-    let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
+    assert!(events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &runtime.project_context("tab-1").unwrap().project_key)));
+    let session = runtime
+        .project_state(&runtime.project_context("tab-1").unwrap())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard");
     let view = session.wizard.view();
     assert_eq!(view.title, "Launch Agent");
     assert_ne!(
@@ -11732,7 +12064,11 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
 
     assert_eq!(
         runtime
-            .cycle_focus_events(FocusCycleDirection::Forward, bounds)
+            .cycle_focus_events(
+                &runtime.test_context(),
+                FocusCycleDirection::Forward,
+                bounds
+            )
             .len(),
         1
     );
@@ -11876,7 +12212,7 @@ fn app_runtime_arrange_windows_does_not_clobber_real_fit_pty_size() {
 
     assert_eq!(
         runtime
-            .arrange_windows_events(ArrangeMode::Tile, bounds)
+            .arrange_windows_events(&runtime.test_context(), ArrangeMode::Tile, bounds)
             .len(),
         1
     );
@@ -11939,7 +12275,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
     );
 
     assert!(matches!(
-        events.first().map(|event| &event.event),
+        events.get(1).map(|event| &event.event),
         Some(BackendEvent::WindowCanvasState { .. })
     ));
     let projection = events.iter().find_map(|event| match &event.event {
@@ -12068,7 +12404,7 @@ fn app_runtime_authoritative_empty_projection_replaces_stale_replay_cache() {
 }
 
 #[test]
-fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() {
+fn app_runtime_select_project_tab_preserves_other_project_wizard() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -12092,28 +12428,34 @@ fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() 
         ),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
-    runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
 
     let events = runtime.select_project_tab_events("tab-2");
 
-    assert_eq!(events.len(), 4);
-    assert!(matches!(events[0].target, DispatchTarget::All));
+    assert_eq!(events.len(), 3);
+    let other_context = runtime.project_context("tab-2").unwrap();
+    assert!(events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &other_context.project_key)));
     assert!(matches!(
         events[0].event,
         BackendEvent::WindowCanvasState { .. }
     ));
-    assert!(matches!(events[1].target, DispatchTarget::All));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
     ));
-    assert!(matches!(events[2].target, DispatchTarget::All));
     assert!(matches!(events[2].event, BackendEvent::PmStatus { .. }));
-    assert!(matches!(events[3].target, DispatchTarget::All));
-    assert!(matches!(
-        events[3].event,
-        BackendEvent::LaunchWizardState { wizard: None }
-    ));
+    let original_context = runtime.project_context("tab-1").unwrap();
+    assert!(
+        runtime
+            .project_state(&original_context)
+            .unwrap()
+            .launch_wizard
+            .is_some(),
+        "selecting another project must preserve the owner's wizard"
+    );
 }
 
 #[test]
@@ -12149,14 +12491,22 @@ fn take_project_navigation_completion(
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> ProjectNavigationPrepared {
     wait_for_recorded_event("project navigation completion", recorded_events, |events| {
-        events
-            .iter()
-            .any(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::ProjectNavigationPrepared(_)
+            )
+        })
     });
     let mut events = recorded_events.lock().expect("event log");
     let index = events
         .iter()
-        .position(|event| matches!(event, UserEvent::ProjectNavigationPrepared(_)))
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::ProjectNavigationPrepared(_)
+            )
+        })
         .expect("project navigation completion");
     match events.remove(index) {
         UserEvent::ProjectNavigationPrepared(prepared) => *prepared,
@@ -12495,7 +12845,8 @@ fn project_prepare_switch_drops_completion_after_close_and_generation_change() {
             .is_empty(),
         "a closed project incarnation must reject its switch completion"
     );
-    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-first"));
+    assert!(runtime.project_context("tab-second").is_none());
+    assert!(runtime.project_context("tab-first").is_some());
 
     runtime.select_project_tab_events("tab-first");
     drain_queued_blocking_tasks(&queued_tasks);
@@ -12716,11 +13067,11 @@ fn app_runtime_select_project_tab_broadcasts_fresh_project_pm_status() {
         .iter()
         .find_map(|outbound| match (&outbound.target, &outbound.event) {
             (
-                DispatchTarget::All,
+                DispatchTarget::Project(key),
                 BackendEvent::PmStatus {
                     loop_interval_secs, ..
                 },
-            ) => Some(*loop_interval_secs),
+            ) if Some(key) == runtime.project_key_for_tab("tab-2") => Some(*loop_interval_secs),
             _ => None,
         })
         .expect("tab switch must broadcast the newly active project's pm_status");
@@ -12731,7 +13082,7 @@ fn app_runtime_select_project_tab_broadcasts_fresh_project_pm_status() {
 }
 
 #[test]
-fn app_runtime_close_active_tab_broadcasts_fallback_project_pm_status() {
+fn app_runtime_close_project_preserves_other_project_pm_status() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -12755,22 +13106,24 @@ fn app_runtime_close_active_tab_broadcasts_fallback_project_pm_status() {
 
     let events = runtime.close_project_tab_events("tab-1");
 
-    assert!(events.iter().any(|outbound| matches!(
-        outbound,
-        OutboundEvent {
-            target: DispatchTarget::All,
-            event: BackendEvent::PmStatus {
-                available: true,
-                loop_interval_secs: 23,
-                ..
-            },
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::PmStatus { .. })),
+        "closing one project must not publish another project's PM state"
+    );
+    assert!(matches!(
+        runtime.pm_status_event(&runtime.project_context("tab-2").unwrap()),
+        BackendEvent::PmStatus {
+            available: true,
+            loop_interval_secs: 23,
             ..
         }
-    )));
+    ));
 }
 
 #[test]
-fn app_runtime_close_last_tab_clears_pm_status_as_unavailable() {
+fn app_runtime_close_last_project_clears_canvas_and_hub_catalog() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -12778,22 +13131,15 @@ fn app_runtime_close_last_tab_clears_pm_status_as_unavailable() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    let context = runtime.test_context();
     let events = runtime.close_project_tab_events("tab-1");
 
-    assert!(events.iter().any(|outbound| matches!(
-        outbound,
-        OutboundEvent {
-            target: DispatchTarget::All,
-            event: BackendEvent::PmStatus {
-                available: false,
-                configured_agent_id,
-                running_agent_id: None,
-                is_running: false,
-                ..
-            },
-            ..
-        } if configured_agent_id.is_empty()
-    )));
+    assert!(events.iter().any(|event| matches!((&event.target, &event.event),
+        (DispatchTarget::Project(key), BackendEvent::WindowCanvasState { workspace })
+        if key == &context.project_key && workspace.tabs.is_empty() && workspace.active_tab_id.is_none())));
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::HubState { hub } if hub.projects.is_empty())));
+    assert!(runtime.project_state(&context).is_none());
 }
 
 #[test]
@@ -12809,7 +13155,7 @@ fn pm_status_event_uses_sixty_second_default_for_missing_prefs() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let status = runtime.pm_status_event();
+    let status = runtime.pm_status_event(&runtime.test_context());
 
     let loop_interval_secs = match status {
         BackendEvent::PmStatus {
@@ -12823,7 +13169,7 @@ fn pm_status_event_uses_sixty_second_default_for_missing_prefs() {
 }
 
 #[test]
-fn app_runtime_close_project_tab_emits_active_work_projection_when_active_changes() {
+fn app_runtime_close_project_does_not_publish_another_project_projection() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -12838,21 +13184,20 @@ fn app_runtime_close_project_tab_emits_active_work_projection_when_active_change
 
     let events = runtime.close_project_tab_events("tab-1");
 
-    let projection = events
-        .iter()
-        .find_map(|event| match &event.event {
-            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
-            _ => None,
-        })
-        .expect("ActiveWorkProjection broadcast after closing the active tab");
-    assert_eq!(
-        projection.id, "tab-2",
-        "projection must reflect the new active tab after close"
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
+        "closing A must not redirect A's client to B's projection"
     );
+    assert!(events.iter().any(
+        |event| matches!(&event.event, BackendEvent::HubState { hub }
+        if hub.projects.len() == 1 && hub.projects[0].id == "tab-2")
+    ));
 }
 
 #[test]
-fn app_runtime_cross_project_window_focus_refreshes_the_new_project_snapshot() {
+fn app_runtime_window_focus_refreshes_only_its_owner_project() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -12877,40 +13222,25 @@ fn app_runtime_cross_project_window_focus_refreshes_the_new_project_snapshot() {
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
     runtime.rebuild_window_lookup();
-    runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
 
     let events = runtime.focus_window_events(&combined_window_id("tab-2", "shell-2"), None);
 
-    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
-    assert!(runtime.launch_wizard.is_none());
-    assert!(events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
-    assert!(events.iter().any(|event| matches!(
-        event.event,
-        BackendEvent::LaunchWizardState { wizard: None }
-    )));
-    let projection = events
-        .iter()
-        .find_map(|event| match &event.event {
-            BackendEvent::ActiveWorkProjection { projection } => Some(projection.as_ref()),
-            _ => None,
-        })
-        .expect("cross-project focus must fully replace the active Work projection");
-    assert_eq!(projection.id, "tab-2");
-    assert!(events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
-    assert!(events.iter().any(|event| matches!(
-        event.event,
-        BackendEvent::PmStatus {
-            available: true,
-            ..
-        }
-    )));
-    assert!(events
-        .iter()
-        .all(|event| !matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })));
+    assert!(
+        runtime
+            .project_state(&runtime.project_context("tab-1").unwrap())
+            .unwrap()
+            .launch_wizard
+            .is_some(),
+        "focusing B must preserve A's wizard"
+    );
+    assert_eq!(events.len(), 1);
+    assert!(matches!((&events[0].target, &events[0].event),
+        (DispatchTarget::Project(key), BackendEvent::WindowCanvasState { workspace })
+        if Some(key) == runtime.project_key_for_tab("tab-2") && workspace.active_tab_id.as_deref() == Some("tab-2")));
 }
 
 #[test]
@@ -13009,13 +13339,17 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
             .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
         "non-structural runtime status changes must not force a full workspace_state"
     );
-    assert!(matches!(events[0].target, DispatchTarget::All));
+    assert!(
+        matches!(&events[0].target, DispatchTarget::Project(key) if key == &runtime.test_context().project_key)
+    );
     assert!(matches!(
         &events[0].event,
         BackendEvent::WindowState { window_id: id, state }
             if id == &window_id && *state == WindowProcessStatus::Error
     ));
-    assert!(matches!(events[1].target, DispatchTarget::All));
+    assert!(
+        matches!(&events[1].target, DispatchTarget::Project(key) if key == &runtime.test_context().project_key)
+    );
     assert!(matches!(
         &events[1].event,
         BackendEvent::TerminalStatus { id, status, detail }
@@ -13057,6 +13391,8 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
         .expect("open launch wizard");
 
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -13120,7 +13456,13 @@ fn app_runtime_open_launch_wizard_does_not_probe_branch_worktree_for_docker_cont
         .open_launch_wizard_for_branch("tab-1", &repo, "feature/docker", None, None)
         .expect("open launch wizard");
 
-    let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+    let wizard = &runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("wizard")
+        .wizard;
     assert!(wizard.context.worktree_path.is_none());
     assert!(same_worktree_path(&wizard.context.quick_start_root, &repo));
     let view = wizard.view();
@@ -13162,6 +13504,8 @@ fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
         .expect("open launch wizard");
     assert!(
         !runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .launch_wizard
             .as_ref()
             .expect("wizard")
@@ -13170,13 +13514,19 @@ fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
             .runtime_context_resolved
     );
 
-    let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
     assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].event,
         BackendEvent::LaunchWizardState { wizard: Some(_) }
     ));
     let pending_view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -13190,16 +13540,24 @@ fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
         "launch wizard runtime resolution",
         &recorded_events,
         |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
         },
     );
     let resolved_event = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("runtime resolved event")
     };
@@ -13209,7 +13567,13 @@ fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
     let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
     assert_eq!(resolved_events.len(), 1);
 
-    let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+    let wizard = &runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("wizard")
+        .wizard;
     assert!(wizard
         .context
         .worktree_path
@@ -13261,9 +13625,15 @@ fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
         .open_launch_wizard_for_branch("tab-1", &repo, branch_name, None, None)
         .expect("open launch wizard");
 
-    let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
     assert_eq!(events.len(), 1);
     let pending_view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -13279,16 +13649,24 @@ fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
         "launch wizard runtime deferral",
         &recorded_events,
         |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
         },
     );
     let resolved_event = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("runtime resolved event")
     };
@@ -13298,7 +13676,13 @@ fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
     let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
     assert_eq!(resolved_events.len(), 1);
 
-    let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+    let wizard = &runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("wizard")
+        .wizard;
     assert!(
         wizard.context.worktree_path.is_none(),
         "runtime confirmation should not resolve a newly-created target worktree"
@@ -13342,6 +13726,8 @@ fn app_runtime_start_work_parent_root_uses_develop_checkout_for_docker_context()
         .open_start_work_for_project("tab-1", &workspace_home)
         .expect("open start work");
     let branch_name = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -13361,7 +13747,13 @@ fn app_runtime_start_work_parent_root_uses_develop_checkout_for_docker_context()
         "start work parent root docker context",
     );
 
-    let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+    let wizard = &runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("wizard")
+        .wizard;
     assert!(
         wizard.context.worktree_path.is_none(),
         "Runtime confirmation must not resolve a missing target worktree"
@@ -13419,6 +13811,8 @@ fn app_runtime_start_work_parent_root_preserves_saved_host_while_showing_runtime
     );
 
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -13472,6 +13866,8 @@ fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker
         .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
         .expect("open launch wizard");
     let phase_one = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -13481,9 +13877,15 @@ fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker
     assert_eq!(phase_one.selected_runtime_target, "host");
     assert!(!phase_one.show_runtime_target);
 
-    let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
     assert_eq!(events.len(), 1);
     let pending_view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -13493,15 +13895,23 @@ fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker
     assert!(!pending_view.runtime_context_resolved);
 
     wait_for_recorded_event("launch wizard host fallback", &recorded_events, |events| {
-        events
-            .iter()
-            .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchWizardRuntimeResolved { .. }
+            )
+        })
     });
     let resolved_event = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("runtime resolved event")
     };
@@ -13512,6 +13922,8 @@ fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker
     assert_eq!(resolved_events.len(), 1);
 
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("wizard")
@@ -13569,6 +13981,8 @@ fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window()
         Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
     ));
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("active work launch wizard")
@@ -13582,12 +13996,15 @@ fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window()
     assert_eq!(view.live_sessions[0].name, "Codex");
 
     let _ = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         gwt::LaunchWizardAction::UseStartMethod {
             method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
         },
         None,
     );
     let configured_view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("configured active work launch wizard")
@@ -13859,7 +14276,11 @@ fn app_runtime_open_launch_wizard_failure_surfaces_launch_wizard_open_error() {
         },
     );
 
-    assert!(runtime.launch_wizard.is_none());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .is_none());
     assert!(matches!(
         events.first().map(|event| &event.target),
         Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
@@ -13897,7 +14318,11 @@ fn app_runtime_open_launch_wizard_accepts_work_window_preset() {
     );
 
     assert!(
-        runtime.launch_wizard.is_some(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_some(),
         "Launch wizard should open from a Work window preset"
     );
     assert!(
@@ -13974,7 +14399,11 @@ fn app_runtime_resume_workspace_failure_surfaces_launch_wizard_open_error() {
         },
     );
 
-    assert!(runtime.launch_wizard.is_none());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .is_none());
     assert!(
             matches!(
                 events.first().map(|event| &event.target),
@@ -14007,16 +14436,10 @@ fn app_runtime_resume_workspace_without_active_tab_returns_launch_wizard_open_er
         },
     );
 
-    assert!(matches!(
-        events.first().map(|event| &event.target),
-        Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
-    ));
-    assert!(matches!(
-        events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardOpenError { title, message })
-            if title == "Resume Work"
-                && message == "Open a project before resuming work"
-    ));
+    assert!(
+        events.is_empty(),
+        "a request without an owned project/window is rejected before mutation"
+    );
 }
 
 #[test]
@@ -14025,8 +14448,12 @@ fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-    runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::NonRepo, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
 
     let events = runtime.custom_agent_reply_with_cache_refresh(
         "client-1".to_string(),
@@ -14060,11 +14487,17 @@ fn app_runtime_launch_wizard_submit_failure_emits_structured_error_log() {
         &[WindowPreset::Branches],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.launch_wizard = Some(sample_no_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_no_agent_launch_wizard_session("tab-1", &repo));
 
     let events = capture_tracing_events(|| {
-        let _ =
-            runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+        let _ = runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
+            LaunchWizardAction::Submit,
+            Some(canvas_bounds()),
+        );
     });
 
     let event = events
@@ -14114,9 +14547,13 @@ fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.launch_wizard = Some(sample_start_work_confirm_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_start_work_confirm_session("tab-1", &repo));
 
     let events = runtime.handle_launch_wizard_action_for_client(
+        &runtime.test_context(),
         Some("client-1"),
         LaunchWizardAction::Submit,
         Some(canvas_bounds()),
@@ -14143,7 +14580,7 @@ fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
             .iter()
             .filter(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -14153,8 +14590,11 @@ fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
     );
     drop(recorded);
 
-    let duplicate_events =
-        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    let duplicate_events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
     assert!(
         duplicate_events
             .iter()
@@ -14167,7 +14607,7 @@ fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
             .iter()
             .filter(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
                 )
             })
@@ -14191,10 +14631,14 @@ fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
         &[WindowPreset::Branches],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.launch_wizard = Some(sample_no_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_no_agent_launch_wizard_session("tab-1", &repo));
 
     let events = capture_tracing_events(|| {
         let _ = runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
             LaunchWizardAction::SetAgent {
                 agent_id: "codex".to_string(),
             },
@@ -16169,7 +16613,17 @@ fn continue_work_ready_timeout_is_correlated_and_aborts_only_current_pending_att
     let identity =
         gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
             .expect("derive successor binding");
-    let mut runtime = sample_runtime(&temp.path().join(".gwt"), Vec::new(), None);
+    let mut runtime = sample_runtime(
+        &temp.path().join(".gwt"),
+        vec![sample_project_tab_with_window_at(
+            "tab-1",
+            "candidate",
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        )],
+        Some("tab-1"),
+    );
     let window_id = "tab-1::candidate".to_string();
     runtime.pending_continue_work.insert(
         window_id.clone(),
@@ -16871,7 +17325,17 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab_with_window_at(
+            "tab-1",
+            "candidate",
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        )],
+        Some("tab-1"),
+    );
     let owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number: 2359,
@@ -16928,6 +17392,7 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
     );
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-2",
         "second-operation".to_string(),
         "work-shared".to_string(),
@@ -16959,9 +17424,20 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
 fn continue_work_empty_operation_identity_failure_is_not_cached() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::NonRepo,
+            &[],
+        )],
+        Some("tab-1"),
+    );
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-invalid",
         String::new(),
         "work-a".to_string(),
@@ -16983,7 +17459,11 @@ fn continue_work_empty_operation_identity_failure_is_not_cached() {
             && !retryable
     )));
     assert!(
-        !runtime.continue_work_outcomes.contains_key(""),
+        !runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .continue_work_outcomes
+            .contains_key(""),
         "an invalid operation identity must never become a replay-cache key"
     );
 }
@@ -16992,24 +17472,43 @@ fn continue_work_empty_operation_identity_failure_is_not_cached() {
 fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waiters() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::NonRepo,
+            &[],
+        )],
+        Some("tab-1"),
+    );
     let operation_id = "immutable-operation";
-    runtime.continue_work_outcomes.insert(
-        operation_id.to_string(),
-        CachedContinueWorkOutcome {
-            work_id: "work-a".to_string(),
-            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-            message: None,
-            error_code: None,
-            retryable: false,
-        },
-    );
-    runtime.continue_work_waiters.insert(
-        operation_id.to_string(),
-        HashSet::from(["client-waiter".to_string()]),
-    );
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_outcomes
+        .insert(
+            operation_id.to_string(),
+            CachedContinueWorkOutcome {
+                work_id: "work-a".to_string(),
+                outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                message: None,
+                error_code: None,
+                retryable: false,
+            },
+        );
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_waiters
+        .insert(
+            operation_id.to_string(),
+            HashSet::from(["client-waiter".to_string()]),
+        );
 
     let invalid = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-invalid",
         operation_id.to_string(),
         String::new(),
@@ -17031,6 +17530,8 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
             && !retryable
     )));
     let cached_preserved = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .continue_work_outcomes
         .get(operation_id)
         .is_some_and(|cached| {
@@ -17039,6 +17540,8 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
                 && cached.error_code.is_none()
         });
     let waiter_preserved = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .continue_work_waiters
         .get(operation_id)
         .is_some_and(|waiters| waiters == &HashSet::from(["client-waiter".to_string()]));
@@ -17050,11 +17553,20 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
     assert!(
         cached_preserved && waiter_preserved && invalid_replied_only_to_caller,
         "invalid identity mutated replay state: cached={:?}, waiters={:?}, events={invalid:?}",
-        runtime.continue_work_outcomes.get(operation_id),
-        runtime.continue_work_waiters.get(operation_id),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .continue_work_outcomes
+            .get(operation_id),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .continue_work_waiters
+            .get(operation_id),
     );
 
     let replay = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-replay",
         operation_id.to_string(),
         "work-a".to_string(),
@@ -17100,9 +17612,14 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
         1,
         "the retained waiter must receive the cached outcome exactly once: {replay:?}"
     );
-    assert!(!runtime.continue_work_waiters.contains_key(operation_id));
+    assert!(!runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_waiters
+        .contains_key(operation_id));
 
     let conflict = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-conflict",
         operation_id.to_string(),
         "work-b".to_string(),
@@ -17141,6 +17658,8 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
         "a conflicting replay must emit exactly one conflict outcome: {conflict:?}"
     );
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .continue_work_outcomes
         .get(operation_id)
         .is_some_and(|cached| {
@@ -17154,19 +17673,34 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
 fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
-    runtime.continue_work_outcomes.insert(
-        "immutable-operation".to_string(),
-        CachedContinueWorkOutcome {
-            work_id: "work-a".to_string(),
-            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-            message: None,
-            error_code: None,
-            retryable: false,
-        },
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::NonRepo,
+            &[],
+        )],
+        Some("tab-1"),
     );
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_outcomes
+        .insert(
+            "immutable-operation".to_string(),
+            CachedContinueWorkOutcome {
+                work_id: "work-a".to_string(),
+                outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                message: None,
+                error_code: None,
+                retryable: false,
+            },
+        );
 
     let conflict = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-b",
         "immutable-operation".to_string(),
         "work-b".to_string(),
@@ -17183,6 +17717,7 @@ fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
     )));
 
     let replay = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-a",
         "immutable-operation".to_string(),
         "work-a".to_string(),
@@ -17199,6 +17734,8 @@ fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
     )));
     assert_eq!(
         runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .continue_work_outcomes
             .get("immutable-operation")
             .map(|cached| cached.work_id.as_str()),
@@ -17647,7 +18184,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
     wait_for_recorded_event("targeted metadata failure", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::LaunchComplete {
                     window_id: completed_window,
                     result,
@@ -17661,7 +18198,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
             .iter()
             .position(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchComplete {
                         window_id: completed_window,
                         result,
@@ -17671,7 +18208,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
             .expect("failed completion");
         events.remove(index)
     };
-    let UserEvent::LaunchComplete { result, .. } = completion else {
+    let UserEvent::LaunchComplete { result, .. } = into_recorded_project_payload(completion) else {
         unreachable!("matched launch completion")
     };
     let failure_events = runtime.handle_launch_complete(window_id, *result);
@@ -17699,7 +18236,7 @@ fn targeted_windows_metadata_failure_never_reports_running_ready_or_delivery_suc
         .expect("event log")
         .iter()
         .all(|event| {
-            !matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_ok())
+            !matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_ok())
         }));
 }
 
@@ -17928,6 +18465,7 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
     );
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-only",
         "projection-only-operation".to_string(),
         work_id.clone(),
@@ -18003,6 +18541,7 @@ fn projection_only_continue_uses_spec_generation_authority_without_issue_cache()
     );
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-spec",
         "projection-spec-operation".to_string(),
         work_id,
@@ -18049,6 +18588,7 @@ fn projection_only_continue_uses_spec_legacy_flat_authority_without_issue_cache(
     );
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-spec-legacy-flat",
         "projection-spec-legacy-flat-operation".to_string(),
         work_id,
@@ -18120,6 +18660,7 @@ fn projection_only_continue_matches_canonical_branch_for_durable_session() {
         .expect("save canonical-branch durable Session");
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-canonical-branch",
         "projection-canonical-branch-operation".to_string(),
         work_id,
@@ -18180,6 +18721,7 @@ fn linked_workspace_resume_routes_through_authority_producing_continuation() {
         .expect("save linked durable Session");
 
     let events = runtime.resume_workspace_agent_events(
+        &runtime.test_context(),
         "resume-client",
         "linked-resume-operation".to_string(),
         durable.id.clone(),
@@ -18250,6 +18792,7 @@ fn continue_work_prefers_exact_custom_durable_session() {
         .expect("save exact custom durable Session");
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-custom-durable",
         "custom-durable-operation".to_string(),
         work_id,
@@ -18326,6 +18869,7 @@ fn continue_work_durable_session_requires_same_work_ref_agent() {
         .expect("save ref-mismatched durable Session");
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-ref-agent-mismatch",
         "ref-agent-mismatch-operation".to_string(),
         work_id,
@@ -18402,6 +18946,7 @@ fn continue_work_missing_work_agent_identity_rejects_durable_codex_and_custom_se
             snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
         let events = runtime.continue_work_events(
+            &runtime.test_context(),
             "client-missing-work-agent",
             format!("operation-{case_name}"),
             work_id,
@@ -18491,6 +19036,7 @@ fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutatio
             .expect("serialize Workspace before");
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-branch-divergence",
         "operation-branch-divergence".to_string(),
         work_id,
@@ -18559,6 +19105,7 @@ fn continue_work_shell_ref_cannot_authenticate_agent_session() {
         .expect("save Session behind Shell ref");
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-shell-ref",
         "shell-ref-operation".to_string(),
         work_id,
@@ -18624,6 +19171,7 @@ fn projection_only_continue_ignores_noncanonical_projected_session_path() {
         .expect("save outside Session-shaped file");
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-noncanonical-session",
         "projection-noncanonical-session-operation".to_string(),
         work_id,
@@ -18683,6 +19231,7 @@ fn projection_only_continue_prepared_spec_recovery_case(divergent_candidate_bran
     let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-prepared-spec",
         operation_id.to_string(),
         work_id.clone(),
@@ -18758,6 +19307,7 @@ fn projection_only_continue_prepared_spec_recovery_case(divergent_candidate_bran
     .expect("serialize recovery Workspace before");
 
     let events = restarted.continue_work_events(
+        &restarted.test_context(),
         "client-projection-prepared-spec-retry",
         operation_id.to_string(),
         work_id,
@@ -18942,6 +19492,7 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         .expect("save foreign Session with matching project root");
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-foreign-recovery",
         operation_id.to_string(),
         work_id.to_string(),
@@ -19016,6 +19567,7 @@ fn projection_only_continue_ignores_durable_session_with_conflicting_owner() {
         .expect("save conflicting durable Session");
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-conflicting-session",
         "projection-conflicting-session-operation".to_string(),
         work_id,
@@ -19075,6 +19627,7 @@ fn projection_only_continue_authenticates_container_before_using_durable_session
         .expect("ledger before");
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-container-first",
         "projection-container-first-operation".to_string(),
         work_id,
@@ -19141,6 +19694,7 @@ fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_st
         .expect("ledger before");
 
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-spawn-failure",
         "projection-spawn-failure-operation".to_string(),
         work_id,
@@ -19238,6 +19792,7 @@ fn projection_only_continue_owner_change_before_activation_aborts_without_commit
     );
     let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
     runtime.continue_work_events(
+        &runtime.test_context(),
         "client-projection-owner-toctou",
         operation_id.to_string(),
         work_id.clone(),
@@ -19368,6 +19923,7 @@ fn assert_projection_only_continue_rejection(
         .expect("ledger before");
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-invalid-projection",
         format!("operation-{case_name}"),
         work_id,
@@ -19605,6 +20161,7 @@ fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
     );
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-owner-kind-heal",
         "owner-kind-heal-operation".to_string(),
         work_id.clone(),
@@ -19884,6 +20441,7 @@ fn continue_work_rebinds_live_local_legacy_session_without_new_generation() {
         .insert(window_id.clone(), inspection.token.clone());
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-1",
         "legacy-focus-operation".to_string(),
         work_id.to_string(),
@@ -20207,6 +20765,7 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
@@ -20248,6 +20807,7 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         .expect("restore exact candidate fixture");
 
     let reconciled = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-retry-exact",
         operation_id.to_string(),
         work_id.to_string(),
@@ -20450,6 +21010,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         let work_before = tracked_workspace_work_store_snapshot(&repo);
 
         let retained = runtime.continue_work_events(
+            &runtime.test_context(),
             "client-retry-dangling",
             operation_id.to_string(),
             work_id.to_string(),
@@ -20499,6 +21060,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
     }));
 
     let raced = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-retry-materialized",
         operation_id.to_string(),
         work_id.to_string(),
@@ -20522,6 +21084,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
     fs::remove_file(&candidate_path).expect("restore true Missing state for successful cleanup");
 
     let events = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
@@ -20808,8 +21371,13 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
         )
         .expect("serialize cleanup Workspace before");
 
-        let events =
-            runtime.continue_work_events("client-cleanup", operation_id, work_id, canvas_bounds());
+        let events = runtime.continue_work_events(
+            &runtime.test_context(),
+            "client-cleanup",
+            operation_id,
+            work_id,
+            canvas_bounds(),
+        );
 
         assert!(
             events.iter().any(|event| matches!(
@@ -21248,6 +21816,7 @@ fn continue_work_activated_successor_recovery_case(
         ));
     }
     let events = restarted_runtime.continue_work_events(
+        &restarted_runtime.test_context(),
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
@@ -21541,6 +22110,7 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
         .expect("pending continuation")
         .clone();
     let _retry_focus = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-reconnected",
         operation_id.to_string(),
         selected_work_id.to_string(),
@@ -21548,6 +22118,8 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     );
     assert!(
         runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .continue_work_waiters
             .get(operation_id)
             .is_some_and(|waiters| waiters.contains("client-reconnected")),
@@ -21580,7 +22152,11 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     );
 
     assert!(
-        runtime.continue_work_outcomes.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .continue_work_outcomes
+            .is_empty(),
         "PTY spawn alone must not produce success"
     );
     assert_eq!(
@@ -21660,14 +22236,22 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
             .is_empty(),
         "the consumed readiness receipt must not emit a second success"
     );
-    runtime.continue_work_outcomes.remove(operation_id);
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_outcomes
+        .remove(operation_id);
     runtime
         .pending_continue_work
         .insert(window_id.clone(), committed_pending.clone());
-    runtime.continue_work_waiters.insert(
-        operation_id.to_string(),
-        HashSet::from(["client-after-response-loss".to_string()]),
-    );
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_waiters
+        .insert(
+            operation_id.to_string(),
+            HashSet::from(["client-after-response-loss".to_string()]),
+        );
     let late_error_events = runtime.launch_error_events_with_continue_work(
         window_id.clone(),
         "late PTY error after committed response loss".to_string(),
@@ -21693,7 +22277,11 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
         "post-commit launch errors must discard only the stale process-local receipt",
     );
     assert!(
-        !runtime.continue_work_waiters.contains_key(operation_id),
+        !runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .continue_work_waiters
+            .contains_key(operation_id),
         "the reconciled outcome must consume reconnect waiters exactly once",
     );
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
@@ -21705,6 +22293,7 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
         "durably committed response-loss recovery must not tear down the exact live pane"
     );
     let same_host_retry = runtime.continue_work_events(
+        &runtime.test_context(),
         "client-response-loss",
         operation_id.to_string(),
         selected_work_id.to_string(),
@@ -21718,20 +22307,32 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
             ..
         }
     )));
-    assert!(!runtime.continue_work_waiters.contains_key(operation_id));
+    assert!(!runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_waiters
+        .contains_key(operation_id));
     assert!(
         !runtime.pending_continue_work.contains_key(&window_id),
         "durable response-loss reconciliation must consume the stale pending receipt"
     );
 
-    runtime.continue_work_outcomes.remove(operation_id);
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_outcomes
+        .remove(operation_id);
     runtime
         .pending_continue_work
         .insert(window_id.clone(), committed_pending);
-    runtime.continue_work_waiters.insert(
-        operation_id.to_string(),
-        HashSet::from(["client-error-pane".to_string()]),
-    );
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_waiters
+        .insert(
+            operation_id.to_string(),
+            HashSet::from(["client-error-pane".to_string()]),
+        );
     runtime
         .window_pty_statuses
         .insert(window_id.clone(), WindowProcessStatus::Error);
@@ -21742,7 +22343,11 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
         "a non-live pane must never be reconstructed as strong continuation success"
     );
     assert!(runtime.pending_continue_work.contains_key(&window_id));
-    assert!(runtime.continue_work_waiters.contains_key(operation_id));
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .continue_work_waiters
+        .contains_key(operation_id));
 
     let retry_tab = sample_project_tab_with_window_at(
         "tab-retry",
@@ -21753,6 +22358,7 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
     );
     let mut restarted_runtime = sample_runtime(&runtime_root, vec![retry_tab], Some("tab-retry"));
     let retry_events = restarted_runtime.continue_work_events(
+        &restarted_runtime.test_context(),
         "client-retry",
         operation_id.to_string(),
         selected_work_id.to_string(),
@@ -23736,7 +24342,7 @@ fn automatic_resume_successor_created_installs_active_authority_before_pty_spawn
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::LaunchComplete {
                         window_id: event_window_id,
                         ..
@@ -24211,7 +24817,7 @@ fn production_host_launch_all_runner_failure_leaves_no_session_or_success_dispat
     assert!(error.contains("exit status 1"), "{error}");
     assert!(recorded
         .iter()
-        .all(|event| !matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_ok())));
+        .all(|event| !matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_ok())));
     let persisted_sessions = fs::read_dir(&sessions_dir)
         .expect("read sessions dir")
         .flatten()
@@ -24276,7 +24882,7 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
     let recorded = events.lock().expect("event log");
     assert!(recorded
         .iter()
-        .any(|event| matches!(event, UserEvent::LaunchComplete { result, .. } if result.is_err())));
+        .any(|event| matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_err())));
     assert_eq!(
         fs::read_to_string(&invocation_counter)
             .expect("Codex invocation counter")
@@ -27106,6 +27712,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     );
     let mut restarted_runtime = sample_runtime(&runtime_root, vec![retry_tab], Some("tab-retry"));
     let retry_events = restarted_runtime.continue_work_events(
+        &restarted_runtime.test_context(),
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
@@ -28085,7 +28692,10 @@ fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
     let submit_events = runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -28164,7 +28774,10 @@ fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
     let _submit_events = runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -28830,6 +29443,8 @@ fn app_runtime_issue_launch_wizard_seeds_issue_workspace_context() {
         .expect("open issue launch wizard");
 
     let context = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.workspace_resume_context.as_ref())
@@ -28875,6 +29490,8 @@ fn app_runtime_issue_launch_wizard_prefers_cached_spec_label_over_preset_kind() 
         .expect("open issue launch wizard");
 
     let context = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.workspace_resume_context.as_ref())
@@ -28889,6 +29506,8 @@ fn app_runtime_issue_launch_wizard_prefers_cached_spec_label_over_preset_kind() 
     // the read-only "Linked issue" section and the manual branch suffix, and a
     // gwt-spec label must not hide the section or seed `spec-1921`.
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -28940,6 +29559,8 @@ fn app_runtime_spec_launch_wizard_seeds_canonical_spec_workspace_owner() {
         .expect("open spec launch wizard");
 
     let context = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.workspace_resume_context.as_ref())
@@ -29173,7 +29794,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
     assert!(refreshed.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(_),
             event: BackendEvent::ActiveWorkProjection { projection },
             ..
         } if projection.active_agents == 2
@@ -30484,7 +31105,7 @@ fn app_runtime_close_work_done_removes_paused_work_from_active_surface() {
     assert_eq!(paused_view.active_works[0].lifecycle_state, "paused");
 
     // Close (Done): the Work leaves the active surface.
-    let events = runtime.close_work("work-session-session-done", "done");
+    let events = runtime.close_work(&runtime.test_context(), "work-session-session-done", "done");
     assert!(
         events.is_empty(),
         "close_work schedules the refreshed projection off the event-loop path"
@@ -30551,7 +31172,11 @@ fn app_runtime_close_work_discarded_marks_terminal_and_removes_from_surface() {
 
     runtime.mark_agent_session_stopped("tab-1::agent-discard");
 
-    let events = runtime.close_work("work-session-session-discard", "discarded");
+    let events = runtime.close_work(
+        &runtime.test_context(),
+        "work-session-session-discard",
+        "discarded",
+    );
     assert!(events.is_empty());
 
     let closed_view = wait_for_active_work_projection(&mut runtime);
@@ -30618,7 +31243,7 @@ fn app_runtime_close_work_blocks_when_owning_agent_is_live() {
         .insert("tab-1::agent-live".to_string(), session);
 
     // Agent is live: close must be blocked.
-    let events = runtime.close_work("work-session-session-live", "done");
+    let events = runtime.close_work(&runtime.test_context(), "work-session-session-live", "done");
     assert!(
         events.is_empty(),
         "a blocked close must not broadcast a projection change"
@@ -30729,7 +31354,11 @@ fn app_runtime_close_work_retains_worktree_and_branch() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     // No live agent session: close the Work without cleaning its materialization.
-    let events = runtime.close_work("work-session-session-cleanup", "done");
+    let events = runtime.close_work(
+        &runtime.test_context(),
+        "work-session-session-cleanup",
+        "done",
+    );
     assert!(events.is_empty());
     let _closed_projection = wait_for_active_work_projection(&mut runtime);
 
@@ -31721,13 +32350,22 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
         .active_agent_sessions
         .insert(window_id.clone(), session);
 
-    let events = runtime.open_active_work_launch_wizard("client-1", "work/test", None);
+    let events = runtime.open_active_work_launch_wizard(
+        &runtime.test_context(),
+        "client-1",
+        "work/test",
+        None,
+    );
 
-    assert!(runtime.launch_wizard.is_none());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .is_none());
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(_),
             event: BackendEvent::WindowCanvasState { .. },
             ..
         }
@@ -32133,7 +32771,7 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
     wait_for_recorded_event("bound runtime natural exit", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::RuntimeStatus {
                     id,
                     incarnation: event_incarnation,
@@ -32156,7 +32794,7 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::WindowCloseFinalized {
                         window_id: finalized_window_id,
                         ..
@@ -32331,7 +32969,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     let codex_id = combined_window_id("tab-1", "legacy-codex");
 
     runtime.restart_window_events(&codex_id);
-    runtime.create_window_events(WindowPreset::Claude, bounds);
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds);
 
     let inventory = gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir);
     let live_windows = runtime.runtimes.keys().cloned().collect::<Vec<_>>();
@@ -34558,7 +35196,12 @@ fn app_runtime_resume_workspace_journal_reuses_existing_branch_as_execution_cont
         },
     );
 
-    let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+    let session = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard");
     let view = session.wizard.view();
     assert_eq!(view.title, "Launch Agent");
     assert_eq!(view.branch_name, branch);
@@ -35388,6 +36031,8 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
     );
 
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -36380,7 +37025,7 @@ fn bootstrap_hands_its_worktree_inventory_to_the_startup_ingest() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .find_map(|event| match event {
+            .find_map(|event| match recorded_project_payload(event) {
                 UserEvent::WorkEventsIngested { local_branches, .. } => {
                     Some(local_branches.clone())
                 }
@@ -36549,7 +37194,10 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .any(|event| matches!(event, UserEvent::StartupGenerationReaperCompleted)));
+        .any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::StartupGenerationReaperCompleted
+        )));
     runtime.handle_startup_generation_reaper_completed();
     assert!(
         runtime.deferred_issue_monitor_launches.is_none(),
@@ -37924,6 +38572,8 @@ fn app_runtime_resume_workspace_journal_populates_quick_start_entries_from_prior
     );
 
     let session_ref = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard opened");
@@ -37974,7 +38624,12 @@ fn app_runtime_resume_workspace_journal_falls_back_to_new_work_branch_when_branc
         },
     );
 
-    let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+    let session = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard");
     let view = session.wizard.view();
     assert_eq!(view.title, "Start Work");
     assert!(view.branch_name.starts_with("work/"));
@@ -38034,7 +38689,12 @@ fn app_runtime_resume_workspace_current_ignores_idle_stale_git_details() {
         },
     );
 
-    let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+    let session = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard");
     let view = session.wizard.view();
     assert_eq!(view.title, "Start Work");
     assert!(view.branch_name.starts_with("work/"));
@@ -38099,7 +38759,12 @@ fn app_runtime_resume_workspace_journal_derives_feature_branch_under_work_named_
         },
     );
 
-    let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+    let session = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard");
     let view = session.wizard.view();
     assert_eq!(view.title, "Launch Agent");
     assert_eq!(view.branch_name, branch);
@@ -38551,15 +39216,21 @@ fn workspace_cleanup_failure_does_not_emit_done_work_item() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let immediate_events =
-        runtime.run_workspace_cleanup_events("client-1", branch, false, false, None);
+    let immediate_events = runtime.run_workspace_cleanup_events(
+        &runtime.test_context(),
+        "client-1",
+        branch,
+        false,
+        false,
+        None,
+    );
 
     assert!(immediate_events.is_empty());
     wait_for_recorded_event("workspace cleanup failure", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
-                UserEvent::Dispatch(outbound_events)
+                recorded_project_payload(event),
+                UserEvent::ProjectDispatch { events: outbound_events, .. }
                     if outbound_events.iter().any(|outbound| matches!(
                         outbound.event,
                         BackendEvent::BranchCleanupResult { .. }
@@ -39052,7 +39723,9 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
     let window_id = combined_window_id("tab-1", "shell-1");
     let captured_events = match &runtime.proxy {
         AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_) => panic!("sample runtime must use stub proxy"),
+        AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+            panic!("sample runtime must use stub proxy")
+        }
     };
     let (command, args) = if cfg!(windows) {
         (
@@ -40096,7 +40769,9 @@ fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
     let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
     let proxy_events = match &runtime.proxy {
         AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_) => panic!("sample runtime must use stub proxy"),
+        AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+            panic!("sample runtime must use stub proxy")
+        }
     };
     runtime.observe_runtime_approval_prompt(&window_id, None);
     let token = runtime.window_approval_waiting[&window_id]
@@ -40110,7 +40785,7 @@ fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::RuntimeApprovalSettle { id, token: queued }
                         if id == &window_id && *queued == token
                 )
@@ -40774,7 +41449,9 @@ fn process_line_events_broadcast_while_console_window_open_on_inactive_tab() {
     ));
 
     assert_eq!(events.len(), 1);
-    assert!(matches!(events[0].target, DispatchTarget::All));
+    assert!(
+        matches!(&events[0].target, DispatchTarget::Project(key) if Some(key) == runtime.project_key_for_tab("tab-b"))
+    );
     assert!(matches!(
         &events[0].event,
         BackendEvent::ProcessLine { line } if line.message == "gh api rate limit"
@@ -40813,7 +41490,7 @@ fn log_entry_events_drop_stream_without_logs_window() {
 }
 
 #[test]
-fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
+fn log_entry_events_send_global_to_consumers_and_project_only_to_owner() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo_a = temp.path().join("repo-a");
@@ -40825,7 +41502,7 @@ fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
         "A",
         repo_a,
         ProjectKind::Git,
-        &[WindowPreset::Shell],
+        &[WindowPreset::Logs],
     );
     let inactive = sample_project_tab(
         "tab-b",
@@ -40842,8 +41519,24 @@ fn log_entry_events_broadcast_while_logs_window_open_on_inactive_tab() {
         "reader stalled",
     ));
 
-    assert_eq!(events.len(), 1);
-    assert!(matches!(events[0].target, DispatchTarget::All));
+    assert_eq!(
+        events.len(),
+        2,
+        "global diagnostics reach both Logs consumers"
+    );
+    let owner = runtime.project_key_for_tab("tab-b").unwrap();
+    let mut scoped =
+        gwt_core::logging::LogEvent::new(LogLevel::Warn, "pty", "B private diagnostic");
+    scoped.project_scope = Some(owner.as_str().to_string());
+    let owned_events = runtime.log_entry_events(scoped.clone());
+    assert_eq!(
+        owned_events.len(),
+        1,
+        "another project's diagnostics must not reach the A socket"
+    );
+    assert!(matches!(&owned_events[0].target, DispatchTarget::Project(key) if key == owner));
+    scoped.project_scope = Some("unopened-project".to_string());
+    assert!(runtime.log_entry_events(scoped).is_empty());
     assert!(matches!(
         &events[0].event,
         BackendEvent::LogEntryAppended { entry } if entry.message == "reader stalled"
@@ -40882,7 +41575,7 @@ fn stop_all_windows_events_stops_every_runtime_keeping_windows() {
             .insert(window_id.clone(), WindowProcessStatus::Running);
     }
 
-    runtime.stop_all_windows_events();
+    runtime.stop_all_windows_events(&runtime.test_context());
 
     for raw in &raw_ids {
         let window_id = combined_window_id("tab-1", raw);
@@ -41058,11 +41751,14 @@ fn app_runtime_viewport_and_geometry_updates_persist_workspace_state() {
 
     assert_eq!(
         runtime
-            .update_viewport_events(gwt::CanvasViewport {
-                x: 12.0,
-                y: 34.0,
-                zoom: 1.25,
-            })
+            .update_viewport_events(
+                &runtime.test_context(),
+                gwt::CanvasViewport {
+                    x: 12.0,
+                    y: 34.0,
+                    zoom: 1.25,
+                }
+            )
             .len(),
         1
     );
@@ -41137,11 +41833,18 @@ fn app_runtime_duplicate_viewport_update_skips_workspace_broadcast_and_persist()
         zoom: 1.25,
     };
 
-    assert_eq!(runtime.update_viewport_events(viewport.clone()).len(), 1);
+    assert_eq!(
+        runtime
+            .update_viewport_events(&runtime.test_context(), viewport.clone())
+            .len(),
+        1
+    );
     assert_eq!(runtime.persist_dispatcher.enqueued_count(), 1);
 
     assert!(
-        runtime.update_viewport_events(viewport).is_empty(),
+        runtime
+            .update_viewport_events(&runtime.test_context(), viewport)
+            .is_empty(),
         "duplicate viewport payload should not broadcast a workspace_state",
     );
     assert_eq!(
@@ -41152,11 +41855,14 @@ fn app_runtime_duplicate_viewport_update_skips_workspace_broadcast_and_persist()
 
     assert_eq!(
         runtime
-            .update_viewport_events(gwt::CanvasViewport {
-                x: 12.0,
-                y: 34.0,
-                zoom: 1.5,
-            })
+            .update_viewport_events(
+                &runtime.test_context(),
+                gwt::CanvasViewport {
+                    x: 12.0,
+                    y: 34.0,
+                    zoom: 1.5,
+                }
+            )
             .len(),
         1,
         "changed zoom must still broadcast workspace_state",
@@ -41975,7 +42681,7 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
     wait_for_recorded_event("knowledge entries dispatch", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| {
                         matches!(
@@ -42001,7 +42707,7 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
     wait_for_recorded_event("knowledge detail dispatch", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
@@ -42739,7 +43445,7 @@ fn app_runtime_knowledge_search_replies_through_async_dispatch() {
     wait_for_recorded_event("knowledge search dispatch", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| {
                         matches!(
@@ -42876,7 +43582,7 @@ fn app_runtime_knowledge_search_transient_failure_stays_silent_with_retry_direct
     wait_for_recorded_event("knowledge search completion", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| {
                         matches!(
@@ -43094,7 +43800,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
     wait_for_recorded_event("selection detail dispatch", &recorded_events, |events| {
         events[events_before_selection..].iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
@@ -43207,7 +43913,7 @@ fn select_knowledge_bridge_entry_snapshot_miss_stays_empty_without_full_scan() {
     wait_for_recorded_event("selection cache-miss detail", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
@@ -43223,7 +43929,7 @@ fn select_knowledge_bridge_entry_snapshot_miss_stays_empty_without_full_scan() {
     let recorded = recorded_events.lock().expect("events lock");
     assert!(recorded.iter().all(|event| {
         !matches!(
-            event,
+            recorded_project_payload(event),
             UserEvent::Dispatch(dispatched)
                 if dispatched.iter().any(|outbound| matches!(
                     &outbound.event,
@@ -43277,7 +43983,7 @@ fn select_pr_knowledge_bridge_entry_preserves_the_legacy_full_view_path() {
     wait_for_recorded_event("PR selection full view", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| matches!(
                         &outbound.event,
@@ -43402,7 +44108,7 @@ fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
     wait_for_recorded_event("manual knowledge refresh dispatch", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| {
                         matches!(
@@ -43494,7 +44200,7 @@ fn app_runtime_manual_knowledge_refresh_uses_child_bare_repo_for_workspace_home(
         |events| {
             events.iter().any(|event| {
                 matches!(
-                    event,
+                    recorded_project_payload(event),
                     UserEvent::Dispatch(dispatched)
                         if dispatched.iter().any(|outbound| {
                             matches!(
@@ -43567,7 +44273,7 @@ fn app_runtime_manual_knowledge_refresh_error_preserves_request_context() {
     wait_for_recorded_event("manual knowledge refresh error", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::Dispatch(dispatched)
                     if dispatched.iter().any(|outbound| {
                         matches!(
@@ -43844,10 +44550,10 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(key),
             event: BackendEvent::ProfileSnapshot { id, snapshot },
             ..
-        } if id == &current_window_id
+        } if key == &runtime.test_context().project_key && id == &current_window_id
             && snapshot.selected_profile == "review"
             && snapshot.active_profile == "default"
             && snapshot.profiles.iter().any(|profile|
@@ -43860,7 +44566,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(key),
             event: BackendEvent::ProfileSnapshot { id, snapshot },
             ..
         } if id == &sibling_window_id
@@ -44079,7 +44785,10 @@ fn frontend_project_log_tab_id_routes_non_window_owners() {
         sample_project_tab("tab-b", "B", project_b, ProjectKind::NonRepo, &[]),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-b"));
-    runtime.launch_wizard = Some(sample_launch_wizard_session("tab-a", &project_a));
+    let context_a = runtime.project_context("tab-a").unwrap();
+    let context_b = runtime.project_context("tab-b").unwrap();
+    runtime.project_state_mut(&context_a).unwrap().launch_wizard =
+        Some(sample_launch_wizard_session("tab-a", &project_a));
     let cases = [
         (
             FrontendEvent::RebuildIndexCell {
@@ -44128,7 +44837,14 @@ fn frontend_project_log_tab_id_routes_non_window_owners() {
     ];
     let actual = cases
         .iter()
-        .map(|(event, _)| runtime.frontend_project_log_tab_id(event))
+        .map(|(event, _)| {
+            let context = if matches!(event, FrontendEvent::LaunchWizardAction { .. }) {
+                &context_a
+            } else {
+                &context_b
+            };
+            runtime.frontend_project_log_tab_id(Some(context), event)
+        })
         .collect::<Vec<_>>();
     let expected = cases.iter().map(|(_, owner)| *owner).collect::<Vec<_>>();
     assert_eq!(
@@ -44210,7 +44926,8 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
         "opened project uses its canonical project log store"
     );
 
-    runtime.create_window_events(WindowPreset::Logs, canvas_bounds());
+    let context_b = runtime.project_context(&tab_b_id).unwrap();
+    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds());
     let logs_b_raw_id = runtime
         .tab(&tab_b_id)
         .expect("opened project tab")
@@ -44264,8 +44981,10 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
         "legacy project-file records inherit the selected project scope"
     );
 
+    let context_a = runtime.project_context("tab-a").unwrap();
     let global_entries = runtime
-        .handle_frontend_event(
+        .handle_frontend_event_for_project(
+            &context_a,
             "client-1".to_string(),
             FrontendEvent::LoadLogs {
                 id: logs_a_id.clone(),
@@ -44309,25 +45028,52 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
         "UI traces follow the active project's canonical log store"
     );
 
+    // The connection owns the artifact even while the legacy test selection is A.
+    let project_b_trace = runtime.handle_frontend_event_for_project(
+        &context_b,
+        "client-b".to_string(),
+        FrontendEvent::SaveUiTrace {
+            trace: serde_json::from_value::<UiTracePayload>(serde_json::json!({
+                "session_id": "project-b-trace",
+                "entries": [{ "kind": "trace_start", "ts": 1 }]
+            }))
+            .expect("typed B trace"),
+        },
+    );
+    assert!(matches!(
+        &project_b_trace[..],
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::UiTraceSaved { path, entries }, ..
+        }] if client_id == "client-b" && *entries == 1
+            && Path::new(path).exists() && Path::new(path).parent() == Some(scope_b.log_dir())
+    ));
+
     runtime.set_active_tab(tab_b_id.clone());
     assert_eq!(
         runtime
-            .frontend_project_log_scope(&FrontendEvent::FocusWindow {
-                id: logs_a_id.clone(),
-                bounds: Some(canvas_bounds()),
-            })
+            .frontend_project_log_scope(
+                Some(&context_a),
+                &FrontendEvent::FocusWindow {
+                    id: logs_a_id.clone(),
+                    bounds: Some(canvas_bounds()),
+                }
+            )
             .as_ref(),
         Some(&scope_a),
         "an event from an inactive project keeps the window owner's scope"
     );
     assert!(runtime
-        .frontend_project_log_scope(&FrontendEvent::GetSystemSettings)
+        .frontend_project_log_scope(Some(&context_a), &FrontendEvent::GetSystemSettings)
         .is_none());
     assert!(runtime
-        .frontend_project_log_scope(&FrontendEvent::LoadLogs {
-            id: logs_a_id.clone(),
-            scope: LogScopeSelection::Global,
-        })
+        .frontend_project_log_scope(
+            Some(&context_a),
+            &FrontendEvent::LoadLogs {
+                id: logs_a_id.clone(),
+                scope: LogScopeSelection::Global,
+            }
+        )
         .is_none());
 
     // Capture A at enqueue time, then switch the active project before the
@@ -44415,7 +45161,7 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
 
     let migrated = temp.path().join("project-a-migrated");
     fs::create_dir_all(&migrated).expect("create migrated project");
-    runtime.handle_migration_done("tab-a", &migrated);
+    runtime.handle_migration_done(&context_a, &migrated);
     let migrated_scope = runtime
         .project_log_scope_for_tab("tab-a")
         .expect("migrated scope");
@@ -45511,10 +46257,16 @@ fn app_runtime_issue_monitor_enable_opens_single_settings_wizard_without_launch_
         "Start without saved profile must not publish cached inbox yet"
     );
     assert!(
-        runtime.launch_wizard.is_some(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_some(),
         "Start without launch settings should open one settings wizard"
     );
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.issue_monitor_profile_save.as_ref())
@@ -45663,6 +46415,7 @@ fn app_runtime_published_issue_monitor_control_has_one_authority_writer() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let events = runtime.issue_monitor_control_result_events(
+        &runtime.test_context(),
         "client-1",
         Ok(()),
         "autonomous-mode",
@@ -47213,6 +47966,7 @@ fn app_runtime_recovery_blocked_control_never_recovers_or_mutates_corrupt_prefs(
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let events = runtime.issue_monitor_control_result_events(
+        &runtime.test_context(),
         "client-1",
         Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::RecoveryBlocked),
         "enabled",
@@ -47286,6 +48040,7 @@ exit 1
     let started = Instant::now();
 
     let events = runtime.local_issue_monitor_events_with_policy(
+        &runtime.test_context(),
         Some("client-1"),
         super::IssueMonitorScanPolicy::CacheOnly,
         |monitor| {
@@ -47309,7 +48064,7 @@ exit 1
 }
 
 #[test]
-fn daemon_monitor_frames_only_update_the_active_project_display() {
+fn daemon_monitor_frames_update_each_owner_project() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let active_root = temp.path().join("active");
@@ -47336,13 +48091,23 @@ fn daemon_monitor_frames_only_update_the_active_project_display() {
         BackendEvent::IssueMonitorStatus { status: actual } if **actual == status
     ));
     let other = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
-    assert!(runtime
-        .issue_monitor_daemon_status_events(&other_root, Box::new(other.status_view()))
-        .is_empty());
+    let other_key = runtime
+        .project_context("other")
+        .expect("other context")
+        .project_key;
+    let other_events =
+        runtime.issue_monitor_daemon_status_events(&other_root, Box::new(other.status_view()));
+    assert!(!other_events.is_empty());
+    assert!(other_events
+        .iter()
+        .all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &other_key)));
     assert!(runtime
         .issue_monitor_daemon_inbox_events(&other_root, Vec::new())
         .iter()
-        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorInbox { .. })));
+        .any(
+            |event| matches!(event.event, BackendEvent::IssueMonitorInbox { .. })
+                && matches!(&event.target, DispatchTarget::Project(key) if key == &other_key)
+        ));
     assert!(runtime
         .issue_monitor_daemon_inbox_events(&active_root, Vec::new())
         .iter()
@@ -47365,10 +48130,14 @@ fn list_issue_monitor_uses_the_daemon_gui_projection_without_local_scan() {
     let expected = agent["gui_status"].clone();
     reset_local_issue_monitor_remote_scan_count();
 
-    let events = runtime.list_issue_monitor_events_with_reader("client-1", |project_root| {
-        assert_eq!(project_root, root);
-        Ok(Some(agent))
-    });
+    let events = runtime.list_issue_monitor_events_with_reader(
+        &runtime.test_context(),
+        "client-1",
+        |project_root| {
+            assert_eq!(project_root, root);
+            Ok(Some(agent))
+        },
+    );
 
     assert_eq!(local_issue_monitor_remote_scan_count(), 0);
     assert_eq!(events.len(), 1);
@@ -47409,7 +48178,11 @@ fn list_issue_monitor_uncertain_and_legacy_daemon_reads_preserve_display() {
         (Ok(Some(serde_json::json!({"gui_status": "invalid"}))), true),
         (Ok(Some(legacy)), false),
     ] {
-        let events = runtime.list_issue_monitor_events_with_reader("client-1", |_| result);
+        let events = runtime.list_issue_monitor_events_with_reader(
+            &runtime.test_context(),
+            "client-1",
+            |_| result,
+        );
         assert!(events
             .iter()
             .all(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. })));
@@ -47419,11 +48192,50 @@ fn list_issue_monitor_uncertain_and_legacy_daemon_reads_preserve_display() {
 }
 
 #[test]
+fn issue_monitor_control_error_targets_its_owner_and_drops_ownerless_notifications() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo_a = temp.path().join("a");
+    let repo_b = temp.path().join("b");
+    fs::create_dir_all(&repo_a).unwrap();
+    fs::create_dir_all(&repo_b).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![
+            sample_project_tab("a", "A", repo_a, ProjectKind::Git, &[]),
+            sample_project_tab("b", "B", repo_b.clone(), ProjectKind::Git, &[]),
+        ],
+        Some("a"),
+    );
+    let error = || {
+        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+            "timed out".into(),
+        )
+    };
+    let events = runtime.issue_monitor_control_error_events(
+        Some(&repo_b),
+        None,
+        error(),
+        "launch",
+        Some(42),
+    );
+    assert!(matches!(&events[..], [OutboundEvent {
+        target: DispatchTarget::Project(key),
+        event: BackendEvent::IssueMonitorToast { issue_number: Some(42), .. },
+        ..
+    }] if Some(key) == runtime.project_key_for_tab("b")));
+    assert!(runtime
+        .issue_monitor_control_error_events(None, None, error(), "launch", None)
+        .is_empty());
+}
+
+#[test]
 fn issue_monitor_control_error_preserves_the_authoritative_display() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let runtime = sample_runtime(temp.path(), Vec::new(), None);
     let events = runtime.issue_monitor_control_error_events(
+        None,
         Some("client-1"),
         gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
             "control timed out".to_string(),
@@ -47845,7 +48657,12 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. }))
+            .filter(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::ApplyUpdateDrained { .. }
+                )
+            })
             .count()
     };
     let at = |secs: i64| since + chrono::Duration::seconds(secs);
@@ -47903,7 +48720,10 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .all(|event| !matches!(event, UserEvent::ApplyUpdateRestartNow { .. })),
+            .all(|event| !matches!(
+                recorded_project_payload(event),
+                UserEvent::ApplyUpdateRestartNow { .. }
+            )),
         "the drained manual click never uses the Restart-now route"
     );
 }
@@ -47993,6 +48813,100 @@ fn app_runtime_restart_after_manual_drain_restores_pre_drain_monitor_setting() {
 /// Running agent pane keeps it from firing and a long drain is recorded with
 /// its blockers without stopping anything.
 #[test]
+fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let since = chrono::DateTime::parse_from_rfc3339("2026-09-07T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let repos = [temp.path().join("repo-a"), temp.path().join("repo-b")];
+    let tabs = repos
+        .iter()
+        .enumerate()
+        .map(|(index, repo)| {
+            fs::create_dir_all(repo).unwrap();
+            init_repo_with_initial_commit(repo);
+            gwt::save_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(repo),
+                &gwt::IssueMonitorPrefs {
+                    enabled: true,
+                    autonomous_mode: true,
+                    update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                        version: "9.99.0".into(),
+                        since: since.to_rfc3339(),
+                        reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                        blocking: Vec::new(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            sample_project_tab(
+                &format!("tab-{index}"),
+                "Repo",
+                repo.clone(),
+                ProjectKind::Git,
+                &[],
+            )
+        })
+        .collect();
+    let (mut runtime, user_events) = sample_runtime_with_events(temp.path(), tabs, Some("tab-0"));
+    let at = |secs| since + chrono::Duration::seconds(secs);
+    assert!(runtime.update_drain_tick_events_at(at(15)).is_empty());
+    runtime.active_tab_id = Some("tab-1".into());
+    let scheduled = runtime.update_drain_tick_events_at(at(30));
+    assert_eq!(
+        scheduled
+            .iter()
+            .filter(|event| matches!(
+                event.event,
+                BackendEvent::UpdateAutoApply {
+                    phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "one host announcement for both project planners"
+    );
+    let context_a = runtime.project_context("tab-0").unwrap();
+    let context_b = runtime.project_context("tab-1").unwrap();
+    assert_eq!(
+        runtime.project_state(&context_a).unwrap().update_auto_apply,
+        runtime.project_state(&context_b).unwrap().update_auto_apply,
+    );
+    assert_ne!(
+        runtime.project_state(&context_a).unwrap().update_auto_apply,
+        gwt::update_drain::UpdateAutoApplyPlanner::default(),
+        "both project planners must retain the quiescence streak",
+    );
+    runtime.update_drain_tick_events_at(at(90));
+    assert_eq!(
+        user_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(
+                recorded_project_payload(event),
+                UserEvent::ApplyUpdateDrained { .. }
+            ))
+            .count(),
+        1,
+        "one host apply for the staged version"
+    );
+    runtime.cancel_update_auto_apply_events();
+    for repo in repos {
+        assert!(
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo),)
+                .unwrap()
+                .update_drain
+                .is_none(),
+            "cancel must release every matching project"
+        );
+    }
+}
+
+#[test]
 fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -48033,7 +48947,12 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. }))
+            .filter(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::ApplyUpdateDrained { .. }
+                )
+            })
             .count()
     };
     let at = |secs: i64| since + chrono::Duration::seconds(secs);
@@ -48104,7 +49023,10 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .all(|event| !matches!(event, UserEvent::ApplyUpdateRestartNow { .. })),
+            .all(|event| !matches!(
+                recorded_project_payload(event),
+                UserEvent::ApplyUpdateRestartNow { .. }
+            )),
         "the automatic path never uses the Restart-now route"
     );
 }
@@ -48978,8 +49900,10 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
     let rebase_mutated =
         super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |_| true);
     let control = runtime.commit_local_issue_monitor_control_for_project(&repo, |_| ());
-    let authorizing =
-        runtime.commit_local_issue_monitor_authorizing_control(|_| Ok::<_, String>(()));
+    let authorizing = runtime
+        .commit_local_issue_monitor_authorizing_control(&runtime.test_context(), |_| {
+            Ok::<_, String>(())
+        });
     let elapsed = started.elapsed();
     FileExt::unlock(&lock).expect("release prefs lock");
 
@@ -49383,7 +50307,11 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
         )
     }));
     assert!(
-        runtime.launch_wizard.is_none(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_none(),
         "auto launch with last settings must not open the Launch Agent window"
     );
     assert!(
@@ -49466,6 +50394,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let first = runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49475,6 +50404,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         .iter()
         .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
     let replay = runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49572,6 +50502,7 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
 
     runtime.issue_monitor_fallback_commit_timeout = Duration::ZERO;
     let starved = runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49596,6 +50527,7 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
     runtime.issue_monitor_fallback_commit_timeout =
         super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
     let replay = runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49673,6 +50605,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     );
 
     let replay = runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49713,6 +50646,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     insert_test_pane_runtime(&mut runtime, &live_window_id);
 
     let waiting_replay = runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49735,6 +50669,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     runtime.stop_window_runtime_without_session_projection(&live_window_id);
 
     let expired_replay = runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49809,12 +50744,14 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
     runtime_b.issue_monitor_materializer_id = "gui-b".to_string();
 
     let first = runtime_a.auto_launch_issue_monitor_delivery_events(
+        &runtime_a.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     let second = runtime_b.auto_launch_issue_monitor_delivery_events(
+        &runtime_b.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49898,6 +50835,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
     let (mut first_runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![first_tab], Some("tab-1"));
     let _ = first_runtime.auto_launch_issue_monitor_delivery_events(
+        &first_runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -49949,6 +50887,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
     restarted.issue_monitor_materializer_id = "restarted-gui".to_string();
 
     let events = restarted.auto_launch_issue_monitor_delivery_events(
+        &restarted.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some("launch:effect-3165".to_string()),
@@ -50163,16 +51102,19 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
         "issue monitor last settings runtime launch",
         &recorded_events,
         |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchComplete { .. }
+                )
+            })
         },
     );
     let result = {
         let events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .find_map(|event| match event {
+            .find_map(|event| match recorded_project_payload(event) {
                 UserEvent::LaunchComplete { result, .. } => Some(result.clone()),
                 _ => None,
             })
@@ -50744,16 +51686,26 @@ fn take_monitor_launch_complete_event(
     // asset/trust materialization in a debug build. Under parallel CI load it
     // can legitimately exceed the generic 20-second unit-test poll budget.
     wait_for_recorded_event_with_timeout(label, events, Duration::from_secs(60), |events| {
-        events
-            .iter()
-            .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchComplete { .. }
+            )
+        })
     });
     let mut events = events.lock().expect("event log");
     let index = events
         .iter()
-        .position(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::LaunchComplete { .. }
+            )
+        })
         .expect("launch complete event");
-    let UserEvent::LaunchComplete { window_id, result } = events.remove(index) else {
+    let UserEvent::LaunchComplete { window_id, result } =
+        into_recorded_project_payload(events.remove(index))
+    else {
         unreachable!("matched launch complete above")
     };
     (window_id, *result)
@@ -51018,6 +51970,7 @@ fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation
             false,
         );
         fixture.runtime.auto_launch_issue_monitor_delivery_events(
+            &fixture.runtime.test_context(),
             3165,
             LinkedIssueKind::Spec,
             None,
@@ -51068,6 +52021,7 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
             false,
         );
         let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+            &fixture.runtime.test_context(),
             3165,
             LinkedIssueKind::Spec,
             None,
@@ -51113,6 +52067,7 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
         false,
     );
     different.runtime.auto_launch_issue_monitor_delivery_events(
+        &different.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -51169,6 +52124,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     let delivery_id = fixture.delivery_id.clone().expect("durable delivery id");
 
     let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some(delivery_id.clone()),
@@ -51223,7 +52179,12 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         let mut recorded = fixture.recorded_events.lock().expect("recorded events");
         let index = recorded
             .iter()
-            .position(|event| matches!(event, UserEvent::IssueMonitorAnswerDeliveryComplete(_)))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorAnswerDeliveryComplete(_)
+                )
+            })
             .expect("physical answer delivery completion");
         recorded.remove(index)
     };
@@ -51326,7 +52287,10 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         .lock()
         .expect("recorded events")
         .iter()
-        .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })));
+        .all(|event| !matches!(
+            recorded_project_payload(event),
+            UserEvent::LaunchComplete { .. }
+        )));
 }
 
 /// Issue #3716 AC-2: once a worker may have written the prompt body, an error
@@ -51363,6 +52327,7 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     assert!(fixture
         .runtime
         .auto_launch_issue_monitor_delivery_events(
+            &fixture.runtime.test_context(),
             3165,
             LinkedIssueKind::Spec,
             Some(delivery_id.clone()),
@@ -51388,7 +52353,12 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         let mut recorded = fixture.recorded_events.lock().expect("recorded events");
         let index = recorded
             .iter()
-            .position(|event| matches!(event, UserEvent::IssueMonitorAnswerDeliveryComplete(_)))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorAnswerDeliveryComplete(_)
+                )
+            })
             .expect("failed answer delivery completion");
         recorded.remove(index)
     };
@@ -51432,6 +52402,7 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     let (retry_spawner, retry_tasks) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = retry_spawner;
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some(delivery_id.clone()),
@@ -51473,6 +52444,7 @@ fn app_runtime_answered_handoff_waits_for_a_materializing_holder() {
     assert!(fixture
         .runtime
         .auto_launch_issue_monitor_delivery_events(
+            &fixture.runtime.test_context(),
             3165,
             LinkedIssueKind::Spec,
             None,
@@ -51490,7 +52462,10 @@ fn app_runtime_answered_handoff_waits_for_a_materializing_holder() {
         .lock()
         .expect("recorded events")
         .iter()
-        .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })));
+        .all(|event| !matches!(
+            recorded_project_payload(event),
+            UserEvent::LaunchComplete { .. }
+        )));
 }
 
 /// Issue #3716 AC-2: a queued answer belongs to the gwt Session recorded by
@@ -51542,6 +52517,7 @@ fn app_runtime_answered_handoff_ignores_a_newer_branch_session() {
         .apply_refreshed_launch_wizard_sessions(vec![source, newer]);
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -51583,6 +52559,7 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
     seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -51678,6 +52655,7 @@ fn monitor_launch_without_pinned_package_runners_is_refused() {
     );
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -51723,6 +52701,7 @@ fn app_runtime_pre_spawn_exact_handoff_failure_uses_bounded_retry() {
     gwt::save_issue_monitor_prefs(&prefs_path, &stale).expect("save stale strategy");
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some(delivery_id.clone()),
@@ -51795,6 +52774,7 @@ fn app_runtime_incomplete_grok_handoff_store_stays_retryable() {
     let delivery_id = fixture.delivery_id.clone().expect("delivery id");
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         Some(delivery_id.clone()),
@@ -51827,7 +52807,10 @@ fn app_runtime_incomplete_grok_handoff_store_stays_retryable() {
         .lock()
         .expect("recorded events")
         .iter()
-        .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })));
+        .all(|event| !matches!(
+            recorded_project_payload(event),
+            UserEvent::LaunchComplete { .. }
+        )));
 }
 
 /// SPEC #3165 T-228 / FR-104: if another live gwt window wins the native
@@ -52062,6 +53045,7 @@ fn app_runtime_monitor_resume_if_safe_ignores_non_live_active_holder_entries() {
             "fixture must expose the intended non-live window status",
         );
         fixture.runtime.auto_launch_issue_monitor_delivery_events(
+            &fixture.runtime.test_context(),
             3165,
             LinkedIssueKind::Spec,
             None,
@@ -52111,6 +53095,7 @@ fn app_runtime_monitor_resume_if_safe_ignores_stale_pending_auto_resume_source()
         .any(|(window_id, _)| window_id == holder_window_id));
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -52146,6 +53131,7 @@ fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
         true,
     );
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         fixture.delivery_id.clone(),
@@ -52216,6 +53202,7 @@ fn app_runtime_monitor_fresh_required_switches_to_current_provider_profile() {
         .expect("save current Claude Monitor profile");
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -52286,6 +53273,7 @@ fn app_runtime_monitor_resume_if_safe_skips_provider_mismatched_session() {
         .expect("save current Claude Monitor profile");
 
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -52355,6 +53343,7 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         gwt::issue_monitor::provider_auth_state_from_env;
 
     let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -52385,9 +53374,10 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
-        recorded
-            .iter()
-            .all(|event| !matches!(event, UserEvent::LaunchComplete { .. })),
+        recorded.iter().all(|event| !matches!(
+            recorded_project_payload(event),
+            UserEvent::LaunchComplete { .. }
+        )),
         "refused launch must not spawn a PTY",
     );
 }
@@ -52486,6 +53476,8 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     assert_eq!(view.primary_action_label, "Continue");
     assert_eq!(view.linked_issue_number, Some(3165));
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -52493,7 +53485,7 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         .is_some());
     assert_eq!(
         runtime
-            .launch_wizard
+            .project_state(&runtime.test_context()).expect("test project state").launch_wizard
             .as_ref()
             .expect("launch wizard")
             .wizard
@@ -52502,36 +53494,47 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     );
 
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::SetModel {
             model: "gpt-5.5".to_string(),
         },
         None,
     );
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
         },
         None,
     );
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::SetSkipPermissions { enabled: true },
         None,
     );
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
     wait_for_recorded_event(
         "issue monitor settings runtime resolution",
         &recorded_events,
         |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
         },
     );
     let resolved_event = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("runtime resolved event")
     };
@@ -52539,7 +53542,11 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         unreachable!("matched above")
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
-    let confirm_events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let confirm_events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
     let confirm_view = confirm_events
         .iter()
         .find_map(|event| match &event.event {
@@ -52551,7 +53558,11 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         .expect("confirm wizard view");
     assert_eq!(confirm_view.primary_action_label, "Save settings");
 
-    let saved_events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let saved_events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
 
     assert!(saved_events.iter().any(|event| {
         matches!(
@@ -52560,7 +53571,11 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
                 if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
         )
     }));
-    assert!(runtime.launch_wizard.is_none());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .is_none());
     assert!(
         runtime.window_details.is_empty(),
         "saving Issue Monitor settings must not spawn an agent window"
@@ -52703,21 +53718,29 @@ fn app_runtime_issue_monitor_configure_profile_previews_the_pool_head_replacemen
     );
     let previewed_summary = impact.resulting_summary.clone();
 
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
     wait_for_recorded_event(
         "issue monitor settings runtime resolution",
         &recorded_events,
         |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
         },
     );
     let resolved_event = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("runtime resolved event")
     };
@@ -52725,8 +53748,8 @@ fn app_runtime_issue_monitor_configure_profile_previews_the_pool_head_replacemen
         unreachable!("matched above")
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
     let saved_summary =
@@ -52862,6 +53885,8 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
     assert_eq!(view.linked_issue_number, None);
     assert_eq!(view.primary_action_label, "Continue");
     let save_context = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -52871,6 +53896,8 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
     assert_eq!(save_context.issue_number, None);
     assert_eq!(
         runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .launch_wizard
             .as_ref()
             .expect("launch wizard")
@@ -52880,32 +53907,42 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
     );
 
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::SetModel {
             model: "gpt-5.5".to_string(),
         },
         None,
     );
     runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
         LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
         },
         None,
     );
-    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
     wait_for_recorded_event(
         "global issue monitor settings runtime resolution",
         &recorded_events,
         |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
         },
     );
     let resolved_event = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardRuntimeResolved { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("runtime resolved event")
     };
@@ -52913,8 +53950,16 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         unreachable!("matched above")
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
-    let _confirm_events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
-    let saved_events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let _confirm_events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
+    let saved_events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::Submit,
+        None,
+    );
 
     assert!(saved_events.iter().any(|event| {
         matches!(
@@ -52923,7 +53968,11 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
                 if message == "Issue Monitor settings saved" && issue_number.is_none()
         )
     }));
-    assert!(runtime.launch_wizard.is_none());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
+        .launch_wizard
+        .is_none());
     assert!(
         runtime.window_details.is_empty(),
         "saving global Issue Monitor settings must not spawn an agent window"
@@ -53038,6 +54087,8 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
         )
     }));
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.issue_monitor_profile_save.as_ref())
@@ -53105,7 +54156,11 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
     );
 
     assert!(
-        runtime.launch_wizard.is_none(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_none(),
         "saved Issue Monitor profile must launch silently"
     );
     let agent_window = runtime.tabs[0]
@@ -53181,7 +54236,11 @@ fn app_runtime_issue_monitor_auto_launch_skips_a_held_candidate_and_reports_why(
     );
 
     assert!(
-        runtime.launch_wizard.is_none(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_none(),
         "pool launch must stay silent"
     );
     let agent_window = runtime.tabs[0]
@@ -53251,6 +54310,7 @@ fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save pooled Monitor prefs");
 
     let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
         3165,
         LinkedIssueKind::Spec,
         None,
@@ -53361,10 +54421,16 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
     );
 
     assert!(
-        runtime.launch_wizard.is_some(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_some(),
         "auto launch without saved or last settings must open one settings window"
     );
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -53382,7 +54448,7 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
     );
     assert_eq!(
         runtime
-            .launch_wizard
+            .project_state(&runtime.test_context()).expect("test project state").launch_wizard
             .as_ref()
             .expect("launch wizard")
             .wizard
@@ -53413,6 +54479,8 @@ fn app_runtime_issue_monitor_auto_launch_keeps_existing_settings_wizard() {
         LinkedIssueKind::Spec,
     );
     let first_wizard_id = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("first settings wizard")
@@ -53427,6 +54495,8 @@ fn app_runtime_issue_monitor_auto_launch_keeps_existing_settings_wizard() {
 
     assert_eq!(
         runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
             .launch_wizard
             .as_ref()
             .expect("existing settings wizard")
@@ -53483,7 +54553,11 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
         )
     }));
     assert!(
-        runtime.launch_wizard.is_some(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_some(),
         "manual Issue Monitor launch should not be capped by max_active_agents"
     );
 }
@@ -53540,7 +54614,11 @@ fn app_runtime_issue_monitor_requeue_releases_a_dead_hold_without_launching() {
         "missing daemon forces the atomic GUI fallback writer"
     );
     assert!(
-        runtime.launch_wizard.is_none(),
+        runtime
+            .project_state(&runtime.test_context())
+            .expect("test project state")
+            .launch_wizard
+            .is_none(),
         "the recovery returns the row to the queue and must not start an agent"
     );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
@@ -54214,7 +55292,7 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
         Some("simulated stale state before reconnect".to_string()),
     );
 
-    let events = runtime.frontend_sync_events("client-1");
+    let events = runtime.frontend_project_sync_events("client-1", &runtime.test_context());
 
     let workspace_event = events
         .iter()
@@ -55858,10 +56936,10 @@ fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only
         assert!(events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::All,
+                target: DispatchTarget::Project(key),
                 event: BackendEvent::BoardEntries { id, entries, .. },
                 ..
-            } if *id == expected_id
+            } if Some(key) == runtime.project_key_for_tab("tab-1") && *id == expected_id
                 && entries.len() == 1
                 && entries[0].body == "External update"
         )));
@@ -55899,6 +56977,7 @@ fn board_projection_refresh_applies_a_work_milestone_without_rebuilding_active_w
     super::workspace_views::reset_full_active_work_projection_builds();
 
     let events = runtime.apply_board_projection_refresh(super::BoardProjectionRefreshed {
+        context: runtime.project_context("tab-1"),
         events: Vec::new(),
         milestone: Some((repo.clone(), projection)),
     });
@@ -56002,7 +57081,12 @@ fn wait_for_active_work_prepare_completions(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|event| matches!(event, UserEvent::ActiveWorkProjectionPrepared(_)))
+            .filter(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::ActiveWorkProjectionPrepared(_)
+                )
+            })
             .count();
         if count >= expected || Instant::now() >= deadline {
             return count;
@@ -56019,7 +57103,7 @@ fn active_work_refresh_requests(events: &Arc<Mutex<Vec<UserEvent>>>, project_roo
         .iter()
         .filter(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::ActiveWorkProjectionChanged { project_root: root }
                     if root == project_root
             )
@@ -56323,15 +57407,58 @@ fn migration_detected_broadcasts_only_for_pending_tabs() {
     assert!(matches!(
         &events[0],
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(key),
             event: BackendEvent::MigrationDetected { tab_id, .. },
             ..
-        } if tab_id == "tab-1"
+        } if tab_id == "tab-1" && Some(key) == runtime.project_key_for_tab(tab_id)
     ));
 }
 
 #[test]
-fn handle_migration_done_repoints_tab_and_emits_broadcast() {
+fn migration_completion_ignores_reopened_tab_generation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let new_worktree = project.join("develop");
+    fs::create_dir_all(&new_worktree).expect("new worktree");
+    let tab = migration_pending_tab("tab-1", project.clone());
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let context = runtime.project_context("tab-1").expect("project context");
+
+    // Reopening the same project preserves its tab ID and key, but not its generation.
+    runtime.close_project_tab_events("tab-1");
+    runtime
+        .tabs
+        .push(migration_pending_tab("tab-1", project.clone()));
+    runtime.refresh_project_tab_incarnation("tab-1");
+    runtime.active_tab_id = Some("tab-1".to_string());
+
+    assert!(runtime
+        .handle_migration_progress(&context, gwt_core::migration::MigrationPhase::Bareify, 50,)
+        .is_empty());
+    let events = runtime.handle_migration_error(
+        &context,
+        gwt_core::migration::MigrationPhase::Bareify,
+        "old failure".to_string(),
+        gwt_core::migration::RecoveryState::RolledBack,
+    );
+    assert!(
+        events.is_empty(),
+        "stale errors must not reach reopened project"
+    );
+    assert!(runtime.tabs[0].migration_pending);
+    let events = runtime.handle_migration_done(&context, &new_worktree);
+    assert!(
+        events.is_empty(),
+        "stale completion must not reach reopened project"
+    );
+    assert_eq!(runtime.tabs[0].project_root, project);
+    assert!(runtime.tabs[0].migration_pending);
+}
+
+#[test]
+fn handle_migration_done_repoints_tab_and_emits_project_event() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
@@ -56341,7 +57468,21 @@ fn handle_migration_done_repoints_tab_and_emits_broadcast() {
     let tab = migration_pending_tab("tab-1", project);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_migration_done("tab-1", &new_worktree);
+    let context = runtime.project_context("tab-1").expect("project context");
+    let progress = runtime.handle_migration_progress(
+        &context,
+        gwt_core::migration::MigrationPhase::Bareify,
+        50,
+    );
+    assert!(matches!(
+        &progress[..],
+        [OutboundEvent {
+            target: DispatchTarget::Project(project_key),
+            event: BackendEvent::MigrationProgress { percent: 50, .. },
+            ..
+        }] if project_key == &context.project_key
+    ));
+    let events = runtime.handle_migration_done(&context, &new_worktree);
 
     let updated = runtime
         .tabs
@@ -56352,18 +57493,18 @@ fn handle_migration_done_repoints_tab_and_emits_broadcast() {
     assert_eq!(updated.project_root, canonical_new);
     assert!(!updated.migration_pending, "pending flag must clear");
 
-    assert!(events.iter().any(|event| matches!(
-        event,
+    assert!(matches!(
+        &events[0],
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(project_key),
             event: BackendEvent::MigrationDone { tab_id, .. },
             ..
-        } if tab_id == "tab-1"
-    )));
+        } if project_key == &context.project_key && tab_id == "tab-1"
+    ));
 }
 
 #[test]
-fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
+fn handle_migration_error_clears_pending_and_emits_project_recovery_label() {
     use gwt_core::migration::{MigrationPhase, RecoveryState};
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -56373,8 +57514,9 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
     let tab = migration_pending_tab("tab-1", project);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    let context = runtime.project_context("tab-1").expect("project context");
     let events = runtime.handle_migration_error(
-        "tab-1",
+        &context,
         MigrationPhase::Bareify,
         "boom".to_string(),
         RecoveryState::RolledBack,
@@ -56391,10 +57533,10 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(project_key),
             event: BackendEvent::MigrationError { tab_id, recovery, phase, .. },
             ..
-        } if tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
+        } if project_key == &context.project_key && tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
     )));
 }
 
@@ -56470,7 +57612,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Hub,
             event: BackendEvent::CloneProjectDone {
                 workspace_home: emitted_workspace_home,
             },
@@ -56480,7 +57622,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(_),
             event: BackendEvent::WindowCanvasState { .. },
             ..
         }
@@ -56488,7 +57630,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
+            target: DispatchTarget::Project(_),
             event: BackendEvent::PmStatus {
                 available: true,
                 ..
@@ -56699,10 +57841,10 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
     assert!(open_events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::All,
-            event: BackendEvent::MigrationDetected { .. },
+            target: DispatchTarget::Project(key),
+            event: BackendEvent::MigrationDetected { tab_id, .. },
             ..
-        }
+        } if Some(key) == runtime.project_key_for_tab(tab_id)
     )));
 
     let skip_events = runtime.skip_migration_events(&tab_id);
@@ -56730,10 +57872,10 @@ fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
         next_events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::All,
-                event: BackendEvent::MigrationDetected { .. },
+                target: DispatchTarget::Project(key),
+                event: BackendEvent::MigrationDetected { tab_id, .. },
                 ..
-            }
+            } if Some(key) == next_runtime.project_key_for_tab(tab_id)
         )),
         "skip is launch-local; the modal must be shown again next launch"
     );
@@ -56760,7 +57902,7 @@ fn quit_migration_events_requests_app_quit_without_repository_changes() {
     let recorded_events = recorded_events.lock().expect("recorded events");
     assert!(recorded_events
         .iter()
-        .any(|event| matches!(event, UserEvent::QuitApp { .. })));
+        .any(|event| matches!(recorded_project_payload(event), UserEvent::QuitApp { .. })));
     assert!(matches!(
         gwt_git::detect_repo_type(&project),
         gwt_git::RepoType::Normal {
@@ -56790,10 +57932,10 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
         events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::All,
-                event: BackendEvent::MigrationDetected { .. },
+                target: DispatchTarget::Project(key),
+                event: BackendEvent::MigrationDetected { tab_id, .. },
                 ..
-            }
+            } if Some(key) == runtime.project_key_for_tab(tab_id)
         )),
         "Normal Git layout should still open a migration-pending tab"
     );
@@ -56801,15 +57943,16 @@ fn open_project_with_existing_migration_backup_emits_recovery_error() {
         events.iter().any(|event| matches!(
             event,
             OutboundEvent {
-                target: DispatchTarget::All,
+                target: DispatchTarget::Project(key),
                 event: BackendEvent::MigrationError {
+                    tab_id,
                     phase,
                     recovery,
                     message,
                     ..
                 },
                 ..
-            } if phase == "backup"
+            } if Some(key) == runtime.project_key_for_tab(tab_id) && phase == "backup"
                 && recovery == "partial"
                 && message.contains(".gwt-migration-backup")
         )),
@@ -57927,7 +59070,17 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
     )
     .expect_err("trust writer failure must abort launch preflight");
 
-    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-1",
+            "Project",
+            project.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
     let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
         enabled: true,
         ..gwt::IssueMonitorConfig::default()
@@ -60805,7 +61958,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     wait_for_recorded_event("dirty work merge status", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::WorkMergeStatus {
                     project_root,
                     ..
@@ -60818,7 +61971,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     let (_, merged_branches, cleanup_ready_branches, dirty_branches, live_process_branches) =
         snapshot
             .iter()
-            .find_map(|event| match event {
+            .find_map(|event| match recorded_project_payload(event) {
                 UserEvent::WorkMergeStatus {
                     project_root,
                     merged_branches,
@@ -60925,7 +62078,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     wait_for_recorded_event("gwt-write work merge status", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::WorkMergeStatus {
                     project_root,
                     ..
@@ -60937,7 +62090,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     let snapshot = events.lock().expect("event log").clone();
     let (cleanup_ready_branches, dirty_branches) = snapshot
         .iter()
-        .find_map(|event| match event {
+        .find_map(|event| match recorded_project_payload(event) {
             UserEvent::WorkMergeStatus {
                 project_root,
                 cleanup_ready_branches,
@@ -61025,7 +62178,7 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
     wait_for_recorded_event("historical merged work status", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::WorkMergeStatus {
                     project_root,
                     ..
@@ -61037,7 +62190,7 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
         .lock()
         .expect("event log")
         .iter()
-        .find_map(|event| match event {
+        .find_map(|event| match recorded_project_payload(event) {
             UserEvent::WorkMergeStatus {
                 project_root,
                 merged_branches,
@@ -61184,7 +62337,7 @@ fn spawn_work_merge_status_scan_clears_stale_cache_when_no_targets_remain() {
     wait_for_recorded_event("empty work merge status", &events, |events| {
         events.iter().any(|event| {
             matches!(
-                event,
+                recorded_project_payload(event),
                 UserEvent::WorkMergeStatus {
                     project_root,
                     merged_branches,
@@ -61565,6 +62718,7 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let events = runtime.resume_workspace_agent_events(
+        &runtime.test_context(),
         "client-7",
         "resume-operation-7".to_string(),
         session.id.clone(),
@@ -61909,20 +63063,19 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
         .expect("recorded events")
         .pop()
         .expect("inactive projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+    let UserEvent::ActiveWorkProjectionPrepared(completion) =
+        into_recorded_project_payload(completion)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
-    assert!(
-        runtime
-            .handle_active_work_projection_prepared(*completion)
-            .prepared_dispatch
-            .is_none(),
-        "inactive completion updates caches without broadcasting",
-    );
+    let dispatch = runtime
+        .handle_active_work_projection_prepared(*completion)
+        .prepared_dispatch
+        .expect("non-selected project completion must reach its own clients");
+    assert_eq!(dispatch.context, runtime.project_context("tab-b").unwrap());
 
-    runtime.active_tab_id = Some("tab-b".to_string());
     assert!(runtime
-        .active_work_projection_broadcast_on_tab_change()
+        .active_work_projection_broadcast_on_tab_change("tab-b")
         .is_none());
     let dispatch = recorded_events
         .lock()
@@ -63180,11 +64333,8 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
     let events = runtime.issue_monitor_launch_succeeded_events(&repo_b, 42, "project-b::agent-1");
 
     assert!(
-        events.iter().all(|event| !matches!(
-            event.event,
-            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
-        )),
-        "an inactive launch ACK must not replace the active project's UI"
+        events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &runtime.project_context("project-b").expect("owner context").project_key)),
+        "launch ACK events belong only to the owner project"
     );
 
     assert_eq!(
@@ -63271,11 +64421,8 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
     let events = runtime.close_window_events("project-b::agent-1");
 
     assert!(
-        events.iter().all(|event| !matches!(
-            event.event,
-            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
-        )),
-        "an inactive owner's project-scoped snapshot must not replace the active project's UI"
+        events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &runtime.project_context("project-b").expect("owner context").project_key)),
+        "close events belong only to the owner project"
     );
     let finalizer = finalizers
         .lock()
@@ -63284,10 +64431,7 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
         .expect("queued inactive-project close finalizer");
     finalizer();
     let completion = apply_recorded_window_close_finalized(&mut runtime, &recorded_events);
-    assert!(completion.iter().all(|event| !matches!(
-        event.event,
-        BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
-    )));
+    assert!(completion.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &runtime.project_context("project-b").expect("owner context").project_key)));
 
     let prefs_a = gwt::load_issue_monitor_prefs(&prefs_a_path).expect("reload repo A");
     assert_eq!(
@@ -63452,10 +64596,7 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
     );
 
     assert!(
-        events.iter().all(|event| !matches!(
-            event.event,
-            BackendEvent::IssueMonitorStatus { .. } | BackendEvent::IssueMonitorInbox { .. }
-        )),
+        events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &runtime.project_context("project-b").expect("owner context").project_key)),
         "an inactive agent failure must not replace the active project's UI"
     );
     assert!(
@@ -64499,22 +65640,34 @@ fn drain_pm_worktree_preparation(
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> Vec<OutboundEvent> {
     wait_for_recorded_event("PM worktree preparation", recorded_events, |events| {
-        events
-            .iter()
-            .any(|event| matches!(event, UserEvent::PmWorktreePrepared { .. }))
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::PmWorktreePrepared { .. }
+            )
+        })
     });
     let prepared = {
         let mut events = recorded_events.lock().expect("event log");
         events
             .iter()
-            .position(|event| matches!(event, UserEvent::PmWorktreePrepared { .. }))
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::PmWorktreePrepared { .. }
+                )
+            })
             .map(|index| events.remove(index))
             .expect("PM worktree preparation event")
     };
+    assert!(
+        matches!(&prepared, UserEvent::ProjectCompletion { .. }),
+        "PM worktree completion must carry its project generation"
+    );
     let UserEvent::PmWorktreePrepared {
         continuation,
         result,
-    } = prepared
+    } = into_recorded_project_payload(prepared)
     else {
         unreachable!("matched above")
     };
@@ -66429,14 +67582,17 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
 
         runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
         wait_for_recorded_event("restore launch preparation", &recorded_events, |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchComplete { .. }))
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchComplete { .. }
+                )
+            })
         });
         let recorded = recorded_events.lock().expect("event log");
         let (window_id, result) = recorded
             .iter()
-            .find_map(|event| match event {
+            .find_map(|event| match recorded_project_payload(event) {
                 UserEvent::LaunchComplete { window_id, result } => {
                     Some((window_id.clone(), result.as_ref().clone()))
                 }
@@ -67045,7 +68201,8 @@ fn pm_status_projects_configured_and_running_agent_model_and_reasoning() {
     )
     .expect("register the live PM");
 
-    let status = serde_json::to_value(runtime.pm_status_event()).expect("serialize PM status");
+    let status = serde_json::to_value(runtime.pm_status_event(&runtime.test_context()))
+        .expect("serialize PM status");
     assert_eq!(status["configured_agent_id"], "codex");
     assert_eq!(status["configured_model"], "gpt-5.6");
     assert_eq!(status["configured_reasoning"], "xhigh");
@@ -67425,7 +68582,7 @@ fn pm_close_window_deregisters_pm() {
 }
 
 #[test]
-fn stale_pm_close_completion_cannot_overwrite_the_active_project_status() {
+fn pm_close_completion_stays_with_owner_and_is_dropped_after_owner_closes() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo_a = temp.path().join("repo-a");
@@ -67464,11 +68621,12 @@ fn stale_pm_close_completion_cannot_overwrite_the_active_project_status() {
     assert!(
         after_switch
             .iter()
-            .all(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. })),
-        "a delayed close from repo A must not replace repo B's current PM status"
+            .all(|outbound| matches!(&outbound.target, DispatchTarget::Project(key) if key == &runtime.project_context("tab-a").expect("owner context").project_key)),
+        "a delayed close from repo A must target only repo A"
     );
 
-    runtime.active_tab_id = None;
+    runtime.close_project_tab_events("tab-a");
+    runtime.close_project_tab_events("tab-b");
     let after_last_tab_close = runtime.handle_window_close_finalized(
         "tab-a::pm-a-final",
         Some(&repo_a),
@@ -68344,13 +69502,15 @@ fn set_pm_loop_interval_accepts_minimum_and_preserves_live_pm() {
         .iter()
         .find_map(|outbound| match (&outbound.target, &outbound.event) {
             (
-                DispatchTarget::All,
+                DispatchTarget::Project(key),
                 BackendEvent::PmStatus {
                     loop_interval_secs,
                     is_running,
                     ..
                 },
-            ) => Some((*loop_interval_secs, *is_running)),
+            ) if Some(key) == runtime.project_key_for_tab("tab-1") => {
+                Some((*loop_interval_secs, *is_running))
+            }
             _ => None,
         })
         .expect("a committed write must broadcast pm_status");
@@ -72298,7 +73458,7 @@ fn issue_3777_tab_change_reuses_background_serialized_projection() {
         .borrow_mut()
         .insert("tab-1".to_string(), payload.clone());
 
-    let structured = runtime.active_work_projection_broadcast_on_tab_change();
+    let structured = runtime.active_work_projection_broadcast_on_tab_change("tab-1");
 
     assert!(structured.is_none());
     let event = recorded_events
@@ -72310,11 +73470,13 @@ fn issue_3777_tab_change_reuses_background_serialized_projection() {
         tab_id,
         target,
         payload: dispatched,
+        context,
     } = event
     else {
         panic!("expected PreparedActiveWorkDispatch");
     };
     assert_eq!(tab_id, "tab-1");
+    assert_eq!(context, runtime.project_context("tab-1").unwrap());
     assert!(
         matches!(target, DispatchTarget::Project(key) if Some(&key) == runtime.project_key_for_tab("tab-1"))
     );
@@ -72336,7 +73498,7 @@ fn issue_3777_frontend_ready_reuses_background_serialized_projection() {
         .borrow_mut()
         .insert("tab-1".to_string(), payload.clone());
 
-    let structured = runtime.active_work_projection_reply("client-1");
+    let structured = runtime.active_work_projection_reply("client-1", "tab-1");
 
     assert!(structured.is_none());
     let event = recorded_events
@@ -72388,7 +73550,9 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
             .contains_key("tab-1"),
         "a cache-only structured mutation must invalidate the older wire payload"
     );
-    assert!(runtime.active_work_projection_reply("client-1").is_some());
+    assert!(runtime
+        .active_work_projection_reply("client-1", "tab-1")
+        .is_some());
     assert!(
         recorded_events.lock().expect("recorded events").is_empty(),
         "FrontendReady must not replay a payload serialized before the watcher patch"
@@ -72426,7 +73590,9 @@ fn issue_3777_runtime_hook_refresh_burst_keeps_one_worker_and_latest_generation(
         .expect("recorded events")
         .pop()
         .expect("first projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(first_completion) = first_completion else {
+    let UserEvent::ActiveWorkProjectionPrepared(first_completion) =
+        into_recorded_project_payload(first_completion)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
     let first_commit = runtime.handle_active_work_projection_prepared(*first_completion);
@@ -72451,7 +73617,9 @@ fn issue_3777_runtime_hook_refresh_burst_keeps_one_worker_and_latest_generation(
         .expect("recorded events")
         .pop()
         .expect("latest projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(latest_completion) = latest_completion else {
+    let UserEvent::ActiveWorkProjectionPrepared(latest_completion) =
+        into_recorded_project_payload(latest_completion)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
     let latest_commit = runtime.handle_active_work_projection_prepared(*latest_completion);
@@ -72536,13 +73704,20 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
         .lock()
         .expect("recorded events")
         .iter()
-        .position(|event| matches!(event, UserEvent::ActiveWorkProjectionPrepared(_)))
+        .position(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::ActiveWorkProjectionPrepared(_)
+            )
+        })
         .expect("stale projection completion");
     let completion = recorded_events
         .lock()
         .expect("recorded events")
         .remove(completion_index);
-    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+    let UserEvent::ActiveWorkProjectionPrepared(completion) =
+        into_recorded_project_payload(completion)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
     let commit = runtime.handle_active_work_projection_prepared(*completion);
@@ -72596,7 +73771,9 @@ fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
         .expect("recorded events")
         .pop()
         .expect("first projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+    let UserEvent::ActiveWorkProjectionPrepared(completion) =
+        into_recorded_project_payload(completion)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
     assert!(completion
@@ -72639,7 +73816,8 @@ fn issue_3777_normal_refresh_does_not_erase_pending_runtime_hook_profile() {
         .expect("recorded events")
         .pop()
         .expect("first completion");
-    let UserEvent::ActiveWorkProjectionPrepared(first) = first else {
+    let UserEvent::ActiveWorkProjectionPrepared(first) = into_recorded_project_payload(first)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
     runtime.handle_active_work_projection_prepared(*first);
@@ -72649,7 +73827,8 @@ fn issue_3777_normal_refresh_does_not_erase_pending_runtime_hook_profile() {
         .expect("recorded events")
         .pop()
         .expect("latest completion");
-    let UserEvent::ActiveWorkProjectionPrepared(latest) = latest else {
+    let UserEvent::ActiveWorkProjectionPrepared(latest) = into_recorded_project_payload(latest)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
 
@@ -72716,7 +73895,9 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
         .expect("recorded events")
         .pop()
         .expect("failed projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+    let UserEvent::ActiveWorkProjectionPrepared(completion) =
+        into_recorded_project_payload(completion)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
     let commit = runtime.handle_active_work_projection_prepared(*completion);
@@ -72793,7 +73974,9 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
         .expect("recorded events")
         .pop()
         .expect("projection completion");
-    let UserEvent::ActiveWorkProjectionPrepared(completion) = completion else {
+    let UserEvent::ActiveWorkProjectionPrepared(completion) =
+        into_recorded_project_payload(completion)
+    else {
         panic!("expected ActiveWorkProjectionPrepared");
     };
 
@@ -72983,6 +74166,8 @@ fn app_runtime_manual_launch_wizard_injects_hermes_launch_choices() {
         .expect("open launch wizard");
 
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -73026,6 +74211,8 @@ fn app_runtime_knowledge_launch_wizard_injects_hermes_launch_choices() {
         .expect("open issue launch wizard");
 
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -73058,6 +74245,8 @@ fn app_runtime_start_work_wizard_injects_hermes_launch_choices() {
         .expect("open start work");
 
     let view = runtime
+        .project_state(&runtime.test_context())
+        .expect("test project state")
         .launch_wizard
         .as_ref()
         .expect("launch wizard")
@@ -76305,4 +77494,116 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
     );
     runtime.terminal_input_events(&pm_window_id, "\u{0003}");
     assert!(runtime.pending_pm_wakes.is_empty());
+}
+
+#[test]
+fn issue_4537_hub_sync_does_not_contain_project_workspace() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-a",
+        "shell-a",
+        WindowPreset::Shell,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-a"));
+    let events = runtime.frontend_sync_events("hub-client");
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::WindowCanvasState { .. }
+                | BackendEvent::TerminalSnapshot { .. }
+                | BackendEvent::LaunchWizardState { .. }
+        )),
+        "unbound Hub hydration must contain catalog, never project payloads"
+    );
+}
+
+include!("wizard_project_tests.rs");
+
+include!("outbound_scope_tests.rs");
+
+include!("project_request_tests.rs");
+
+include!("window_project_scope_tests.rs");
+
+include!("async_project_tests.rs");
+
+// Handler unit tests inspect the payload; ingress-generation rejection is covered
+// separately through accept_project_completion in async_project_tests.rs.
+fn recorded_project_payload(event: &UserEvent) -> &UserEvent {
+    match event {
+        UserEvent::ProjectCompletion { event, .. } => recorded_project_payload(event),
+        event => event,
+    }
+}
+
+fn into_recorded_project_payload(event: UserEvent) -> UserEvent {
+    match event {
+        UserEvent::ProjectCompletion { event, .. } => into_recorded_project_payload(*event),
+        event => event,
+    }
+}
+
+#[test]
+fn reopened_project_releases_old_pm_and_scan_worker_gates() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project_root = temp.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-a",
+            "A",
+            project_root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-a"),
+    );
+    let context = runtime.project_context("tab-a").unwrap();
+    let (proxy, queued) = AppEventProxy::stub();
+    let old_worker = proxy.for_project(context);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+    runtime
+        .pending_pm_worktree_preparations
+        .insert(project_root.clone());
+    runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+    runtime
+        .project_tab_incarnations
+        .get_mut("tab-a")
+        .unwrap()
+        .generation += 1;
+    runtime.refresh_project_state("tab-a");
+    assert!(!runtime
+        .pending_pm_worktree_preparations
+        .contains(&project_root));
+    assert!(!runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .contains(&prefs_path));
+    runtime
+        .pending_pm_worktree_preparations
+        .insert(project_root.clone());
+    runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+    old_worker.send(UserEvent::IssueMonitorScheduledScanComplete {
+        project_root: project_root.clone(),
+        prefs_path: prefs_path.clone(),
+        now: String::new(),
+        outcome: Err("stale".to_string()),
+        vanished_window_failures: vec![],
+    });
+    assert!(runtime
+        .accept_project_completion(queued.lock().unwrap().pop().unwrap())
+        .is_none());
+    assert!(runtime
+        .pending_pm_worktree_preparations
+        .contains(&project_root));
+    assert!(runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .contains(&prefs_path));
 }

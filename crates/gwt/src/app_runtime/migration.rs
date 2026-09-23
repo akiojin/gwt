@@ -13,7 +13,7 @@ use crate::UserEvent;
 
 use super::{
     load_restored_workspace_state, recovery_state_label, AppRuntime, BackendEvent, OutboundEvent,
-    WindowCanvasState,
+    ProjectContext, WindowCanvasState,
 };
 
 impl AppRuntime {
@@ -25,8 +25,10 @@ impl AppRuntime {
             return Vec::new();
         };
         let project_root = tab.project_root.clone();
+        let Some(context) = self.project_context(tab_id) else {
+            return Vec::new();
+        };
         let proxy = self.proxy.clone();
-        let tab_id_owned = tab_id.to_string();
 
         let project_scope = self.project_log_scope_for_tab(tab_id).cloned();
         std::thread::spawn(move || {
@@ -37,14 +39,14 @@ impl AppRuntime {
                     tracing::trace_span!(target: "gwt_log_scope", parent: None, "machine_migration")
                         .entered()
                 });
-            let progress_tab = tab_id_owned.clone();
+            let progress_context = context.clone();
             let progress_proxy = proxy.clone();
             let outcome = gwt::migration::execute_migration(
                 &project_root,
                 MigrationOptions::default(),
                 move |phase, percent| {
                     progress_proxy.send(UserEvent::MigrationProgress {
-                        tab_id: progress_tab.clone(),
+                        context: progress_context.clone(),
                         phase,
                         percent,
                     });
@@ -52,11 +54,11 @@ impl AppRuntime {
             );
             match outcome {
                 Ok(result) => proxy.send(UserEvent::MigrationDone {
-                    tab_id: tab_id_owned,
+                    context,
                     branch_worktree_path: result.branch_worktree_path,
                 }),
                 Err(error) => proxy.send(UserEvent::MigrationError {
-                    tab_id: tab_id_owned,
+                    context,
                     phase: error.phase,
                     message: error.message,
                     recovery: error.recovery,
@@ -65,6 +67,25 @@ impl AppRuntime {
         });
 
         Vec::new()
+    }
+
+    pub(crate) fn handle_migration_progress(
+        &self,
+        context: &ProjectContext,
+        phase: MigrationPhase,
+        percent: u8,
+    ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::MigrationProgress {
+                tab_id: context.tab_id.clone(),
+                phase: phase.as_str().to_string(),
+                percent,
+            },
+        )]
     }
 
     /// SPEC-1934 US-6.7: user dismissed the modal. Drop the in-memory flag so
@@ -83,9 +104,13 @@ impl AppRuntime {
     /// workspace_state broadcast.
     pub(crate) fn handle_migration_done(
         &mut self,
-        tab_id: &str,
+        context: &ProjectContext,
         branch_worktree_path: &Path,
     ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let tab_id = context.tab_id.as_str();
         let canonical = dunce::canonicalize(branch_worktree_path)
             .unwrap_or_else(|_| branch_worktree_path.to_path_buf());
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
@@ -108,12 +133,28 @@ impl AppRuntime {
         self.register_project_log_scope(tab_id);
         let _ = self.persist();
 
+        // Deliver completion before the snapshot switches the client's project key.
         vec![
-            self.workspace_state_broadcast(),
-            OutboundEvent::broadcast(BackendEvent::MigrationDone {
-                tab_id: tab_id.to_string(),
-                branch_worktree_path: canonical.display().to_string(),
-            }),
+            OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::MigrationDone {
+                    tab_id: tab_id.to_string(),
+                    branch_worktree_path: canonical.display().to_string(),
+                },
+            ),
+            OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::WindowCanvasState {
+                    workspace: self
+                        .project_state_view(
+                            &self
+                                .project_context(tab_id)
+                                .expect("migrated project context"),
+                        )
+                        .expect("migrated project state"),
+                },
+            ),
+            self.hub_state_broadcast(),
         ]
     }
 
@@ -121,21 +162,28 @@ impl AppRuntime {
     /// frontend offers Retry / Restore / Quit) and broadcast the failure.
     pub(crate) fn handle_migration_error(
         &mut self,
-        tab_id: &str,
+        context: &ProjectContext,
         phase: MigrationPhase,
         message: String,
         recovery: RecoveryState,
     ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let tab_id = context.tab_id.as_str();
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.migration_pending = false;
         }
         self.refresh_project_tab_incarnation(tab_id);
-        vec![OutboundEvent::broadcast(BackendEvent::MigrationError {
-            tab_id: tab_id.to_string(),
-            phase: phase.as_str().to_string(),
-            message,
-            recovery: recovery_state_label(recovery).to_string(),
-        })]
+        vec![OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::MigrationError {
+                tab_id: tab_id.to_string(),
+                phase: phase.as_str().to_string(),
+                message,
+                recovery: recovery_state_label(recovery).to_string(),
+            },
+        )]
     }
 
     /// SPEC-1934 US-6.8: user chose Quit. Leave the repository untouched and
