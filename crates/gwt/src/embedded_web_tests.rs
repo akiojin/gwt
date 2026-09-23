@@ -1942,7 +1942,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
         "expected socket transport bootstrap helper in embedded html",
     );
     assert!(
-            html.contains("socket = new WebSocket(websocketUrl());")
+            html.contains("socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;")
                 && html.contains("setConnectionState(false);")
                 && html.contains("installSocketEventHandlers(socket);"),
             "expected socket bootstrap to create the websocket, reset connection state, and install handlers",
@@ -1991,7 +1991,7 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
 fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
     let html = frontend_bundle_source();
     let websocket_url = regex::Regex::new(
-            r#"function websocketUrl\(\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*const projectKey = activeProjectKey\(\);\s*if \(projectKey\) url\.searchParams\.set\("repo_hash", projectKey\);\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
+            r#"function websocketUrl\(projectKey = activeProjectKey\(\)\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*if \(projectKey\) url\.searchParams\.set\("repo_hash", projectKey\);\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
         )
         .expect("valid regex");
 

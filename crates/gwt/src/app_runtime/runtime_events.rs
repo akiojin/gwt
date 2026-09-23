@@ -443,54 +443,56 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
 }
 
 impl AppRuntime {
-    /// Issue #3366 — whether any project tab's workspace still holds a
-    /// window of the given preset. Docked windows stay in the workspace
-    /// window list, so tab groups are covered. The check spans every tab
-    /// (not just the active one) because surfaces on an inactive tab keep
-    /// their accumulated client state and do not re-request a snapshot
-    /// when their tab becomes active again.
-    fn any_window_open(&self, preset: WindowPreset) -> bool {
-        self.tabs.iter().any(|tab| {
-            tab.workspace
-                .persisted()
-                .windows
-                .iter()
-                .any(|window| window.preset == preset)
-        })
+    /// Deliver the shared diagnostic stream only to projects with a consumer.
+    /// Docked surfaces retain their subscriptions, independently of UI selection.
+    fn project_events_for_open_surface(
+        &self,
+        preset: WindowPreset,
+        event: BackendEvent,
+    ) -> Vec<OutboundEvent> {
+        self.tabs
+            .iter()
+            .filter(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .any(|window| window.preset == preset)
+            })
+            .filter_map(|tab| {
+                self.project_key_for_tab(&tab.id)
+                    .cloned()
+                    .map(|key| OutboundEvent::project(key, event.clone()))
+            })
+            .collect()
     }
 
-    /// Issue #3366 — deliver one external-process line to the client hub
-    /// only while a Console window exists. Raw `process_line` events are
-    /// consumed exclusively by Console window controllers, and every
-    /// Console mount replays the `ProcessConsoleHub` ring buffer through
-    /// `LoadProcessConsole`, so nothing is lost while suppressed.
-    /// Unconditional broadcast measured ≈956 msg/s under normal agent
-    /// load and delayed a new client's first workspace paint by ~1 min.
     pub(crate) fn process_line_events(
         &self,
         line: gwt_core::process_console::ProcessLine,
     ) -> Vec<OutboundEvent> {
-        if !self.any_window_open(WindowPreset::Console) {
-            return Vec::new();
-        }
-        vec![OutboundEvent::broadcast(BackendEvent::ProcessLine { line })]
+        self.project_events_for_open_surface(
+            WindowPreset::Console,
+            BackendEvent::ProcessLine { line },
+        )
     }
 
-    /// Issue #3366 — deliver one tracing log event to the client hub only
-    /// while a Logs window exists. `log_entry_appended` is consumed
-    /// exclusively by Logs window state, and `LoadLogs` re-reads the log
-    /// directory on mount, so the live stream is pure overhead without an
-    /// open Logs surface.
     pub(crate) fn log_entry_events(
         &self,
         entry: gwt_core::logging::LogEvent,
     ) -> Vec<OutboundEvent> {
-        if !self.any_window_open(WindowPreset::Logs) {
-            return Vec::new();
+        let project_scope = entry.project_scope.clone();
+        let mut events = self.project_events_for_open_surface(
+            WindowPreset::Logs,
+            BackendEvent::LogEntryAppended { entry },
+        );
+        if let Some(scope) = project_scope {
+            events.retain(|event| {
+                matches!(&event.target,
+                super::DispatchTarget::Project(key) if key.as_str() == scope)
+            });
         }
-        vec![OutboundEvent::broadcast(BackendEvent::LogEntryAppended {
-            entry,
-        })]
+        events
     }
 
     /// Test-only entry that streams output without a pane stream position;
@@ -554,10 +556,16 @@ impl AppRuntime {
             }
         }
         let output_id = id.clone();
-        let mut events = vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
-            id,
-            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-        })
+        let Some(project_key) = self.project_key_for_window(&id).cloned() else {
+            return Vec::new();
+        };
+        let mut events = vec![OutboundEvent::project(
+            project_key,
+            BackendEvent::TerminalOutput {
+                id,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            },
+        )
         .with_terminal_stream_seq(stream_seq)];
         if publish_to_daemon {
             events.extend(self.observe_codex_directory_trust_prompt_from_screen(&output_id));
@@ -924,7 +932,7 @@ impl AppRuntime {
             return Vec::new();
         };
         if force_status || before != Some(composed) {
-            Self::status_events(window_id.to_string(), composed, None)
+            self.status_events(window_id.to_string(), composed, None)
         } else {
             Vec::new()
         }
@@ -1216,8 +1224,12 @@ impl AppRuntime {
                     ));
                 }
             }
-            events.push(self.workspace_state_broadcast());
-            if let Some(event) = self.in_memory_active_work_projection_broadcast_for_active_tab() {
+            if let Some(context) = self.project_context(&address.tab_id) {
+                events.push(self.workspace_state_broadcast(&context));
+            }
+            if let Some(event) =
+                self.in_memory_active_work_projection_broadcast_for_tab(&address.tab_id)
+            {
                 events.push(event);
             }
             return events;
@@ -1332,11 +1344,11 @@ impl AppRuntime {
                 WindowProcessStatus::Error | WindowProcessStatus::Stopped
             )
         {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            if let Some(event) = self.active_work_projection_broadcast_for_tab(&address.tab_id) {
                 events.push(event);
             }
         }
-        events.extend(Self::status_events(id, composed_status, detail));
+        events.extend(self.status_events(id, composed_status, detail));
         events
     }
 
@@ -1542,11 +1554,7 @@ impl AppRuntime {
         }
         let _ = self.persist();
         if let Some(composed) = self.recompute_window_state(window_id) {
-            events.extend(Self::status_events(
-                window_id.to_string(),
-                composed,
-                Some(detail),
-            ));
+            events.extend(self.status_events(window_id.to_string(), composed, Some(detail)));
         }
         events
     }
@@ -1605,7 +1613,7 @@ impl AppRuntime {
                     .insert(window_id.to_string(), detail.clone());
                 let mut events = Vec::new();
                 if let Some(composed) = self.recompute_window_state(window_id) {
-                    events.extend(Self::status_events(
+                    events.extend(self.status_events(
                         window_id.to_string(),
                         composed,
                         Some(detail),
@@ -1620,7 +1628,7 @@ impl AppRuntime {
                 self.window_details.remove(window_id);
                 let mut events = Vec::new();
                 if let Some(composed) = self.recompute_window_state(window_id) {
-                    events.extend(Self::status_events(window_id.to_string(), composed, None));
+                    events.extend(self.status_events(window_id.to_string(), composed, None));
                 }
                 events
             }
@@ -1799,9 +1807,27 @@ impl AppRuntime {
         if Self::should_broadcast_runtime_hook_event_to_frontend(&event) {
             let mut public_event = event.clone();
             public_event.continuation_readiness_nonce = None;
-            events.push(OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
-                event: public_event,
-            }));
+            let project_key = self
+                .active_window_for_runtime_event(&event)
+                .and_then(|id| self.project_key_for_window(&id).cloned())
+                .or_else(|| {
+                    event.project_root.as_deref().and_then(|root| {
+                        self.tabs
+                            .iter()
+                            .find(|tab| {
+                                super::same_worktree_path(&tab.project_root, Path::new(root))
+                            })
+                            .and_then(|tab| self.project_key_for_tab(&tab.id).cloned())
+                    })
+                });
+            if let Some(key) = project_key {
+                events.push(OutboundEvent::project(
+                    key,
+                    BackendEvent::RuntimeHookEvent {
+                        event: public_event,
+                    },
+                ));
+            }
         }
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
@@ -1868,7 +1894,7 @@ impl AppRuntime {
                     self.recompute_window_state(&window_id)
                 }) {
                     if effective_before != Some(composed) {
-                        events.extend(Self::status_events(window_id, composed, None));
+                        events.extend(self.status_events(window_id, composed, None));
                     }
                 }
             }
@@ -1944,14 +1970,22 @@ impl AppRuntime {
             // here is reported by name rather than as an unexplained
             // `RuntimeHook` stall.
             stages.measure("active_work_projection_dispatch", || {
-                if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
-                    events.push(event);
+                if let Some(tab_id) = self
+                    .window_lookup
+                    .get(&window_id)
+                    .map(|address| address.tab_id.as_str())
+                {
+                    if let Some(event) =
+                        self.cached_active_work_projection_broadcast_for_tab(tab_id)
+                    {
+                        events.push(event);
+                    }
                 }
                 // Issue #3777 AC-2: the rebuild itself is scheduled off the event
                 // loop, carrying the content-free RuntimeHook profile labels.
-                if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+                if let Some(project_root) = issue_monitor_project_root.as_ref() {
                     self.schedule_runtime_hook_active_work_projection_refresh(
-                        &project_root,
+                        project_root,
                         runtime_hook_source_event_profile_label(event.source_event.as_deref()),
                         runtime_hook_composed_state_profile_label(composed_state),
                     );
@@ -1962,7 +1996,7 @@ impl AppRuntime {
             });
         }
         if hook_state_changed || effective_before != Some(composed_state) {
-            events.extend(Self::status_events(window_id, composed_state, detail));
+            events.extend(self.status_events(window_id, composed_state, detail));
         }
         events
     }

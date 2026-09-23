@@ -95,11 +95,6 @@ impl Default for ProjectIndexBootstrapService {
 }
 
 impl ProjectIndexBootstrapService {
-    pub(crate) fn global() -> &'static Self {
-        static SERVICE: OnceLock<ProjectIndexBootstrapService> = OnceLock::new();
-        SERVICE.get_or_init(Self::default)
-    }
-
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         // Legacy tests re-spawn bootstraps freely; the reconnect-storm
@@ -162,9 +157,6 @@ impl ProjectIndexBootstrapService {
         S: FnOnce(&Path) -> gwt::ProjectIndexStatusView + Send + 'static,
     {
         let disabled = gwt::index_worker::automatic_background_index_disabled();
-        if !disabled {
-            ensure_refresh_broker_drain(proxy.clone());
-        }
         self.spawn_automatic_with(
             proxy,
             project_root,
@@ -492,7 +484,7 @@ impl ProjectIndexBootstrapService {
         Some(entry.status.clone())
     }
 
-    fn invalidate_full_status(&self, project_root: &Path) {
+    pub(crate) fn invalidate_full_status(&self, project_root: &Path) {
         let key = normalize_project_root(project_root);
         if let Ok(mut last) = self.last_full_status.lock() {
             last.remove(&key);
@@ -1055,9 +1047,17 @@ fn ensure_project_index_runtime_for_rebuild() -> Result<(), String> {
 /// a few-second poll keeps admission latency small without busy-waiting.
 const REFRESH_BROKER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Start the single process-wide drain that executes claimed Refresh Broker
-/// targets for the repositories this process registered. Idempotent.
-fn ensure_refresh_broker_drain(proxy: AppEventProxy) {
+/// Request a fresh snapshot without carrying state from a completed worker.
+pub(crate) fn request_project_index_refresh(proxy: &AppEventProxy, project_root: PathBuf) {
+    let project_key = gwt_core::paths::resolve_project_scope(&project_root).hash;
+    proxy.send(UserEvent::ProjectIndexRefreshRequested {
+        project_key,
+        project_root,
+    });
+}
+
+/// Start the single process-wide drain for registered Refresh Broker targets.
+pub(crate) fn ensure_refresh_broker_drain(proxy: AppEventProxy) {
     static DRAIN: OnceLock<()> = OnceLock::new();
     DRAIN.get_or_init(|| {
         let spawned = thread::Builder::new()
@@ -1111,12 +1111,7 @@ fn refresh_broker_drain_loop(proxy: AppEventProxy) {
         match gwt::index_worker::execute_claimed_project_index_refresh(claim) {
             Ok(project_root) => {
                 gwt::global_aggregated_status_cache().invalidate(&project_root);
-                ProjectIndexBootstrapService::global().invalidate_full_status(&project_root);
-                let status = current_worktree_status_probe(&project_root);
-                proxy.send(UserEvent::ProjectIndexStatus {
-                    project_root: normalize_project_root(&project_root).display().to_string(),
-                    status: Box::new(status),
-                });
+                request_project_index_refresh(&proxy, project_root);
             }
             Err(error) => {
                 tracing::warn!(

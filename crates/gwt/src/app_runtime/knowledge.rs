@@ -89,6 +89,12 @@ fn normalized_snapshot_project_root(project_root: &Path) -> PathBuf {
 }
 
 impl KnowledgeRelatedSnapshotCache {
+    pub(crate) fn evict(&mut self, project_root: &Path) {
+        let project_root = normalized_snapshot_project_root(project_root);
+        self.entries
+            .retain(|entry| entry.project_root != project_root);
+    }
+
     fn entry_index(&self, project_root: &Path, kind: KnowledgeKind) -> Option<usize> {
         let project_root = normalized_snapshot_project_root(project_root);
         self.entries
@@ -175,6 +181,12 @@ impl KnowledgeRelatedSnapshotCache {
 }
 
 impl KnowledgeMonitorSnapshotCache {
+    pub(crate) fn evict(&mut self, project_root: &Path) {
+        let project_root = normalized_snapshot_project_root(project_root);
+        self.entries
+            .retain(|entry| entry.project_root != project_root);
+    }
+
     fn entry_index(&self, project_root: &Path) -> Option<usize> {
         let project_root = normalized_snapshot_project_root(project_root);
         self.entries
@@ -1897,30 +1909,16 @@ impl AppRuntime {
     /// reply with an empty advisory rather than an error (FR-415).
     pub(crate) fn request_work_advisory_events(
         &self,
+        context: &super::ProjectContext,
         client_id: &str,
         id: &str,
         query: &str,
         request_id: u64,
     ) -> Vec<OutboundEvent> {
-        // The Launch Wizard is a modal bound to the client's active project
-        // tab (not a registered window), so resolve the project from the active
-        // tab the same way wizard actions do.
-        let project_root = self
-            .active_tab_id
-            .clone()
-            .and_then(|tab_id| self.tab(&tab_id))
-            .map(|tab| tab.project_root.clone());
-        let Some(project_root) = project_root else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::WorkAdvisoryResult {
-                    id: id.to_string(),
-                    query: query.to_string(),
-                    request_id,
-                    results: Vec::new(),
-                },
-            )];
-        };
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let project_root = context.project_root.clone();
         self.spawn_work_advisory(WorkAdvisoryTask {
             client_id: client_id.to_string(),
             id: id.to_string(),
@@ -2099,8 +2097,8 @@ impl AppRuntime {
     }
 
     /// SPEC-1939 US-5 / T-IDX-102: handle a per-cell rebuild request from the
-    /// frontend. Spawns the rebuild via the global bootstrap service so the
-    /// in-flight set is shared with the orchestrator and CLI.
+    /// frontend. The owning project incarnation shares the bootstrap in-flight
+    /// set with its status requests, and rejects results after reopening.
     pub(crate) fn rebuild_index_cell_events(
         &self,
         project_root: String,
@@ -2108,11 +2106,16 @@ impl AppRuntime {
         worktree_hash: Option<String>,
     ) -> Vec<OutboundEvent> {
         let project_root = std::path::PathBuf::from(project_root);
-        let service =
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
+        let Some(context) = self.project_context_for_root(&project_root) else {
+            return Vec::new();
+        };
+        let Some(state) = self.project_state(&context) else {
+            return Vec::new();
+        };
+        let service = state.project_index_bootstrap.clone();
         let _request = crate::project_index_bootstrap::spawn_per_cell_rebuild(
             service,
-            self.proxy.clone(),
+            self.proxy.for_project(context),
             project_root,
             scope,
             worktree_hash,
@@ -2125,9 +2128,15 @@ impl AppRuntime {
     /// spikes on repositories with many active worktrees.
     pub(crate) fn refresh_index_status_events(&self, project_root: String) -> Vec<OutboundEvent> {
         let project_root = std::path::PathBuf::from(project_root);
-        let service =
-            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
-        let _request = service.spawn_full_status_refresh(self.proxy.clone(), project_root);
+        let Some(context) = self.project_context_for_root(&project_root) else {
+            return Vec::new();
+        };
+        let Some(state) = self.project_state(&context) else {
+            return Vec::new();
+        };
+        let service = state.project_index_bootstrap.clone();
+        let _request =
+            service.spawn_full_status_refresh(self.proxy.for_project(context), project_root);
         Vec::new()
     }
 }
