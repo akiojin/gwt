@@ -1793,7 +1793,11 @@ impl AppRuntime {
             Some(session.branch.as_str()),
             &session.worktree_path,
         ));
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = self
+            .project_context(tab_id)
+            .map(|context| self.workspace_state_broadcast(&context))
+            .into_iter()
+            .collect::<Vec<_>>();
         events.append(&mut self.spawn_restored_agent_session(
             tab_id,
             session,
@@ -1887,7 +1891,9 @@ impl AppRuntime {
                                 Some(&combined),
                                 reason,
                             );
-                            events.push(self.workspace_state_broadcast());
+                            if let Some(context) = self.project_context(tab_id) {
+                                events.push(self.workspace_state_broadcast(&context));
+                            }
                         }
                         continue;
                     }
@@ -2138,15 +2144,7 @@ impl AppRuntime {
     fn update_resume_notice_events(&mut self) -> Vec<OutboundEvent> {
         self.pending_update_resume_notice
             .take()
-            .map(|(level, message)| {
-                vec![OutboundEvent::broadcast(
-                    gwt::BackendEvent::IssueMonitorToast {
-                        level,
-                        message,
-                        issue_number: None,
-                    },
-                )]
-            })
+            .map(|(level, message)| vec![OutboundEvent::global_update_notice(level, message)])
             .unwrap_or_default()
     }
 

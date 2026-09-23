@@ -15,16 +15,18 @@ const TITLE_LIMIT: usize = 96;
 impl AppRuntime {
     pub(super) fn load_recovery_center_events(
         &mut self,
+        context: &super::ProjectContext,
         client_id: &str,
         request_id: &str,
     ) -> Vec<OutboundEvent> {
-        let generation = self.next_recovery_center_generation();
-        self.recovery_center_handles.clear();
+        let Some(state) = self.project_state_mut(context) else {
+            return Vec::new();
+        };
+        state.recovery_center_generation = state.recovery_center_generation.wrapping_add(1).max(1);
+        let generation = state.recovery_center_generation;
+        state.recovery_center_handles.clear();
 
-        let tab = self
-            .active_tab_id
-            .as_ref()
-            .and_then(|active_id| self.tabs.iter().find(|tab| tab.id == *active_id).cloned());
+        let tab = self.tab(&context.tab_id).cloned();
         let Some(tab) = tab else {
             return vec![recovery_center_state_event(
                 client_id,
@@ -57,13 +59,16 @@ impl AppRuntime {
                         .map(|acknowledgement| acknowledgement.entry_id.clone())
                 })
                 .flatten();
-            self.recovery_center_handles.insert(
-                handle.clone(),
-                RecoveryCenterAction {
-                    generation,
-                    board_entry_id,
-                },
-            );
+            self.project_state_mut(context)
+                .expect("current recovery project")
+                .recovery_center_handles
+                .insert(
+                    handle.clone(),
+                    RecoveryCenterAction {
+                        generation,
+                        board_entry_id,
+                    },
+                );
             items.push(project_recovery_record(record, handle));
         }
 
@@ -78,14 +83,15 @@ impl AppRuntime {
 
     pub(super) fn open_recovery_center_board_entry_events(
         &self,
+        context: &super::ProjectContext,
         client_id: &str,
         request_id: &str,
         generation: u64,
         action_handle: &str,
     ) -> Vec<OutboundEvent> {
         let board_entry_id = self
-            .recovery_center_handles
-            .get(action_handle)
+            .project_state(context)
+            .and_then(|state| state.recovery_center_handles.get(action_handle))
             .filter(|action| action.generation == generation)
             .and_then(|action| action.board_entry_id.clone());
         vec![OutboundEvent::reply(
@@ -96,11 +102,6 @@ impl AppRuntime {
                 board_entry_id,
             },
         )]
-    }
-
-    fn next_recovery_center_generation(&mut self) -> u64 {
-        self.recovery_center_generation = self.recovery_center_generation.wrapping_add(1).max(1);
-        self.recovery_center_generation
     }
 }
 

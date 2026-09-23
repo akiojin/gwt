@@ -27,10 +27,10 @@ use super::startup::prepare_open_project_window_restores;
 use super::{
     combined_window_id, load_restored_workspace_state, normalize_recent_project_path,
     resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    PreparedMigrationSnapshot, PreparedProjectOpen, PreparedProjectSwitch, ProjectIncarnation,
-    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectNavigationRequest,
-    ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime, UserEvent, Uuid,
-    WindowCanvasState,
+    PreparedMigrationSnapshot, PreparedProjectOpen, PreparedProjectSwitch, ProjectContext,
+    ProjectIncarnation, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectNavigationRequest, ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime,
+    UserEvent, Uuid, WindowCanvasState,
 };
 
 pub(crate) fn initial_project_tab_incarnations(
@@ -239,15 +239,16 @@ fn prepare_project_switch(
 }
 
 impl AppRuntime {
-    /// Broadcast the consumers whose state is scoped to the active project.
-    /// Every route that changes `active_tab_id` uses this bundle so a consumer
-    /// cannot keep values from the previous project.
-    pub(crate) fn active_project_snapshot_broadcasts(&mut self) -> Vec<OutboundEvent> {
+    /// Publish snapshots only to viewers of the explicitly selected project.
+    pub(crate) fn project_snapshot_broadcasts(
+        &mut self,
+        context: &ProjectContext,
+    ) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
-        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change(&context.tab_id) {
             events.push(event);
         }
-        events.extend(self.pm_status_broadcast_events());
+        events.extend(self.pm_status_broadcast_events(context));
         events
     }
 
@@ -383,16 +384,9 @@ impl AppRuntime {
         source: ProjectNavigationSource,
         target_incarnation: Option<ProjectIncarnation>,
     ) -> ProjectNavigationRequest {
-        let expected_active_tab_id = self.active_tab_id.clone();
-        let expected_active_incarnation = expected_active_tab_id
-            .as_ref()
-            .and_then(|tab_id| self.project_tab_incarnations.get(tab_id))
-            .cloned();
         let request = ProjectNavigationRequest {
             id: self.next_project_navigation_request_id(),
             source,
-            expected_active_tab_id,
-            expected_active_incarnation,
             target_incarnation,
         };
         self.pending_project_navigation = Some(request.clone());
@@ -447,20 +441,11 @@ impl AppRuntime {
                 BackendEvent::ProjectOpenError { message }
             }
         };
-        vec![OutboundEvent::broadcast(event)]
+        vec![OutboundEvent::hub(event)]
     }
 
     fn project_navigation_request_is_current(&self, request: &ProjectNavigationRequest) -> bool {
-        if self.pending_project_navigation.as_ref() != Some(request)
-            || self.active_tab_id != request.expected_active_tab_id
-        {
-            return false;
-        }
-        let active_incarnation = request
-            .expected_active_tab_id
-            .as_ref()
-            .and_then(|tab_id| self.project_tab_incarnations.get(tab_id));
-        if active_incarnation != request.expected_active_incarnation.as_ref() {
+        if self.pending_project_navigation.as_ref() != Some(request) {
             return false;
         }
         request.target_incarnation.as_ref().is_none_or(|expected| {
@@ -575,16 +560,24 @@ impl AppRuntime {
             (tab_id, true)
         };
 
+        self.refresh_project_state(&tab_id);
+        let context = self
+            .project_context(&tab_id)
+            .expect("opened project context");
+        #[cfg(test)]
+        self.set_active_tab(tab_id.clone());
         self.register_project_log_scope(&tab_id);
         let project_scope = self.project_log_scope_for_tab(&tab_id).cloned();
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter());
-        let wizard_closed = self.set_active_tab(tab_id.clone());
         if let ProjectNavigationSource::Clone { workspace_home } = &source {
             self.remember_recent_clone_workspace_home(workspace_home);
         }
         let _ = self.persist();
 
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = vec![
+            self.hub_state_broadcast(),
+            self.workspace_state_broadcast(&context),
+        ];
         if new_tab {
             events.extend(
                 self.restore_prepared_open_project_windows(&tab_id, prepared.window_restores),
@@ -605,28 +598,29 @@ impl AppRuntime {
         // active-project bundle after every restore and ensure mutation has
         // settled.
         events.retain(|outbound| !matches!(outbound.event, BackendEvent::PmStatus { .. }));
-        events.extend(self.active_project_snapshot_broadcasts());
-        if wizard_closed {
-            events.push(self.launch_wizard_state_broadcast(None));
-        }
+        events.extend(self.project_snapshot_broadcasts(&context));
         if let Some(snapshot) = prepared.migration.as_ref() {
-            events.push(OutboundEvent::broadcast(BackendEvent::MigrationDetected {
-                tab_id: tab_id.clone(),
-                project_root: prepared.target.project_root.display().to_string(),
-                branch: snapshot.branch.clone(),
-                has_dirty: snapshot.has_dirty,
-                has_locked: snapshot.has_locked,
-                has_submodules: snapshot.has_submodules,
-            }));
+            events.push(OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::MigrationDetected {
+                    tab_id: tab_id.clone(),
+                    project_root: prepared.target.project_root.display().to_string(),
+                    branch: snapshot.branch.clone(),
+                    has_dirty: snapshot.has_dirty,
+                    has_locked: snapshot.has_locked,
+                    has_submodules: snapshot.has_submodules,
+                },
+            ));
             if snapshot.has_backup {
                 let tab = self.tab(&tab_id).expect("opened project tab");
-                events.push(OutboundEvent::broadcast(
+                events.push(OutboundEvent::project(
+                    context.project_key.clone(),
                     self.migration_backup_error_event_for(tab),
                 ));
             }
         }
         if let ProjectNavigationSource::Clone { workspace_home } = source {
-            events.push(OutboundEvent::broadcast(BackendEvent::CloneProjectDone {
+            events.push(OutboundEvent::hub(BackendEvent::CloneProjectDone {
                 workspace_home: workspace_home.display().to_string(),
             }));
         }
@@ -659,6 +653,7 @@ impl AppRuntime {
     pub(crate) fn refresh_project_tab_incarnation(&mut self, tab_id: &str) {
         let Some(tab) = self.tab(tab_id).cloned() else {
             self.project_tab_incarnations.remove(tab_id);
+            self.refresh_project_state(tab_id);
             return;
         };
         let generation = self.next_project_incarnation;
@@ -672,6 +667,7 @@ impl AppRuntime {
                 migration_pending: tab.migration_pending,
             },
         );
+        self.refresh_project_state(tab_id);
     }
 
     fn remember_recent_clone_workspace_home(&mut self, workspace_home: &Path) {
@@ -734,25 +730,40 @@ impl AppRuntime {
         self.tabs
             .iter()
             .filter(|tab| tab.migration_pending)
-            .map(|tab| OutboundEvent::broadcast(self.migration_detected_event_for(tab)))
+            .map(|tab| {
+                OutboundEvent::project(
+                    self.project_key_for_tab(&tab.id).unwrap().clone(),
+                    self.migration_detected_event_for(tab),
+                )
+            })
             .collect()
     }
 
     /// SPEC-1934 US-6.1 reply variant: used by `frontend_sync_events` so a
     /// freshly-connected frontend learns about pending migrations during
     /// state hydration without resending to other clients.
-    pub(crate) fn migration_detected_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn migration_detected_replies(
+        &self,
+        client_id: &str,
+        context: &ProjectContext,
+    ) -> Vec<OutboundEvent> {
         self.tabs
             .iter()
-            .filter(|tab| tab.migration_pending)
+            .filter(|tab| tab.id == context.tab_id && tab.migration_pending)
             .map(|tab| OutboundEvent::reply(client_id, self.migration_detected_event_for(tab)))
             .collect()
     }
 
-    pub(crate) fn migration_recovery_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn migration_recovery_replies(
+        &self,
+        client_id: &str,
+        context: &ProjectContext,
+    ) -> Vec<OutboundEvent> {
         self.tabs
             .iter()
-            .filter(|tab| tab.migration_pending && Self::has_migration_backup(tab))
+            .filter(|tab| {
+                tab.id == context.tab_id && tab.migration_pending && Self::has_migration_backup(tab)
+            })
             .map(|tab| OutboundEvent::reply(client_id, self.migration_backup_error_event_for(tab)))
             .collect()
     }
@@ -765,7 +776,11 @@ impl AppRuntime {
             return Vec::new();
         };
         let project_root = target_incarnation.project_root.clone();
-        let wizard_closed = self.set_active_tab(tab_id.to_string());
+        let context = self
+            .project_context(tab_id)
+            .expect("selected project context");
+        #[cfg(test)]
+        self.set_active_tab(tab_id.to_string());
         let request = self.reserve_project_navigation(
             ProjectNavigationSource::Switch {
                 tab_id: tab_id.to_string(),
@@ -795,11 +810,8 @@ impl AppRuntime {
         {
             self.pending_project_navigation = None;
         }
-        let mut events = vec![self.workspace_state_broadcast()];
-        events.extend(self.active_project_snapshot_broadcasts());
-        if wizard_closed {
-            events.push(self.launch_wizard_state_broadcast(None));
-        }
+        let mut events = vec![self.workspace_state_broadcast(&context)];
+        events.extend(self.project_snapshot_broadcasts(&context));
         if let Some(error) = prepare_error {
             events.extend(self.project_open_error_events(&request.source, error));
         }
@@ -807,7 +819,9 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        let previous_project_root = self.active_project_root().map(Path::to_path_buf);
+        let Some(context) = self.project_context(tab_id) else {
+            return Vec::new();
+        };
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
@@ -847,32 +861,23 @@ impl AppRuntime {
             project_still_open,
         );
         self.project_tab_incarnations.remove(tab_id);
-        self.invalidate_project_navigation();
-        if self.tabs.is_empty() {
-            self.active_tab_id = None;
-        } else if self.active_tab_id.as_deref() == Some(tab_id) {
-            let next_index = index.saturating_sub(1).min(self.tabs.len() - 1);
-            self.active_tab_id = self.tabs.get(next_index).map(|tab| tab.id.clone());
-        }
-
-        let wizard_closed = self
-            .launch_wizard
-            .as_ref()
-            .is_some_and(|wizard| wizard.tab_id == tab_id);
-        if wizard_closed {
-            self.launch_wizard = None;
-        }
-        let active_project_changed =
-            self.active_project_root().map(Path::to_path_buf) != previous_project_root;
+        self.refresh_project_state(tab_id);
+        self.pending_launch_wizard_materializations
+            .retain(|_, wizard| wizard.tab_id != tab_id);
         let _ = self.persist();
-
-        let mut events = vec![self.workspace_state_broadcast()];
-        if active_project_changed {
-            events.extend(self.active_project_snapshot_broadcasts());
-        }
-        if wizard_closed {
-            events.push(self.launch_wizard_state_broadcast(None));
-        }
-        events
+        vec![
+            OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::WindowCanvasState {
+                    workspace: gwt::AppStateView {
+                        app_version: crate::runtime_support::current_app_version().to_string(),
+                        tabs: Vec::new(),
+                        active_tab_id: None,
+                        recent_projects: Vec::new(),
+                    },
+                },
+            ),
+            self.hub_state_broadcast(),
+        ]
     }
 }
