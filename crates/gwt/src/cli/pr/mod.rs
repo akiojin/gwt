@@ -3994,6 +3994,87 @@ mod tests {
         assert!(manual_env.pr_ready_call_log.is_empty());
     }
 
+    /// Issue #4637 AC-6: an autonomous `pr.create` whose diff is only a Node
+    /// script outside `crates/gwt/web/` (plus its `.test.mjs`) is not refused
+    /// for missing headed E2E — the change renders no UI.
+    #[test]
+    fn an_autonomous_script_only_change_creates_a_ready_pr_without_headed_e2e() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let session_id = "create-4637-autonomous";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let repo = tempfile::tempdir().unwrap();
+        ready_gate_worktree(
+            repo.path(),
+            &[
+                ("scripts/coverage-summary.mjs", "export const x = 1;\n"),
+                (
+                    "scripts/coverage-summary.test.mjs",
+                    "test('x', () => {});\n",
+                ),
+            ],
+        );
+        ready_gate_session(
+            repo.path(),
+            session_id,
+            gwt_agent::LaunchRoute::Autonomous,
+            true,
+        );
+        use crate::cli::verification_record as verification;
+        let derived = crate::cli::verify_derivation::derive(repo.path()).expect("derive the plan");
+        assert!(
+            !derived.surfaces.contains(&"frontend".to_string()),
+            "{:?}",
+            derived.surfaces
+        );
+        verification::save_plan(
+            repo.path(),
+            &verification::VerificationPlanRecord {
+                session_id: session_id.to_string(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".to_string()],
+                derived: true,
+                worktree_fingerprint: String::new(),
+                surfaces: derived.surfaces.clone(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (record, _) =
+            verification::run_verification(repo.path(), session_id, &["git --version".to_string()])
+                .unwrap();
+        verification::save(repo.path(), &record).unwrap();
+
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        env.seed_created_pr(seeded_pr());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: "develop".to_string(),
+                head: None,
+                title: "fix: coverage summary".to_string(),
+                body: "User Verification Result: n/a (autonomous)\n\
+                       Agent Visual Check: n/a (no UI surface)\n"
+                    .to_string(),
+                labels: vec![],
+                draft: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "a script-only change has no UI surface: {out}");
+        assert!(!out.contains("headed Chromium E2E"), "{out}");
+    }
+
     #[test]
     fn manual_ready_still_requires_user_confirmation() {
         let _lock = crate::env_test_lock()
