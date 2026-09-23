@@ -26,7 +26,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -34,6 +34,7 @@ import {
   clearLiveLaunchWizard,
   gotoLiveGwt,
   openLiveGwtProject,
+  readLiveHubCatalog,
   sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
 
@@ -114,19 +115,19 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
   // finish; only the interaction and hook budgets below are acceptance gates.
   test.setTimeout(600_000);
 
-  test("tab, Issue identity, and terminal roundtrip stay live under hook and Work refresh load", async ({
+  test("Issue identity and terminal roundtrip stay live under hook and Work refresh load", async ({
     page,
   }, testInfo) => {
     const fixture = await requireStressFixture();
     const releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     const refreshProjects: RefreshProject[] = [];
-    const refreshTabIds = new Set<string>();
+    const refreshProjectKeys = new Set<string>();
+    const refreshPages: Page[] = [];
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     let trigger: RunningLoadTrigger | undefined;
     let shellWindowId: string | undefined;
     let issueWindowId: string | undefined;
-    let refreshTabId: string | undefined;
     let refreshRendezvous: ActiveWorkRendezvous | undefined;
 
     page.on("console", (message) => {
@@ -145,9 +146,20 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
       await clearLiveMigrationModal(page);
       await selectTheme(page, testInfo.project.name.includes("light") ? "light" : "dark");
       await openLiveGwtProject(page, fixture.projectRoot);
-      const primaryTabId = await projectTabIdForRoot(page, fixture.projectRoot);
-      await activateProjectTab(page, primaryTabId);
-      await closeOtherProjectTabs(page, primaryTabId);
+      const primaryProjectUrl = page.url();
+      const primaryRoot = await page.waitForFunction(() => {
+        const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.payload?.kind === "workspace_state");
+        return state?.payload.workspace.tabs[0]?.project_root;
+      }).then((handle) => handle.jsonValue());
+      const { stdout: commonDirectory } = await execFileAsync("git", [
+        "-C", fixture.projectRoot, "rev-parse", "--path-format=absolute", "--git-common-dir",
+      ]);
+      expect([await realpath(fixture.projectRoot), dirname(await realpath(commonDirectory.trim()))])
+        .toContain(await realpath(primaryRoot));
+      // Project navigation/isolation and detach/close are covered by
+      // project-per-browser-tab.spec.ts and project-close-detach.spec.ts.
+      // Keep this page on its route while another Project loads Work data.
 
       issueWindowId = await createWindow(page, "issue");
       const issueSurface = page.locator(
@@ -223,24 +235,22 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
         fixture.hookProfilePath,
       )).length;
       const traceEntries: TraceEntry[] = [];
-      let exactProjectionValidated = false;
       const runLoadedInteraction = async <T,>(
-        preparePrimary: boolean,
         measure: () => Promise<T>,
         prepareInteraction?: () => Promise<void>,
       ): Promise<T> => {
-        let refreshProject = refreshProjects[0];
-        if (!refreshProject) {
-          refreshProject = await createRefreshProject(
-            fixture.checkHome,
-            `${testInfo.project.name}-refresh`,
-          );
-          refreshProjects.push(refreshProject);
-        }
-        const existingRefreshTabId = refreshTabIds.values().next().value;
-        if (existingRefreshTabId) {
-          await activateProjectTab(page, primaryTabId);
-        }
+        const refreshProject = await createRefreshProject(
+          fixture.checkHome,
+          `${testInfo.project.name}-refresh-${refreshProjects.length}`,
+        );
+        refreshProjects.push(refreshProject);
+        const refreshPage = await page.context().newPage();
+        refreshPages.push(refreshPage);
+        refreshPage.on("console", (message) => {
+          if (message.type() === "error") consoleErrors.push(message.text());
+        });
+        refreshPage.on("pageerror", (error) => pageErrors.push(String(error)));
+        await gotoLiveGwt(refreshPage, BASE, { hub: true, enableTestBridge: false });
         trigger = await startLoadTrigger(
           fixture,
           fixture.projectRoot,
@@ -251,24 +261,25 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
           fixture.checkHome,
           refreshProject.workItemsTargetPath,
         );
-        refreshTabId = existingRefreshTabId;
-        if (refreshTabId) {
-          await activateProjectTab(page, refreshTabId);
-        } else {
-          refreshTabId = await openAndWaitForNewProjectTab(page, refreshProject.root);
-          refreshTabIds.add(refreshTabId);
-        }
-        expect(refreshTabId).not.toBe(primaryTabId);
-        await skipPendingMigration(page, refreshTabId);
+        // Open through the Hub, then bind the load observer to the new
+        // Project route. Never switch the measured page away from primary.
+        const catalog = await readLiveHubCatalog(refreshPage, BASE, {
+          send: { kind: "reopen_recent_project", path: refreshProject.root },
+          until: (hub, root) => hub.recent_projects.some((entry) => entry.path === root),
+          arg: refreshProject.root,
+        });
+        const refreshKey = catalog.recent_projects.find((entry) => entry.path === refreshProject.root)!.project_key!;
+        refreshProjectKeys.add(refreshKey);
+        await gotoLiveGwt(refreshPage, BASE, { projectKey: refreshKey, enableTestBridge: true });
+        await clearLiveMigrationModal(refreshPage);
         await refreshRendezvous.waitForStarted();
         expect(await refreshRendezvous.hasCompleted()).toBe(false);
         expect(
           trigger.child.exitCode,
           "Work decode trigger must be active when interaction measurement begins",
         ).toBeNull();
-        if (preparePrimary) {
-          await activateProjectTab(page, primaryTabId);
-        }
+        await page.bringToFront();
+        expect(page.url()).toBe(primaryProjectUrl);
         await prepareInteraction?.();
 
         await runPaletteCommand(page, "Start UI Trace");
@@ -280,7 +291,7 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
         await refreshRendezvous.releaseDecode();
         await refreshRendezvous.waitForDecodeResumed();
         const result = await measure();
-        const interactionCompleteCursor = await liveMessageCursor(page);
+        const interactionCompleteCursor = await liveMessageCursor(refreshPage);
         // Both real operations are proven active when measurement begins.
         // Completing either operation before the GUI interaction finishes is
         // valid (and desirable), so completion order is not an acceptance gate.
@@ -290,34 +301,21 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
         await trigger.finish();
         trigger = undefined;
         await refreshRendezvous.waitForCompleted();
-        if (!exactProjectionValidated) {
-          const projectionCursor = await liveMessageCursor(page);
-          await activateProjectTab(page, refreshTabId);
-          const workloadSignals = await waitForWorkloadSignals(
-            page,
-            Math.max(interactionCompleteCursor, projectionCursor),
-            fixture.stressWorkId,
-          );
-          expect(workloadSignals.activeWorkProjectionSeen).toBe(true);
-          expect(workloadSignals.sequence).toBeGreaterThan(interactionCompleteCursor);
-          exactProjectionValidated = true;
-        }
+        const projectionCursor = await liveMessageCursor(refreshPage);
+        await sendLiveGwtEvent(refreshPage, { kind: "frontend_ready" });
+        const workloadSignals = await waitForWorkloadSignals(
+          refreshPage,
+          projectionCursor,
+          fixture.stressWorkId,
+        );
+        expect(workloadSignals.activeWorkProjectionSeen).toBe(true);
+        expect(workloadSignals.sequence).toBeGreaterThan(interactionCompleteCursor);
         await refreshRendezvous.stop();
         refreshRendezvous = undefined;
-        refreshTabId = undefined;
         return result;
       };
 
-      const tabLatencyMs = await runLoadedInteraction(
-        false,
-        () => measureTabSwitch(page, primaryTabId),
-        () =>
-          page.locator(
-            `.project-tab[data-project-tab-id="${primaryTabId}"]`,
-          ).evaluate((node) => (node as HTMLElement).focus()),
-      );
       const issueResult = await runLoadedInteraction(
-        true,
         () => measureIssueSelection(page, issueWindowId!, fixture.issueNumber),
         () =>
           page.locator(
@@ -325,7 +323,6 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
           ).focus({ timeout: INTERACTION_BUDGET_MS }),
       );
       const terminalLatencyMs = await runLoadedInteraction(
-        true,
         () => measureTerminalRoundtrip(page, shellWindowId!),
         () =>
           page.locator(
@@ -336,15 +333,6 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
       const hookProfiles = (
         await readUserPromptSubmitProfiles(fixture.hookProfilePath)
       ).slice(hookProfileCursor);
-      expect(hookProfiles).toHaveLength(3);
-      for (const hookProfile of hookProfiles) {
-        expect(Number.isFinite(hookProfile.duration_ms)).toBe(true);
-        expect(hookProfile.duration_ms).toBeGreaterThan(0);
-        expect(hookProfile.duration_ms).toBeLessThan(250);
-        expect(hookProfile.provider_read_count).toBe(1);
-        expect(hookProfile.history_materialization_count).toBe(1);
-        expect(Number(hookProfile.projection_load_count)).toBeLessThanOrEqual(2);
-      }
       const maxHookDurationMs = Math.max(
         ...hookProfiles.map((profile) => Number(profile.duration_ms)),
       );
@@ -360,8 +348,44 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
           Number(entry.gap_ms ?? 0) >= RAF_GAP_BUDGET_MS,
       );
 
+      testInfo.annotations.push({
+        type: "measurement",
+        description:
+          `issue=${issueResult.latencyMs.toFixed(1)}ms ` +
+          `terminal=${terminalLatencyMs.toFixed(1)}ms ` +
+          `hook_under_work_load_max=${maxHookDurationMs.toFixed(1)}ms ` +
+          `long_tasks=${overBudgetLongTasks.length} ` +
+          `raf_gaps=${overBudgetRafGaps.length}`,
+      });
+      const measurementsPath = testInfo.outputPath("responsiveness-measurements.json");
+      await mkdir(dirname(measurementsPath), { recursive: true });
+      await writeFile(measurementsPath, JSON.stringify({
+        issue: issueResult,
+        terminalLatencyMs,
+        hookProfiles: hookProfiles.map((profile) => ({
+          duration_ms: profile.duration_ms,
+          provider_read_count: profile.provider_read_count,
+          history_materialization_count: profile.history_materialization_count,
+          projection_load_count: profile.projection_load_count,
+        })),
+        overBudgetLongTasks,
+        overBudgetRafGaps,
+        consoleErrors,
+        pageErrors,
+      }), "utf8");
+      await testInfo.attach("responsiveness-measurements", {
+        contentType: "application/json", path: measurementsPath,
+      });
+      expect(hookProfiles).toHaveLength(2);
+      for (const hookProfile of hookProfiles) {
+        expect(Number.isFinite(hookProfile.duration_ms)).toBe(true);
+        expect(hookProfile.duration_ms).toBeGreaterThan(0);
+        expect(hookProfile.duration_ms).toBeLessThan(250);
+        expect(hookProfile.provider_read_count).toBe(1);
+        expect(hookProfile.history_materialization_count).toBe(1);
+        expect(Number(hookProfile.projection_load_count)).toBeLessThanOrEqual(2);
+      }
       expect(traceEntries.some((entry) => entry.kind === "trace_start")).toBe(true);
-      expect(tabLatencyMs).toBeLessThan(INTERACTION_BUDGET_MS);
       expect(issueResult.latencyMs).toBeLessThan(INTERACTION_BUDGET_MS);
       expect(issueResult.mismatchedFrames).toBe(0);
       expect(terminalLatencyMs).toBeLessThan(INTERACTION_BUDGET_MS);
@@ -370,48 +394,37 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
       expect(consoleErrors).toEqual([]);
       expect(pageErrors).toEqual([]);
 
-      testInfo.annotations.push({
-        type: "measurement",
-        description:
-          `tab=${tabLatencyMs.toFixed(1)}ms ` +
-          `issue=${issueResult.latencyMs.toFixed(1)}ms ` +
-          `terminal=${terminalLatencyMs.toFixed(1)}ms ` +
-          `hook_under_work_load_max=${maxHookDurationMs.toFixed(1)}ms ` +
-          `long_tasks=${overBudgetLongTasks.length} ` +
-          `raf_gaps=${overBudgetRafGaps.length}`,
-      });
     } finally {
-      await trigger?.stop();
-      await refreshRendezvous?.stop();
-      await clearLiveLaunchWizard(page).catch(() => undefined);
-      // The passive fixture agent is shared by the serial dark/light runs.
-      // Keeping it alive avoids a default-agent replacement between themes;
-      // browser-check teardown owns the isolated process and capability file.
-      if (shellWindowId) {
-        await sendLiveGwtEvent(page, { kind: "close_window", id: shellWindowId })
-          .catch(() => undefined);
+      try {
+        await trigger?.stop();
+        await refreshRendezvous?.stop();
+        await clearLiveLaunchWizard(page).catch(() => undefined);
+        // The passive fixture agent is shared by the serial dark/light runs.
+        // Keeping it alive avoids a default-agent replacement between themes;
+        // browser-check teardown owns the isolated process and capability file.
+        if (shellWindowId) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id: shellWindowId })
+            .catch(() => undefined);
+        }
+        if (issueWindowId) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id: issueWindowId })
+            .catch(() => undefined);
+        }
+        for (const projectKey of refreshProjectKeys) {
+          await readLiveHubCatalog(page, BASE, {
+            send: { kind: "preview_close_project", project_key: projectKey },
+            until: (hub, key) => !hub.projects.some((entry) => entry.project_key === key),
+            arg: projectKey,
+          });
+        }
+        for (const refreshPage of refreshPages) await refreshPage.close();
+        for (const refreshProject of refreshProjects) {
+          await rm(refreshProject.root, { recursive: true, force: true });
+          await rm(refreshProject.storeRoot, { recursive: true, force: true });
+        }
+      } finally {
+        await releaseBackendLock();
       }
-      if (issueWindowId) {
-        await sendLiveGwtEvent(page, { kind: "close_window", id: issueWindowId })
-          .catch(() => undefined);
-      }
-      if (refreshTabId) {
-        await sendLiveGwtEvent(page, {
-          kind: "close_project_tab",
-          tab_id: refreshTabId,
-        }).catch(() => undefined);
-      }
-      for (const tabId of refreshTabIds) {
-        await sendLiveGwtEvent(page, {
-          kind: "close_project_tab",
-          tab_id: tabId,
-        }).catch(() => undefined);
-      }
-      for (const refreshProject of refreshProjects) {
-        await rm(refreshProject.root, { recursive: true, force: true });
-        await rm(refreshProject.storeRoot, { recursive: true, force: true });
-      }
-      await releaseBackendLock();
     }
   });
 });
@@ -621,7 +634,7 @@ async function createRefreshProject(
   checkHome: string,
   projectName: string,
 ): Promise<RefreshProject> {
-  const root = await mkdtemp(join(tmpdir(), "gwt-prompt-responsive-secondary-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "gwt-prompt-responsive-secondary-")));
   const branchName = `issue-3777-${projectName.replace(/[^a-z0-9-]/gi, "-")}`;
   const originPath = `gwt-browser-check/${projectName.toLowerCase()}-${basename(root).toLowerCase()}`;
   const originUrl = `https://github.com/${originPath}.git`;
@@ -691,82 +704,13 @@ async function skipPendingMigration(page: Page, tabId: string): Promise<void> {
 }
 
 async function activeProjectTabId(page: Page): Promise<string> {
-  const tab = page.locator(".project-tab[aria-current='page']");
-  await expect(tab).toBeVisible({ timeout: 20_000 });
-  const id = await tab.getAttribute("data-project-tab-id");
-  if (!id) throw new Error("active project tab has no data-project-tab-id");
-  return id;
-}
-
-async function projectTabIdForRoot(page: Page, projectRoot: string): Promise<string> {
-  const id = await page
-    .waitForFunction(
-      (expectedRoot) => {
-        const normalize = (value: string) => value.replace(/^\/private(?=\/var\/)/, "");
-        const match = Array.from(document.querySelectorAll<HTMLElement>(".project-tab"))
-          .find((tab) =>
-            normalize(tab.dataset.projectRoot ?? "") === normalize(expectedRoot),
-          );
-        return match?.dataset.projectTabId ?? "";
-      },
-      projectRoot,
-      { timeout: 20_000 },
-    )
-    .then((handle) => handle.jsonValue())
-    .catch(async (error) => {
-      const tabs = await page.locator(".project-tab").evaluateAll((nodes) =>
-        nodes.map((node) => ({
-          id: (node as HTMLElement).dataset.projectTabId ?? "",
-          root: (node as HTMLElement).dataset.projectRoot ?? "",
-        })),
-      );
-      throw new Error(
-        `${String(error)}\nExpected project root: ${projectRoot}\nProject tabs: ${JSON.stringify(tabs)}`,
-      );
-    });
-  if (!id) throw new Error(`live backend did not expose project tab for ${projectRoot}`);
-  return id;
-}
-
-async function closeOtherProjectTabs(page: Page, keepTabId: string): Promise<void> {
-  const staleTabIds = await page.locator(".project-tab").evaluateAll(
-    (tabs, keepId) => tabs
-      .map((tab) => (tab as HTMLElement).dataset.projectTabId ?? "")
-      .filter((id) => id && id !== keepId),
-    keepTabId,
-  );
-  for (const tabId of staleTabIds) {
-    await sendLiveGwtEvent(page, { kind: "close_project_tab", tab_id: tabId });
-  }
-  await page.waitForFunction(
-    (keepId) => Array.from(document.querySelectorAll<HTMLElement>(".project-tab"))
-      .every((tab) => tab.dataset.projectTabId === keepId),
-    keepTabId,
-    { timeout: 20_000 },
-  );
-}
-
-async function openAndWaitForNewProjectTab(page: Page, projectRoot: string): Promise<string> {
-  const before = await page
-    .locator(".project-tab")
-    .evaluateAll((tabs) => tabs.map((tab) => (tab as HTMLElement).dataset.projectTabId ?? ""));
-  await openLiveGwtProject(page, projectRoot);
-  const id = await page
-    .waitForFunction(
-      (previousIds) => {
-        const previous = new Set(previousIds);
-        const active = document.querySelector<HTMLElement>(
-          ".project-tab[aria-current='page']",
-        );
-        const candidate = active?.dataset.projectTabId ?? "";
-        return candidate && !previous.has(candidate) ? candidate : "";
-      },
-      before,
-      { timeout: 20_000 },
-    )
-    .then((handle) => handle.jsonValue());
-  if (!id) throw new Error("live backend did not activate the refresh project tab");
-  return id;
+  // Migration still identifies the server's tab, but the Project route owns
+  // selection; the removed application tab DOM is not an identity source.
+  return (await page.waitForFunction(() => {
+    const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+      entry.payload?.kind === "workspace_state");
+    return message?.payload.workspace.tabs[0]?.id;
+  })).jsonValue();
 }
 
 async function createWindow(
@@ -897,35 +841,6 @@ async function startLoadTrigger(
     }
   };
   return { child, finish, startHook, stop };
-}
-
-async function measureTabSwitch(page: Page, tabId: string): Promise<number> {
-  const cursor = await liveMessageCursor(page);
-  const start = await page.evaluate(() => performance.now());
-  const tab = page.locator(`.project-tab[data-project-tab-id="${tabId}"]`);
-  await tab.click({ force: true, timeout: INTERACTION_BUDGET_MS });
-  await expect(tab).toHaveAttribute("aria-current", "page", {
-    timeout: INTERACTION_BUDGET_MS,
-  });
-  await waitForLiveMessage(page, cursor, "workspace_state", (payload) =>
-    payload?.workspace?.active_tab_id === tabId,
-  );
-  return page.evaluate((startedAt) => performance.now() - startedAt, start);
-}
-
-async function activateProjectTab(page: Page, tabId: string): Promise<void> {
-  const tab = page.locator(`.project-tab[data-project-tab-id="${tabId}"]`);
-  if (await tab.getAttribute("aria-current") === "page") return;
-  const cursor = await liveMessageCursor(page);
-  await tab.evaluate((node) => (node as HTMLElement).click());
-  await expect(tab).toHaveAttribute("aria-current", "page", { timeout: 20_000 });
-  await waitForLiveMessage(
-    page,
-    cursor,
-    "workspace_state",
-    (payload) => payload?.workspace?.active_tab_id === tabId,
-    20_000,
-  );
 }
 
 async function measureIssueSelection(
