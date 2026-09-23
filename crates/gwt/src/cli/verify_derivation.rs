@@ -1191,7 +1191,7 @@ mod tests {
                 // The xvfb `--ignored` real-binary family stays CI-owned:
                 // it needs a display server, so it is deliberately outside
                 // the locally derived matrix.
-                "dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration -- --ignored --test-threads=1 --nocapture"
+                "dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"
                     .to_string(),
             ],
             "CI's Rust gate changed — update verify.plan derivation with it (#3640)"
