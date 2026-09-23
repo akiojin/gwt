@@ -86,8 +86,8 @@ fn the_rust_test_job_checks_for_processes_the_suite_failed_to_reap() {
     let doc = test_workflow();
     let steps = run_steps(&job(&doc, RUST_TEST_JOB));
 
-    let suite = index_of_step_running(&steps, "cargo test --workspace")
-        .expect("`Test (Rust)` must keep the workspace `cargo test` step");
+    let suite = index_of_step_running(&steps, "cargo nextest run --workspace")
+        .expect("`Test (Rust)` must run the workspace with per-test timeouts");
     let orphan_check = index_of_step_running(&steps, ORPHAN_SCRIPT).unwrap_or_else(|| {
         panic!("`Test (Rust)` must run {ORPHAN_SCRIPT} (SPEC #4551 T-050 / AC-5)")
     });
