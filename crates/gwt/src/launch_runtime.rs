@@ -1,5 +1,7 @@
 use super::*;
 
+mod base_freshness;
+
 fn normalize_child_process_path(path: &Path) -> PathBuf {
     gwt_core::paths::normalize_windows_child_process_path(path)
 }
@@ -107,7 +109,8 @@ pub fn resolve_launch_worktree_request(
     let Some(branch_name) = branch_name.map(str::to_string) else {
         return Ok(());
     };
-    if working_dir.is_some() {
+    let inspect_base = branch_name.starts_with("work/issue-");
+    if working_dir.is_some() && !inspect_base {
         return Ok(());
     }
 
@@ -126,13 +129,21 @@ pub fn resolve_launch_worktree_request(
         }
     };
     with_launch_worktree_materialization_lock(&main_repo_path, &branch_name, || {
-        resolve_launch_worktree_request_locked(
-            &main_repo_path,
-            &branch_name,
-            base_branch,
-            working_dir,
-            env_vars,
-        )
+        if working_dir.is_none() {
+            resolve_launch_worktree_request_locked(
+                &main_repo_path,
+                &branch_name,
+                base_branch,
+                working_dir,
+                env_vars,
+            )?;
+        }
+        if inspect_base {
+            if let Some(worktree) = working_dir.as_deref() {
+                base_freshness::refresh_and_record(&main_repo_path, &branch_name, worktree);
+            }
+        }
+        Ok(())
     })
 }
 
@@ -1433,7 +1444,7 @@ mod tests {
         assert_eq!(config.args, original_args);
     }
 
-    fn run_git(repo: &Path, args: &[&str]) {
+    pub(super) fn run_git(repo: &Path, args: &[&str]) {
         let output = gwt_core::process::hidden_command("git")
             .args(args)
             .current_dir(repo)
@@ -1456,7 +1467,7 @@ mod tests {
             .success()
     }
 
-    fn init_launch_test_repo(root: &Path) -> PathBuf {
+    pub(super) fn init_launch_test_repo(root: &Path) -> PathBuf {
         let origin = root.join("origin.git");
         let repo = root.join("repo");
         run_git(root, &["init", "--bare", origin.to_str().unwrap()]);
