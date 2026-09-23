@@ -53,6 +53,7 @@ fn aggregate_payload(
 #[test]
 fn project_aggregate_counts_hidden_agents_and_scopes_changes() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = aggregate_test_runtime(temp.path());
     let a = runtime.project_context("a").unwrap();
     let b = runtime.project_context("b").unwrap();
@@ -89,6 +90,7 @@ fn project_aggregate_counts_hidden_agents_and_scopes_changes() {
 #[test]
 fn project_aggregate_ack_requires_current_visible_focused_project_revision() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = aggregate_test_runtime(temp.path());
     let context = runtime.project_context("a").unwrap();
     let initial = aggregate_payload(&runtime.refresh_project_aggregates(), &context.project_key);
@@ -160,6 +162,7 @@ fn project_aggregate_ack_requires_current_visible_focused_project_revision() {
 #[test]
 fn project_aggregate_reopen_discards_unread_and_fences_old_ack() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut runtime = aggregate_test_runtime(temp.path());
     let context = runtime.project_context("a").unwrap();
     runtime.refresh_project_aggregates();
