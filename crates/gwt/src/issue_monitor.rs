@@ -1536,6 +1536,11 @@ pub struct PendingIssueMonitorLaunchDelivery {
     #[serde(default)]
     pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
     pub created_at: String,
+    /// Issue #4630: the operator's reason for the requeue this launch
+    /// consumed, delivered in the launch prompt. `None` for every launch that
+    /// no operator requeue preceded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requeue_reason: Option<String>,
 }
 
 /// Backward-compat: the first shipped shape was a bare id array. A parse
@@ -1680,6 +1685,12 @@ pub struct IssueMonitorReleasedFailure {
     /// this to zero; the default keeps pre-Issue-3734 preferences readable.
     #[serde(default)]
     pub attempts_after: u32,
+    /// Issue #4630: an operator (`issue.monitor.requeue`, the Issue Monitor
+    /// surface) issued this release, so `reason` is theirs to hand to the
+    /// relaunched window. Releases the Monitor issues on its own leave it
+    /// false: their reason is bookkeeping, not an instruction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub operator_requested: bool,
 }
 
 /// Issue #3734 FR-113: operator reset evidence is durable but cannot grow
@@ -5028,6 +5039,87 @@ pub fn issue_monitor_launch_prompt(kind: LinkedIssueKind, number: u64) -> String
             "$gwt-execute #{number}\n\n{provenance}\n\nBefore changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #{number} and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
         ),
     }
+}
+
+/// Issue #4630 AC-6: the most characters of an operator's requeue reason a
+/// launch prompt carries. The prompt reaches the agent as a launch argument,
+/// and a requeue reason is a short note about this relaunch; the requirements
+/// themselves belong in the Issue body. 2000 characters holds several
+/// paragraphs with a command block while keeping one runaway reason from
+/// dwarfing the prompt it annotates.
+pub const ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS: usize = 2000;
+
+/// [`issue_monitor_launch_prompt`] for a launch that consumed an operator
+/// requeue: the reason is appended in its own section, fenced and labelled as
+/// context for this relaunch, never as Issue specification (Issue #4630). A
+/// missing or blank reason yields the ordinary prompt unchanged.
+pub fn issue_monitor_launch_prompt_with_requeue_reason(
+    kind: LinkedIssueKind,
+    number: u64,
+    requeue_reason: Option<&str>,
+) -> String {
+    let prompt = issue_monitor_launch_prompt(kind, number);
+    let Some(reason) = requeue_reason
+        .map(sanitize_requeue_reason)
+        .filter(|reason| !reason.is_empty())
+    else {
+        return prompt;
+    };
+    let longest_backtick_run = reason
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest_backtick_run.max(2) + 1);
+    format!(
+        "{prompt}\n\nPM requeue reason for this relaunch. The PM returned this Issue to the queue with the note below. It explains this relaunch only and is not part of the Issue specification; the Issue body remains the source of requirements.\n\n{fence}text\n{reason}\n{fence}"
+    )
+}
+
+/// Normalize a reason for a launch prompt: line endings become `\n` (a `\r`
+/// would submit a prompt typed into a terminal), other control characters
+/// are dropped, and the text is capped at
+/// [`ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS`].
+fn sanitize_requeue_reason(reason: &str) -> String {
+    let cleaned = reason
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect::<String>();
+    let cleaned = cleaned.trim();
+    let total = cleaned.chars().count();
+    if total <= ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS {
+        return cleaned.to_string();
+    }
+    let kept = cleaned
+        .chars()
+        .take(ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS)
+        .collect::<String>();
+    format!(
+        "{kept}\n[truncated: {} more characters; the full reason is kept in the Issue Monitor requeue audit]",
+        total - ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS
+    )
+}
+
+/// The operator requeue reason carried by the exact durable launch delivery
+/// being materialized (Issue #4630). `None` when there is no delivery id, the
+/// delivery is gone, or no operator requeue preceded it; an unreadable prefs
+/// file degrades to the ordinary prompt rather than refusing the launch.
+pub fn issue_monitor_launch_delivery_requeue_reason(
+    prefs_path: &Path,
+    issue_number: u64,
+    delivery_id: Option<&str>,
+) -> Option<String> {
+    let delivery_id = delivery_id?;
+    load_issue_monitor_prefs(prefs_path)
+        .ok()?
+        .pending_launch_deliveries
+        .into_iter()
+        .find(|delivery| {
+            delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+        })?
+        .requeue_reason
 }
 
 pub fn issue_monitor_launch_plan(issue: &IssueMonitorIssue) -> IssueMonitorLaunchPlan {
@@ -12829,7 +12921,13 @@ impl IssueMonitorState {
         // Issue #3757 / SPEC #3165 FR-134: the confirmed claim and its durable
         // delivery are the exact transition that starts the fresh lifecycle.
         // Consume the recovery fence here, never by comparing timestamps.
-        self.released_failures.remove(&issue_number);
+        // Issue #4630: an operator's reason for that recovery travels on with
+        // the delivery, which is what the launch prompt is built from.
+        let requeue_reason = self
+            .released_failures
+            .remove(&issue_number)
+            .filter(|release| release.operator_requested && !release.reason.trim().is_empty())
+            .map(|release| release.reason);
         // Issue #4077 AC-1: remember who owns this claim comment. The launch
         // accounting below is cleared the moment the launch ends; the comment
         // is not, and releasing it needs the exact pair.
@@ -12869,6 +12967,7 @@ impl IssueMonitorState {
                     workspace_durable_window_id: None,
                     launch_session_strategy,
                     created_at: now.to_string(),
+                    requeue_reason,
                 });
         }
         true
@@ -13612,6 +13711,7 @@ impl IssueMonitorState {
             reason,
             attempts_before: attempts,
             attempts_after: attempts,
+            operator_requested: false,
         }));
     }
 
@@ -14811,7 +14911,7 @@ impl IssueMonitorState {
             return IssueMonitorRequeueOutcome::NotHeld;
         }
 
-        let outcome = self.release_failed_issue_hold(issue_number, reason, now);
+        let outcome = self.release_held_failure(issue_number, reason, now, true);
         self.push_autonomous_notice(
             "info",
             issue_number,
@@ -14820,13 +14920,23 @@ impl IssueMonitorState {
         outcome
     }
 
-    /// Publish the release of a held failure and return the issue to the
-    /// queue. Callers have already refused live launches and unheld rows.
+    /// Publish a release the Monitor issued on its own and return the issue to
+    /// the queue. Callers have already refused live launches and unheld rows.
     fn release_failed_issue_hold(
         &mut self,
         issue_number: u64,
         reason: &str,
         now: &str,
+    ) -> IssueMonitorRequeueOutcome {
+        self.release_held_failure(issue_number, reason, now, false)
+    }
+
+    fn release_held_failure(
+        &mut self,
+        issue_number: u64,
+        reason: &str,
+        now: &str,
+        operator_requested: bool,
     ) -> IssueMonitorRequeueOutcome {
         let stale_window_id = self.failed_windows.get(&issue_number).cloned();
         let attempts_before = self.attempt_count(issue_number);
@@ -14838,6 +14948,7 @@ impl IssueMonitorState {
             reason: reason.to_string(),
             attempts_before,
             attempts_after: 0,
+            operator_requested,
         };
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
@@ -15232,6 +15343,7 @@ impl IssueMonitorState {
             reason: reason.to_string(),
             attempts_before,
             attempts_after: 0,
+            operator_requested: true,
         };
         self.released_failures.insert(issue_number, release.clone());
         self.merge_requeue_audit(std::iter::once(release));
@@ -23005,6 +23117,7 @@ mod tests {
                 reason: "operator recovery".to_string(),
                 attempts_before: 3,
                 attempts_after: 0,
+                operator_requested: true,
             }],
             "the reset delta and operator reason must survive in durable audit history"
         );
@@ -23012,6 +23125,224 @@ mod tests {
             monitor.prefs().queued_launch_session_strategies.get(&42),
             Some(&IssueMonitorLaunchSessionStrategy::FreshRequired),
             "the abandoned session must not be resumed by the recovered launch"
+        );
+    }
+
+    /// Relaunch `number` in a daemon driver after `requeue` ran in a separate
+    /// operator process, exactly as `issue.monitor.requeue` reaches the driver:
+    /// through the persisted prefs it rebases on.
+    fn relaunch_after_operator_release(
+        number: u64,
+        requeue: impl FnOnce(&mut IssueMonitorState),
+    ) -> IssueMonitorState {
+        let mut driver = agent_failed_monitor(number, "stale worktree base");
+        let mut operator =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), driver.prefs());
+        requeue(&mut operator);
+        let disk: IssueMonitorPrefs =
+            serde_json::from_str(&serde_json::to_string(&operator.prefs()).unwrap()).unwrap();
+        driver.rebase_daemon_driver_prefs(&disk);
+        assert!(driver.apply_confirmed_claim(
+            number,
+            format!("claim-{number}"),
+            "host/session",
+            &format!("effect-{number}"),
+            "2026-09-22T21:01:00Z",
+        ));
+        driver
+    }
+
+    fn delivered_requeue_reason(monitor: &IssueMonitorState, number: u64) -> Option<String> {
+        monitor
+            .prefs()
+            .pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == number)
+            .expect("the relaunch has a durable delivery")
+            .requeue_reason
+            .clone()
+    }
+
+    /// Issue #4630 AC-1 / AC-3 / AC-4 / AC-5(a): the reason an operator gave
+    /// `issue.monitor.requeue` reaches the relaunched window's prompt, set
+    /// apart from the Issue body, and the audit record still keeps it.
+    #[test]
+    fn operator_requeue_reason_reaches_the_relaunch_prompt_and_the_audit() {
+        let reason = "Rebuild gwtd from origin/develop before verifying";
+        let driver = relaunch_after_operator_release(42, |operator| {
+            operator.requeue_failed_issue(42, reason, "2026-09-22T21:00:00Z");
+        });
+
+        let delivered = delivered_requeue_reason(&driver, 42);
+        assert_eq!(delivered.as_deref(), Some(reason));
+        assert!(
+            driver.prefs().released_failures.is_empty(),
+            "the claim still consumes the recovery fence"
+        );
+        assert_eq!(
+            driver
+                .prefs()
+                .requeue_audit
+                .iter()
+                .map(|release| release.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec![reason],
+            "delivery must not replace the durable audit"
+        );
+
+        let base = issue_monitor_launch_prompt(LinkedIssueKind::Issue, 42);
+        let prompt = issue_monitor_launch_prompt_with_requeue_reason(
+            LinkedIssueKind::Issue,
+            42,
+            delivered.as_deref(),
+        );
+        let section = prompt
+            .strip_prefix(&base)
+            .expect("the requeue section is appended after the unchanged prompt");
+        assert!(section.contains("requeue reason"), "{section}");
+        assert!(
+            section.contains("not part of the Issue specification"),
+            "the reason must not read as Issue body: {section}"
+        );
+        assert!(
+            section.contains(&format!("\n```text\n{reason}\n```")),
+            "{section}"
+        );
+
+        let spec = issue_monitor_launch_prompt_with_requeue_reason(
+            LinkedIssueKind::Spec,
+            42,
+            delivered.as_deref(),
+        );
+        assert!(spec.starts_with(&issue_monitor_launch_prompt(LinkedIssueKind::Spec, 42)));
+        assert!(spec.contains(reason));
+    }
+
+    /// Issue #4630 AC-2 / AC-5(b)(c): no reason, a blank reason, and an
+    /// ordinary launch all produce the prompt unchanged.
+    #[test]
+    fn a_launch_without_an_operator_reason_keeps_the_prompt_unchanged() {
+        let blank = relaunch_after_operator_release(42, |operator| {
+            operator.requeue_failed_issue(42, "  \n ", "2026-09-22T21:00:00Z");
+        });
+        assert_eq!(delivered_requeue_reason(&blank, 42), None);
+
+        let mut ordinary = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut ordinary, &[issue(43)], "2026-09-22T21:00:00Z");
+        assert!(ordinary.apply_confirmed_claim(
+            43,
+            "claim-43",
+            "host/session",
+            "effect-43",
+            "2026-09-22T21:00:00Z",
+        ));
+        assert_eq!(delivered_requeue_reason(&ordinary, 43), None);
+
+        for kind in [LinkedIssueKind::Issue, LinkedIssueKind::Spec] {
+            for reason in [None, Some(""), Some(" \n\t ")] {
+                assert_eq!(
+                    issue_monitor_launch_prompt_with_requeue_reason(kind, 42, reason),
+                    issue_monitor_launch_prompt(kind, 42)
+                );
+            }
+        }
+    }
+
+    /// Issue #4630 AC-2: a requeue the Monitor issued on its own is not a PM
+    /// reason and must not be presented as one.
+    #[test]
+    fn a_monitor_initiated_release_does_not_deliver_a_requeue_reason() {
+        let mut monitor = agent_failed_monitor(42, "stale verdict");
+        assert!(matches!(
+            monitor.release_failed_issue_hold(
+                42,
+                "stranded execution generation released",
+                "2026-09-22T21:00:00Z"
+            ),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-09-22T21:01:00Z",
+        ));
+        assert_eq!(delivered_requeue_reason(&monitor, 42), None);
+    }
+
+    /// Issue #4630: the operator release paths other than a failure hold carry
+    /// their reason the same way.
+    #[test]
+    fn a_claim_block_or_stranded_launch_release_delivers_its_reason() {
+        let driver = relaunch_after_operator_release(42, |operator| {
+            operator.release_stranded_launch(42, "window vanished", "2026-09-22T21:00:00Z");
+        });
+        assert_eq!(
+            delivered_requeue_reason(&driver, 42).as_deref(),
+            Some("window vanished")
+        );
+    }
+
+    /// Issue #4630 AC-6: fences, carriage returns and control bytes in the
+    /// reason cannot close the block early or submit the prompt, and an
+    /// over-long reason is truncated at a char boundary.
+    #[test]
+    fn a_requeue_reason_cannot_break_the_launch_prompt() {
+        let reason = "step 1\r\n```sh\ncargo build\n```\r\nstep 2 ````\u{1b}[31m";
+        let prompt = issue_monitor_launch_prompt_with_requeue_reason(
+            LinkedIssueKind::Issue,
+            42,
+            Some(reason),
+        );
+        assert!(!prompt.contains('\r'), "{prompt:?}");
+        assert!(!prompt.contains('\u{1b}'), "{prompt:?}");
+        assert!(
+            prompt.contains("\n`````text\nstep 1\n```sh\ncargo build\n```\nstep 2 ````[31m\n`````"),
+            "the fence must be longer than any backtick run in the reason: {prompt:?}"
+        );
+
+        let long = "é".repeat(ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS + 10);
+        let prompt = issue_monitor_launch_prompt_with_requeue_reason(
+            LinkedIssueKind::Issue,
+            42,
+            Some(&long),
+        );
+        assert!(prompt.contains(&"é".repeat(ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS)));
+        assert!(!prompt.contains(&"é".repeat(ISSUE_MONITOR_REQUEUE_REASON_MAX_CHARS + 1)));
+        assert!(
+            prompt.contains("[truncated: 10 more characters"),
+            "{prompt}"
+        );
+    }
+
+    /// Issue #4630: the GUI materializer reads the reason back from the exact
+    /// durable delivery it is launching.
+    #[test]
+    fn the_requeue_reason_is_read_back_for_the_exact_delivery() {
+        let driver = relaunch_after_operator_release(42, |operator| {
+            operator.requeue_failed_issue(42, "use the new base", "2026-09-22T21:00:00Z");
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("issue-monitor.json");
+        std::fs::write(&path, serde_json::to_string(&driver.prefs()).unwrap()).unwrap();
+
+        assert_eq!(
+            issue_monitor_launch_delivery_requeue_reason(&path, 42, Some("launch:effect-42"))
+                .as_deref(),
+            Some("use the new base")
+        );
+        assert_eq!(
+            issue_monitor_launch_delivery_requeue_reason(&path, 42, Some("launch:other")),
+            None
+        );
+        assert_eq!(
+            issue_monitor_launch_delivery_requeue_reason(&path, 42, None),
+            None
+        );
+        assert_eq!(
+            issue_monitor_launch_delivery_requeue_reason(&temp.path().join("missing"), 42, None),
+            None
         );
     }
 
@@ -23352,6 +23683,7 @@ mod tests {
                 reason: reason.to_string(),
                 attempts_before: 1,
                 attempts_after: 0,
+                operator_requested: false,
             };
         let stranded = "stranded execution generation released (holder Session Idle); returned to the queue by the Issue Monitor";
         let monitor = IssueMonitorState::with_prefs(
@@ -24070,6 +24402,7 @@ mod tests {
             reason: format!("operator recovery {release_version}"),
             attempts_before: 1,
             attempts_after: 0,
+            operator_requested: false,
         };
         let mut observer = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
