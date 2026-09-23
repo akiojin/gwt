@@ -1582,6 +1582,10 @@ pub struct AppRuntime {
     /// delta — an in-place agent restart reusing the same window is fine.
     /// Runtime-only; never persisted.
     pub(crate) window_output_bytes: HashMap<String, u64>,
+    /// Issue #4608: when each pane last wrote to its terminal. The Monitor's
+    /// hook-independent liveness signal (see
+    /// `IssueMonitorWindowObservation::last_output_at`). Runtime-only.
+    pub(crate) window_last_output_at: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     /// Live Agent panes whose rendered provider UI is blocked on a human tool
     /// approval. Runtime-only and never persisted. A remote daemon overlay has
@@ -1629,6 +1633,10 @@ pub struct AppRuntime {
     /// heartbeat published to the Issue Monitor can be throttled instead of
     /// firing a daemon control on every hook. Keyed by combined window id.
     pub(crate) last_agent_activity: HashMap<String, chrono::DateTime<chrono::Utc>>,
+    /// Issue #4608: when each window's heartbeat was last let through the
+    /// throttle. Kept apart from `last_agent_activity`, which every arrival
+    /// refreshes: throttling on that starved a steadily working agent.
+    pub(crate) last_issue_monitor_heartbeat: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(crate) agent_capability_issuer: Option<AgentCapabilityIssuer>,
     /// Issue-time opaque agent capability keyed by combined window id.
     ///
@@ -3368,6 +3376,7 @@ impl AppRuntime {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: HashMap::new(),
             approval_settle_epoch: 0,
@@ -3378,6 +3387,7 @@ impl AppRuntime {
             released_provider_quota_notices: HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: HashMap::new(),
+            last_issue_monitor_heartbeat: HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -5435,19 +5445,37 @@ impl AppRuntime {
     /// stall check needs, and each publication is a daemon control round trip.
     const HEARTBEAT_THROTTLE_SECS: i64 = 60;
 
-    pub(crate) fn issue_monitor_heartbeat(&mut self, project_root: &Path, window_id: &str) {
-        // Record the observation before deciding whether to publish: activity
-        // is a fact about the window, independent of whether this window is
-        // currently bound to a monitored issue. Binding can be established
-        // later (or lost), and a gap in the local clock would then read as a
-        // stall that never happened.
-        let now_instant = chrono::Utc::now();
-        let recently_published = self.last_agent_activity.get(window_id).is_some_and(|last| {
-            (now_instant - *last).num_seconds() < Self::HEARTBEAT_THROTTLE_SECS
-        });
-        self.last_agent_activity
-            .insert(window_id.to_string(), now_instant);
+    /// Record one activity arrival for `window_id` at `now` and report whether
+    /// the throttle lets a heartbeat out for it.
+    ///
+    /// Activity is recorded before deciding: it is a fact about the window,
+    /// independent of whether this window is currently bound to a monitored
+    /// issue. Binding can be established later (or lost), and a gap in the
+    /// local clock would then read as a stall that never happened. The throttle
+    /// itself counts from the last heartbeat let out (Issue #4608) — counting
+    /// from the last arrival never published again for an agent whose hooks
+    /// arrive less than a minute apart.
+    pub(crate) fn take_issue_monitor_heartbeat_slot(
+        &mut self,
+        window_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        self.last_agent_activity.insert(window_id.to_string(), now);
+        let recently_published = self
+            .last_issue_monitor_heartbeat
+            .get(window_id)
+            .is_some_and(|last| (now - *last).num_seconds() < Self::HEARTBEAT_THROTTLE_SECS);
         if recently_published {
+            return false;
+        }
+        self.last_issue_monitor_heartbeat
+            .insert(window_id.to_string(), now);
+        true
+    }
+
+    pub(crate) fn issue_monitor_heartbeat(&mut self, project_root: &Path, window_id: &str) {
+        let now_instant = chrono::Utc::now();
+        if !self.take_issue_monitor_heartbeat_slot(window_id, now_instant) {
             return;
         }
         let issue_number = self.issue_monitor_issue_number_for_window(project_root, window_id);
@@ -6838,6 +6866,11 @@ impl AppRuntime {
                     // reads, so the reason is taken from the two maps that
                     // mean the pane actually stopped.
                     hold_reason: self.pane_hold_reason(&window_id),
+                    // Issue #4608: the hook-independent liveness signal.
+                    last_output_at: self
+                        .window_last_output_at
+                        .get(&window_id)
+                        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
                     issue_number,
                     status: window.status,
                     window_id,
@@ -10504,6 +10537,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
+        self.window_last_output_at.remove(window_id);
         self.window_hook_states.remove(window_id);
         self.clear_runtime_approval_latch_without_status(window_id, true);
         self.recoverable_agent_error_windows.remove(window_id);

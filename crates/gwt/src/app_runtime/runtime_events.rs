@@ -550,6 +550,12 @@ impl AppRuntime {
         // answer "did this pane emit anything since the last deadline".
         let observed = self.window_output_bytes.entry(id.clone()).or_insert(0);
         *observed = observed.saturating_add(data.len() as u64);
+        // Issue #4608: any output — local or relayed — is the pane writing,
+        // which is the Monitor's hook-independent liveness signal.
+        if !data.is_empty() {
+            self.window_last_output_at
+                .insert(id.clone(), chrono::Utc::now());
+        }
         if publish_to_daemon {
             if let Some(tab) = self.tab(&address.tab_id) {
                 publish_runtime_output_change(&tab.project_root, &id, &data);

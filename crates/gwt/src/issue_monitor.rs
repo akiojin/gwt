@@ -2435,6 +2435,15 @@ pub struct IssueMonitorWindowObservation {
     /// when empty, so an older reader simply does not see it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold_reason: Option<String>,
+    /// Issue #4608: when this pane last wrote anything to its terminal.
+    ///
+    /// The liveness signal that does not come from hooks. An agent inside a
+    /// turn redraws its spinner and elapsed-time line continuously — during a
+    /// long tool call too — while one sitting at its prompt writes nothing.
+    /// Omitted when the canvas has not seen output since it started, which
+    /// the Monitor reads as "unknown", never as "silent".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at: Option<String>,
 }
 
 /// Issue #4084: the complete set of agent windows on one project tab at
@@ -4756,6 +4765,10 @@ pub fn record_heartbeat_on_record(record: &mut AutonomousIssueRecord, now: &str)
     // Issue #3944 AC-2: progress answers the steering request.
     record.steering = None;
 }
+
+/// Issue #4608 AC-3: a heartbeat that stopped within this many seconds of the
+/// launch confirmation means the launch itself failed, not the work.
+const LAUNCH_DIED_WITHIN_SECS: i64 = 60;
 
 /// Issue #3844 / #4078 AC-2: write one wait declaration onto `record`.
 ///
@@ -7608,7 +7621,10 @@ impl IssueMonitorState {
     /// A launch with no window is lost: it is requeued as a transient failure
     /// (fresh launch). Neither path parks the Issue. Idempotent per stuck
     /// window: a steering request re-arms the timeout and a requeued issue is
-    /// no longer launched.
+    /// no longer launched. Issue #4608: a tracked window whose pane has also
+    /// been silent for the whole timeout is not alive after all; it is released
+    /// and requeued like a lost launch (see
+    /// [`Self::silent_launch_release_reason`]).
     pub fn recover_stuck_autonomous(&mut self, now: &str) -> Vec<(u64, AutonomousFailureOutcome)> {
         // Fail-closed gate: never mutate autonomous state when the mode is off
         // (default), so the SPEC #3165 path is untouched.
@@ -7618,13 +7634,21 @@ impl IssueMonitorState {
         self.stuck_autonomous_issues(now)
             .into_iter()
             .map(|issue_number| {
-                let outcome = if self.launched_windows.contains_key(&issue_number) {
-                    let count = self.request_autonomous_steering(
-                        issue_number,
-                        "stuck/idle timeout: the agent window is alive but made no progress within stuck_timeout_secs; send it a one-line instruction",
-                        now,
-                    );
-                    AutonomousFailureOutcome::SteeringRequested { count }
+                let window_id = self.launched_windows.get(&issue_number).cloned();
+                let outcome = if let Some(window_id) = window_id {
+                    match self.silent_launch_release_reason(issue_number, &window_id, now) {
+                        Some(reason) => {
+                            self.release_silent_launch(issue_number, &window_id, reason, now)
+                        }
+                        None => {
+                            let count = self.request_autonomous_steering(
+                                issue_number,
+                                "stuck/idle timeout: the agent window is alive but made no progress within stuck_timeout_secs; send it a one-line instruction",
+                                now,
+                            );
+                            AutonomousFailureOutcome::SteeringRequested { count }
+                        }
+                    }
                 } else {
                     self.record_autonomous_failure(
                         issue_number,
@@ -7635,6 +7659,115 @@ impl IssueMonitorState {
                 (issue_number, outcome)
             })
             .collect()
+    }
+
+    /// Issue #4608 AC-1/AC-3/AC-4: why a stuck launch whose window is still
+    /// bound may be released, or `None` to keep steering it.
+    ///
+    /// The heartbeat is hook-driven, so it also stops for a healthy agent
+    /// inside a long tool call. Release therefore needs a second, independent
+    /// signal: the pane has written nothing to its terminal for the same
+    /// `stuck_timeout_secs`. An agent inside a turn keeps redrawing its
+    /// spinner; one back at its prompt (a provider error ended the turn, or a
+    /// restored session is waiting) is silent. A missing, stale, or
+    /// pre-launch observation, or one without an output time, proves nothing
+    /// and keeps the steering path.
+    fn silent_launch_release_reason(
+        &self,
+        issue_number: u64,
+        window_id: &str,
+        now: &str,
+    ) -> Option<String> {
+        let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
+        let snapshot = self.fresh_window_snapshot(now)?;
+        let owned_here = issue_monitor_qualified_window_id(window_id)
+            .is_some_and(|(tab_id, _)| tab_id == snapshot.project_tab_id);
+        if !owned_here
+            || !self.window_observation_covers_launch(
+                issue_number,
+                window_id,
+                &snapshot.observed_at,
+            )
+        {
+            return None;
+        }
+        let observed = snapshot
+            .windows
+            .iter()
+            .find(|observed| issue_monitor_window_ids_match(window_id, &observed.window_id))?;
+        let last_output_at = observed.last_output_at.as_deref()?;
+        if !rfc3339_elapsed_secs(last_output_at, now).is_some_and(|silent| silent >= timeout) {
+            return None;
+        }
+        let heartbeat = self
+            .autonomous_records
+            .get(&issue_number)
+            .and_then(|record| record.last_heartbeat.as_deref())
+            .unwrap_or("never");
+        let launched_at = self
+            .launch_confirmations
+            .get(&issue_number)
+            .filter(|ack| ack.window_id == window_id)
+            .map(|ack| ack.confirmed_at.as_str());
+        let died_at_launch = launched_at.is_some_and(|launched_at| {
+            rfc3339_elapsed_secs(launched_at, heartbeat)
+                .is_some_and(|active| active <= LAUNCH_DIED_WITHIN_SECS)
+        });
+        let mut reason = if died_at_launch {
+            format!(
+                "launch died right after start: no agent activity since {heartbeat} \
+                 (launched {}) and no pane output since {last_output_at}",
+                launched_at.unwrap_or_default()
+            )
+        } else {
+            format!(
+                "stalled mid-work: no agent activity since {heartbeat} and no pane output \
+                 since {last_output_at}"
+            )
+        };
+        reason.push_str(&format!(
+            " (both past stuck_timeout_secs={timeout}); window {window_id} released and the Issue requeued"
+        ));
+        if let Some(hold) = observed.hold_reason.as_deref() {
+            reason.push_str(&format!("; pane hold: {hold}"));
+        }
+        Some(reason)
+    }
+
+    /// Issue #4608 AC-2: free the slot of a stuck launch whose pane is silent
+    /// and requeue the Issue through the ordinary retry ladder. The binding is
+    /// dropped and the pane closed, so a window that outlives this scan can
+    /// neither re-adopt the slot nor keep running beside the relaunch.
+    fn release_silent_launch(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+        reason: String,
+        now: &str,
+    ) -> AutonomousFailureOutcome {
+        let outcome = self.record_autonomous_failure(issue_number, reason.clone(), now);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.launched_window_id = None;
+        }
+        self.launch_bindings
+            .retain(|bound, _| !issue_monitor_window_ids_match(bound, window_id));
+        if self
+            .idle_pane_closes_requested
+            .insert(window_id.to_string())
+        {
+            self.pending_idle_pane_closes
+                .push_back(IssueMonitorIdlePaneClose {
+                    window_id: window_id.to_string(),
+                    issue_number: Some(issue_number),
+                    idle_kind: IssueMonitorIdleKind::StuckUnknown,
+                });
+        }
+        self.last_error = Some(format!("issue #{issue_number}: {reason}"));
+        outcome
     }
 
     /// SPEC #3200 (review follow-up): restore self-healing for a `Reviewing`
@@ -28663,6 +28796,157 @@ mod tests {
             .is_some_and(|record| record.steering.is_none()));
     }
 
+    /// Issue #4608: the bound pane as the canvas saw it at `observed_at`.
+    fn silent_pane_snapshot(
+        observed_at: &str,
+        status: WindowState,
+        last_output_at: Option<&str>,
+        hold_reason: Option<&str>,
+    ) -> IssueMonitorWindowSnapshot {
+        IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: observed_at.to_string(),
+            windows: vec![IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::agent-1".to_string(),
+                issue_number: Some(42),
+                status,
+                review_dispatch: false,
+                hold_reason: hold_reason.map(str::to_string),
+                last_output_at: last_output_at.map(str::to_string),
+            }],
+        }
+    }
+
+    #[test]
+    fn recover_stuck_releases_and_requeues_a_running_pane_whose_output_is_also_silent() {
+        // Issue #4608 AC-1/AC-2/AC-5: `pane_state: running`, a consistent
+        // runtime join, and a heartbeat past the timeout. The heartbeat alone
+        // is not enough to release (a healthy window can be inside a long tool
+        // call), but a pane that has written nothing for the same window is at
+        // its prompt: the slot is released, the Issue requeued, and the pane
+        // closed so it cannot be re-adopted.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T01:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:10:00Z"),
+            None,
+        ));
+        assert_eq!(
+            monitor
+                .agent_status_at("2026-06-29T01:00:00Z")
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .and_then(|row| row.runtime_consistency),
+            Some(IssueMonitorRuntimeConsistency::Consistent),
+            "the incident shape: nothing in the runtime join looks wrong"
+        );
+
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
+
+        assert!(
+            matches!(
+                recovered.as_slice(),
+                [(42, AutonomousFailureOutcome::Retry { attempt: 1 })]
+            ),
+            "{recovered:?}"
+        );
+        assert_eq!(monitor.active_count(), 0, "the slot is released");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "release is paired with a requeue"
+        );
+        assert!(monitor.queue.contains(&42));
+        assert!(
+            !monitor
+                .launch_bindings
+                .keys()
+                .any(|bound| issue_monitor_window_ids_match(bound, "tab-1::agent-1")),
+            "a pane that survives until its close lands must not re-adopt the slot"
+        );
+        let closes = monitor.take_pending_idle_pane_closes();
+        assert_eq!(
+            closes
+                .iter()
+                .map(|close| (close.window_id.as_str(), close.issue_number))
+                .collect::<Vec<_>>(),
+            vec![("tab-1::agent-1", Some(42))]
+        );
+        let last_error = monitor
+            .status_view_at("2026-06-29T01:00:00Z")
+            .last_error
+            .expect("the release reason is on last_error");
+        assert!(last_error.starts_with("issue #42: "), "{last_error}");
+        assert!(last_error.contains("stalled mid-work"), "{last_error}");
+        assert!(
+            monitor
+                .inbox_item(42)
+                .and_then(|item| item.error_message.as_deref())
+                .is_some_and(|message| message.contains("stalled mid-work")),
+            "the queued row keeps the reason past the next scan"
+        );
+    }
+
+    #[test]
+    fn recover_stuck_keeps_steering_a_pane_that_is_still_writing_output() {
+        // Issue #4608 AC-1: a stopped heartbeat alone never releases. The
+        // healthy window in the PM's counter-example kept working for 65
+        // minutes with a frozen heartbeat; its pane output is the signal that
+        // it was alive. No observed output at all is unknown, not silent.
+        for last_output_at in [Some("2026-06-29T00:59:30Z"), None] {
+            let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+            monitor.record_window_snapshot(silent_pane_snapshot(
+                "2026-06-29T01:00:00Z",
+                WindowState::Running,
+                last_output_at,
+                None,
+            ));
+            let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
+            assert!(
+                matches!(
+                    recovered.as_slice(),
+                    [(42, AutonomousFailureOutcome::SteeringRequested { count: 1 })]
+                ),
+                "{last_output_at:?}: {recovered:?}"
+            );
+            assert_eq!(monitor.active_count(), 1, "{last_output_at:?}");
+            assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_launch_that_died_right_after_start_is_reported_apart_from_a_mid_work_stall() {
+        // Issue #4608 AC-3/AC-4: the heartbeat stopped within a minute of the
+        // launch confirmation, so the PM reads "the launch failed", not "the
+        // work stalled". A hold the canvas already recognized (a provider
+        // error that ended the turn) is carried into the reason.
+        let mut monitor = stuck_monitor(42, "2026-06-26T00:00:08Z");
+        let hold = "Provider API error (codex) HTTP 503: Selected model is at capacity";
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-26T04:42:00Z",
+            WindowState::Waiting,
+            Some("2026-06-26T00:00:20Z"),
+            Some(hold),
+        ));
+
+        monitor.recover_stuck_autonomous("2026-06-26T04:42:00Z");
+
+        let last_error = monitor
+            .status_view_at("2026-06-26T04:42:00Z")
+            .last_error
+            .expect("released with a reason");
+        assert!(
+            last_error.contains("launch died right after start"),
+            "{last_error}"
+        );
+        assert!(!last_error.contains("stalled mid-work"), "{last_error}");
+        assert!(last_error.contains(hold), "{last_error}");
+        assert_eq!(monitor.active_count(), 0);
+    }
+
     #[test]
     fn recover_stuck_without_a_window_requeues_even_past_the_attempt_cap() {
         // Issue #3944 AC-2: no live window ⇒ the stall is a lost launch; it is
@@ -31886,6 +32170,7 @@ mod tests {
             status,
             review_dispatch,
             hold_reason: None,
+            last_output_at: None,
         }
     }
 
@@ -32046,6 +32331,7 @@ mod tests {
                          is waiting for input; it resumes when told to continue."
                             .to_string(),
                     ),
+                    last_output_at: None,
                 },
                 idle_observation("tab-1::healthy-42", Some(42), WindowState::Running, false),
             ],

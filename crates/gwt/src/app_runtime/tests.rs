@@ -4356,6 +4356,7 @@ fn sample_runtime_with_events(
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
+        window_last_output_at: HashMap::new(),
         window_hook_states: HashMap::new(),
         window_approval_waiting: HashMap::new(),
         approval_settle_epoch: 0,
@@ -4366,6 +4367,7 @@ fn sample_runtime_with_events(
         released_provider_quota_notices: HashMap::new(),
         provider_usage_accounts: Vec::new(),
         last_agent_activity: HashMap::new(),
+        last_issue_monitor_heartbeat: HashMap::new(),
         agent_capability_issuer: None,
         agent_capability_tokens: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
@@ -5140,6 +5142,12 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
         .insert(window_id.to_string());
     runtime
         .last_agent_activity
+        .insert(window_id.to_string(), chrono::Utc::now());
+    runtime
+        .last_issue_monitor_heartbeat
+        .insert(window_id.to_string(), chrono::Utc::now());
+    runtime
+        .window_last_output_at
         .insert(window_id.to_string(), chrono::Utc::now());
 }
 
@@ -33870,6 +33878,73 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
         runtime.last_agent_activity_for_test(&window_id).is_some(),
         "a hook arrival must refresh the activity clock for its window"
     );
+}
+
+/// Issue #4608: the heartbeat throttle is measured from the last heartbeat it
+/// let through, not from the last activity it saw. Measuring from activity
+/// meant an agent whose hooks arrived less than a minute apart — any agent
+/// working steadily — never published again after launch, so its
+/// `last_activity_at` froze while it worked.
+#[test]
+fn issue_monitor_heartbeat_throttle_counts_from_the_last_publication() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let window_id = "tab-1::agent-1";
+    let at = |secs: i64| {
+        chrono::DateTime::parse_from_rfc3339("2026-09-22T07:58:46Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc)
+            + chrono::Duration::seconds(secs)
+    };
+
+    let due = [0, 30, 59, 61, 90, 121]
+        .map(|secs| runtime.take_issue_monitor_heartbeat_slot(window_id, at(secs)));
+
+    assert_eq!(due, [true, false, false, true, false, true]);
+    assert_eq!(
+        runtime.last_agent_activity_for_test(window_id),
+        Some(at(121)),
+        "every arrival is still recorded as activity"
+    );
+}
+
+/// Issue #4608 AC-1: the pane's own terminal output is the liveness signal
+/// that does not depend on hooks, so the canvas observation the Monitor judges
+/// carries when this pane last wrote anything.
+#[test]
+fn issue_monitor_window_observation_carries_the_last_pane_output_time() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let observed = |runtime: &AppRuntime| {
+        runtime
+            .issue_monitor_window_snapshot_for_tab("tab-1", "2026-09-22T12:40:00Z")
+            .expect("snapshot")
+            .windows
+            .into_iter()
+            .find(|window| window.window_id == window_id)
+            .expect("observation")
+            .last_output_at
+    };
+    assert_eq!(observed(&runtime), None, "no output seen yet is unknown");
+
+    let before = chrono::Utc::now() - chrono::Duration::seconds(1);
+    runtime.handle_runtime_output(window_id.clone(), b"Working (3s)".to_vec());
+
+    let last_output_at = observed(&runtime).expect("output time recorded");
+    let last_output_at = chrono::DateTime::parse_from_rfc3339(&last_output_at)
+        .expect("rfc3339")
+        .with_timezone(&chrono::Utc);
+    assert!(last_output_at >= before, "{last_output_at} < {before}");
 }
 
 /// SPEC-3431 FR-067: an agent that exits cleanly also frees its slot.

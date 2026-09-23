@@ -117,6 +117,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
         $visit!($runtime, $id, window_output_bytes);
+        $visit!($runtime, $id, window_last_output_at);
         $visit!($runtime, $id, window_hook_states);
         $visit!($runtime, $id, window_approval_waiting);
         $visit!($runtime, $id, recoverable_agent_error_windows);
@@ -125,6 +126,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, released_provider_quota_notices);
         $visit!($runtime, $id, provider_api_error_holds);
         $visit!($runtime, $id, last_agent_activity);
+        $visit!($runtime, $id, last_issue_monitor_heartbeat);
     };
 }
 
