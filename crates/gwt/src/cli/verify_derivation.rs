@@ -914,13 +914,13 @@ mod tests {
             .collect()
     }
 
-    /// Every cargo test invocation the job runs, one per script line.
+    /// Every Rust test invocation the job runs, one per script line.
     fn workflow_cargo_tests(workflow: &str, job: &str) -> Vec<String> {
         workflow_job_runs(workflow, job)
             .iter()
             .flat_map(|script| script.lines().collect::<Vec<_>>())
             .map(str::trim)
-            .filter(|line| line.contains("cargo test"))
+            .filter(|line| line.contains("cargo test") || line.contains("cargo nextest run"))
             .map(str::to_string)
             .collect()
     }
@@ -1179,22 +1179,24 @@ mod tests {
         }
     }
 
-    // #3640 AC-3 / AC-4: the derived matrix is defined as the CI gate
-    // narrowed by package, so this test fails the moment CI's Rust job
-    // changes shape and the derivation is not updated with it.
+    // #3640 AC-3 / AC-4: preserve the same package/target/feature coverage.
+    // #3845 splits this repository's CI gate into isolated nextest tests and
+    // rustdoc tests. Its AGENTS.md registers that explicit plan; the portable
+    // default still uses cargo test, which includes both families.
     #[test]
     fn derived_rust_matrix_tracks_the_ci_rust_gate() {
         assert_eq!(
             workflow_cargo_tests("test.yml", "test"),
             vec![
-                CI_RUST_TEST_GATE.to_string(),
+                "cargo nextest run --workspace --all-features --test-threads=1".to_string(),
+                "cargo test --workspace --all-features --doc".to_string(),
                 // The xvfb `--ignored` real-binary family stays CI-owned:
                 // it needs a display server, so it is deliberately outside
                 // the locally derived matrix.
                 "dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"
                     .to_string(),
             ],
-            "CI's Rust gate changed — update verify.plan derivation with it (#3640)"
+            "CI's Rust test coverage changed — reconcile its explicit plan and the default (#3640, #3845)"
         );
         assert_eq!(
             package_test_command_for("gwt-core", VerificationHost::Other),

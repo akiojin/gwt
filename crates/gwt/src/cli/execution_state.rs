@@ -17565,7 +17565,9 @@ mod tests {
             &identity,
             77,
             child_started_at,
-            std::process::id(),
+            // nextest makes this test a process-group leader: an old start time
+            // alone cannot make its still-live process group a dead child.
+            i32::MAX as u32,
             1,
         )
         .save(&stale_runtime_path)
@@ -19528,7 +19530,9 @@ mod tests {
             &identity,
             57,
             live_started_at,
-            std::process::id(),
+            // Keep the Host live, but use a dead child group even when nextest
+            // runs this test as a process-group leader.
+            i32::MAX as u32,
             1,
         )
         .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
