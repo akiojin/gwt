@@ -26,6 +26,8 @@ function fixture({ routeProjectKey = null } = {}) {
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
     socketReceiveDispatcher: null, recoveryCenterController: null,
+    closeResetCount: 0,
+    closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
     opened, renderRouteNotFound() { context.notFoundRendered = true; },
@@ -44,7 +46,7 @@ function fixture({ routeProjectKey = null } = {}) {
   for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult"]) {
     vm.runInContext(functionSource(name), context);
   }
-  for (const name of ["mergeProjectCatalog", "receiveHubState", "selectClientProject", "showProjectRouteNotFound"]) {
+  for (const name of ["mergeProjectCatalog", "receiveHubState", "showProjectRouteNotFound"]) {
     if (source.includes(`function ${name}(`)) vm.runInContext(functionSource(name), context);
   }
   // Allow the pre-change implementation to reach behavioral assertions.
@@ -96,33 +98,7 @@ test("Hub socket refuses pane input before project scope is known", () => {
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "A", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "B", kind: "git" };
 
-test("Hub catalog remains unselected until an explicit local project selection", () => {
-  const { context, sockets } = fixture();
-  context.connectSocket();
-  context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [] });
-  assert.equal(sockets.length, 1);
-  assert.equal(context.activeProjectTab(), null);
-  assert.equal(context.send({ kind: "select_project_tab", tab_id: "tab-b" }), "sent");
-  assert.equal(sockets.length, 2);
-  assert.equal(new URL(sockets[1].url).searchParams.get("repo_hash"), projectB.project_key);
-  sockets[1].open();
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
-  context.send({ kind: "select_project_tab", tab_id: "tab-b" });
-  assert.equal(sockets.length, 2);
-});
 
-test("Project-only snapshots preserve the Hub catalog and reconnect selection", () => {
-  const { context, sockets } = fixture();
-  context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [{ path: "/recent" }] });
-  context.send({ kind: "select_project_tab", tab_id: "tab-b" });
-  context.renderAppState({ app_version: "1", tabs: [{ ...projectB, workspace: { windows: [{ id: "pane-b" }] } }], active_tab_id: "tab-b", recent_projects: [] });
-  assert.equal(context.appState.tabs.length, 2);
-  assert.equal(context.activeProjectTab().workspace.windows[0].id, "pane-b");
-  assert.equal(context.appState.recent_projects[0].path, "/recent");
-  sockets.at(-1).close();
-  context.connectSocket();
-  assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectB.project_key);
-});
 
 
 test("retained Hub processes catalog and navigation without duplicating global events", () => {
@@ -134,8 +110,8 @@ test("retained Hub processes catalog and navigation without duplicating global e
   sockets[0].handlers.message({ data: JSON.stringify({ kind: "update_state" }) });
   sockets[1].handlers.message({ data: JSON.stringify({ kind: "update_state" }) });
   assert.deepEqual(context.received.map((event) => event.kind), ["hub_state", "update_state"]);
-  context.send({ kind: "close_project_tab", tab_id: projectB.id });
-  assert.equal(sockets[0].sent.at(-1).tab_id, projectB.id);
+  context.send({ kind: "reopen_recent_project", path: "/project-b" });
+  assert.equal(sockets[0].sent.at(-1).path, "/project-b");
   assert.equal(sockets[1].sent.length, 1);
   select(projectB.project_key);
   assert.equal(sockets[0].readyState, 1);
@@ -177,24 +153,13 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   context.connectSocket();
   sockets[1].open();
   sockets[1].close();
+  assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.connectSocket();
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
 });
 
-test("selecting another Project opens it in a new tab and keeps this tab's URL scope", () => {
-  const { context, sockets, opened } = fixture({ routeProjectKey: projectA.project_key });
-  context.connectSocket();
-  context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [] });
-  const socketCount = sockets.length;
-  assert.equal(context.send({ kind: "select_project_tab", tab_id: projectB.id }), "sent");
-  assert.deepEqual(opened, [["/p/fedcba9876543210", "_blank", "noopener"]]);
-  assert.equal(context.activeProjectTab().id, projectA.id);
-  assert.equal(sockets.length, socketCount, "no rebind to the other Project");
-  context.send({ kind: "select_project_tab", tab_id: projectA.id });
-  assert.equal(opened.length, 1, "selecting this tab's own Project is a no-op");
-});
 
 test("project not found stops every reconnect for the route", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });

@@ -164,11 +164,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ReopenRecentProject { path } => {
             FrontendUserActionLog::new("reopen_recent_project", "project").target(path)
         }
-        FrontendEvent::SelectProjectTab { tab_id } => {
-            FrontendUserActionLog::new("select_project_tab", "project").target(tab_id)
+        FrontendEvent::PreviewCloseProject { project_key } => {
+            FrontendUserActionLog::new("preview_close_project", "project").target(project_key)
         }
-        FrontendEvent::CloseProjectTab { tab_id } => {
-            FrontendUserActionLog::new("close_project_tab", "project").target(tab_id)
+        FrontendEvent::ConfirmCloseProject { token } => {
+            FrontendUserActionLog::new("confirm_close_project", "project")
+                .target(&token.project_key)
+        }
+        FrontendEvent::CancelCloseProject { token } => {
+            FrontendUserActionLog::new("cancel_close_project", "project").target(&token.project_key)
         }
         FrontendEvent::CreateWindow { preset, .. } => {
             FrontendUserActionLog::new("create_window", "window").target(format!("{preset:?}"))

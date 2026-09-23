@@ -395,11 +395,14 @@ pub enum FrontendEvent {
     ReopenRecentProject {
         path: String,
     },
-    SelectProjectTab {
-        tab_id: String,
+    PreviewCloseProject {
+        project_key: String,
     },
-    CloseProjectTab {
-        tab_id: String,
+    ConfirmCloseProject {
+        token: CloseProjectToken,
+    },
+    CancelCloseProject {
+        token: CloseProjectToken,
     },
     CreateWindow {
         preset: WindowPreset,
@@ -1286,6 +1289,14 @@ pub struct ProjectTabView {
     pub running_agents: Vec<RunningAgentSummary>,
 }
 
+/// Client-bound, single-use authority for one incarnation of an open Project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseProjectToken {
+    pub project_key: String,
+    pub generation: u64,
+    pub nonce: String,
+}
+
 // SPEC-2013 FR-011: project tab close 確認 modal が表示する running agent の
 // 最小情報。`display_name` は `dynamic_title` → `purpose_title` → `title` の
 // 優先順で、`branch` は worktree から導出する。frontend はこのリストを
@@ -1832,6 +1843,18 @@ pub enum UpdateAutoApplyPhase {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
+    CloseProjectPreview {
+        token: CloseProjectToken,
+        title: String,
+        running_agents: Vec<RunningAgentSummary>,
+    },
+    CloseProjectError {
+        project_key: String,
+        message: String,
+    },
+    ProjectClosed {
+        project_key: String,
+    },
     HubState {
         hub: HubStateView,
     },
@@ -2672,6 +2695,21 @@ impl BackendEventPolicy {
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     BackendEventPolicy::new(
+        "close_project_preview",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "close_project_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "project_closed",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "hub_state",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3197,6 +3235,9 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
+            BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
+            BackendEvent::CloseProjectError { .. } => "close_project_error",
+            BackendEvent::ProjectClosed { .. } => "project_closed",
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
@@ -3379,6 +3420,40 @@ mod tests {
         ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
         RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn close_project_protocol_rejects_legacy_tab_operations_and_preserves_delivery() {
+        for kind in ["select_project_tab", "close_project_tab"] {
+            assert!(
+                serde_json::from_value::<super::FrontendEvent>(serde_json::json!({
+                    "kind": kind, "tab_id": "a"
+                }))
+                .is_err()
+            );
+        }
+        let token = super::CloseProjectToken {
+            project_key: "a".into(),
+            generation: 7,
+            nonce: "opaque".into(),
+        };
+        for event in [
+            super::BackendEvent::CloseProjectPreview {
+                token,
+                title: "A".into(),
+                running_agents: Vec::new(),
+            },
+            super::BackendEvent::CloseProjectError {
+                project_key: "a".into(),
+                message: "expired".into(),
+            },
+            super::BackendEvent::ProjectClosed {
+                project_key: "a".into(),
+            },
+        ] {
+            assert_eq!(event.delivery_policy().kind, event.event_kind());
+            assert!(!event.delivery_policy().coalesces_on_frontend());
+        }
+    }
 
     #[test]
     fn issue_monitor_control_errors_never_fall_back_to_global_delivery() {

@@ -283,7 +283,7 @@ fn board_projection_watch_key(project_root: &Path) -> PathBuf {
 }
 
 fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
-    matches!(event, FrontendEvent::CloseProjectTab { .. })
+    matches!(event, FrontendEvent::ConfirmCloseProject { .. })
 }
 
 /// Phase 0 perf instrumentation (measure-first; see plan
@@ -1498,8 +1498,9 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::GithubRepositorySearch { .. }
             | FrontendEvent::CloneProjectStart { .. }
             | FrontendEvent::ReopenRecentProject { .. }
-            | FrontendEvent::CloseProjectTab { .. }
-            | FrontendEvent::SelectProjectTab { .. }
+            | FrontendEvent::PreviewCloseProject { .. }
+            | FrontendEvent::ConfirmCloseProject { .. }
+            | FrontendEvent::CancelCloseProject { .. }
             | FrontendEvent::SaveUiTrace { .. }
             | FrontendEvent::GetSystemSettings
             | FrontendEvent::UpdateSystemSettings { .. }
@@ -2838,8 +2839,12 @@ mod tests {
     #[test]
     fn board_projection_watcher_sync_only_for_project_tab_changes() {
         assert!(super::frontend_event_may_change_project_tabs(
-            &gwt::FrontendEvent::CloseProjectTab {
-                tab_id: "tab-1".to_string()
+            &gwt::FrontendEvent::ConfirmCloseProject {
+                token: gwt::protocol::CloseProjectToken {
+                    project_key: "project".into(),
+                    generation: 1,
+                    nonce: "nonce".into(),
+                }
             }
         ));
 
@@ -4473,8 +4478,8 @@ mod tests {
         assert!(close_events
             .iter()
             .any(|event| matches!((&event.target, &event.event),
-            (super::DispatchTarget::Project(key), BackendEvent::WindowCanvasState { workspace })
-            if key == &b.project_key && workspace.tabs.is_empty())));
+            (super::DispatchTarget::Project(key), BackendEvent::ProjectClosed { project_key })
+            if key == &b.project_key && project_key == b.project_key.as_str())));
         assert!(runtime
             .window_lookup
             .keys()
@@ -5642,24 +5647,6 @@ mod tests {
             .tabs
             .iter()
             .any(|tab| crate::same_worktree_path(&tab.project_root, &scratch)));
-        assert!(!runtime
-            .handle_frontend_event_for_project(
-                &context,
-                "client-1".to_string(),
-                gwt::FrontendEvent::SelectProjectTab {
-                    tab_id: "tab-1".to_string(),
-                },
-            )
-            .is_empty());
-        assert!(runtime
-            .handle_frontend_event_for_project(
-                &context,
-                "client-1".to_string(),
-                gwt::FrontendEvent::CloseProjectTab {
-                    tab_id: "missing".to_string(),
-                },
-            )
-            .is_empty());
 
         assert_eq!(
             runtime
@@ -5914,7 +5901,7 @@ mod tests {
         assert_eq!(wizard_events.len(), 1);
         assert!(
             !runtime
-                .project_state(&runtime.test_context())
+                .project_state(&context)
                 .expect("test project state")
                 .launch_wizard
                 .as_ref()

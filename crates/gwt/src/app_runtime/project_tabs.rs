@@ -8,8 +8,8 @@
 //!   [`AppRuntime::open_project_path_events`], ...)
 //! - GitHub repository search for the clone dialog
 //!   (`search_github_repositories`, `parse_github_repository_search_results`)
-//! - Project tab selection / close ([`AppRuntime::select_project_tab_events`],
-//!   [`AppRuntime::close_project_tab_events`]) and recent-project bookkeeping
+//! - Explicit Project close ([`AppRuntime::close_project_tab_events`]) and
+//!   recent-project bookkeeping
 //! - SPEC-1934 migration detection broadcasts / replies
 //!   (`recovery_state_label` stays re-exported through `mod.rs` for
 //!   `migration.rs`)
@@ -25,10 +25,12 @@ use std::{
 
 use super::project_route::ProjectOpenControlFailure;
 use super::startup::prepare_open_project_window_restores;
+#[cfg(test)]
+use super::PreparedProjectSwitch;
 use super::{
     combined_window_id, load_restored_workspace_state, normalize_recent_project_path,
-    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    PreparedMigrationSnapshot, PreparedProjectOpen, PreparedProjectSwitch, ProjectContext,
+    resolve_project_target, same_worktree_path, AppRuntime, BackendEvent, FrontendEvent,
+    OutboundEvent, PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext,
     ProjectIncarnation, ProjectNavigationPayload, ProjectNavigationPrepared,
     ProjectNavigationRequest, ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime,
     UserEvent, Uuid, WindowCanvasState,
@@ -229,6 +231,7 @@ fn prepare_project_open(
     }))
 }
 
+#[cfg(test)]
 fn prepare_project_switch(
     tab_id: String,
     project_root: PathBuf,
@@ -438,9 +441,9 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let event = match source {
             ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError { message },
-            ProjectNavigationSource::Open | ProjectNavigationSource::Switch { .. } => {
-                BackendEvent::ProjectOpenError { message }
-            }
+            ProjectNavigationSource::Open => BackendEvent::ProjectOpenError { message },
+            #[cfg(test)]
+            ProjectNavigationSource::Switch { .. } => BackendEvent::ProjectOpenError { message },
         };
         vec![OutboundEvent::hub(event)]
     }
@@ -450,10 +453,12 @@ impl AppRuntime {
             return false;
         }
         request.target_incarnation.as_ref().is_none_or(|expected| {
-            let ProjectNavigationSource::Switch { tab_id } = &request.source else {
-                return false;
-            };
-            self.project_tab_incarnations.get(tab_id) == Some(expected)
+            #[cfg(test)]
+            if let ProjectNavigationSource::Switch { tab_id } = &request.source {
+                return self.project_tab_incarnations.get(tab_id) == Some(expected);
+            }
+            let _ = expected;
+            false
         })
     }
 
@@ -494,6 +499,7 @@ impl AppRuntime {
                 self.project_open_error_events(&prepared.request.source, error)
             }
             Ok(ProjectNavigationPayload::Open(open)) => {
+                #[cfg(test)]
                 if matches!(
                     prepared.request.source,
                     ProjectNavigationSource::Switch { .. }
@@ -507,6 +513,7 @@ impl AppRuntime {
                 self.settle_project_open_waiter(prepared.request.id, Ok(project_key));
                 events
             }
+            #[cfg(test)]
             Ok(ProjectNavigationPayload::Switch(switch)) => {
                 let ProjectNavigationSource::Switch { tab_id } = &prepared.request.source else {
                     return Vec::new();
@@ -574,6 +581,23 @@ impl AppRuntime {
         };
 
         self.refresh_project_state(&tab_id);
+        if new_tab {
+            // Persisted windows need addresses before restore or frontend requests.
+            // Register only this Project: rebuilding the global lookup would
+            // invalidate unrelated Projects' window lifecycle generations.
+            let window_ids = self
+                .tab(&tab_id)
+                .expect("opened project tab")
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(|window| window.id.clone())
+                .collect::<Vec<_>>();
+            for window_id in window_ids {
+                self.register_window(&tab_id, &window_id);
+            }
+        }
         let context = self
             .project_context(&tab_id)
             .expect("opened project context");
@@ -785,6 +809,7 @@ impl AppRuntime {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         // Issue #4145 AC-1: the whole user-visible switch runs synchronously on
         // the GUI event loop here, so this guard is the switch route.
@@ -835,6 +860,77 @@ impl AppRuntime {
         events
     }
 
+    /// Route explicit close requests before normal Project dispatch so stale
+    /// connections receive a deterministic client-only error, even after close.
+    pub(super) fn close_project_request_events(
+        &mut self,
+        client_id: &str,
+        event: &FrontendEvent,
+        scope: &super::ClientScope,
+    ) -> Option<Vec<OutboundEvent>> {
+        let (project_key, token) = match event {
+            FrontendEvent::PreviewCloseProject { project_key } => (project_key, None),
+            FrontendEvent::ConfirmCloseProject { token }
+            | FrontendEvent::CancelCloseProject { token } => (&token.project_key, Some(token)),
+            _ => return None,
+        };
+        let error = || {
+            let event = BackendEvent::CloseProjectError {
+                project_key: project_key.clone(),
+                message: "Close request expired or unauthorized. Try Close Project again.".into(),
+            };
+            Some(vec![OutboundEvent::reply(client_id.to_string(), event)])
+        };
+        if matches!(scope, super::ClientScope::Project(key) if key.as_str() != project_key) {
+            return error();
+        }
+        let Some(context) = self
+            .project_contexts()
+            .into_iter()
+            .find(|context| context.project_key.as_str() == project_key)
+        else {
+            return error();
+        };
+        if let Some(token) = token {
+            let Some(state) = self.project_state_mut(&context) else {
+                return error();
+            };
+            if token.generation != context.generation
+                || state.close_project_nonces.get(client_id) != Some(&token.nonce)
+            {
+                return error();
+            }
+            state.close_project_nonces.remove(client_id);
+            return Some(
+                if matches!(event, FrontendEvent::ConfirmCloseProject { .. }) {
+                    self.close_project_tab_events(&context.tab_id)
+                } else {
+                    Vec::new()
+                },
+            );
+        }
+        let tab = self.tabs.iter().find(|tab| tab.id == context.tab_id)?;
+        let title = tab.title.clone();
+        let running_agents =
+            crate::runtime_support::collect_running_agents(&tab.workspace.persisted().windows);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        self.project_state_mut(&context)?
+            .close_project_nonces
+            .insert(client_id.to_string(), nonce.clone());
+        Some(vec![OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::CloseProjectPreview {
+                token: gwt::protocol::CloseProjectToken {
+                    project_key: project_key.clone(),
+                    generation: context.generation,
+                    nonce,
+                },
+                title,
+                running_agents,
+            },
+        )])
+    }
+
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context(tab_id) else {
             return Vec::new();
@@ -883,13 +979,8 @@ impl AppRuntime {
         vec![
             OutboundEvent::project(
                 context.project_key.clone(),
-                BackendEvent::WindowCanvasState {
-                    workspace: gwt::AppStateView {
-                        app_version: crate::runtime_support::current_app_version().to_string(),
-                        tabs: Vec::new(),
-                        active_tab_id: None,
-                        recent_projects: Vec::new(),
-                    },
+                BackendEvent::ProjectClosed {
+                    project_key: context.project_key.to_string(),
                 },
             ),
             self.hub_state_broadcast(),
