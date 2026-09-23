@@ -1556,8 +1556,10 @@ impl AppRuntime {
                 crate::app_runtime::pm::PmEnsureTrigger::Automatic,
             ));
         }
-        for window_id in self.pending_pm_launches.keys() {
-            gwt::perf::startup::track_new_terminal(window_id);
+        for state in self.project_states.values() {
+            for window_id in state.pending_pm_launches.keys() {
+                gwt::perf::startup::track_new_terminal(window_id);
+            }
         }
         events
     }

@@ -2132,7 +2132,7 @@ mod tests {
         let blocker = WorkEventSettlementBlocker::PathDirty {
             states: vec![WorkEventPathState::Untracked],
         };
-        let refusal = work_event_settlement_blocker_description_with_gate(&blocker, true);
+        let refusal = work_event_settlement_blocker_description_with_gate(&blocker, true, None);
 
         // The refusal still demands the commit, but no longer demands it
         // silently behind a gate that forbids it.
@@ -2188,7 +2188,7 @@ mod tests {
         }
 
         // With the gate open the refusal stays exactly as it was.
-        let ungated = work_event_settlement_blocker_description_with_gate(&blocker, false);
+        let ungated = work_event_settlement_blocker_description_with_gate(&blocker, false, None);
         assert!(!ungated.contains("identity gate"), "{ungated}");
         assert!(refusal.starts_with(&ungated), "{refusal}\n---\n{ungated}");
     }

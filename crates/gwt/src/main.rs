@@ -3825,6 +3825,8 @@ mod tests {
                 let commit = runtime.handle_active_work_projection_prepared(*completion);
                 if commit.prepared_dispatch.is_some() {
                     return runtime
+                        .project_state_for_tab(&tab_id)
+                        .unwrap()
                         .active_work_projection_cache
                         .borrow()
                         .get(&tab_id)
@@ -3888,7 +3890,6 @@ mod tests {
             sessions_dir,
             launch_wizard_cache,
 
-            pending_launch_wizard_materializations: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
@@ -3897,7 +3898,6 @@ mod tests {
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
             issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
-            issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::disabled(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
@@ -3906,15 +3906,9 @@ mod tests {
 
             inflight_launches: HashMap::new(),
             project_open_started: None,
-            pending_pm_launches: HashMap::new(),
-            pending_pm_closes: HashMap::new(),
-            pm_sessions: HashMap::new(),
-            pm_wake_seen: HashMap::new(),
-            pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
             startup_worktree_inventories: HashMap::new(),
-            pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_restore_log: None,
             pending_restore_summaries: Vec::new(),
@@ -3927,7 +3921,6 @@ mod tests {
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             terminal_close_grace: std::time::Duration::from_secs(60),
-            work_merged_branches: HashMap::new(),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
@@ -3938,11 +3931,6 @@ mod tests {
             session_ledger_cache: Arc::new(Mutex::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             )),
-            work_items_cache: Arc::new(Mutex::new(
-                gwt_core::workspace_projection::WorkItemsCache::new(),
-            )),
-            active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
-            active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
             active_work_projection_refresh: std::cell::RefCell::new(
                 super::app_runtime::ActiveWorkProjectionRefreshBroker::default(),
             ),
@@ -3954,6 +3942,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: std::collections::HashMap::new(),
             approval_settle_epoch: 0,
@@ -3964,6 +3953,7 @@ mod tests {
             released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
+            last_issue_monitor_heartbeat: std::collections::HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
