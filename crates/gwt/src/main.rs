@@ -3405,8 +3405,11 @@ mod tests {
         // URL (the browser URL); the previous `webview_url` mirror was
         // removed alongside the wry WebView path.
         assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
+        // Issue #4538: the single entrypoint is the route bootstrap, which
+        // loads /app.js for Project routes.
         assert!(
-            html.contains("<script type=\"module\" src=\"/app.js\"></script>"),
+            html.contains("<script type=\"module\" src=\"/frontend-bootstrap.js\"></script>")
+                && include_str!("../web/frontend-bootstrap.js").contains("\"/app.js\""),
             "expected browser and native front door modes to point at the same embedded frontend bundle entrypoint",
         );
         assert!(
