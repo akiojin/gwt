@@ -4195,8 +4195,12 @@ fn wait_for_test_pty_stop_settlement(
 }
 
 fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
+    insert_test_pane_runtime_with_pane(runtime, window_id, long_running_test_pane(window_id));
+}
+
+fn insert_test_pane_runtime_with_pane(runtime: &mut AppRuntime, window_id: &str, pane: Pane) {
     let incarnation = super::next_window_runtime_incarnation();
-    let pane = Arc::new(Mutex::new(long_running_test_pane(window_id)));
+    let pane = Arc::new(Mutex::new(pane));
     let child_pid = pane
         .lock()
         .expect("test pane")
@@ -4784,15 +4788,27 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
         .collect();
     assert_eq!(window_ids.len(), 4, "AC-1 requires four live panes");
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let mut children = Vec::new();
+    let mut worker_releases = Vec::new();
+    let (worker_done, workers_done) = mpsc::channel();
     for window_id in &window_ids {
-        let pane = Arc::new(Mutex::new(long_running_test_pane(window_id)));
+        let pane = long_running_test_pane(window_id);
+        children.push(TestPaneGuard::new(&pane));
+        let pane = Arc::new(Mutex::new(pane));
         let mut window_runtime = WindowRuntime::new(super::next_window_runtime_incarnation(), pane);
-        window_runtime.output_thread = Some(thread::spawn(|| loop {
-            thread::park();
-        }));
-        window_runtime.status_thread = Some(thread::spawn(|| loop {
-            thread::park();
-        }));
+        for worker in [
+            &mut window_runtime.output_thread,
+            &mut window_runtime.status_thread,
+        ] {
+            let (release, released) = mpsc::channel::<()>();
+            worker_releases.push(release);
+            let done = worker_done.clone();
+            *worker = Some(thread::spawn(move || {
+                // Stay blocked during close, but release on both success and panic.
+                let _ = released.recv();
+                let _ = done.send(());
+            }));
+        }
         runtime.runtimes.insert(window_id.clone(), window_runtime);
     }
     let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
@@ -4837,6 +4853,13 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
         elapsed < Duration::from_millis(400),
         "four live-PTY closes plus pane.list blocked the agent route for {elapsed:?}"
     );
+    drop(worker_releases);
+    for _ in 0..window_ids.len() * 2 {
+        workers_done
+            .recv_timeout(Duration::from_secs(20))
+            .expect("close fixture worker exited");
+    }
+    drop(children);
 }
 
 /// Issue #3783 AC-2/AC-3/AC-4: accepting a pane close is an in-memory
@@ -71359,8 +71382,114 @@ fn seed_quiet_standing_supervision(repo: &Path) {
     .expect("seed quiet loop");
 }
 
-fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) {
-    insert_test_pane_runtime(runtime, window_id);
+/// Own the fixture's child independently of runtime/finalizer Arc clones.
+/// Drain output as well as input: an unread macOS PTY can stall child exit.
+struct TestPaneGuard {
+    pty: Arc<gwt_terminal::PtyHandle>,
+    reader: Option<thread::JoinHandle<()>>,
+}
+
+impl TestPaneGuard {
+    fn new(pane: &Pane) -> Self {
+        let pty = pane.shared_pty();
+        let mut reader = pane.reader().expect("test PTY reader");
+        let reader = thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while std::io::Read::read(&mut reader, &mut buffer).is_ok_and(|n| n > 0) {}
+        });
+        #[cfg(windows)]
+        pty.write_input(b"\x1b[1;1R").expect("ConPTY cursor reply");
+        Self {
+            pty,
+            reader: Some(reader),
+        }
+    }
+}
+
+impl Drop for TestPaneGuard {
+    fn drop(&mut self) {
+        let _ = self.pty.kill();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if self.pty.try_wait().is_ok_and(|status| status.is_some()) {
+                // ConPTY holds its output pipe open until the master is closed.
+                self.pty.release_descriptors();
+                if self
+                    .reader
+                    .as_ref()
+                    .is_none_or(|reader| reader.is_finished())
+                {
+                    if let Some(reader) = self.reader.take() {
+                        reader.join().expect("test PTY reader");
+                    }
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        if !thread::panicking() {
+            panic!(
+                "test PTY {:?} was not reaped and drained",
+                self.pty.process_id()
+            );
+        }
+    }
+}
+
+fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> TestPaneGuard {
+    let (command, args) = if cfg!(windows) {
+        (
+            "powershell",
+            vec![
+                "-NoProfile",
+                "-Command",
+                "while ($null -ne [Console]::ReadLine()) {}",
+            ],
+        )
+    } else {
+        // Raw input avoids the canonical queue boundary even before a submit.
+        (
+            "/bin/sh",
+            vec!["-c", "stty -echo -icanon; exec cat >/dev/null"],
+        )
+    };
+    let pane = Pane::new(
+        window_id.to_string(),
+        command.to_string(),
+        args.into_iter().map(str::to_string).collect(),
+        80,
+        24,
+        HashMap::new(),
+        test_pane_cwd(),
+    )
+    .expect("draining PM test pane");
+    let guard = TestPaneGuard::new(&pane);
+    insert_test_pane_runtime_with_pane(runtime, window_id, pane);
+    guard
+}
+
+#[test]
+fn live_pm_pane_fixture_drains_input_and_reaps_its_child_at_scope_exit() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (_repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+    let pty = {
+        let _fixture = attach_live_pm_pane(&mut runtime, &window_id);
+        let pty = runtime.runtimes[&window_id].pty.clone();
+        // Cross the macOS canonical queue limit without submitting a line.
+        pty.write_input(&[b'x'; 4096]).expect("drain unsent input");
+        pty
+    };
+    let reaped = pty.try_wait().expect("probe fixture child").is_some();
+    // Keep a failing regression run from leaving the old fixture's child alive.
+    pty.kill().expect("cleanup fixture child");
+    assert!(
+        reaped,
+        "the fixture must reap its child before returning to the suite"
+    );
 }
 
 fn assert_pm_pane_is_not_in_protected_inject(runtime: &AppRuntime, window_id: &str) {
@@ -71390,7 +71519,7 @@ fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     seed_quiet_standing_supervision(&repo);
-    attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
 
     let compose = runtime.terminal_input_events(&pm_window_id, "ちゃんとbunx/npxで実行されてい");
     assert!(compose.is_empty());
@@ -71433,7 +71562,7 @@ fn issue_monitor_activity_wake_does_not_inject_while_pm_pane_has_unsent_input() 
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     seed_quiet_standing_supervision(&repo);
-    attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
 
     let baseline = [pm_wake_inbox_item(41, gwt::MonitorInboxState::Queued)];
     assert!(runtime.pm_wake_events(&repo, &baseline).is_empty());
@@ -71458,7 +71587,7 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     seed_quiet_standing_supervision(&repo);
-    attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
 
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
     let pty = runtime
@@ -71491,7 +71620,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     seed_quiet_standing_supervision(&repo);
-    attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
 
     let _ = runtime.terminal_input_events(&pm_window_id, "実行されてい");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
@@ -71574,7 +71703,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     seed_quiet_standing_supervision(&repo);
-    attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
 
     let _ = runtime.terminal_input_events(&pm_window_id, "途中の入力");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
@@ -77874,7 +78003,7 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
     let mut subject = gwt_agent::Session::new(&repo, "work/subject", gwt_agent::AgentId::Codex);
     subject.status = gwt_agent::AgentStatus::Running;
     seed_pm_session_escalation(&repo, &subject, "PENDING-SUBJECT");

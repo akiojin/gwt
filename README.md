@@ -1019,8 +1019,12 @@ cargo bundle -p gwt --format osx
 ### Test
 
 ```bash
-cargo test -p gwt-core -p gwt --all-features
+cargo install cargo-nextest --locked --version 0.9.146
+cargo nextest run -p gwt-core -p gwt --all-features --test-threads=1
+cargo test -p gwt-core -p gwt --all-features --doc
 ```
+
+Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
 ### Serializing heavy verification
 
