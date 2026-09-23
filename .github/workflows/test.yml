@@ -94,8 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     # Issue #4055 / #4191: the step budgets below are the operative limits;
     # this cap only bounds the job as a whole and must cover their sum
-    # (5+18+25+10+10+10+10) plus checkout / toolchain / cache setup.
-    timeout-minutes: 95
+    # including nextest installation, doctests and the timeout regression.
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v7
       # Issue #4191 AC-2: restoring the .deb archive before the install means a
@@ -137,6 +137,11 @@ jobs:
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps xvfb dbus
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+        timeout-minutes: 5
       # Issue #4133: naming the scope is what lets cache-warm.yml populate it
       # from develop/main. Without `shared-key` the key embeds GITHUB_JOB, so
       # only a job with this exact id could ever write a cache this job reads —
@@ -153,7 +158,7 @@ jobs:
       # turn a green suite into a timeout. Pinned by
       # crates/gwt/tests/ci_test_budget_contract_test.rs.
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo nextest run --workspace --all-features --test-threads=1
         timeout-minutes: 25
       # SPEC #4551 T-050 / AC-5: mechanism (C) -- a child the suite never
       # reaped. It has no textual shape to scan for and it does not fail the
@@ -162,7 +167,15 @@ jobs:
       # here, immediately after the suite, while the orphan is still alive.
       # Pinned by crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
       - name: Check for processes the suite failed to reap
+        if: ${{ !cancelled() }}
         run: scripts/ci-check-orphan-processes.sh
+        timeout-minutes: 5
+      # nextest isolates normal tests; doctests retain rustdoc's own harness.
+      - name: Run doctests
+        run: cargo test --workspace --all-features --doc
+        timeout-minutes: 5
+      - name: Verify per-test timeout and suite continuation
+        run: node scripts/test-nextest-timeout.mjs
         timeout-minutes: 5
       # Issue #4317: the workspace test step enables the self dev-dependency's
       # `test-gh-guard` feature, so the target/debug/gwtd it leaves behind

@@ -1,0 +1,4 @@
+# Issue #3845: a blocked test must fail without preventing later tests from running.
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
