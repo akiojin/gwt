@@ -322,12 +322,12 @@ test.describe.serial("Issue #3777 prompt/runtime responsiveness (live backend)",
             `.workspace-window[data-id="${issueWindowId}"] .knowledge-row[data-issue-number="${fixture.issueNumber}"] .knowledge-row-select`,
           ).focus({ timeout: INTERACTION_BUDGET_MS }),
       );
+      let terminalSentinel = "";
       const terminalLatencyMs = await runLoadedInteraction(
-        () => measureTerminalRoundtrip(page, shellWindowId!),
-        () =>
-          page.locator(
-            `.workspace-window[data-id="${shellWindowId}"] .xterm-helper-textarea`,
-          ).focus({ timeout: INTERACTION_BUDGET_MS }),
+        () => measureTerminalRoundtrip(page, shellWindowId!, terminalSentinel),
+        async () => {
+          terminalSentinel = await prepareTerminalCommand(page, shellWindowId!);
+        },
       );
 
       const hookProfiles = (
@@ -924,43 +924,81 @@ async function selectIssueAndWait(
   ).toContainText(`#${issueNumber}`);
 }
 
-async function measureTerminalRoundtrip(page: Page, windowId: string): Promise<number> {
+async function prepareTerminalCommand(page: Page, windowId: string): Promise<string> {
   const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  const sentinel = `__GWT_RESPONSIVE_${suffix}__`;
   const terminal = page.locator(
     `.workspace-window[data-id="${windowId}"] .xterm-helper-textarea`,
   );
-  const cursor = await liveMessageCursor(page);
-  const start = await page.evaluate(() => performance.now());
   await terminal.focus({ timeout: INTERACTION_BUDGET_MS });
+  // Preparation runs before the real hook begins and Work decode is released.
+  // Keep the sentinel split so echoed command text cannot satisfy the reply.
   await page.keyboard.type(`printf '%s%s\\n' '__GWT_RESPONSIVE_' '${suffix}__'`);
-  await page.keyboard.press("Enter");
-  await page.waitForFunction(
-    ({ cursor, sentinel, windowId }) => {
-      const messages = (window as any).__gwtPlaywrightMessages;
-      if (!Array.isArray(messages)) return false;
-      const encoded = messages
-        .filter(
-          (entry: any) =>
-            entry?.sequence > cursor &&
-            entry?.payload?.kind === "terminal_output" &&
-            entry.payload.id === windowId,
-        )
-        .map((entry: any) => String(entry.payload.data_base64 ?? ""));
-      let output = "";
-      for (const chunk of encoded) {
-        try {
-          output += atob(chunk);
-        } catch {
-          return false;
-        }
-      }
-      return output.includes(sentinel);
-    },
-    { cursor, sentinel, windowId },
-    { timeout: INTERACTION_BUDGET_MS },
+  return `__GWT_RESPONSIVE_${suffix}__`;
+}
+
+async function measureTerminalRoundtrip(
+  page: Page,
+  windowId: string,
+  sentinel: string,
+): Promise<number> {
+  const terminal = page.locator(
+    `.workspace-window[data-id="${windowId}"] .xterm-helper-textarea`,
   );
-  return page.evaluate((startedAt) => performance.now() - startedAt, start);
+  await terminal.focus({ timeout: INTERACTION_BUDGET_MS });
+  // Both timestamps are browser-native: trusted Enter keydown -> this PTY's
+  // sentinel output. This includes xterm input handling, WS dispatch, real
+  // shell execution and reply handling, but excludes command preparation,
+  // focus, trace/CDP action overhead and the RPC that retrieves the result.
+  // Existing long-task/RAF gates still cover event-delivery/UI stalls.
+  await page.evaluate(({ windowId, sentinel, budget }) => {
+    const textarea = Array.from(document.querySelectorAll<HTMLElement>(".workspace-window"))
+      .find((node) => node.dataset.id === windowId)?.querySelector(".xterm-helper-textarea");
+    const projectKey = location.pathname.split("/").at(-1);
+    const socket = ((window as any).__gwtPlaywrightSockets as WebSocket[]).find((candidate) =>
+      candidate.readyState === WebSocket.OPEN
+      && new URL(candidate.url).searchParams.get("repo_hash") === projectKey);
+    if (!textarea || !socket) throw new Error("terminal RTT requires its live Project socket and textarea");
+    let startedAt: number | null = null;
+    let output = "";
+    let resolve!: (result: { latencyMs?: number; error?: string }) => void;
+    const promise = new Promise<{ latencyMs?: number; error?: string }>((done) => { resolve = done; });
+    const finish = (result: { latencyMs?: number; error?: string }) => {
+      clearTimeout(timer);
+      textarea.removeEventListener("keydown", onEnter, true);
+      socket.removeEventListener("message", onOutput);
+      resolve(result);
+    };
+    const onEnter = (event: Event) => {
+      const key = event as KeyboardEvent;
+      if (!key.isTrusted || key.key !== "Enter" || startedAt !== null) return;
+      startedAt = performance.now();
+      clearTimeout(timer);
+      timer = window.setTimeout(() => finish({ error: `terminal RTT exceeded ${budget}ms after trusted Enter` }), budget);
+    };
+    const onOutput = (event: MessageEvent) => {
+      if (startedAt === null) return;
+      const message = JSON.parse(String(event.data));
+      if (message.kind !== "terminal_output" || message.id !== windowId) return;
+      output += atob(message.data_base64);
+      if (output.includes(sentinel)) finish({ latencyMs: performance.now() - startedAt });
+    };
+    // This watchdog is setup-only; the acceptance deadline starts on Enter.
+    let timer = window.setTimeout(() => finish({ error: "trusted terminal Enter was not delivered" }), 5_000);
+    textarea.addEventListener("keydown", onEnter, true);
+    socket.addEventListener("message", onOutput);
+    (window as any).__gwtTerminalRoundtripProbe = { promise, cancel: () => finish({ error: "probe cancelled" }) };
+  }, { windowId, sentinel, budget: INTERACTION_BUDGET_MS });
+  try {
+    await terminal.press("Enter", { timeout: INTERACTION_BUDGET_MS });
+    const result = await page.evaluate(() => (window as any).__gwtTerminalRoundtripProbe.promise);
+    if (result.error) throw new Error(result.error);
+    return result.latencyMs;
+  } finally {
+    await page.evaluate(() => {
+      (window as any).__gwtTerminalRoundtripProbe?.cancel();
+      delete (window as any).__gwtTerminalRoundtripProbe;
+    });
+  }
 }
 
 async function launchHookCapabilityAgent(
