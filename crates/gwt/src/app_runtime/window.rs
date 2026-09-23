@@ -131,15 +131,17 @@ macro_rules! window_scoped_state {
 impl AppRuntime {
     pub(crate) fn create_window_events(
         &mut self,
+        context: &super::ProjectContext,
         preset: WindowPreset,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if preset.is_removed_legacy() {
             return Vec::new();
         }
-        let Some(tab_id) = self.active_tab_id.clone() else {
+        if !self.project_context_is_current(context) {
             return Vec::new();
-        };
+        }
+        let tab_id = context.tab_id.clone();
         if shares_work_surface_singleton(preset) {
             let existing_id = {
                 let Some(tab) = self.tab_mut(&tab_id) else {
@@ -174,7 +176,7 @@ impl AppRuntime {
         self.register_window(&tab_id, &window.id);
         let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
         let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = vec![self.workspace_state_broadcast(context)];
         events.extend(runtime_events);
         events
     }
@@ -197,28 +199,23 @@ impl AppRuntime {
     }
 
     fn activate_tab_for_window_events(&mut self, tab_id: String) -> Vec<OutboundEvent> {
-        let previous_tab_id = self.active_tab_id.clone();
-        let wizard_closed = self.set_active_tab(tab_id);
-        let tab_changed = self.active_tab_id != previous_tab_id;
+        let Some(context) = self.project_context(&tab_id) else {
+            return Vec::new();
+        };
         let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast()];
-        if tab_changed {
-            events.extend(self.active_project_snapshot_broadcasts());
-        }
-        if wizard_closed {
-            events.push(self.launch_wizard_state_broadcast(None));
-        }
-        events
+        vec![self.workspace_state_broadcast(&context)]
     }
 
     pub(crate) fn cycle_focus_events(
         &mut self,
+        context: &super::ProjectContext,
         direction: FocusCycleDirection,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
+        if !self.project_context_is_current(context) {
             return Vec::new();
-        };
+        }
+        let tab_id = context.tab_id.clone();
         let focused = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
@@ -237,31 +234,34 @@ impl AppRuntime {
         // clobbered the accurate cols/rows back to the spawn-time approximation
         // on every window switch, desyncing the child's grid from xterm.
         let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        vec![self.workspace_state_broadcast(context)]
     }
 
     pub(crate) fn update_viewport_events(
         &mut self,
+        context: &super::ProjectContext,
         viewport: CanvasViewport,
     ) -> Vec<OutboundEvent> {
-        let Some(tab) = self.active_tab_mut() else {
+        let Some(tab) = self.tab_mut(&context.tab_id) else {
             return Vec::new();
         };
         if !tab.workspace.update_viewport(viewport) {
             return Vec::new();
         }
         let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        vec![self.workspace_state_broadcast(context)]
     }
 
     pub(crate) fn arrange_windows_events(
         &mut self,
+        context: &super::ProjectContext,
         mode: ArrangeMode,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
+        if !self.project_context_is_current(context) {
             return Vec::new();
-        };
+        }
+        let tab_id = context.tab_id.clone();
         let arranged = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
@@ -278,7 +278,7 @@ impl AppRuntime {
         // the resulting workspace_state render. The backend approximation
         // must not clobber those frontend-fitted cols/rows.
         let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        vec![self.workspace_state_broadcast(context)]
     }
 
     pub(crate) fn dock_window_tab_events(
@@ -505,6 +505,9 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
+        let Some(context) = self.project_context(&address.tab_id) else {
+            return Vec::new();
+        };
         if let Some(base_geometry_revision) = base_geometry_revision {
             let Some(tab) = self.tab(&address.tab_id) else {
                 return Vec::new();
@@ -513,7 +516,7 @@ impl AppRuntime {
                 return Vec::new();
             };
             if window.geometry_revision != base_geometry_revision {
-                return vec![self.workspace_state_broadcast()];
+                return vec![self.workspace_state_broadcast(&context)];
             }
         }
         let updated = {
@@ -531,7 +534,7 @@ impl AppRuntime {
             }
         }
         let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        vec![self.workspace_state_broadcast(&context)]
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
@@ -625,6 +628,25 @@ impl AppRuntime {
         // measures exactly the latency a person sees when a pane disappears.
         // The detached teardown that follows is deliberately outside it.
         let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PaneClose);
+        let Some(context) = self
+            .window_lookup
+            .get(id)
+            .and_then(|address| self.project_context(&address.tab_id))
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .find(|tab| {
+                        id.strip_prefix(&format!("{}::", tab.id))
+                            .is_some_and(|raw_id| tab.workspace.window(raw_id).is_some())
+                    })
+                    .and_then(|tab| self.project_context(&tab.id))
+            })
+        else {
+            return CloseWindowOutcome {
+                closed: false,
+                events: Vec::new(),
+            };
+        };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
         if !close_window_from_workspace(
             &mut self.tabs,
@@ -658,8 +680,8 @@ impl AppRuntime {
         // has captured what it owns.
         self.forget_window_scoped_state(id);
         let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = self.cached_active_work_projection_broadcast_for_active_tab() {
+        let mut events = vec![self.workspace_state_broadcast(&context)];
+        if let Some(event) = self.cached_active_work_projection_broadcast_for_tab(&context.tab_id) {
             events.push(event);
         }
         CloseWindowOutcome {
@@ -733,6 +755,9 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
+        let Some(context) = self.project_context(&address.tab_id) else {
+            return Vec::new();
+        };
         // Tear down the live runtime (kills the PTY + joins reader/status
         // threads + deregisters the writer). This reuses the exact same stop
         // primitive that `close_window_events` uses, so no PTY management is
@@ -748,13 +773,9 @@ impl AppRuntime {
             WindowProcessStatus::Stopped,
         );
         let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast()];
-        events.extend(Self::status_events(
-            id.to_string(),
-            WindowProcessStatus::Stopped,
-            None,
-        ));
-        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+        let mut events = vec![self.workspace_state_broadcast(&context)];
+        events.extend(self.status_events(id.to_string(), WindowProcessStatus::Stopped, None));
+        if let Some(event) = self.active_work_projection_broadcast_for_tab(&context.tab_id) {
             events.push(event);
         }
         events
@@ -766,8 +787,19 @@ impl AppRuntime {
     /// window that currently has a live runtime, so the confirm-on-frontend
     /// "stop all" button resolves to the same kept-but-stopped state as the
     /// single-window kill switch.
-    pub(crate) fn stop_all_windows_events(&mut self) -> Vec<OutboundEvent> {
-        let running_ids: Vec<String> = self.runtimes.keys().cloned().collect();
+    pub(crate) fn stop_all_windows_events(
+        &mut self,
+        context: &super::ProjectContext,
+    ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
+            return Vec::new();
+        }
+        let running_ids: Vec<String> = self
+            .runtimes
+            .keys()
+            .filter(|id| self.project_key_for_window(id) == Some(&context.project_key))
+            .cloned()
+            .collect();
         let mut events = Vec::new();
         for window_id in running_ids {
             events.extend(self.stop_window_events(&window_id));
@@ -788,6 +820,9 @@ impl AppRuntime {
     /// Board resume buttons use) bound to the existing window id.
     pub(crate) fn restart_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let Some(context) = self.project_context(&address.tab_id) else {
             return Vec::new();
         };
         let Some(tab) = self.tab(&address.tab_id) else {
@@ -818,11 +853,26 @@ impl AppRuntime {
         self.window_details.remove(id);
         let events = self.start_window(&address.tab_id, &address.raw_id, preset, geometry);
         let _ = self.persist();
-        let mut all = vec![self.workspace_state_broadcast()];
+        let mut all = vec![self.workspace_state_broadcast(&context)];
         all.extend(events);
         all
     }
 
+    pub(crate) fn list_windows_event_for_project(
+        &self,
+        context: &super::ProjectContext,
+    ) -> BackendEvent {
+        let windows = if self.project_context_is_current(context) {
+            self.tab(&context.tab_id)
+                .map(|tab| self.workspace_view_for_tab(tab).windows)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        BackendEvent::WindowList { windows }
+    }
+
+    #[cfg(test)]
     pub(crate) fn list_windows_event(&self) -> BackendEvent {
         // SPEC-3038 (2026-06-20): the Windows popover lists windows from every
         // project tab so it matches the cross-tab open-window badge. Windows

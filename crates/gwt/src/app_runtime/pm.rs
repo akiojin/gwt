@@ -410,8 +410,8 @@ impl AppRuntime {
         // is also where the settings panel learns about it. Skipped ensures
         // (opt-out, non-Git tab, backoff floor) still report — "not running"
         // is exactly the state the panel has to show.
-        if self.active_tab_id.as_deref() == Some(tab_id) {
-            events.extend(self.pm_status_broadcast_events());
+        if let Some(context) = self.project_context(tab_id) {
+            events.extend(self.pm_status_broadcast_events(&context));
         }
         events
     }
@@ -518,8 +518,8 @@ impl AppRuntime {
     /// A non-Git or missing active tab produces an explicit unavailable
     /// snapshot. Shared Settings windows can outlive a project tab, so silence
     /// would leak the previous project's values into the new scope.
-    pub(crate) fn pm_status_event(&self) -> BackendEvent {
-        let Some(project_root) = self.active_pm_project_root() else {
+    pub(crate) fn pm_status_event(&self, context: &super::ProjectContext) -> BackendEvent {
+        let Some(project_root) = self.pm_project_root(context) else {
             let loop_interval_secs = pm_registry::PM_LOOP_INTERVAL_DEFAULT_SECS;
             return BackendEvent::PmStatus {
                 available: false,
@@ -598,8 +598,14 @@ impl AppRuntime {
     /// The PM settings snapshot as a broadcast, for the call sites that change
     /// PM state. Every PM state transition must pass through here — the panel
     /// has no other source of truth, so a silent transition leaves it stale.
-    pub(crate) fn pm_status_broadcast_events(&self) -> Vec<OutboundEvent> {
-        vec![OutboundEvent::broadcast(self.pm_status_event())]
+    pub(crate) fn pm_status_broadcast_events(
+        &self,
+        context: &super::ProjectContext,
+    ) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::project(
+            context.project_key.clone(),
+            self.pm_status_event(context),
+        )]
     }
 
     /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to
@@ -620,9 +626,11 @@ impl AppRuntime {
             .collect()
     }
 
-    fn active_pm_project_root(&self) -> Option<PathBuf> {
-        let tab_id = self.active_tab_id.clone()?;
-        self.tab(&tab_id)
+    fn pm_project_root(&self, context: &super::ProjectContext) -> Option<PathBuf> {
+        if !self.project_context_is_current(context) {
+            return None;
+        }
+        self.tab(&context.tab_id)
             .filter(|tab| tab.kind == gwt::ProjectKind::Git)
             .map(|tab| tab.project_root.clone())
     }
@@ -632,8 +640,12 @@ impl AppRuntime {
     /// Deliberately does not touch the running pane. The flag decides whether
     /// opening the project starts a PM; treating it as a stop switch would end
     /// a conversation the user only meant to stop auto-starting next time.
-    pub(crate) fn set_pm_auto_start_events(&mut self, enabled: bool) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_pm_project_root() else {
+    pub(crate) fn set_pm_auto_start_events(
+        &mut self,
+        context: &super::ProjectContext,
+        enabled: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
@@ -643,7 +655,7 @@ impl AppRuntime {
             tracing::warn!(%error, "failed to persist the PM auto-start setting");
             return Vec::new();
         }
-        self.pm_status_broadcast_events()
+        self.pm_status_broadcast_events(context)
     }
 
     /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
@@ -654,6 +666,7 @@ impl AppRuntime {
     /// running and reload the preference on their next loop/wake evaluation.
     pub(crate) fn set_pm_loop_interval_events(
         &mut self,
+        context: &super::ProjectContext,
         loop_interval_secs: u64,
     ) -> Vec<OutboundEvent> {
         if loop_interval_secs < pm_registry::PM_LOOP_INTERVAL_MIN_SECS {
@@ -664,7 +677,7 @@ impl AppRuntime {
             );
             return Vec::new();
         }
-        let Some(project_root) = self.active_pm_project_root() else {
+        let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
         let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
@@ -674,7 +687,7 @@ impl AppRuntime {
             tracing::warn!(%error, "failed to persist the PM loop interval");
             return Vec::new();
         }
-        self.pm_status_broadcast_events()
+        self.pm_status_broadcast_events(context)
     }
 
     /// SPEC-3431 FR-026: persist what the next PM start runs as.
@@ -686,11 +699,12 @@ impl AppRuntime {
     /// [`Self::restart_pm_agent_events`].
     pub(crate) fn set_pm_launch_profile_events(
         &mut self,
+        context: &super::ProjectContext,
         agent_id: &str,
         model: Option<String>,
         reasoning: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_pm_project_root() else {
+        let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
         if !pm_registry::pm_agent_is_supported(agent_id) {
@@ -714,7 +728,7 @@ impl AppRuntime {
             tracing::warn!(%error, "failed to persist the PM launch profile");
             return Vec::new();
         }
-        self.pm_status_broadcast_events()
+        self.pm_status_broadcast_events(context)
     }
 
     /// SPEC-3431 FR-026: apply the configured profile by restarting the PM.
@@ -724,10 +738,14 @@ impl AppRuntime {
     /// (T-016). A restart is not a stop — the worktree holds the PM's own
     /// notes — so clearing the registration up front makes that reap a no-op
     /// and leaves the worktree for the successor.
-    pub(crate) fn restart_pm_agent_events(&mut self) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
+    pub(crate) fn restart_pm_agent_events(
+        &mut self,
+        context: &super::ProjectContext,
+    ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(context) {
             return Vec::new();
-        };
+        }
+        let tab_id = context.tab_id.clone();
         let Some(project_root) = self.tab(&tab_id).map(|tab| tab.project_root.clone()) else {
             return Vec::new();
         };
@@ -2103,6 +2121,9 @@ impl AppRuntime {
         &mut self,
         continuation: PmWorktreeContinuation,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context(continuation.tab_id()) else {
+            return Vec::new();
+        };
         let project_root = continuation.project_root().to_path_buf();
         if !self
             .pending_pm_worktree_preparations
@@ -2114,7 +2135,7 @@ impl AppRuntime {
             );
             return Vec::new();
         }
-        let proxy = self.proxy.clone();
+        let proxy = self.proxy.for_project(context);
         let spawned = self.blocking_tasks.try_spawn(move || {
             let result = continuation.prepare();
             proxy.send(UserEvent::PmWorktreePrepared {
@@ -2175,8 +2196,8 @@ impl AppRuntime {
         };
         // FR-026: the preparation is where the PM's live state actually
         // changes now, so it is also where the settings panel learns about it.
-        if self.active_tab_id.as_deref() == Some(tab_id.as_str()) {
-            events.extend(self.pm_status_broadcast_events());
+        if let Some(context) = self.project_context(&tab_id) {
+            events.extend(self.pm_status_broadcast_events(&context));
         }
         events
     }
@@ -2220,19 +2241,25 @@ impl AppRuntime {
         project_root: &Path,
         error: &str,
     ) -> Vec<OutboundEvent> {
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
         tracing::warn!(
             project_root = %project_root.display(),
             error,
             "failed to prepare the PM worktree; PM not started"
         );
-        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-            level: "error".to_string(),
-            message: format!(
-                "PM worktree preparation failed for {}: {error}",
-                project_root.display()
-            ),
-            issue_number: None,
-        })]
+        vec![OutboundEvent::project(
+            context.project_key.clone(),
+            BackendEvent::IssueMonitorToast {
+                level: "error".to_string(),
+                message: format!(
+                    "PM worktree preparation failed for {}: {error}",
+                    project_root.display()
+                ),
+                issue_number: None,
+            },
+        )]
     }
 
     /// SPEC-3431 FR-026: the launch config for a fresh PM spawn.

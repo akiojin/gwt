@@ -148,6 +148,7 @@ pub fn app_state_view_from_parts(
     }
 }
 
+#[cfg(test)]
 pub fn normalize_active_tab_id(
     tabs: &[ProjectTabRuntime],
     active_tab_id: Option<String>,
