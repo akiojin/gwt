@@ -13979,3 +13979,62 @@ fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container
         "two live rows stay ambiguous even when discarded rows are excluded"
     );
 }
+
+/// SPEC #3590 FR-020 / FR-025: a stale Work left on the same branch and
+/// worktree by an earlier Session under another owner spelling must not make
+/// the delivering Session's own PR record ambiguous. Only the Work that this
+/// owner and Session hold is a candidate.
+#[test]
+fn execution_pr_metadata_ignores_a_stale_work_of_another_owner_and_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let works = tmp.path().join("works.json");
+    let events = tmp.path().join("events");
+    let now = Utc::now();
+    let mut projection = WorkItemsProjection::empty(now);
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".into()),
+        worktree_path: Some(tmp.path().to_path_buf()),
+        pr_number: Some(4661),
+        pr_url: Some("https://github.com/example/repo/pull/4661".into()),
+        pr_state: Some("OPEN".into()),
+    };
+    let mut bare = container.clone();
+    bare.pr_number = None;
+    bare.pr_url = None;
+    bare.pr_state = None;
+    for (id, owner, session) in [
+        ("current-work", "SPEC-42", "current-session"),
+        ("stale-work", "Issue #42", "stale-session"),
+    ] {
+        let mut start = WorkEvent::new(WorkEventKind::Start, id, now);
+        start.owner = Some(owner.into());
+        start.agent_session_id = Some(session.into());
+        start.execution_container = Some(bare.clone());
+        projection.apply_event(start);
+    }
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+
+    record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "SPEC-42",
+        "current-session",
+        &container,
+    )
+    .expect("the owned Work is the only candidate");
+
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let containers = |id: &str| {
+        saved
+            .work_items
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap()
+            .execution_containers
+            .clone()
+    };
+    assert_eq!(containers("current-work"), vec![container]);
+    assert_eq!(containers("stale-work"), vec![bare]);
+}

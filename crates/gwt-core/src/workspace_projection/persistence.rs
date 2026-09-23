@@ -4988,6 +4988,19 @@ fn record_workspace_pr_metadata_for_execution_at(
             .enumerate()
             .filter(|(_, item)| !item.discarded)
         {
+            // SPEC #3590 FR-020: a stale Work of another owner or Session on
+            // the same branch and worktree is not a candidate, so it cannot
+            // make the delivering Session's own record ambiguous.
+            if item.owner.as_deref() != Some(owner)
+                || item
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.session_id == session_id)
+                    .count()
+                    != 1
+            {
+                continue;
+            }
             for existing in &item.execution_containers {
                 if canonical_session_bound_branch(existing.branch.as_deref().unwrap_or_default())
                     == canonical_session_bound_branch(
@@ -5006,16 +5019,6 @@ fn record_workspace_pr_metadata_for_execution_at(
             return Err(refusal());
         };
         let item = &projection.work_items[*index];
-        if item.owner.as_deref() != Some(owner)
-            || item
-                .agents
-                .iter()
-                .filter(|agent| agent.session_id == session_id)
-                .count()
-                != 1
-        {
-            return Err(refusal());
-        }
         let mut updated = (*existing).clone();
         updated.pr_number = container.pr_number;
         updated.pr_url = container.pr_url.clone();
