@@ -1,7 +1,7 @@
+import { createCloseProjectController } from "/close-project-confirm-modal.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
-      // project-tabs-renderer / close-project-tab-confirm-modal view imports
       // moved to /project-shell-surface.js with the project shell chrome.
       import {
         initOperatorShell,
@@ -419,7 +419,6 @@
           mutatedBy: Object.freeze([
             "renderAppState",
             "renderWorkspace",
-            "renderProjectTabs",
             "renderProjectPicker",
             "renderProjectOnboarding",
             "renderWindowList",
@@ -502,7 +501,6 @@
         recent_projects: [],
       };
       let hubCatalog = null;
-      let renderedProjectTabsKey = "";
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /workspace-render-sync.js) so a failed sync
       // never leaves a committed key behind.
@@ -513,23 +511,6 @@
       // availability) and maximizedViewportSyncFrame moved to
       // /project-shell-surface.js.
 
-      function projectTabsRenderKey(state) {
-        const tabs = state?.tabs || [];
-        const parts = [];
-        appendRenderKeyPart(parts, "active_tab_id");
-        appendRenderKeyPart(parts, state?.active_tab_id || null);
-        appendRenderKeyPart(parts, "tabs");
-        appendRenderKeyPart(parts, tabs.length);
-        for (const tab of tabs) {
-          appendRenderKeyPart(parts, "id");
-          appendRenderKeyPart(parts, tab?.id || "");
-          appendRenderKeyPart(parts, "title");
-          appendRenderKeyPart(parts, tab?.title || "");
-          appendRenderKeyPart(parts, "project_root");
-          appendRenderKeyPart(parts, tab?.project_root || "");
-        }
-        return parts.join("");
-      }
 
       // SPEC-3064 Phase 3 (E7): recentProjectsRenderKey moved to
       // /project-shell-surface.js with the recent-projects renderers.
@@ -829,10 +810,6 @@
         // instead of passing the (not yet initialized) consts directly.
         renderIndexPanelInAllSettingsWindows: () =>
           renderIndexPanelInAllSettingsWindows(),
-        // SPEC-3064 Phase 3 (E7): refreshProjectTabStateCues lives in the
-        // project shell surface, whose factory also runs after this one —
-        // close over the binding for the same reason.
-        refreshProjectTabStateCues: () => refreshProjectTabStateCues(),
         requestFullIndexStatusRefresh: () => requestFullIndexStatusRefresh(),
       });
 
@@ -933,9 +910,6 @@
       }
 
       function send(message) {
-        if (message.kind === "select_project_tab") {
-          return selectClientProject(message.tab_id) ? "sent" : "unavailable";
-        }
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -1367,6 +1341,7 @@
       }
 
       function handleSocketClose() {
+        closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
         setConnectionState(false);
@@ -1389,7 +1364,7 @@
       }
 
       function isHubNavigationMessage(kind) {
-        return ["open_project_dialog", "reopen_recent_project", "close_project_tab",
+        return ["open_project_dialog", "reopen_recent_project",
           "select_clone_project_parent", "github_repository_search", "clone_project_start"].includes(kind);
       }
 
@@ -1870,21 +1845,6 @@
         renderAppState({ ...appState, app_version: hub.app_version });
       }
 
-      function selectClientProject(tabId) {
-        const tab = appState.tabs.find((entry) => entry.id === tabId);
-        if (!tab) return false;
-        // Issue #4538: one browser tab is one Project. Another Project opens
-        // in its own tab so this tab's URL and scope never change.
-        if (routeProjectKey) {
-          if (tab.project_key !== routeProjectKey && /^[0-9a-f]{16}$/.test(tab.project_key || "")) {
-            window.open(projectUrlPath(tab.project_key), "_blank", "noopener");
-          }
-          return true;
-        }
-        renderAppState({ ...appState, active_tab_id: tabId });
-        return true;
-      }
-
       function renderAppState(nextState) {
         dismissOperatorBriefing();
         return traceMeasure(
@@ -1900,11 +1860,6 @@
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
             setVersionState(appState.app_version, versionState.latest);
-            const nextProjectTabsKey = projectTabsRenderKey(appState);
-            if (renderedProjectTabsKey !== nextProjectTabsKey) {
-              renderedProjectTabsKey = nextProjectTabsKey;
-              renderProjectTabs();
-            }
             const tab = activeProjectTab();
             renderProjectPicker(tab);
             updateActionAvailability(tab);
@@ -2664,6 +2619,28 @@
         frameWindow(nextWindowId);
       }
 
+      const closeProjectController = createCloseProjectController({
+        document, send,
+        onClosed: (projectKey) => {
+          if (projectKey !== routeProjectKey) return;
+          routeProjectMissing = true;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+          const oldSocket = socket;
+          const oldHubSocket = hubSocket;
+          socket = null;
+          hubSocket = null;
+          pendingMessages.length = 0;
+          pendingHubMessages.length = 0;
+          oldSocket?.close();
+          oldHubSocket?.close();
+          window.location.assign("/");
+        },
+        onError: (message) => window.alert(message),
+      });
+      document.body.append(closeProjectController.modal);
+      document.getElementById("close-project-button")?.addEventListener("click", () => closeProjectController.request(routeProjectKey));
+
       function shouldHandleFocusShortcut(event) {
         if (event.repeat) {
           return false;
@@ -2677,7 +2654,8 @@
         if (
           modal.classList.contains("open") ||
           wizardModal.classList.contains("open") ||
-          cloneProjectModal?.classList.contains("open")
+          cloneProjectModal?.classList.contains("open") ||
+          document.querySelector(".modal-backdrop.open")
         ) {
           return false;
         }
@@ -3685,7 +3663,7 @@
             if (!element) {
               renderWindowList();
               refreshWindowTabTelemetry(windowData);
-              refreshProjectTabStateCues();
+
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -3747,7 +3725,7 @@
               }
             }
             renderWindowList();
-            refreshProjectTabStateCues();
+
           },
         );
       }
@@ -4930,8 +4908,8 @@
           timeoutMs: 12_000,
           onActivate: () => {
             if (notice.projectId) {
-              frontendUnits.projectWorkspaceShell.clearProjectUnread(notice.projectId);
-              send({ kind: "select_project_tab", tab_id: notice.projectId });
+              const project = appState.tabs.find((tab) => tab.id === notice.projectId);
+              if (project?.project_key && project.project_key !== routeProjectKey) window.open(projectUrlPath(project.project_key), "_blank", "noopener");
             }
           },
         };
@@ -5198,11 +5176,6 @@
         requestWindowList,
         renderWindowList,
         toggleWindowList,
-        renderProjectTabs,
-        refreshProjectTabStateCues,
-        markProjectUnread,
-        clearProjectUnread,
-        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -6069,10 +6042,6 @@
         renderWindowList,
         windowDisplayTitle,
         toggleWindowList,
-        renderProjectTabs,
-        markProjectUnread,
-        clearProjectUnread,
-        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -6083,9 +6052,7 @@
         document,
         window,
         showToast: showAgentCompletionToast,
-        onProjectUnread: (projectId) => {
-          projectWorkspaceShell.markProjectUnread(projectId);
-        },
+        onProjectUnread: () => {},
       });
 
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
@@ -6206,6 +6173,7 @@
       });
 
       function receive(event) {
+        if (closeProjectController.receive(event)) return;
         if (shouldDropLiveEventForTestMode(event)) {
           return;
         }

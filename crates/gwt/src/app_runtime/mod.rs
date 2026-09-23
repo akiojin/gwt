@@ -1081,6 +1081,8 @@ pub(crate) struct ProjectContext {
 }
 
 pub(crate) struct ProjectRuntimeState {
+    /// Latest close preview nonce for each requesting connection; never persisted.
+    pub(crate) close_project_nonces: HashMap<ClientId, String>,
     /// Single-use launch requests keyed by the exact wizard that produced
     /// them. The visible modal may be replaced before the queued event runs;
     /// materialization ownership must not move with that global UI slot.
@@ -1169,6 +1171,7 @@ pub(crate) fn initial_project_states(
             (
                 context.project_key.clone(),
                 ProjectRuntimeState {
+                    close_project_nonces: HashMap::new(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
@@ -1209,8 +1212,13 @@ pub(crate) struct ProjectIncarnation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectNavigationSource {
     Open,
-    Clone { workspace_home: PathBuf },
-    Switch { tab_id: String },
+    Clone {
+        workspace_home: PathBuf,
+    },
+    #[cfg(test)]
+    Switch {
+        tab_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1245,6 +1253,7 @@ pub(crate) enum PreparedProjectWindowRestore {
     },
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedProjectSwitch {
     pub(crate) tab_id: String,
@@ -1263,6 +1272,7 @@ pub(crate) struct PreparedMigrationSnapshot {
 #[derive(Debug, Clone)]
 pub(crate) enum ProjectNavigationPayload {
     Open(PreparedProjectOpen),
+    #[cfg(test)]
     Switch(PreparedProjectSwitch),
 }
 
@@ -3090,6 +3100,7 @@ impl AppRuntime {
             self.project_states
                 .entry(context.project_key.clone())
                 .or_insert_with(|| ProjectRuntimeState {
+                    close_project_nonces: HashMap::new(),
                     pending_pm_launches: Default::default(),
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
@@ -7986,9 +7997,7 @@ impl AppRuntime {
                 .and_then(|context| self.project_state(context))
                 .and_then(|state| state.launch_wizard.as_ref())
                 .map(|wizard| wizard.tab_id.as_str()),
-            FrontendEvent::SelectProjectTab { tab_id }
-            | FrontendEvent::CloseProjectTab { tab_id }
-            | FrontendEvent::StartMigration { tab_id }
+            FrontendEvent::StartMigration { tab_id }
             | FrontendEvent::SkipMigration { tab_id }
             | FrontendEvent::QuitMigration { tab_id } => Some(tab_id.as_str()),
             FrontendEvent::StartupTerminalReady { id, .. }
@@ -8092,6 +8101,10 @@ impl AppRuntime {
         event: FrontendEvent,
         scope: &ClientScope,
     ) -> Vec<OutboundEvent> {
+        if let Some(events) = self.close_project_request_events(&client_id, &event, scope) {
+            log_frontend_user_action(&client_id, &event);
+            return events;
+        }
         match scope {
             ClientScope::Hub => self.handle_hub_frontend_event(client_id, event),
             ClientScope::Project(key) => {
@@ -8128,7 +8141,6 @@ impl AppRuntime {
             FrontendEvent::SaveUiTrace { trace } => {
                 self.save_ui_trace_events(None, client_id, trace)
             }
-            FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
             FrontendEvent::FrontendReady => {
                 self.ensure_recent_project_keys();
                 self.frontend_sync_events(&client_id)
@@ -8377,9 +8389,7 @@ impl AppRuntime {
             | FrontendEvent::MoveAgentKanbanCard { id, board_id, .. } => {
                 owns_window(id) && owns_window(board_id)
             }
-            FrontendEvent::SelectProjectTab { tab_id }
-            | FrontendEvent::CloseProjectTab { tab_id }
-            | FrontendEvent::StartMigration { tab_id }
+            FrontendEvent::StartMigration { tab_id }
             | FrontendEvent::SkipMigration { tab_id }
             | FrontendEvent::QuitMigration { tab_id } => tab_id == &context.tab_id,
             _ => true,
@@ -8479,8 +8489,15 @@ impl AppRuntime {
             FrontendEvent::ReopenRecentProject { path } => {
                 self.open_project_path_events(PathBuf::from(path))
             }
-            FrontendEvent::SelectProjectTab { tab_id } => self.select_project_tab_events(&tab_id),
-            FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
+            FrontendEvent::PreviewCloseProject { .. }
+            | FrontendEvent::ConfirmCloseProject { .. }
+            | FrontendEvent::CancelCloseProject { .. } => self
+                .close_project_request_events(
+                    &client_id,
+                    &event,
+                    &ClientScope::Project(context.project_key.clone()),
+                )
+                .unwrap_or_default(),
             FrontendEvent::CreateWindow { preset, bounds } => {
                 self.create_window_events(context, preset, bounds)
             }

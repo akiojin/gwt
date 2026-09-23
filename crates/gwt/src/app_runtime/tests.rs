@@ -13159,9 +13159,11 @@ fn app_runtime_close_last_project_clears_canvas_and_hub_catalog() {
     let context = runtime.test_context();
     let events = runtime.close_project_tab_events("tab-1");
 
-    assert!(events.iter().any(|event| matches!((&event.target, &event.event),
-        (DispatchTarget::Project(key), BackendEvent::WindowCanvasState { workspace })
-        if key == &context.project_key && workspace.tabs.is_empty() && workspace.active_tab_id.is_none())));
+    assert!(events
+        .iter()
+        .any(|event| matches!((&event.target, &event.event),
+        (DispatchTarget::Project(key), BackendEvent::ProjectClosed { project_key })
+        if key == &context.project_key && project_key == context.project_key.as_str())));
     assert!(events.iter().any(|event| matches!(&event.event,
         BackendEvent::HubState { hub } if hub.projects.is_empty())));
     assert!(runtime.project_state(&context).is_none());

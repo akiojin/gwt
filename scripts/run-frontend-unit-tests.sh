@@ -2,6 +2,7 @@
 set -euo pipefail
 
 bash scripts/run-node-tests-with-linkedom.sh \
+  crates/gwt/web/__tests__/close-project.test.mjs \
   crates/gwt/web/__tests__/socket-project-scope.test.mjs \
   crates/gwt/web/__tests__/frontend-route.test.mjs \
   crates/gwt/web/__tests__/hub-app.test.mjs \
@@ -76,11 +77,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/toast-host.test.mjs \
   crates/gwt/web/__tests__/notification-center.test.mjs \
   crates/gwt/web/__tests__/notification-fanout.test.mjs \
-  crates/gwt/web/__tests__/project-switcher.test.mjs \
-  crates/gwt/web/__tests__/project-tabs-renderer.test.mjs \
-  crates/gwt/web/__tests__/close-project-tab.smoke.test.mjs \
   crates/gwt/web/__tests__/window-tabs-renderer.test.mjs \
-  crates/gwt/web/__tests__/project-tab-style.test.mjs \
   crates/gwt/web/__tests__/playwright-embedded-routes.test.mjs \
   crates/gwt/web/__tests__/viewport-persist-wiring.test.mjs \
   crates/gwt/web/__tests__/system-settings-interaction-guard-wiring.test.mjs \

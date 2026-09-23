@@ -49,7 +49,7 @@ const ROOT_MODULES = new Set([
   "camera-framing.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
-  "close-project-tab-confirm-modal.js",
+  "close-project-confirm-modal.js",
   "window-close-confirm-modal.js",
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
@@ -85,8 +85,6 @@ const ROOT_MODULES = new Set([
   // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface.
   "project-shell-surface.js",
   // SPEC-2013 2026-06-16 amendment — internal Project Switcher popover.
-  "project-switcher.js",
-  "project-tabs-renderer.js",
   // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface.
   "provider-usage-surface.js",
   "window-tabs-renderer.js",

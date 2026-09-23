@@ -229,6 +229,10 @@ JSON
 未知のキーは受け付けるキー一覧を示して拒否します。既存の `board` フィールドは維持し、
 `page.total_entries` はCLI制限前の可視snapshot件数、`page.returned_entries` は
 返却件数、`page.truncated` はCLI制限による省略の有無を示します。
+`blocked` の各 entry は `escalation` オブジェクト（`resolved` 真偽値、`resolved_at`、
+`resolved_by_entry_id`）を持ちます。escalation index に無い blocked entry は
+`indexed: false` / `resolved: null` を返します。`params.unresolved: true`（既定 `false`）
+を指定すると、未解決の blocked entry だけを返します。絞り込みは `limit` より先に適用されます。
 
 返却サイズはおおむね「件数 × シリアライズされた1件のサイズ + metadata」です。
 1件平均2 KiBなら20件で約40 KiBです。固定バイト上限はなく、長文ほど増え、

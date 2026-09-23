@@ -148,3 +148,30 @@ test("the Hub reconnects after its socket closes", () => {
   assert.equal(sockets.length, 2);
   assert.equal(new URL(sockets[1].url).search, "");
 });
+
+test("Hub Close Project previews the selected key and removes only a closed project", () => {
+  const { document, sockets } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([projectA, projectB]));
+  document.querySelector(`[data-close-project="${projectA.project_key}"]`).click();
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+  const token = { project_key: projectA.project_key, generation: 1, nonce: 'test' };
+  sockets[0].deliver({ kind: 'close_project_preview', token, title: 'Alpha', running_agents: [] });
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'confirm_close_project', token });
+  sockets[0].deliver({ kind: 'project_closed', project_key: projectA.project_key });
+  assert.equal(document.querySelector(`[data-close-project="${projectA.project_key}"]`), null);
+  assert.ok(document.querySelector(`[data-close-project="${projectB.project_key}"]`));
+});
+
+test("Hub retries Close after its preview connection is lost", () => {
+  const { document, sockets, timers } = fixture();
+  sockets[0].open();
+  sockets[0].deliver(hubState([projectA]));
+  const close = document.querySelector(`[data-close-project="${projectA.project_key}"]`);
+  close.click();
+  sockets[0].handlers.close();
+  timers.at(-1)();
+  sockets[1].open();
+  close.click();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+});

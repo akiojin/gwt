@@ -205,21 +205,6 @@ body::after {
   text-shadow: 0 0 6px color-mix(in oklab, var(--agent-codex) 40%, transparent);
 }
 
-.project-tabs {
-  display: flex;
-  gap: var(--space-2);
-  flex: 1;
-  align-items: center;
-  overflow: hidden;
-  font-stretch: 100%;
-  letter-spacing: var(--tracking-wide);
-  text-transform: none;
-  font-weight: 500;
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  color: var(--color-text);
-}
-
 .project-actions {
   display: flex;
   align-items: center;
@@ -3092,57 +3077,6 @@ button.workspace-board-ref:focus-visible {
 /* SPEC-2013 FR-012: close project tab confirm modal layout primitives.
    Reuses .modal-backdrop / .modal-shell base from existing modals; only
    the body / list spacing and footer alignment are scoped here. */
-.close-project-tab-modal-shell {
-  padding: 24px 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  max-width: 480px;
-}
-.close-project-tab-modal__title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-.close-project-tab-modal__subtitle {
-  margin: 4px 0 0 0;
-  font-size: 12px;
-  color: var(--color-text-muted, #888);
-}
-.close-project-tab-modal__summary {
-  margin: 0;
-  font-size: 13px;
-}
-.close-project-tab-modal__agent-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 0 0 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-}
-.close-project-tab-modal__agent-item::before {
-  content: "•";
-  margin-right: 6px;
-  color: var(--color-text-muted, #888);
-}
-.close-project-tab-modal__agent-branch {
-  color: var(--color-text-muted, #888);
-}
-.close-project-tab-modal__more {
-  margin: 0;
-  font-size: 12px;
-  color: var(--color-text-muted, #888);
-  font-style: italic;
-}
-.close-project-tab-modal__footer.modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 6px;
-}
-
 /* SPEC-3038 US-3 — Close Guard modal. Shares the project-tab confirm
    vocabulary; adds an identity row (agent + live state chip) and a
    destructive warning shown only while the agent is running. */

@@ -265,6 +265,16 @@ export async function readLiveHubCatalog(
       socket.addEventListener("open", () => socket.send(JSON.stringify({ kind: "frontend_ready" })));
       socket.addEventListener("message", (event) => {
         const message = JSON.parse(String(event.data));
+        if (message.kind === "close_project_preview" && (send as { kind?: string } | null)?.kind === "preview_close_project") {
+          if (message.running_agents.length) {
+            window.clearTimeout(timer);
+            socket.close();
+            reject(new Error("refusing to close a live test Project with running agents"));
+            return;
+          }
+          socket.send(JSON.stringify({ kind: "confirm_close_project", token: message.token }));
+          return;
+        }
         if (message.kind !== "hub_state") return;
         if (send && !sent) {
           sent = true;
@@ -520,5 +530,5 @@ export async function openLiveGwtProject(
     await page.goto(target);
     await prepareLiveGwtPage(page, liveGwtPageOptions.get(page) ?? {});
   }
-  await page.waitForSelector(".project-tab", { state: "visible" });
+  await page.waitForSelector("#close-project-button", { state: "visible" });
 }

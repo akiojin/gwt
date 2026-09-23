@@ -100,7 +100,8 @@ test.describe("Project Hub and routes", () => {
     await installEmbeddedRoutes(page);
     await installRouteBackend(page);
     await page.goto(`${ORIGIN_URL}p/${projectA.project_key}`);
-    await expect(page.locator(".project-tab[aria-current='page']")).toBeVisible();
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    await expect(page.locator("#project-tabs")).toHaveCount(0);
     const scopes = await page.evaluate(() => (window as any).__gwtSent
       .filter((entry: any) => entry.message.kind === "frontend_ready").map((entry: any) => entry.scope));
     expect(scopes).toContain(projectA.project_key);

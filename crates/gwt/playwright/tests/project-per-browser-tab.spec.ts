@@ -140,15 +140,15 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         created.shift();
         await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
-        const projectPopup = page.waitForEvent("popup");
-        await page.locator(`[data-project-tab-id="${projectB.id}"]`).click();
-        const projectTab = await projectPopup;
-        await expect.poll(() => projectTab.url()).toBe(liveGwtProjectUrl(base!, projectB.project_key));
-        await projectTab.close();
         const hubPopup = page.waitForEvent("popup");
         await page.locator("#project-home-link").click();
         const hubTab = await hubPopup;
         await expect(hubTab.locator("[data-hub]")).toBeVisible();
+        const projectPopup = hubTab.waitForEvent("popup");
+        await hubTab.locator(`[data-hub-list="open"] a[href="/p/${projectB.project_key}"]`).click();
+        const projectTab = await projectPopup;
+        await expect.poll(() => projectTab.url()).toBe(liveGwtProjectUrl(base!, projectB.project_key));
+        await projectTab.close();
         await hubTab.close();
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
       } finally {
@@ -169,7 +169,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
     await withLiveGwtBackendLock(base!, testInfo, async () => {
       const errors = collectBrowserErrors(page);
       const recentRoot = await mkdtemp(join(tmpdir(), "gwt-4538-recent-"));
-      let recentTabId: string | undefined;
+      let recentProjectKey: string | undefined;
       try {
         // Hub: picker only, path-free new-tab links.
         await gotoLiveGwt(page, base!, { hub: true });
@@ -193,7 +193,7 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         const popup = page.waitForEvent("popup");
         await links.first().click();
         const opened = await popup;
-        await expect(opened.locator(".project-tab[aria-current='page']")).toBeVisible();
+        await expect(opened.locator("#close-project-button")).toBeVisible();
         expect(new URL(opened.url()).pathname).toMatch(/^\/p\/[0-9a-f]{16}$/);
         await opened.close();
 
@@ -216,22 +216,22 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         const openEntry = await readLiveHubCatalog(page, base!, {
           until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
-        recentTabId = openEntry.projects.find((entry) => entry.project_key === recent.project_key)!.id;
+        recentProjectKey = openEntry.projects.find((entry) => entry.project_key === recent.project_key)!.project_key;
         await readLiveHubCatalog(page, base!, {
-          send: { kind: "close_project_tab", tab_id: recentTabId },
+          send: { kind: "preview_close_project", project_key: recentProjectKey },
           until: (catalog, key) => !catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
-        recentTabId = undefined;
+        recentProjectKey = undefined;
         await page.goto(liveGwtProjectUrl(base!, recent.project_key!));
-        await expect(page.locator(".project-tab[aria-current='page']")).toBeVisible({ timeout: 30_000 });
+        await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 30_000 });
         const reopened = await readLiveHubCatalog(page, base!, {
           until: (catalog, key) => catalog.projects.some((entry) => entry.project_key === key), arg: recent.project_key,
         });
-        recentTabId = reopened.projects.find((entry) => entry.project_key === recent.project_key)!.id;
+        recentProjectKey = reopened.projects.find((entry) => entry.project_key === recent.project_key)!.project_key;
       } finally {
-        if (recentTabId) {
+        if (recentProjectKey) {
           await readLiveHubCatalog(page, base!, {
-            send: { kind: "close_project_tab", tab_id: recentTabId },
+            send: { kind: "preview_close_project", project_key: recentProjectKey },
           }).catch(() => {});
         }
         await rm(recentRoot, { recursive: true, force: true });

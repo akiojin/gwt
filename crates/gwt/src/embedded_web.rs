@@ -77,10 +77,9 @@ root_js_modules! {
     // module load fails and the splash hangs.
     "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
-    "close-project-tab-confirm-modal.js" => "renderCloseProjectTabConfirmModal",
+    "close-project-confirm-modal.js" => "createCloseProjectController",
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
-    "project-switcher.js" => "createProjectSwitcherController",
     // SPEC-2008 Camera Focus: rail-safe viewport framing math for local
     // per-viewer camera moves.
     "camera-framing.js" => "computeCameraFrameArea",
@@ -111,7 +110,6 @@ root_js_modules! {
     // Issue #2698 — stable project tab renderer. Keeps tab DOM keyed by
     // project tab id so status-only workspace refreshes do not rebuild the
     // whole tab strip.
-    "project-tabs-renderer.js" => "renderProjectTabs",
     // SPEC-2008 Phase 34 — stable window tab renderer. Keeps grouped-window
     // tab DOM keyed by window id so active-tab switches do not blank/rebuild
     // the tab strip or disturb the terminal body.

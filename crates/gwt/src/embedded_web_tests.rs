@@ -31,10 +31,6 @@ fn js_braced_block_after<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
     None
 }
 
-fn project_tabs_renderer_js() -> &'static str {
-    root_js_module_source("/project-tabs-renderer.js")
-}
-
 fn terminal_context_menu_js() -> &'static str {
     root_js_module_source("/terminal-context-menu.js")
 }
@@ -1486,7 +1482,6 @@ fn embedded_web_window_status_chip_uses_running_idle_stopped_error_variants() {
 fn embedded_web_project_bar_omits_index_status_badge() {
     let html = frontend_styles_bundle();
     let js = app_js();
-    let project_tabs_js = project_tabs_renderer_js();
 
     // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
     // surface and its supporting controller / progress-toast wiring must
@@ -1527,13 +1522,7 @@ fn embedded_web_project_bar_omits_index_status_badge() {
                 && settings_surface_js().contains("renderIndexSettingsPanel({"),
             "SPEC-1939 Phase 15: Settings must drop Index while the Index window keeps the health panel",
         );
-    assert!(
-        html.contains(".project-tab-state-cue")
-            && project_tabs_js.contains("projectTabAgentCueState")
-            && project_tabs_js.contains("projectTabStateForRuntimeState")
-            && !project_tabs_js.contains("aggregateProjectTabDotState"),
-        "SPEC-2013 Phase 6: project tab state cue must reflect agent runtime state, not Index health",
-    );
+    assert!(!index_html().contains("id=\"project-tabs\""));
 }
 
 #[test]
@@ -2209,7 +2198,7 @@ fn embedded_web_root_js_module_registry_covers_app_imports() {
 
     for module_path in [
         "/branch-cleanup-modal.js",
-        "/close-project-tab-confirm-modal.js",
+        "/close-project-confirm-modal.js",
         "/migration-modal.js",
         "/window-docking.js",
         "/board-surface.js",
@@ -3858,24 +3847,11 @@ fn embedded_web_project_picker_exposes_github_clone_action_and_modal() {
 // Clone from GitHub intake actions, so the top toolbar carries a single
 // project control and no split-button group remains.
 #[test]
-fn embedded_web_top_toolbar_is_single_projects_switcher() {
+fn embedded_web_top_toolbar_exposes_close_project() {
     let html = index_html();
-
-    assert!(
-        !html.contains("id=\"open-project-group\"")
-            && !html.contains("class=\"split-button-group\"")
-            && !html.contains("id=\"open-project-menu\""),
-        "the Open Project split-button group must be removed from the top toolbar"
-    );
-    assert!(
-        html.contains("id=\"project-switcher-button\"")
-            && html.contains("aria-controls=\"project-switcher-panel\""),
-        "top toolbar must mount the single Projects switcher button"
-    );
-    assert!(
-        html.contains("id=\"project-switcher-panel\"") && html.contains("role=\"listbox\""),
-        "Projects switcher panel must mount as a listbox"
-    );
+    assert!(html.contains("id=\"close-project-button\""));
+    assert!(!html.contains("id=\"project-switcher-button\""));
+    assert!(!html.contains("id=\"project-tabs\""));
 }
 
 /// Launch Wizard hydration can add QuickStart, Docker, and Advanced form
