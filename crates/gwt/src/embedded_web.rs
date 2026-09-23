@@ -16,7 +16,7 @@
 //! `include_str!` / `include_bytes!` time instead of 404ing in production.
 
 use axum::{
-    http::{header, HeaderValue},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 
@@ -64,6 +64,11 @@ macro_rules! root_js_modules {
 // runtime and the splash hangs because no boot wiring runs (learned the hard
 // way with /release-notes-window.js, see SPEC-2780 and PR #2797 memory).
 root_js_modules! {
+    // Issue #4538 — route bootstrap: `/` loads the Hub, `/p/<repo-hash>`
+    // loads /app.js. index.html's only module script is the bootstrap.
+    "frontend-bootstrap.js" => "bootFrontendRoute",
+    "frontend-route.js" => "parseFrontendRoute",
+    "hub-app.js" => "createHubApp",
     "startup-metrics.js" => "createStartupMetrics",
     "branch-cleanup-modal.js" => "renderBranchCleanupModal",
     // SPEC-2009 Phase 7 (FR-064..FR-067) — Branches detail-check reconnect
@@ -436,6 +441,34 @@ pub fn static_asset_response(asset: &'static StaticAsset) -> Response {
         );
     }
     response
+}
+
+/// Issue #4538 AC-1: deterministic, path-free answer for a per-project URL
+/// whose hash is not a canonical ProjectKey. A syntactically valid hash is
+/// resolved by the Project app over its scoped WebSocket instead.
+const PROJECT_NOT_FOUND_HTML: &str = include_str!("../web/project-not-found.html");
+
+/// `GET /p/<repo_hash>`: the shared entrypoint for a canonical ProjectKey,
+/// otherwise the not-found page. Never touches the filesystem.
+pub fn project_route_response(repo_hash: &str) -> Response {
+    if gwt_core::repo_hash::ProjectKey::parse(repo_hash).is_ok() {
+        static_asset_response(&STATIC_ASSETS[0])
+    } else {
+        project_not_found_response()
+    }
+}
+
+/// `404` for every unroutable per-project URL.
+pub fn project_not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [
+            (header::CONTENT_TYPE, HTML_CONTENT_TYPE),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
+        PROJECT_NOT_FOUND_HTML,
+    )
+        .into_response()
 }
 
 /// Builds the response for one [`RootJsModuleAsset`] manifest entry

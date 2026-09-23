@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { projectUrlPath, routeWebSocketUrl } from "../frontend-route.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 function functionSource(name) {
@@ -10,8 +11,9 @@ function functionSource(name) {
   const end = source.indexOf("\n      }", start) + 8;
   return source.slice(start, end);
 }
-function fixture() {
+function fixture({ routeProjectKey = null } = {}) {
   const sockets = [];
+  const opened = [];
   class Socket {
     static OPEN = 1;
     constructor(url) { this.url = url; this.readyState = 0; this.handlers = {}; this.sent = []; sockets.push(this); }
@@ -25,8 +27,15 @@ function fixture() {
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
     socketReceiveDispatcher: null, recoveryCenterController: null,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
+    routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
+    opened, renderRouteNotFound() { context.notFoundRendered = true; },
     renderAppState(state) { context.appState = context.mergeProjectCatalog(state); context.connectSocket(); },
-    window: { location: { href: "http://localhost:1234/?token=discard#fragment" }, setTimeout: () => 1 },
+    window: {
+      location: { href: "http://localhost:1234/?token=discard#fragment" },
+      setTimeout: () => 1,
+      open: (...args) => { opened.push(args); return null; },
+    },
+    document: {},
     clearTimeout() {}, setConnectionState() {}, syncRunningBranchCleanups() {},
     createSocketReceiveDispatcher: ({ receive }) => ({ handle(event) { receive(JSON.parse(event.data)); } }),
     received: [], receive(event) { context.received.push(event); },
@@ -35,13 +44,13 @@ function fixture() {
   for (const name of ["activeProjectTab", "websocketUrl", "send", "handleSocketOpen", "handleSocketMessage", "handleSocketClose", "installSocketEventHandlers", "connectSocket", "connectHubSocket", "isHubNavigationMessage", "isHubNavigationResult"]) {
     vm.runInContext(functionSource(name), context);
   }
-  for (const name of ["mergeProjectCatalog", "receiveHubState", "selectClientProject"]) {
+  for (const name of ["mergeProjectCatalog", "receiveHubState", "selectClientProject", "showProjectRouteNotFound"]) {
     if (source.includes(`function ${name}(`)) vm.runInContext(functionSource(name), context);
   }
   // Allow the pre-change implementation to reach behavioral assertions.
   if (source.includes("function activeProjectKey(")) vm.runInContext(functionSource("activeProjectKey"), context);
   const select = (key) => { context.appState = { active_tab_id: key, tabs: [{ id: key, project_key: key }] }; context.connectSocket(); };
-  return { context, sockets, select };
+  return { context, sockets, select, opened };
 }
 
 test("Hub bootstrap retains its catalog socket while selecting a project", () => {
@@ -145,4 +154,55 @@ test("retained Hub processes catalog and navigation without duplicating global e
   assert.equal(sockets[2].readyState, 3, "returning to Hub closes the project connection");
   sockets.at(-1).handlers.message({ data: JSON.stringify({ kind: "update_state" }) });
   assert.equal(context.received.length, before + 1, "Hub handles global events when it is the active channel");
+});
+
+// Issue #4538 AC-2: a `/p/<repo-hash>` tab derives its Project scope from
+// the URL, keeps it across catalog changes and reconnects, and opens other
+// Projects in their own browser tabs.
+test("route-bound Project tab connects its scope from the URL before any catalog", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectB.project_key });
+  context.connectSocket();
+  assert.equal(sockets.length, 2, "Hub catalog plus the route's Project socket");
+  assert.equal(new URL(sockets[0].url).search, "");
+  assert.equal(new URL(sockets[1].url).searchParams.get("repo_hash"), projectB.project_key);
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }], "full sync is requested on the scoped socket");
+  context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [] });
+  assert.equal(context.activeProjectTab().id, projectB.id, "the catalog entry for the route becomes active");
+  assert.equal(sockets.length, 2, "catalog updates never rebind the scope");
+});
+
+test("route-bound Project tab reconnects to the same Project only", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  sockets[1].close();
+  context.connectSocket();
+  assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
+  sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
+});
+
+test("selecting another Project opens it in a new tab and keeps this tab's URL scope", () => {
+  const { context, sockets, opened } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [] });
+  const socketCount = sockets.length;
+  assert.equal(context.send({ kind: "select_project_tab", tab_id: projectB.id }), "sent");
+  assert.deepEqual(opened, [["/p/fedcba9876543210", "_blank", "noopener"]]);
+  assert.equal(context.activeProjectTab().id, projectA.id);
+  assert.equal(sockets.length, socketCount, "no rebind to the other Project");
+  context.send({ kind: "select_project_tab", tab_id: projectA.id });
+  assert.equal(opened.length, 1, "selecting this tab's own Project is a no-op");
+});
+
+test("project not found stops every reconnect for the route", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  context.showProjectRouteNotFound();
+  assert.equal(context.notFoundRendered, true);
+  assert.ok(sockets.every((socket) => socket.readyState === 3));
+  const count = sockets.length;
+  context.connectSocket();
+  assert.equal(sockets.length, count);
 });

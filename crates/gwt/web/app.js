@@ -11,6 +11,12 @@
         applyRuntimeHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
+      import {
+        parseFrontendRoute,
+        projectUrlPath,
+        renderRouteNotFound,
+        routeWebSocketUrl,
+      } from "/frontend-route.js";
       import { createStartupMetrics } from "/startup-metrics.js";
       import {
         TITLEBAR_DOCK_HIT_HEIGHT,
@@ -439,6 +445,12 @@
       let hubReconnectTimer = null;
       const pendingHubMessages = [];
       let socketProjectKey = null;
+      // Issue #4538 AC-2: this browser tab is bound to exactly one Project by
+      // its `/p/<repo-hash>` URL. The Project WebSocket scope comes from the
+      // route, never from in-page selection, so reconnects rebind the same
+      // Project and workspace actions never change the URL.
+      const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      let routeProjectMissing = false;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
       // (replaying stale terminal_output / workspace_state). `generation`
@@ -1238,18 +1250,23 @@
       }
 
       function activeProjectKey() {
+        if (routeProjectKey) return routeProjectKey;
         const key = activeProjectTab()?.project_key;
         return typeof key === "string" && /^[0-9a-f]{16}$/.test(key) ? key : null;
       }
 
       function websocketUrl(projectKey = activeProjectKey()) {
-        const url = new URL(window.location.href);
-        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-        url.pathname = "/ws";
-        url.search = "";
-        if (projectKey) url.searchParams.set("repo_hash", projectKey);
-        url.hash = "";
-        return url.toString();
+        return routeWebSocketUrl(window.location.href, projectKey);
+      }
+
+      // Issue #4538 AC-1: the route's hash resolved to no open or Recent
+      // Project. Show the path-free not-found view and stop reconnecting.
+      function showProjectRouteNotFound() {
+        routeProjectMissing = true;
+        for (const connection of [socket, hubSocket]) {
+          try { connection?.close(); } catch { /* already closed */ }
+        }
+        renderRouteNotFound(document);
       }
 
       function handleSocketOpen() {
@@ -1384,6 +1401,7 @@
       }
 
       function connectHubSocket() {
+        if (routeProjectMissing) return;
         if (hubSocket && hubSocket.readyState <= WebSocket.OPEN) return;
         if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
         hubReconnectTimer = null;
@@ -1418,6 +1436,7 @@
       }
 
       function connectSocket() {
+        if (routeProjectMissing) return;
         const projectKey = activeProjectKey();
         connectHubSocket();
         if (socket && socket.readyState <= WebSocket.OPEN
@@ -1842,11 +1861,12 @@
           ...project,
           ...state.tabs?.find((tab) => tab.id === project.id),
         }));
+        const routeTabId = tabs.find((tab) => tab.project_key === routeProjectKey)?.id ?? null;
         return {
           ...state,
           tabs,
           active_tab_id: tabs.some((tab) => tab.id === state.active_tab_id)
-            ? state.active_tab_id : null,
+            ? state.active_tab_id : routeTabId,
           recent_projects: hubCatalog.recent_projects || [],
         };
       }
@@ -1857,7 +1877,16 @@
       }
 
       function selectClientProject(tabId) {
-        if (!appState.tabs.some((tab) => tab.id === tabId)) return false;
+        const tab = appState.tabs.find((entry) => entry.id === tabId);
+        if (!tab) return false;
+        // Issue #4538: one browser tab is one Project. Another Project opens
+        // in its own tab so this tab's URL and scope never change.
+        if (routeProjectKey) {
+          if (tab.project_key !== routeProjectKey && /^[0-9a-f]{16}$/.test(tab.project_key || "")) {
+            window.open(projectUrlPath(tab.project_key), "_blank", "noopener");
+          }
+          return true;
+        }
         renderAppState({ ...appState, active_tab_id: tabId });
         return true;
       }
@@ -6189,6 +6218,10 @@
         switch (event.kind) {
           case "hub_state": {
             receiveHubState(event.hub);
+            break;
+          }
+          case "project_not_found": {
+            if (event.project_key === routeProjectKey) showProjectRouteNotFound();
             break;
           }
           case "workspace_state": {

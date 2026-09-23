@@ -132,10 +132,15 @@ the tray menu:
 - **Quit** — gracefully shuts the tray icon, embedded server, and
   PTY children down in order.
 
-Select a project in each browser tab to open its workspace. Different projects
-keep their windows and launch dialogs separate; two browser tabs viewing the same
-project share its live workspace. The project list stays synchronized as projects
-are opened or closed.
+The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
+from GitHub, Recent projects, and the currently open projects. Every project
+has its own URL, `http://127.0.0.1:<port>/p/<project-hash>`, and project links
+open in a new browser tab, so one browser tab shows one project. Different
+projects keep their windows and launch dialogs separate; two browser tabs on
+the same project URL share its live workspace. Bookmarking or restoring a
+project URL reopens a recent project automatically; an unknown project URL
+shows "Project not found" with a link back to the Hub. The **Hub** link in a
+project's header opens the Hub in a new tab.
 
 Autostart lives in **Settings > System > Launch GWT at login**. Enabling it
 installs an OS-native per-user entry (macOS LaunchAgent / Windows HKCU Run /
@@ -145,7 +150,8 @@ OS login as a tray-resident process. The browser is not opened automatically.
 ```bash
 gwt                                 # install tray + start embedded server (loopback)
 gwt --bind 0.0.0.0 --port 60745     # bind the embedded server to a LAN/VPN-reachable address
-gwt open                            # open the running tray's URL in the OS default browser
+gwt open                            # open the running tray's Hub URL in the OS default browser
+gwt open ~/src/my-repo              # open that project (opening it first if needed) at its /p/<hash> URL
 ```
 
 `--bind <ip>` defaults to `127.0.0.1`. When `--port` is omitted and no port has

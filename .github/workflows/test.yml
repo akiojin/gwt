@@ -190,7 +190,7 @@ jobs:
       # it spawns the same real binary and therefore needs the same display and
       # session bus. One `gwt` lifetime, so the step budget is unchanged.
       - name: Run real-binary front-door tests (Xvfb)
-        run: dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration -- --ignored --test-threads=1 --nocapture
+        run: dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture
         timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
         run: |
