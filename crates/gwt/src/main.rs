@@ -1885,6 +1885,13 @@ enum UserEvent {
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     ProjectNavigationPrepared(Box<ProjectNavigationPrepared>),
+    /// Issue #4538: Recent path → ProjectKey resolution for `/p/<hash>`.
+    RecentProjectKeysResolved(app_runtime::RecentProjectKeysResolved),
+    /// Issue #4538 AC-4: authenticated `gwt open <path>` control request.
+    ControlProjectOpen {
+        path: PathBuf,
+        reply: app_runtime::ProjectOpenReply,
+    },
     Dispatch(Vec<OutboundEvent>),
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -3858,6 +3865,7 @@ mod tests {
             next_project_incarnation,
             project_navigation_request: 0,
             pending_project_navigation: None,
+            project_route: Default::default(),
             recent_projects: Vec::new(),
             profile_selections: HashMap::new(),
             profile_config_path: Some(temp_root.join("profile-config.toml")),
@@ -9649,6 +9657,7 @@ fn main() -> std::io::Result<()> {
         clients.clone(),
         pty_writers.clone(),
         attachment_uploads,
+        Some(tray_lock_handle.control_token().to_string()),
     )
     .expect("embedded server");
     debug_assert_eq!(server.bound_port(), prepared_port);
@@ -10504,6 +10513,14 @@ fn main() -> std::io::Result<()> {
                     #[cfg(unix)]
                     board_daemon_subscribers.sync(&app, proxy.clone());
                 }
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RecentProjectKeysResolved(resolved)) => {
+                let events = app.handle_recent_project_keys_resolved(resolved);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ControlProjectOpen { path, reply }) => {
+                let events = app.control_project_open_events(path, reply);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {

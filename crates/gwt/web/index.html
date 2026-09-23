@@ -39,6 +39,17 @@
     <div id="app">
       <div class="project-shell">
         <div class="project-bar">
+          <!-- Issue #4538 AC-3: the Hub opens in its own browser tab so this
+               Project tab is never navigated away. -->
+          <a
+            class="project-home-link"
+            id="project-home-link"
+            href="/"
+            target="_blank"
+            rel="noopener"
+            aria-label="Open the gwt Hub in a new tab"
+            title="Open the gwt Hub in a new tab"
+          ><span aria-hidden="true">⌂</span> Hub</a>
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
             <div class="project-switcher-shell">
@@ -929,6 +940,8 @@
          mount as sibling lanes so neither fixed surface can cover the other. -->
     <div id="operator-notice-stack" class="operator-notice-stack"></div>
 
-    <script type="module" src="/app.js"></script>
+    <!-- Issue #4538: route bootstrap. `/` loads the Hub, `/p/<repo-hash>`
+         loads the Project app (/app.js); nothing else runs first. -->
+    <script type="module" src="/frontend-bootstrap.js"></script>
   </body>
 </html>

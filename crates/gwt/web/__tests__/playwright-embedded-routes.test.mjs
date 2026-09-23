@@ -67,7 +67,13 @@ function playwrightRootModules(source) {
 
 test("Playwright embedded routes serve every app.js transitive root module import", () => {
   const modules = new Set(playwrightRootModules(embeddedRoutesSource));
-  const appImports = reachableRootModuleImports("app.js");
+  // Issue #4538: index.html's only module script is the route bootstrap,
+  // which mounts the Hub or inserts the /app.js module script.
+  const appImports = [...new Set([
+    ...reachableRootModuleImports("frontend-bootstrap.js"),
+    ...reachableRootModuleImports("app.js"),
+  ])].sort();
+  assert.ok(appImports.includes("hub-app.js"));
   const missing = appImports.filter((moduleName) => !modules.has(moduleName));
   assert.deepEqual(missing, []);
   const orphaned = [...modules].filter((moduleName) => !appImports.includes(moduleName));

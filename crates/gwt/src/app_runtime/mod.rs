@@ -237,6 +237,7 @@ mod migration;
 pub(crate) mod persist_dispatcher;
 pub(crate) mod pm;
 mod profile;
+mod project_route;
 mod project_tabs;
 mod pty_io;
 mod recovery_center;
@@ -301,6 +302,9 @@ pub use launch::{
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
 use profile::ProfileSaveRequest;
+pub(crate) use project_route::{
+    ProjectOpenControlFailure, ProjectOpenReply, RecentProjectKeysResolved,
+};
 pub(crate) use project_tabs::initial_project_tab_incarnations;
 #[cfg(test)]
 use project_tabs::parse_github_repository_search_results;
@@ -1322,6 +1326,8 @@ pub struct AppRuntime {
     pub(crate) next_project_incarnation: u64,
     pub(crate) project_navigation_request: u64,
     pub(crate) pending_project_navigation: Option<ProjectNavigationRequest>,
+    /// Issue #4538: `/p/<hash>` resolution cache and `gwt open` waiters.
+    pub(crate) project_route: project_route::ProjectRouteState,
     pub(crate) recent_projects: Vec<gwt::RecentProjectEntry>,
     pub(crate) profile_selections: HashMap<String, String>,
     pub(crate) profile_config_path: Option<PathBuf>,
@@ -3284,6 +3290,7 @@ impl AppRuntime {
             next_project_incarnation,
             project_navigation_request: 0,
             pending_project_navigation: None,
+            project_route: Default::default(),
             recent_projects: prune_missing_recent_projects(dedupe_recent_projects(
                 normalize_recent_projects(persisted.recent_projects),
             )),
@@ -7992,7 +7999,14 @@ impl AppRuntime {
                     .into_iter()
                     .find(|context| &context.project_key == key)
                 else {
-                    return Vec::new();
+                    // Issue #4538 AC-2: a `/p/<hash>` tab may arrive before its
+                    // Project is open; only its hydration request resolves it.
+                    return match event {
+                        FrontendEvent::FrontendReady => {
+                            self.unopened_project_route_events(&client_id, key)
+                        }
+                        _ => Vec::new(),
+                    };
                 };
                 self.handle_frontend_event_for_project(&context, client_id, event)
             }
@@ -8014,7 +8028,10 @@ impl AppRuntime {
                 self.save_ui_trace_events(None, client_id, trace)
             }
             FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
-            FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
+            FrontendEvent::FrontendReady => {
+                self.ensure_recent_project_keys();
+                self.frontend_sync_events(&client_id)
+            }
             FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
                 self.set_claude_account_usage_enabled_events(enabled)
             }
@@ -10066,6 +10083,9 @@ impl AppRuntime {
                     path: project.path.display().to_string(),
                     title: project.title.clone(),
                     kind: project.kind,
+                    project_key: self
+                        .recent_project_key(&project.path)
+                        .map(ToString::to_string),
                 })
                 .collect(),
         }
@@ -10112,6 +10132,7 @@ impl AppRuntime {
                     path: project.path.display().to_string(),
                     title: project.title.clone(),
                     kind: project.kind,
+                    project_key: None,
                 })
                 .collect(),
         }

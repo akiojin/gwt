@@ -1301,6 +1301,10 @@ pub struct RecentProjectView {
     pub path: String,
     pub title: String,
     pub kind: ProjectKind,
+    /// Issue #4538 AC-3: path-free `/p/<key>` link target. `None` until the
+    /// runtime has resolved the repository identity off the tao thread.
+    #[serde(default)]
+    pub project_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1830,6 +1834,11 @@ pub enum UpdateAutoApplyPhase {
 pub enum BackendEvent {
     HubState {
         hub: HubStateView,
+    },
+    /// Issue #4538 AC-1: a `/p/<hash>` client whose hash resolves to neither
+    /// an open Project nor a Recent entry. Carries the hash only, never a path.
+    ProjectNotFound {
+        project_key: String,
     },
     /// SPEC-2359 US-66 (T-527): canonical Rust name is Work-based; the wire
     /// `kind` stays `workspace_state` as the legacy adapter spelling so no
@@ -3189,6 +3198,7 @@ impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
             BackendEvent::HubState { .. } => "hub_state",
+            BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",

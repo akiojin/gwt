@@ -18,7 +18,7 @@ test.describe("Deprecated Intake launch surfaces (live backend)", () => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await openLiveGwtProject(page);
-      await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+      await expect(page.locator(".project-tab[aria-current='page']")).toBeVisible({ timeout: 10_000 });
       await expect(page.locator('.op-rail [data-cmd="intake-session"]')).toHaveCount(0);
       await expect(page.locator("#canvas-empty-intake")).toHaveCount(0);
       await expect(page.locator("#op-workspace-overview-entry")).toBeVisible();

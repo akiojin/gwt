@@ -23,6 +23,7 @@ use std::{
     time::Instant,
 };
 
+use super::project_route::ProjectOpenControlFailure;
 use super::startup::prepare_open_project_window_restores;
 use super::{
     combined_window_id, load_restored_workspace_state, normalize_recent_project_path,
@@ -475,11 +476,21 @@ impl AppRuntime {
         prepared: ProjectNavigationPrepared,
     ) -> Vec<OutboundEvent> {
         if !self.project_navigation_request_is_current(&prepared.request) {
+            self.settle_project_open_waiter(
+                prepared.request.id,
+                Err(ProjectOpenControlFailure::Unavailable(
+                    "superseded by a newer project navigation".to_string(),
+                )),
+            );
             return Vec::new();
         }
         match prepared.result {
             Err(error) => {
                 self.pending_project_navigation = None;
+                self.settle_project_open_waiter(
+                    prepared.request.id,
+                    Err(ProjectOpenControlFailure::Rejected(error.clone())),
+                );
                 self.project_open_error_events(&prepared.request.source, error)
             }
             Ok(ProjectNavigationPayload::Open(open)) => {
@@ -490,8 +501,10 @@ impl AppRuntime {
                     return Vec::new();
                 }
                 self.pending_project_navigation = None;
+                let project_key = open.project_key.clone();
                 let events = self.commit_prepared_project_open(open, prepared.request.source);
                 self.record_project_open_route(prepared.request.id);
+                self.settle_project_open_waiter(prepared.request.id, Ok(project_key));
                 events
             }
             Ok(ProjectNavigationPayload::Switch(switch)) => {
@@ -648,6 +661,10 @@ impl AppRuntime {
             },
         );
         self.recent_projects.truncate(12);
+        self.remember_recent_project_key(
+            prepared.recent_path.clone(),
+            prepared.project_key.clone(),
+        );
     }
 
     pub(crate) fn refresh_project_tab_incarnation(&mut self, tab_id: &str) {

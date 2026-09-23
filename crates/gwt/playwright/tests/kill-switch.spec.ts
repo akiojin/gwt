@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { APP_URL, installEmbeddedRoutes, APP_PROJECT_KEY } from "./_helpers/embedded-frontend";
+import { liveGwtProjectUrl } from "./_helpers/live-gwt";
 
 // SPEC-2356 Anshin Addendum — Phase 1 kill-switch + attention UI.
 //
@@ -23,7 +24,8 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
-    await page.goto(liveBase || APP_URL);
+    // Issue #4538: the live server serves the Project app at `/p/<key>`.
+    await page.goto(liveBase ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : APP_URL);
     const win = page.locator('.workspace-window[data-id="agent-1"]');
     await expect(win).toBeVisible({ timeout: 10_000 });
     const chip = win.locator(".status-chip");

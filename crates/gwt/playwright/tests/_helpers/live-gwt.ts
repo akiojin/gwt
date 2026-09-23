@@ -5,6 +5,10 @@ import type { Page, TestInfo } from "@playwright/test";
 
 type LiveGwtOptions = {
   enableTestBridge?: boolean;
+  /** Issue #4538: stay on the Hub (`/`) instead of a Project route. */
+  hub?: boolean;
+  /** Issue #4538: open this Project route (`/p/<key>`) explicitly. */
+  projectKey?: string;
   keepPresetModal?: boolean;
   suppressProjectSurfaces?: boolean;
   suppressUpdateApplyStart?: boolean;
@@ -113,6 +117,7 @@ export async function gotoLiveGwt(
       window.WebSocket = new Proxy(NativeWebSocket, {
         construct(Target, args) {
           const socket = new Target(...args as ConstructorParameters<typeof WebSocket>);
+          ((window as any).__gwtPlaywrightSockets ??= []).push(socket);
           socket.addEventListener("message", (event) => {
             try {
               const payload = JSON.parse(String(event.data));
@@ -152,8 +157,16 @@ export async function gotoLiveGwt(
     suppressUpdateApplyStart: Boolean(options.suppressUpdateApplyStart),
   });
 
-  await page.goto(base);
+  liveGwtPageOptions.set(page, options);
+  await page.goto(await liveGwtRouteUrl(page, base, options));
+  await prepareLiveGwtPage(page, options);
+}
 
+// Options of the last gotoLiveGwt per page, re-applied when a helper has to
+// move the page to another Project route (Issue #4538).
+const liveGwtPageOptions = new WeakMap<Page, LiveGwtOptions>();
+
+async function prepareLiveGwtPage(page: Page, options: LiveGwtOptions): Promise<void> {
   const hiddenStartupSelectors = ["#op-briefing"];
   if (options.suppressProjectSurfaces) {
     hiddenStartupSelectors.push("#project-picker", "#project-onboarding");
@@ -187,6 +200,93 @@ export async function gotoLiveGwt(
     await page.waitForFunction(
       () => (window as any).__gwtPlaywrightTestBridgeInstalled === true,
     );
+  }
+}
+
+export type LiveHubCatalog = {
+  projects: Array<{ id: string; project_key: string; title: string }>;
+  recent_projects: Array<{ path: string; title: string; project_key: string | null }>;
+};
+
+const PROJECT_ROUTE = /\/p\/[0-9a-f]{16}$/;
+
+export function liveGwtProjectUrl(base: string, projectKey: string): string {
+  return new URL(`/p/${projectKey}`, base).toString();
+}
+
+/**
+ * Issue #4538: `/` is the Hub and the workspace lives at `/p/<key>`. A root
+ * `base` resolves to the requested Project, else the first open Project,
+ * else the first Recent Project; a Project URL `base` is used as-is.
+ */
+export async function liveGwtRouteUrl(
+  page: Page,
+  base: string,
+  options: LiveGwtOptions = {},
+): Promise<string> {
+  if (options.hub || PROJECT_ROUTE.test(new URL(base).pathname)) return base;
+  if (options.projectKey) return liveGwtProjectUrl(base, options.projectKey);
+  const catalog = await readLiveHubCatalog(page, base);
+  const key = catalog.projects[0]?.project_key
+    ?? catalog.recent_projects.find((entry) => entry.project_key)?.project_key;
+  if (!key) throw new Error("live gwt has no open or recent Project to route to");
+  return liveGwtProjectUrl(base, key);
+}
+
+/**
+ * Read the Hub catalog through a same-origin WebSocket from the Hub page.
+ * Waits until every Recent entry carries its resolved ProjectKey.
+ * `send` is an optional Hub navigation message sent after hydration.
+ */
+export async function readLiveHubCatalog(
+  page: Page,
+  base: string,
+  options: {
+    send?: unknown;
+    /** Runs in the page: it may only use `catalog` and the serialisable `arg`. */
+    until?: (catalog: LiveHubCatalog, arg: any) => boolean;
+    arg?: unknown;
+  } = {},
+): Promise<LiveHubCatalog> {
+  // A separate Hub page keeps the caller's page, its init scripts, and its
+  // WebSocket instrumentation untouched.
+  const hubUrl = new URL("/", base).toString();
+  const reader = await page.context().newPage();
+  try {
+    await reader.goto(hubUrl);
+    return await reader.evaluate(({ url, send, until, arg }) => new Promise<any>((resolve, reject) => {
+      const accept = until ? new Function(`return (${until})`)() : null;
+      const socket = new WebSocket(url);
+      const timer = window.setTimeout(() => {
+        socket.close();
+        reject(new Error("timed out waiting for the live Hub catalog"));
+      }, 30_000);
+      let sent = false;
+      socket.addEventListener("open", () => socket.send(JSON.stringify({ kind: "frontend_ready" })));
+      socket.addEventListener("message", (event) => {
+        const message = JSON.parse(String(event.data));
+        if (message.kind !== "hub_state") return;
+        if (send && !sent) {
+          sent = true;
+          socket.send(JSON.stringify(send));
+          return;
+        }
+        const hub = message.hub;
+        const resolved = hub.recent_projects.every((entry: any) => entry.project_key);
+        if (resolved && (!accept || accept(hub, arg))) {
+          window.clearTimeout(timer);
+          socket.close();
+          resolve(hub);
+        }
+      });
+    }), {
+      url: hubUrl.replace(/^http/, "ws") + "ws",
+      send: options.send ?? null,
+      until: options.until?.toString() ?? null,
+      arg: options.arg ?? null,
+    });
+  } finally {
+    await reader.close();
   }
 }
 
@@ -373,14 +473,19 @@ async function waitForLaunchWizardState(
 export async function suppressInitialFrontendReady(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const originalSend = WebSocket.prototype.send;
+    // Issue #4538: a Project page hydrates through two sockets (Hub catalog
+    // and its Project scope), so each socket's first ready is dropped until
+    // the test sets `__gwtDropInitialFrontendReady = false`.
+    const suppressed = new WeakSet<WebSocket>();
     WebSocket.prototype.send = function sendWithInitialReadySuppressed(data) {
       try {
         const payload = typeof data === "string" ? JSON.parse(data) : null;
         if (
           payload?.kind === "frontend_ready" &&
+          !suppressed.has(this) &&
           (window as any).__gwtDropInitialFrontendReady !== false
         ) {
-          (window as any).__gwtDropInitialFrontendReady = false;
+          suppressed.add(this);
           return;
         }
       } catch {
@@ -391,13 +496,29 @@ export async function suppressInitialFrontendReady(page: Page): Promise<void> {
   });
 }
 
+/**
+ * Issue #4538: bind this page to `projectRoot`'s Project route. The Hub opens
+ * the root (it becomes a Recent entry with a ProjectKey); a page on another
+ * route then navigates to `/p/<key>` and re-applies its gotoLiveGwt setup.
+ */
 export async function openLiveGwtProject(
   page: Page,
   projectRoot = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd(),
 ): Promise<void> {
-  await sendLiveGwtEvent(page, {
-    kind: "reopen_recent_project",
-    path: projectRoot,
+  const base = new URL("/", page.url()).toString();
+  const catalog = await readLiveHubCatalog(page, base, {
+    send: { kind: "reopen_recent_project", path: projectRoot },
+    until: (hub) => hub.recent_projects.length > 0,
   });
+  const normalized = projectRoot.replace(/\/+$/, "");
+  const entry = catalog.recent_projects.find((recent) =>
+    recent.path.replace(/\/+$/, "") === normalized && recent.project_key)
+    ?? catalog.recent_projects.find((recent) => recent.project_key);
+  if (!entry?.project_key) throw new Error(`live gwt did not resolve ${projectRoot}`);
+  const target = liveGwtProjectUrl(base, entry.project_key);
+  if (page.url() !== target) {
+    await page.goto(target);
+    await prepareLiveGwtPage(page, liveGwtPageOptions.get(page) ?? {});
+  }
   await page.waitForSelector(".project-tab", { state: "visible" });
 }
