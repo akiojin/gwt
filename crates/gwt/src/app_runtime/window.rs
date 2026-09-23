@@ -106,14 +106,12 @@ macro_rules! window_scoped_state {
         // the process.
         $visit!($runtime, $id, launch_error_terminal_details);
         $visit!($runtime, $id, board_all_view_windows);
-        $visit!($runtime, $id, pending_launch_wizard_materializations);
         $visit!($runtime, $id, pending_workspace_resume_contexts);
         $visit!($runtime, $id, pending_launch_feedback_contexts);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
         $visit!($runtime, $id, pending_auto_resume_sources);
         $visit!($runtime, $id, pending_tool_runtime_migrations);
-        $visit!($runtime, $id, pending_pm_wakes);
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
         $visit!($runtime, $id, window_output_bytes);
@@ -563,6 +561,10 @@ impl AppRuntime {
             };
         }
         window_scoped_state!(self, id, forget);
+        for state in self.project_states.values_mut() {
+            state.pending_pm_wakes.remove(id);
+            state.pending_pm_launches.remove(id);
+        }
     }
 
     /// Issue #4234 AC-3 / AC-4: names of the window-keyed maps that still hold
@@ -579,6 +581,14 @@ impl AppRuntime {
             };
         }
         window_scoped_state!(self, id, probe);
+        for state in self.project_states.values() {
+            if state.pending_pm_wakes.contains_key(id) {
+                residue.push("pending_pm_wakes");
+            }
+            if state.pending_pm_launches.contains_key(id) {
+                residue.push("pending_pm_launches");
+            }
+        }
         residue
     }
 
@@ -596,6 +606,11 @@ impl AppRuntime {
         }
         let id = "";
         window_scoped_state!(self, id, count);
+        total += self
+            .project_states
+            .values()
+            .map(|state| state.pending_pm_wakes.len() + state.pending_pm_launches.len())
+            .sum::<usize>();
         total
     }
 
@@ -721,17 +736,19 @@ impl AppRuntime {
         // through `pending_pm_closes` until its finalizer completes.
         let closing_pm_session = match (project_root.as_ref(), closing_session_id.as_ref()) {
             (Some(project_root), Some(session_id)) => {
-                self.pm_sessions.get(project_root) == Some(session_id)
+                self.pm_session_for_root(project_root) == Some(session_id)
             }
             _ => false,
         };
         if closing_pm_session {
             if let Some(project_root) = project_root.as_ref() {
-                *self
-                    .pending_pm_closes
-                    .entry(project_root.clone())
-                    .or_default() += 1;
-                self.pm_sessions.remove(project_root);
+                if let Some(state) = self.project_state_for_root_mut(project_root) {
+                    *state
+                        .pending_pm_closes
+                        .entry(project_root.clone())
+                        .or_default() += 1;
+                    state.pm_sessions.remove(project_root);
+                }
             }
         }
         self.queue_window_close_finalizer(

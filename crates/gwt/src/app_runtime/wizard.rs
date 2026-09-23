@@ -2144,8 +2144,15 @@ impl AppRuntime {
                 let selection = gwt::select_launch_profile(
                     &pool,
                     // Issue #4366 AC-4: a held provider due its
-                    // re-verification is selectable for that one launch.
-                    &prefs.launch_admission_provider_quota_holds(&now),
+                    // re-verification is selectable for that one launch —
+                    // over a free candidate only while the poller reads it
+                    // as usable (Issue #4636 AC-1).
+                    &prefs.launch_admission_provider_quota_holds(&now, |provider| {
+                        gwt::issue_monitor::provider_reports_healthy_for_agent(
+                            provider,
+                            &self.provider_usage_accounts,
+                        )
+                    }),
                     &[],
                     prefs.launch_usage_threshold_percent,
                     &[],
@@ -4286,7 +4293,9 @@ impl AppRuntime {
                 session
                     .wizard
                     .mark_launch_materialization_pending("Preparing worktree...");
-                self.pending_launch_wizard_materializations
+                self.project_state_mut(context)
+                    .expect("current wizard project")
+                    .pending_launch_wizard_materializations
                     .insert(session.wizard_id.clone(), session.clone());
                 self.proxy
                     .send(UserEvent::LaunchWizardLaunchMaterializationRequested {
@@ -4312,10 +4321,11 @@ impl AppRuntime {
         config: LaunchWizardLaunchRequest,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
-        let Some(pending_session) = self
-            .pending_launch_wizard_materializations
-            .remove(&wizard_id)
-        else {
+        let Some(pending_session) = self.project_states.values_mut().find_map(|state| {
+            state
+                .pending_launch_wizard_materializations
+                .remove(&wizard_id)
+        }) else {
             return Vec::new();
         };
         let context = pending_session.project_context.clone();

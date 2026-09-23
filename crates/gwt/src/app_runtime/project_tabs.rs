@@ -862,8 +862,6 @@ impl AppRuntime {
         );
         self.project_tab_incarnations.remove(tab_id);
         self.refresh_project_state(tab_id);
-        self.pending_launch_wizard_materializations
-            .retain(|_, wizard| wizard.tab_id != tab_id);
         let _ = self.persist();
         vec![
             OutboundEvent::project(

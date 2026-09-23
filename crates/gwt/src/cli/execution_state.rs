@@ -11826,7 +11826,7 @@ fn probe_blocked_build_abort_recovery(
     if snapshot.ecr_status != ExecutionDiagnosisState::Blocked {
         return unavailable(
             GovernanceCause::DomainInvalid,
-            "build_abort_requires_blocked_execution",
+            "blocked_build_abort_recovery_not_applicable",
         );
     }
     let (Some(owner_kind), Some(owner_number)) = (snapshot.owner_kind, snapshot.owner_number)
@@ -12925,7 +12925,7 @@ fn verification_recovery_probes(
     let refusal = match session_id {
         _ if ecr_status != ExecutionDiagnosisState::Blocked => Some((
             GovernanceCause::DomainInvalid,
-            "verify_recovery_requires_blocked",
+            "blocked_verification_recovery_not_applicable",
         )),
         None => Some((GovernanceCause::ManagedIdentity, "session_id_unavailable")),
         Some(session_id)
@@ -24740,7 +24740,7 @@ exit 1
             assert!(probes.iter().all(|probe| {
                 let operation = probe["operation"].as_str().unwrap_or_default();
                 let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
-                    "verify_recovery_requires_blocked"
+                    "blocked_verification_recovery_not_applicable"
                 } else {
                     "execution_recovery_scope_invalid"
                 };
@@ -25219,6 +25219,51 @@ exit 1
                     "{reason} must not advertise build.abort: {snapshot:?}"
                 );
             }
+        }
+
+        /// Issue #4618 AC-1/AC-2: an Active execution may run ordinary
+        /// `build.abort` and `verify.*`, so the Blocked-only recovery probes
+        /// must not read as a general "requires blocked" gate.
+        #[test]
+        fn active_status_names_blocked_only_recovery_probes_as_not_applicable() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let repo = tempfile::tempdir().expect("active fixture");
+            let session_id = "session-status-active-probe-reason";
+            prepare_generation_bound_execution(
+                repo.path(),
+                session_id,
+                4618,
+                ExecutionControlStatus::Active,
+            );
+            save_build_state(repo.path(), session_id, Some(4618), true);
+
+            let snapshot = status_snapshot(repo.path(), session_id);
+            let probes = snapshot["recovery_probes"]
+                .as_array()
+                .expect("status recovery probes");
+            let reason_of = |operation: &str| {
+                probes
+                    .iter()
+                    .find(|probe| probe["operation"] == operation)
+                    .and_then(|probe| probe["reason"].as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            assert_eq!(
+                reason_of("build.abort"),
+                "blocked_build_abort_recovery_not_applicable",
+                "{snapshot:?}"
+            );
+            assert_eq!(
+                reason_of("verify.plan"),
+                "blocked_verification_recovery_not_applicable",
+                "{snapshot:?}"
+            );
         }
 
         #[test]

@@ -2643,6 +2643,25 @@ enum StopIdentityMatch {
 }
 
 impl StopIdentityMatch {
+    /// SPEC #3590 FR-005 / Issue #3578: the window is never grounds for
+    /// refusing an operator. The PM supervises from its own window and quotes
+    /// none, and the pane a stalled launch held may already be gone — refusing
+    /// either left the slot with no way back. The claim and delivery still
+    /// name the launch; the answer reports the window the monitor holds.
+    ///
+    /// Runtime callers settle the exact window they observed, so a `Launching`
+    /// issue (no window yet) must agree that there is none.
+    fn windows_agree(self, requested: Option<&str>, live: Option<&str>) -> bool {
+        match self {
+            Self::Exact => match (requested, live) {
+                (Some(requested), Some(live)) => issue_monitor_window_ids_match(live, requested),
+                (None, None) => true,
+                _ => false,
+            },
+            Self::Operator => true,
+        }
+    }
+
     fn claims_agree(self, requested: Option<&str>, live: Option<&str>) -> bool {
         match self {
             Self::Exact => requested == live,
@@ -2687,6 +2706,9 @@ pub enum IssueMonitorStopMismatch {
     NotRunning,
     ClaimMismatch,
     DeliveryMismatch,
+    /// Runtime exact settlement only: the observed window is not the one the
+    /// launch holds. Operator stop / failover never refuse over the window
+    /// (SPEC #3590 FR-005).
     WindowMismatch,
 }
 
@@ -3107,28 +3129,63 @@ fn provider_quota_reverify_due(
 /// Issue #4366 AC-4: the holds that gate launch admission at `now` — every
 /// hold except those due a re-verification launch, which is what admits that
 /// one launch.
+///
+/// Issue #4636 AC-1: a due re-verification only takes a launch away from a
+/// free candidate in `pool_providers` when `reported_healthy` says the usage
+/// poller contradicts the hold (#4366 AC-5). Otherwise a provider that is
+/// still exhausted would burn a real Issue's launch every interval while the
+/// pool has a provider that can run it.
 fn provider_quota_admission_holds(
     holds: &BTreeMap<String, String>,
     evidence: &BTreeMap<String, IssueMonitorProviderQuotaHoldEvidence>,
+    pool_providers: &[String],
     now: chrono::DateTime<chrono::Utc>,
+    reported_healthy: impl Fn(&str) -> bool,
 ) -> BTreeMap<String, String> {
+    let another_candidate_is_free = |held: &str| {
+        pool_providers
+            .iter()
+            .any(|provider| provider != held && hold_reset_after(holds, provider, now).is_none())
+    };
     holds
         .iter()
-        .filter(|(provider, _)| !provider_quota_reverify_due(evidence.get(*provider), now))
+        .filter(|(provider, _)| {
+            !(provider_quota_reverify_due(evidence.get(*provider), now)
+                && (!another_candidate_is_free(provider) || reported_healthy(provider)))
+        })
         .map(|(provider, reset_at)| (provider.clone(), reset_at.clone()))
         .collect()
+}
+
+fn launch_pool_providers(pool: &[IssueMonitorLaunchProfile]) -> Vec<String> {
+    let mut providers = Vec::new();
+    for profile in pool {
+        if let Some(provider) = normalize_issue_monitor_provider(&profile.agent_id) {
+            if !providers.contains(&provider) {
+                providers.push(provider);
+            }
+        }
+    }
+    providers
 }
 
 impl IssueMonitorPrefs {
     /// Issue #4366 AC-4: the provider holds a launch choice honors at `now`.
     /// A held provider due its re-verification is left out, so the choice can
-    /// pick it for that one launch.
-    pub fn launch_admission_provider_quota_holds(&self, now: &str) -> BTreeMap<String, String> {
+    /// pick it for that one launch — unless another candidate is free and the
+    /// poller does not report it `reported_healthy` (Issue #4636 AC-1).
+    pub fn launch_admission_provider_quota_holds(
+        &self,
+        now: &str,
+        reported_healthy: impl Fn(&str) -> bool,
+    ) -> BTreeMap<String, String> {
         match parse_rfc3339_utc(now) {
             Some(now) => provider_quota_admission_holds(
                 &self.provider_quota_holds,
                 &self.provider_quota_hold_evidence,
+                &launch_pool_providers(&self.launch_profile_pool()),
                 now,
+                reported_healthy,
             ),
             None => self.provider_quota_holds.clone(),
         }
@@ -9213,6 +9270,7 @@ impl IssueMonitorState {
     }
 
     /// Issue #4366 AC-4: the provider holds that gate admission at `now`.
+    /// The daemon has no usage poller, so no hold is reported healthy here.
     fn admission_provider_quota_holds(
         &self,
         now: chrono::DateTime<chrono::Utc>,
@@ -9220,7 +9278,9 @@ impl IssueMonitorState {
         provider_quota_admission_holds(
             &self.provider_quota_holds,
             &self.provider_quota_hold_evidence,
+            &self.saved_launch_providers(),
             now,
+            |_| false,
         )
     }
 
@@ -10376,15 +10436,7 @@ impl IssueMonitorState {
     /// SPEC #3914 FR-008: every distinct provider in the candidate pool, in
     /// pool order.
     fn saved_launch_providers(&self) -> Vec<String> {
-        let mut providers = Vec::new();
-        for profile in &self.launch_profiles {
-            if let Some(provider) = normalize_issue_monitor_provider(&profile.agent_id) {
-                if !providers.contains(&provider) {
-                    providers.push(provider);
-                }
-            }
-        }
-        providers
+        launch_pool_providers(&self.launch_profiles)
     }
 
     /// SPEC #3914 FR-008: the queue-wide hold. Only when every provider in
@@ -10951,6 +11003,22 @@ impl IssueMonitorState {
     fn agent_blackout_at(&self, now: &str) -> Option<String> {
         if !self.config.enabled {
             return None;
+        }
+        // Issue #4636 AC-2: a pool whose every candidate is held launches
+        // nothing by design, which is still a stopped fleet for its reader.
+        // Say so the moment it happens instead of leaving zero agents
+        // unexplained.
+        if let Some(hold) = self
+            .provider_quota_hold_at(now)
+            .filter(|_| !self.queue.is_empty())
+        {
+            return Some(format!(
+                "No implementation agent can launch: every launch candidate provider is held; \
+                 {} Issue(s) wait until {} ({} is released first)",
+                self.queue.len(),
+                hold.reset_at,
+                hold.provider,
+            ));
         }
         let since = self.agent_blackout_since.as_deref()?;
         let elapsed_secs = u64::try_from(rfc3339_elapsed_secs(since, now)?).ok()?;
@@ -14388,7 +14456,8 @@ impl IssueMonitorState {
         // Issue #4366 AC-2: a refused launch holds the provider only once
         // enough consecutive launches were refused; until then the Issue is
         // retried after an exponential backoff.
-        let (floor, reason, retry_hold_provider) = match provider.as_deref() {
+        let (floor, reason, retry_hold_provider): (Option<String>, _, _) = match provider.as_deref()
+        {
             Some(held) => match self.record_provider_quota_failure(
                 held,
                 issue_number,
@@ -14402,13 +14471,21 @@ impl IssueMonitorState {
                         reason.as_deref().unwrap_or("provider usage limit reached"),
                         provider_quota_required_failures(),
                     );
-                    (retry_at, Some(reason), None)
+                    (Some(retry_at), Some(reason), None)
                 }
+                // Issue #4636 AC-7 / AC-8: the hold is the provider's, not the
+                // Issue's. The Issue waits only while every candidate is held,
+                // and then until the earliest candidate is released.
                 ProviderQuotaFailureOutcome::Held { reset_at } => {
-                    (reset_at, reason, provider.clone())
+                    let floor = if self.saved_launch_providers().is_empty() {
+                        Some(reset_at)
+                    } else {
+                        self.provider_quota_hold_at(now).map(|hold| hold.reset_at)
+                    };
+                    (floor, reason, provider.clone())
                 }
             },
-            None => (candidate_deadline, reason, None),
+            None => (Some(candidate_deadline), reason, None),
         };
         // SPEC #3914 FR-008: prepared claims are only cancelled when the whole
         // pool is now held; another candidate can still honor them.
@@ -14419,7 +14496,7 @@ impl IssueMonitorState {
             self.compensate_uncommitted_provider_claims();
         }
         let record = self.autonomous_record_mut(issue_number);
-        record.retry_not_before = Some(floor);
+        record.retry_not_before = floor;
         record.retry_hold_reason = reason;
         record.retry_hold_provider = retry_hold_provider;
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
@@ -14807,12 +14884,8 @@ impl IssueMonitorState {
             return Err(IssueMonitorStopMismatch::DeliveryMismatch);
         }
         let live_window = self.launched_window_id(issue_number);
-        match (target.window_id.as_deref(), live_window.as_deref()) {
-            (Some(requested), Some(live)) if issue_monitor_window_ids_match(live, requested) => {}
-            // A `Launching` issue has no window yet, so both sides must agree
-            // that there is none.
-            (None, None) => {}
-            _ => return Err(IssueMonitorStopMismatch::WindowMismatch),
+        if !identity_match.windows_agree(target.window_id.as_deref(), live_window.as_deref()) {
+            return Err(IssueMonitorStopMismatch::WindowMismatch);
         }
         Ok(live_window)
     }
@@ -21826,20 +21899,6 @@ mod tests {
             ),
             (
                 IssueMonitorStopTarget {
-                    window_id: Some("tab-1::agent-2".to_string()),
-                    ..good.clone()
-                },
-                IssueMonitorStopMismatch::WindowMismatch,
-            ),
-            (
-                IssueMonitorStopTarget {
-                    window_id: None,
-                    ..good.clone()
-                },
-                IssueMonitorStopMismatch::WindowMismatch,
-            ),
-            (
-                IssueMonitorStopTarget {
                     delivery_id: Some("stale-delivery".to_string()),
                     ..good.clone()
                 },
@@ -21869,6 +21928,42 @@ mod tests {
                 Some("tab-1::agent-1"),
                 "a rejected stop must not detach the window"
             );
+        }
+    }
+
+    /// SPEC #3590 FR-005 / Issue #3578: an operator stop is not refused over the
+    /// window. The PM supervises from its own window and usually quotes none;
+    /// the pane it would name may already be gone. Omitting the window or
+    /// naming another one releases the live launch and returns the window the
+    /// monitor actually holds, so the caller closes the right pane.
+    #[test]
+    fn operator_stop_and_failover_release_the_launch_whatever_window_is_named() {
+        for requested in [None, Some("tab-1::agent-gone".to_string())] {
+            let base = launched_monitor(42, "tab-1::agent-1");
+            let target = IssueMonitorStopTarget {
+                window_id: requested.clone(),
+                ..stop_target(&base, 42)
+            };
+
+            let mut stopped = base.clone();
+            assert_eq!(
+                stopped.stop_only(&target, "stalled", "2026-09-23T00:00:00Z"),
+                IssueMonitorStopOutcome::Stopped {
+                    window_id: "tab-1::agent-1".to_string()
+                },
+                "stop naming {requested:?} must release the launch"
+            );
+            assert_eq!(stopped.active_count(), 0);
+
+            let mut failed_over = base.clone();
+            assert_eq!(
+                failed_over.failover_restart(&target, "stalled", "2026-09-23T00:00:00Z"),
+                IssueMonitorFailoverOutcome::Restarting {
+                    stopped_window_id: Some("tab-1::agent-1".to_string())
+                },
+                "failover naming {requested:?} must release the launch"
+            );
+            assert_eq!(failed_over.active_count(), 0);
         }
     }
 
@@ -22268,22 +22363,6 @@ mod tests {
             Some("rate limit"),
             "the stop must be durable and diagnosable after a reload"
         );
-
-        // And a mismatch must still fail closed with no inbox to lean on.
-        let mut fresh =
-            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launched.prefs());
-        assert_eq!(
-            fresh.stop_only(
-                &IssueMonitorStopTarget {
-                    window_id: Some("tab-1::agent-2".to_string()),
-                    ..target.clone()
-                },
-                "rate limit",
-                "2026-08-07T00:00:00Z"
-            ),
-            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::WindowMismatch)
-        );
-        assert_eq!(fresh.active_count(), 1);
     }
 
     /// SPEC-3431 FR-033 / T-087c: the running daemon must converge on a stop
@@ -22860,13 +22939,6 @@ mod tests {
         };
 
         for (target, expected) in [
-            (
-                IssueMonitorStopTarget {
-                    window_id: Some("tab-1::agent-2".to_string()),
-                    ..good.clone()
-                },
-                IssueMonitorStopMismatch::WindowMismatch,
-            ),
             (
                 IssueMonitorStopTarget {
                     claim_id: Some("foreign".to_string()),

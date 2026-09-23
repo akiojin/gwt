@@ -3926,6 +3926,8 @@ fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkP
             let commit = runtime.handle_active_work_projection_prepared(*completion);
             if commit.prepared_dispatch.is_some() {
                 return runtime
+                    .project_state_for_tab(&tab_id)
+                    .unwrap()
                     .active_work_projection_cache
                     .borrow()
                     .get(&tab_id)
@@ -4284,19 +4286,12 @@ fn sample_runtime_with_events(
         sessions_dir,
         launch_wizard_cache,
 
-        pending_launch_wizard_materializations: HashMap::new(),
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
         project_open_started: None,
-        pending_pm_launches: HashMap::new(),
-        pending_pm_closes: HashMap::new(),
-        pm_sessions: HashMap::new(),
-        pm_wake_seen: HashMap::new(),
-        pending_pm_wakes: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
         deferred_issue_monitor_launches: None,
         startup_worktree_inventories: HashMap::new(),
-        pending_pm_worktree_preparations: HashSet::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
@@ -4307,7 +4302,6 @@ fn sample_runtime_with_events(
         // CI credential state never decides a launch; auth-preflight tests
         // install a real or explicit probe themselves.
         issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
-        issue_monitor_scheduled_scans_in_flight: HashSet::new(),
         // Issue #3633: tests must never leave real daemons behind on the
         // developer's machine, but the ensure pass still has to be observable
         // so the wiring cannot silently disappear again.
@@ -4329,7 +4323,6 @@ fn sample_runtime_with_events(
         terminal_close_candidates: HashMap::new(),
         terminal_convergence_scan_in_flight: false,
         terminal_close_grace: Duration::from_secs(60),
-        work_merged_branches: HashMap::new(),
         work_known_branch_refs: HashMap::new(),
         work_dirty_branches: HashMap::new(),
         work_live_process_branches: HashMap::new(),
@@ -4340,11 +4333,6 @@ fn sample_runtime_with_events(
         session_ledger_cache: Arc::new(Mutex::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         )),
-        work_items_cache: Arc::new(Mutex::new(
-            gwt_core::workspace_projection::WorkItemsCache::new(),
-        )),
-        active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
-        active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
         active_work_projection_refresh: std::cell::RefCell::new(
             super::ActiveWorkProjectionRefreshBroker::default(),
         ),
@@ -7693,6 +7681,9 @@ fn apply_recorded_window_close_finalized(
             .expect("window close finalizer completion");
         recorded.remove(position)
     };
+    let Some(event) = runtime.accept_project_completion(event) else {
+        return Vec::new();
+    };
     let UserEvent::WindowCloseFinalized {
         window_id,
         project_root,
@@ -10242,6 +10233,8 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         .take()
         .expect("materializing wizard remains visible");
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pending_launch_wizard_materializations
         .remove(&wizard_id)
         .expect("consume exact pending materialization snapshot");
@@ -12411,6 +12404,8 @@ fn app_runtime_authoritative_empty_projection_replaces_stale_replay_cache() {
         .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .is_some());
     assert!(runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_cache
         .borrow()
         .contains_key("tab-1"));
@@ -12422,6 +12417,8 @@ fn app_runtime_authoritative_empty_projection_replaces_stale_replay_cache() {
     assert!(empty.active_works.is_empty());
     assert!(
         runtime
+            .project_state_for_tab("tab-1")
+            .unwrap()
             .active_work_projection_payload_cache
             .borrow()
             .contains_key("tab-1"),
@@ -55978,6 +55975,8 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         }
     }
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_cache
         .borrow_mut()
         .insert("tab-1".to_string(), cached_view);
@@ -56037,6 +56036,8 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
             && agent.sessions.is_empty()
     }));
     assert!(runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_cache
         .borrow()
         .get("tab-1")
@@ -56085,7 +56086,12 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, window_id) =
         apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
-    assert!(runtime.active_work_projection_cache.borrow().is_empty());
+    assert!(runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow()
+        .is_empty());
 
     let mut projection = apply_title_sync_sample_projection(
         &repo,
@@ -56130,6 +56136,8 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
         "cold cache must not fall back to stale active_agent_sessions membership"
     );
     assert!(runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_cache
         .borrow()
         .contains_key("tab-1"));
@@ -56159,10 +56167,14 @@ fn cached_close_preserves_blocked_peer_and_active_lifecycle() {
     projection.agents.push(blocked);
     let view = super::workspace_views::active_work_projection_from_saved(projection);
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_cache
         .borrow_mut()
         .insert("tab-1".to_string(), view);
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab-1".to_string(), Arc::from("pre-close-payload"));
@@ -56171,13 +56183,19 @@ fn cached_close_preserves_blocked_peer_and_active_lifecycle() {
 
     assert!(
         !runtime
+            .project_state_for_tab("tab-1")
+            .unwrap()
             .active_work_projection_payload_cache
             .borrow()
             .contains_key("tab-1"),
         "a cache-only lifecycle patch must invalidate the older wire payload"
     );
 
-    let cache = runtime.active_work_projection_cache.borrow();
+    let cache = runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow();
     let view = cache.get("tab-1").expect("cached projection");
     assert_eq!(view.active_agents, 0);
     assert_eq!(view.blocked_agents, 1);
@@ -57314,7 +57332,12 @@ fn active_work_projection_build_reads_the_work_items_cache_without_deep_copying(
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     let (runtime, _events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
-    let work_items_cache = Arc::clone(&runtime.work_items_cache);
+    let work_items_cache = Arc::clone(
+        &runtime
+            .project_state_for_tab("tab-1")
+            .unwrap()
+            .work_items_cache,
+    );
 
     let job = runtime
         .active_work_projection_refresh_job(&repo)
@@ -65039,7 +65062,11 @@ fn pm_ensure_focuses_live_pm_instead_of_spawning() {
         !events.is_empty(),
         "ensure focuses the live PM (focus/broadcast events)"
     );
-    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
 }
 
 /// Issue #3607 fixture: one repository whose stores split.
@@ -65160,7 +65187,11 @@ fn pm_ensure_refuses_a_second_pm_for_the_same_repository_across_split_stores() {
         "the second store must not spawn a PM pane for a repository that already has one"
     );
     assert!(
-        runtime.pending_pm_launches.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "no PM launch may be queued for the second store"
     );
     assert!(
@@ -65234,7 +65265,11 @@ fn pm_ensure_still_spawns_when_the_other_stores_pm_is_not_live() {
     drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert_eq!(
-        runtime.pending_pm_launches.len(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
         1,
         "a dead PM elsewhere must not leave the repository without one"
     );
@@ -65579,7 +65614,11 @@ fn pm_ensure_respects_auto_start_opt_out() {
         .persisted()
         .windows
         .is_empty());
-    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
 }
 
 #[test]
@@ -65659,11 +65698,17 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
     assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
     assert_eq!(
-        runtime.pending_pm_launches.len(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
         1,
         "pending PM marker tracks the launch for registration at completion"
     );
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
         .pending_pm_launches
         .values()
         .all(|project_root| project_root == &repo));
@@ -65800,7 +65845,11 @@ fn pm_ensure_prepares_the_worktree_off_the_event_loop() {
         "the PM pane must not spawn before the worktree preparation reports back"
     );
     assert!(
-        runtime.pending_pm_launches.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "no launch may be tracked before the preparation reports back"
     );
     assert!(
@@ -65826,7 +65875,11 @@ fn pm_ensure_prepares_the_worktree_off_the_event_loop() {
     assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
     assert_eq!(
-        runtime.pending_pm_launches.len(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
         1,
         "the prepared spawn tracks its launch for registration at completion"
     );
@@ -65837,7 +65890,11 @@ fn pm_ensure_prepares_the_worktree_off_the_event_loop() {
         pm_worktree.display()
     );
     assert!(
-        runtime.pending_pm_worktree_preparations.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .is_empty(),
         "consuming the completion releases the in-flight gate"
     );
 }
@@ -65929,7 +65986,11 @@ fn pm_ensure_refuses_a_second_in_flight_worktree_preparation() {
         "only one PM worktree preparation may be in flight per repository"
     );
     assert!(
-        runtime.pending_pm_worktree_preparations.contains(&repo),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .contains(&repo),
         "the in-flight gate names the repository being prepared"
     );
 }
@@ -65950,6 +66011,8 @@ fn failed_pm_worktree_preparation_is_reported_and_spawns_nothing() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pending_pm_worktree_preparations
         .insert(repo.clone());
 
@@ -65971,9 +66034,17 @@ fn failed_pm_worktree_preparation_is_reported_and_spawns_nothing() {
             .is_empty(),
         "a failed preparation must not leave a pane behind"
     );
-    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
     assert!(
-        !runtime.pending_pm_worktree_preparations.contains(&repo),
+        !runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .contains(&repo),
         "a failed preparation releases the gate so a later ensure can retry"
     );
     let (level, message) = events
@@ -67366,7 +67437,11 @@ fn pm_ensure_focuses_live_registered_pm_without_refreshing_its_worktree() {
         "focusing a live registered PM must not refresh its running worktree"
     );
     assert!(
-        runtime.pending_pm_launches.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "focusing a live PM must not schedule another launch"
     );
 }
@@ -67866,7 +67941,11 @@ fn pm_ensure_fresh_spawn_rejects_symlinked_scratch_dir() {
             .is_empty(),
         "a symlinked scratch root must stop PM spawn"
     );
-    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
     assert!(fs::symlink_metadata(&scratch)
         .expect("scratch symlink metadata")
         .file_type()
@@ -67937,7 +68016,11 @@ fn pm_ensure_fresh_spawn_rejects_symlinked_project_state_dir() {
             .is_empty(),
         "a symlinked project-state directory must stop PM spawn"
     );
-    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
     assert!(fs::symlink_metadata(&project_state)
         .expect("project-state symlink metadata")
         .file_type()
@@ -68418,7 +68501,11 @@ fn pm_ensure_resumes_stale_registration_conversation() {
     assert_eq!(windows.len(), 1, "resume spawns exactly one PM pane");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
     assert_eq!(
-        runtime.pending_pm_launches.len(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
         1,
         "resumed launch still registers the successor session at completion"
     );
@@ -68463,7 +68550,11 @@ fn pm_ensure_resume_inside_the_pm_worktree_still_tracks_its_launch() {
     runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
 
     assert!(
-        runtime.pending_pm_launches.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "the resume waits for the off-loop worktree preparation"
     );
 
@@ -68479,7 +68570,11 @@ fn pm_ensure_resume_inside_the_pm_worktree_still_tracks_its_launch() {
         .clone();
     assert_eq!(windows.len(), 1, "the resume spawns exactly one PM pane");
     assert_eq!(
-        runtime.pending_pm_launches.len(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
         1,
         "the resumed launch must still register the successor session at completion"
     );
@@ -68528,7 +68623,14 @@ fn pm_bootstrap_ensures_pm_for_open_git_tabs() {
         .clone();
     assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
-    assert_eq!(runtime.pending_pm_launches.len(), 1);
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
+        1
+    );
     assert!(runtime.pending_startup_pm_tabs.is_empty());
 }
 
@@ -68559,7 +68661,11 @@ fn pm_bootstrap_respects_opt_out() {
         .persisted()
         .windows
         .is_empty());
-    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
 }
 
 #[test]
@@ -68593,7 +68699,11 @@ fn pm_open_project_skips_migration_pending_repo() {
         .windows
         .iter()
         .all(|window| window.preset != WindowPreset::Agent));
-    assert!(runtime.pending_pm_launches.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_launches
+        .is_empty());
 }
 
 #[test]
@@ -68745,8 +68855,14 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
     fs::create_dir_all(&repo).expect("repo");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.pending_pm_closes.insert(repo.clone(), 2);
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
+        .pending_pm_closes
+        .insert(repo.clone(), 2);
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pm_sessions
         .insert(repo.clone(), "pm-successor".to_string());
     let stale_status = BackendEvent::IssueMonitorToast {
@@ -68765,9 +68881,21 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
         super::WindowCloseMonitorResult::Noop,
     );
     assert!(first.is_empty(), "a stale PM completion must not broadcast");
-    assert_eq!(runtime.pending_pm_closes.get(&repo), Some(&1));
     assert_eq!(
-        runtime.pm_sessions.get(&repo).map(String::as_str),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_closes
+            .get(&repo),
+        Some(&1)
+    );
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pm_sessions
+            .get(&repo)
+            .map(String::as_str),
         Some("pm-successor")
     );
 
@@ -68780,7 +68908,11 @@ fn concurrent_pm_close_completions_keep_counted_fence_and_successor_cache() {
         None,
         super::WindowCloseMonitorResult::Noop,
     );
-    assert!(!runtime.pending_pm_closes.contains_key(&repo));
+    assert!(!runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_closes
+        .contains_key(&repo));
 }
 
 #[test]
@@ -68817,17 +68949,28 @@ fn non_pm_pane_close_does_not_count_the_pm_close_fence() {
         .insert(window_id.clone(), session);
     insert_test_pane_runtime(&mut runtime, &window_id);
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pm_sessions
         .insert(repo.clone(), "pm-session-live".to_string());
 
     runtime.close_window_events(&window_id);
 
     assert!(
-        runtime.pending_pm_closes.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_closes
+            .is_empty(),
         "a non-PM pane close must not fence PM ensure"
     );
     assert_eq!(
-        runtime.pm_sessions.get(&repo).map(String::as_str),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pm_sessions
+            .get(&repo)
+            .map(String::as_str),
         Some("pm-session-live"),
         "the registered PM session survives a worker pane close"
     );
@@ -68872,18 +69015,28 @@ fn pm_pane_close_counts_the_pm_close_fence() {
         .insert(window_id.clone(), session);
     insert_test_pane_runtime(&mut runtime, &window_id);
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pm_sessions
         .insert(repo.clone(), "pm-session-live".to_string());
 
     runtime.close_window_events(&window_id);
 
     assert_eq!(
-        runtime.pending_pm_closes.get(&repo),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_closes
+            .get(&repo),
         Some(&1),
         "closing the registered PM session raises the ensure fence"
     );
     assert!(
-        !runtime.pm_sessions.contains_key(&repo),
+        !runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pm_sessions
+            .contains_key(&repo),
         "the closing PM session leaves the in-memory registration cache"
     );
     let finalizer = finalizers
@@ -68902,7 +69055,11 @@ fn pm_pane_close_counts_the_pm_close_fence() {
         super::WindowCloseMonitorResult::Noop,
     );
     assert!(
-        !runtime.pending_pm_closes.contains_key(&repo),
+        !runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_closes
+            .contains_key(&repo),
         "the finalized PM close releases the fence"
     );
 }
@@ -68963,7 +69120,11 @@ fn pm_crash_records_backoff_and_respawns() {
         "crash is recorded on the backoff ladder"
     );
     assert_eq!(
-        runtime.pending_pm_launches.len(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
         1,
         "immediate respawn resumes the PM conversation"
     );
@@ -69238,6 +69399,8 @@ fn workspace_view_marks_only_the_registered_pm_window() {
     );
 
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pm_sessions
         .insert(repo.clone(), "pm-session".to_string());
 
@@ -69384,7 +69547,14 @@ fn open_pm_agent_event_routes_to_the_active_tab_ensure() {
         .clone();
     assert_eq!(windows.len(), 1, "the launcher started the PM pane");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
-    assert_eq!(runtime.pending_pm_launches.len(), 1);
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
+        1
+    );
 }
 
 /// SPEC-3431 FR-026: the auto-start opt-out governs the NEXT project open, not
@@ -69609,7 +69779,11 @@ fn set_pm_loop_interval_accepts_minimum_and_preserves_live_pm() {
         .expect("a committed write must broadcast pm_status");
     assert_eq!(status, (10, true));
     assert!(
-        runtime.pending_pm_launches.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "write must not restart PM"
     );
     assert_eq!(
@@ -69800,7 +69974,11 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
     assert_eq!(windows.len(), 1, "exactly one PM pane after the restart");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
     assert_eq!(
-        runtime.pending_pm_launches.len(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
         1,
         "the respawn registers the successor session at launch completion"
     );
@@ -69808,6 +69986,8 @@ fn restart_pm_agent_keeps_the_worktree_and_respawns() {
     // behind: it is the window the pending PM launch is tracking.
     assert!(
         runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
             .pending_pm_launches
             .contains_key(&crate::runtime_support::combined_window_id(
                 "tab-1",
@@ -70240,7 +70420,11 @@ fn pm_wake_next_decision_reloads_updated_loop_interval() {
         .expect("next wake decision must reload the ten-second interval");
     assert_eq!(decision.window_id, pm_window_id);
     assert!(
-        runtime.pending_pm_launches.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "wake must not restart PM"
     );
     assert_eq!(
@@ -70350,7 +70534,11 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
 
     let automatic = runtime.ensure_pm_agent_for_tab("tab-1", super::pm::PmEnsureTrigger::Automatic);
     assert!(
-        runtime.pending_pm_launches.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "the automatic ladder must keep honouring the backoff floor"
     );
     assert!(
@@ -70540,7 +70728,11 @@ fn pm_spawn_prepares_the_worktree_for_a_bare_layout_project() {
     drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
     assert!(
-        !runtime.pending_pm_launches.is_empty(),
+        !runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .is_empty(),
         "the PM spawn must survive the bare layout instead of dying on \
          worktree preparation"
     );
@@ -70740,6 +70932,8 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
         "prefs reconstruction has no ephemeral queue"
     );
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(monitor_prefs_path.clone());
     let events = runtime.issue_monitor_scheduled_scan_complete_events(
@@ -70805,6 +70999,8 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
     )
     .expect("quiet loop");
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
@@ -71293,9 +71489,18 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
 
     let _ = runtime.terminal_input_events(&pm_window_id, "実行されてい");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
-    assert_eq!(runtime.pending_pm_wakes.len(), 1);
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_wakes
+            .len(),
+        1
+    );
     assert!(
         runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
             .pending_pm_wakes
             .get(&pm_window_id)
             .is_some_and(|decision| decision.prompt.contains("Scheduled supervision tick")),
@@ -71314,11 +71519,23 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
     )
     .expect("re-quiet the loop");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:05:00Z");
-    assert_eq!(runtime.pending_pm_wakes.len(), 1, "ticks must coalesce");
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_wakes
+            .len(),
+        1,
+        "ticks must coalesce"
+    );
 
     let _ = runtime.terminal_input_events(&pm_window_id, "ますか？\r");
     assert!(
-        runtime.pending_pm_wakes.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_wakes
+            .is_empty(),
         "submit must deliver and clear the held tick"
     );
     let pty = runtime
@@ -71355,11 +71572,22 @@ fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
 
     let _ = runtime.terminal_input_events(&pm_window_id, "途中の入力");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
-    assert_eq!(runtime.pending_pm_wakes.len(), 1);
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_wakes
+            .len(),
+        1
+    );
 
     let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
     assert!(
-        runtime.pending_pm_wakes.is_empty(),
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_wakes
+            .is_empty(),
         "Ctrl+C must deliver the held tick"
     );
 }
@@ -71584,7 +71812,13 @@ fn scheduled_tick_is_single_flight_per_canonical_project_scope() {
     .expect("seed enabled prefs");
     let tabs = vec![
         sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]),
-        sample_project_tab("tab-2", "Repo duplicate", repo, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "tab-2",
+            "Repo duplicate",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
@@ -71605,7 +71839,14 @@ fn scheduled_tick_is_single_flight_per_canonical_project_scope() {
         1,
         "duplicate tabs and duplicate ticks enqueue one worker"
     );
-    assert_eq!(runtime.issue_monitor_scheduled_scans_in_flight.len(), 1);
+    assert_eq!(
+        runtime
+            .project_state_for_root(&repo)
+            .unwrap()
+            .issue_monitor_scheduled_scans_in_flight
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -71694,10 +71935,15 @@ fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overl
         "one exact project worker is queued"
     );
     assert_eq!(
-        runtime.issue_monitor_scheduled_scans_in_flight,
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .issue_monitor_scheduled_scans_in_flight,
         HashSet::from([prefs_path])
     );
     assert!(!runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .contains(&foreign_prefs_path));
 
@@ -71841,7 +72087,11 @@ fn authenticated_scan_now_reports_worker_failure_and_releases_single_flight() {
             reason: Some(reason),
         } if reason == "scan_worker_unavailable"
     )));
-    assert!(runtime.issue_monitor_scheduled_scans_in_flight.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .issue_monitor_scheduled_scans_in_flight
+        .is_empty());
 }
 
 #[test]
@@ -71870,7 +72120,11 @@ fn scheduled_tick_spawn_failure_is_observable_and_releases_single_flight() {
 
     let events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-10T01:00:00Z");
 
-    assert!(runtime.issue_monitor_scheduled_scans_in_flight.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .issue_monitor_scheduled_scans_in_flight
+        .is_empty());
     assert!(events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::IssueMonitorToast { level, message, .. }
@@ -71913,6 +72167,8 @@ fn scheduled_scan_completion_rebases_ephemeral_queue_on_latest_controls() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
@@ -71965,6 +72221,8 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
     assert!(runtime
@@ -71980,6 +72238,8 @@ fn scheduled_scan_completion_stays_silent_after_disable_or_project_close() {
 
     gwt::save_issue_monitor_prefs(&prefs_path, &enabled).expect("re-enable");
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
     runtime.tabs.clear();
@@ -72554,6 +72814,8 @@ fn scheduled_scan_defer_still_rearms_periodic_wake_for_durable_standing_work() {
     )
     .expect("quiet loop");
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
@@ -72611,6 +72873,8 @@ fn scheduled_scan_reload_error_rearms_periodic_wake_from_the_worker_snapshot() {
     .expect("quiet loop");
     fs::write(&prefs_path, b"{").expect("corrupt prefs after worker completion");
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
 
@@ -73547,6 +73811,8 @@ fn issue_3777_tab_change_reuses_background_serialized_projection() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab-1".to_string(), payload.clone());
@@ -73587,6 +73853,8 @@ fn issue_3777_frontend_ready_reuses_background_serialized_projection() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let payload: Arc<str> = Arc::from("x".repeat(4 * 1024 * 1024));
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab-1".to_string(), payload.clone());
@@ -73622,15 +73890,22 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let stale_payload: Arc<str> = Arc::from("stale-before-watcher-patch");
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab-1".to_string(), stale_payload);
-    runtime.active_work_projection_cache.borrow_mut().insert(
-        "tab-1".to_string(),
-        active_work_projection_from_saved(
-            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
-        ),
-    );
+    runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow_mut()
+        .insert(
+            "tab-1".to_string(),
+            active_work_projection_from_saved(
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+            ),
+        );
     let mut fresh = gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
     fresh.title = "Fresh watcher state".to_string();
 
@@ -73638,6 +73913,8 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
 
     assert!(
         !runtime
+            .project_state_for_tab("tab-1")
+            .unwrap()
             .active_work_projection_payload_cache
             .borrow()
             .contains_key("tab-1"),
@@ -73738,17 +74015,26 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
         sample_runtime_with_events(temp.path(), tabs, Some("tab-2"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    runtime.active_work_projection_cache.borrow_mut().insert(
-        "tab-1".to_string(),
-        active_work_projection_from_saved(
-            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
-        ),
-    );
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow_mut()
+        .insert(
+            "tab-1".to_string(),
+            active_work_projection_from_saved(
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+            ),
+        );
+    runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab-1".to_string(), Arc::from("closed-project-payload"));
     runtime
+        .project_state_for_tab("tab-2")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab-2".to_string(), Arc::from("active-project-payload"));
@@ -73761,6 +74047,8 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
     )
     .expect("seed cached Work projection");
     let cached_work_items = runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .work_items_cache
         .lock()
         .expect("Work cache")
@@ -73773,24 +74061,28 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
     runtime.refresh_active_work_projection_for_project_root(&repo);
     runtime.refresh_active_work_projection_for_project_root(&repo);
     assert_eq!(tasks.lock().expect("queued tasks").len(), 1);
-    let cache_owner = runtime.work_items_cache.clone();
+    let cache_owner = runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .work_items_cache
+        .clone();
     let cache_lease = cache_owner.lock().expect("hold Work cache lease");
 
     runtime.close_project_tab_events("tab-1");
 
-    assert!(!runtime
-        .active_work_projection_cache
-        .borrow()
-        .contains_key("tab-1"));
-    assert!(!runtime
+    assert!(runtime.project_state_for_tab("tab-1").is_none());
+    assert!(runtime
+        .project_state_for_tab("tab-2")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow()
-        .contains_key("tab-1"));
+        .contains_key("tab-2"));
     assert!(
         retained_work_items.upgrade().is_some(),
-        "a busy Work cache turns close-time eviction into a pending request"
+        "an outstanding worker retains its own project cache until it completes"
     );
     drop(cache_lease);
+    drop(cache_owner);
 
     tasks.lock().expect("queued tasks").remove(0)();
     let completion_index = recorded_events
@@ -73817,7 +74109,7 @@ fn issue_3777_close_project_tab_discards_cached_and_pending_projection_work() {
     assert!(commit.prepared_dispatch.is_none());
     assert!(
         retained_work_items.upgrade().is_none(),
-        "worker completion drains the pending close-time Work cache eviction"
+        "worker completion releases the closed project's final cache owner"
     );
     assert!(
         tasks.lock().expect("queued tasks").is_empty(),
@@ -73878,6 +74170,8 @@ fn issue_3777_first_authoritative_projection_preserves_legacy_only_work() {
     let committed = runtime.handle_active_work_projection_prepared(*completion);
     assert!(committed.prepared_dispatch.is_some());
     assert!(runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_cache
         .borrow()
         .get("tab-1")
@@ -73966,11 +74260,15 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
         unassigned_agents: Vec::new(),
     };
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_cache
         .borrow_mut()
         .insert("tab-1".to_string(), last_good);
     let last_good_payload: Arc<str> = Arc::from("last-good-payload");
     runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab-1".to_string(), last_good_payload.clone());
@@ -74002,6 +74300,8 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
     );
     assert_eq!(
         runtime
+            .project_state_for_tab("tab-1")
+            .unwrap()
             .active_work_projection_cache
             .borrow()
             .get("tab-1")
@@ -74011,6 +74311,8 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
     );
     assert!(Arc::ptr_eq(
         runtime
+            .project_state_for_tab("tab-1")
+            .unwrap()
             .active_work_projection_payload_cache
             .borrow()
             .get("tab-1")
@@ -77572,7 +77874,10 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
     seed_pm_session_escalation(&repo, &subject, "PENDING-SUBJECT");
     runtime.terminal_input_events(&pm_window_id, "draft");
     runtime.pm_periodic_wake_events_at(&repo, "2026-08-18T01:00:00Z");
-    assert!(runtime.pending_pm_wakes[&pm_window_id]
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_wakes[&pm_window_id]
         .delivery_prompt()
         .contains("PENDING-SUBJECT"));
     subject.status = gwt_agent::AgentStatus::Stopped;
@@ -77580,13 +77885,20 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
         .save(&gwt_core::paths::gwt_sessions_dir())
         .expect("stop subject while held");
     assert!(
-        !runtime.pending_pm_wakes[&pm_window_id]
+        !runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_wakes[&pm_window_id]
             .delivery_prompt()
             .contains("PENDING-SUBJECT"),
         "a held wake must render current subjects at delivery time"
     );
     runtime.terminal_input_events(&pm_window_id, "\u{0003}");
-    assert!(runtime.pending_pm_wakes.is_empty());
+    assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
+        .pending_pm_wakes
+        .is_empty());
 }
 
 #[test]
@@ -77660,9 +77972,13 @@ fn reopened_project_releases_old_pm_and_scan_worker_gates() {
     let old_worker = proxy.for_project(context);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pending_pm_worktree_preparations
         .insert(project_root.clone());
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
     runtime
@@ -77672,15 +77988,23 @@ fn reopened_project_releases_old_pm_and_scan_worker_gates() {
         .generation += 1;
     runtime.refresh_project_state("tab-a");
     assert!(!runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
         .pending_pm_worktree_preparations
         .contains(&project_root));
     assert!(!runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .contains(&prefs_path));
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .pending_pm_worktree_preparations
         .insert(project_root.clone());
     runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .insert(prefs_path.clone());
     old_worker.send(UserEvent::IssueMonitorScheduledScanComplete {
@@ -77694,9 +78018,17 @@ fn reopened_project_releases_old_pm_and_scan_worker_gates() {
         .accept_project_completion(queued.lock().unwrap().pop().unwrap())
         .is_none());
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
         .pending_pm_worktree_preparations
         .contains(&project_root));
     assert!(runtime
+        .project_state(&runtime.test_context())
+        .unwrap()
         .issue_monitor_scheduled_scans_in_flight
         .contains(&prefs_path));
 }
+
+include!("pm_project_state_tests.rs");
+
+include!("project_owned_state_tests.rs");
