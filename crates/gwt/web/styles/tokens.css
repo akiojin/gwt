@@ -116,7 +116,7 @@
   /* Agent colors — SPEC-2133 semantic mapping, dark-tuned */
   --agent-claude: #fbbf24;
   --agent-codex: #22d3ee;
-  --agent-gemini: #e879f9;
+  --agent-hermes: #e879f9;
   --agent-opencode: #4ade80;
   --agent-copilot: #60a5fa;
   --agent-custom: #a1a8b3;
@@ -223,7 +223,7 @@
   /* Agent colors — dark-tuned chroma for bone background */
   --agent-claude: #92400e;
   --agent-codex: #155e75;
-  --agent-gemini: #86198f;
+  --agent-hermes: #86198f;
   --agent-opencode: #166534;
   --agent-copilot: #1e3a8a;
   --agent-custom: #4b5563;
@@ -316,7 +316,7 @@
 
     --agent-claude: Highlight;
     --agent-codex: Highlight;
-    --agent-gemini: Highlight;
+    --agent-hermes: Highlight;
     --agent-opencode: Highlight;
     --agent-copilot: Highlight;
     --agent-custom: GrayText;

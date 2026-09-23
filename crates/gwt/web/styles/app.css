@@ -11,7 +11,7 @@
 }
 
 [data-agent-color="magenta"] {
-  --current-agent: var(--agent-gemini);
+  --current-agent: var(--agent-hermes);
 }
 
 [data-agent-color="green"] {

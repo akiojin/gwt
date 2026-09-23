@@ -1322,7 +1322,7 @@ button.op-runtime-health-detail__process {
 
 [data-agent-state="idle"] {
   /* SPEC-2356 — idle state tints with the agent colour at 50% chroma so
-     observers can still identify the agent (claude/codex/gemini/...) even
+     observers can still identify the agent (claude/codex/hermes/...) even
      when nothing is happening. The pulse animation is suppressed; only a
      static rim remains. */
   --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 55%, var(--color-state-idle));

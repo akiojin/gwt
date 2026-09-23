@@ -639,7 +639,7 @@ fn refresh_managed_assets_for_an_agent_without_a_surface_still_heals_existing_ta
         .expect("create stale claude skill dir");
     std::fs::write(&stale_claude_skill, "stale").expect("seed stale claude skill");
 
-    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Gemini)
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Copilot)
         .expect("refresh assets for an agent without a managed surface");
 
     assert!(

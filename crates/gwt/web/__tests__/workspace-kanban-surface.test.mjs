@@ -1235,8 +1235,8 @@ test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2
   projection.active_works[0].works[0].agents = [
     {
       session_id: "custom-hyphen-session",
-      agent_id: "my-agent",
-      display_name: "my-agent",
+      agent_id: "gemini-cli",
+      display_name: "gemini-cli",
       updated_at: "2026-07-26T03:00:00Z",
       status_category: "idle",
       sessions: [{
@@ -1248,8 +1248,8 @@ test("Work detail preserves punctuation-distinct custom Agent identities (SPEC-2
     },
     {
       session_id: "custom-compact-session",
-      agent_id: "myagent",
-      display_name: "myagent",
+      agent_id: "gemini",
+      display_name: "gemini",
       updated_at: "2026-07-26T02:00:00Z",
       status_category: "idle",
       sessions: [{
