@@ -335,7 +335,13 @@ impl AppRuntime {
         client_id: ClientId,
         trace: UiTracePayload,
     ) -> Vec<OutboundEvent> {
-        let event = match save_ui_trace_to_log_dir(&self.log_dir, trace) {
+        let log_dir = self
+            .active_tab_id
+            .as_deref()
+            .and_then(|id| self.project_log_scope_for_tab(id))
+            .map(|scope| scope.log_dir())
+            .unwrap_or(&self.log_dir);
+        let event = match save_ui_trace_to_log_dir(log_dir, trace) {
             Ok(result) => BackendEvent::UiTraceSaved {
                 path: result.path.display().to_string(),
                 entries: result.entries,

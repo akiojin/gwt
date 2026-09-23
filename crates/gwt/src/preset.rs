@@ -733,6 +733,9 @@ mod tests {
             resolve_launch_spec_with(WindowPreset::Codex, &shell, |command| command == "codex")
                 .expect("codex preset should resolve");
         assert_eq!(result.command, "codex");
+        assert!(result
+            .args
+            .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
         assert!(
             result.args.iter().any(|arg| arg == "--no-alt-screen"),
             "Codex preset must launch with --no-alt-screen so inline scrollback survives \

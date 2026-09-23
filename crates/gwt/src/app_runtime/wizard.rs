@@ -2636,9 +2636,20 @@ impl AppRuntime {
             linked_issue_kind,
             previous_profiles,
         );
-        let initial_prompt = review_prompt
-            .clone()
-            .unwrap_or_else(|| gwt::issue_monitor_launch_prompt(linked_issue_kind, issue_number));
+        let initial_prompt = review_prompt.clone().unwrap_or_else(|| {
+            // Issue #4630: a launch that consumed an operator requeue carries
+            // the operator's reason, read from the exact durable delivery.
+            let requeue_reason = gwt::issue_monitor_launch_delivery_requeue_reason(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+                issue_number,
+                delivery_id.as_deref(),
+            );
+            gwt::issue_monitor_launch_prompt_with_requeue_reason(
+                linked_issue_kind,
+                issue_number,
+                requeue_reason.as_deref(),
+            )
+        });
         session
             .wizard
             .apply(gwt::LaunchWizardAction::SetInitialPrompt {

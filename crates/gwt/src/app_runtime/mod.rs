@@ -106,6 +106,9 @@ impl BlockingTaskSpawner {
     where
         F: FnOnce() + Send + 'static,
     {
+        // Capture ownership when work is enqueued, before another project can become active.
+        let span = tracing::trace_span!(target: "gwt_log_scope", parent: tracing::Span::current(), "blocking_task");
+        let task = move || span.in_scope(task);
         match self {
             Self::Tokio(handle) => {
                 drop(handle.spawn_blocking(task));
@@ -1223,6 +1226,8 @@ pub struct AppRuntime {
     pub(crate) recovery_center_generation: u64,
     pub(crate) session_state_path: PathBuf,
     pub(crate) log_dir: PathBuf,
+    pub(crate) project_log_router: Option<gwt_core::logging::ProjectLogRouter>,
+    pub(crate) project_log_scopes: HashMap<String, gwt_core::logging::ProjectLogScope>,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
     pub(crate) sessions_dir: PathBuf,
@@ -2899,6 +2904,58 @@ fn issue_monitor_issue_from_snapshot(
 }
 
 impl AppRuntime {
+    pub(crate) fn set_project_log_router(&mut self, router: gwt_core::logging::ProjectLogRouter) {
+        self.log_dir = router.global_log_dir().to_path_buf();
+        self.project_log_router = Some(router);
+        let tab_ids: Vec<_> = self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        for tab_id in tab_ids {
+            self.register_project_log_scope(&tab_id);
+        }
+    }
+
+    pub(crate) fn project_log_scope_for_tab(
+        &self,
+        tab_id: &str,
+    ) -> Option<&gwt_core::logging::ProjectLogScope> {
+        self.project_log_scopes.get(tab_id)
+    }
+
+    pub(super) fn project_log_scope_for_window(
+        &self,
+        id: &str,
+    ) -> Option<&gwt_core::logging::ProjectLogScope> {
+        self.window_lookup
+            .get(id)
+            .and_then(|address| self.project_log_scope_for_tab(&address.tab_id))
+    }
+
+    pub(super) fn enter_window_log_scope(&self, id: &str) -> tracing::span::EnteredSpan {
+        self.project_log_scope_for_window(id)
+            .map(|scope| scope.enter())
+            .unwrap_or_else(|| {
+                tracing::trace_span!(target: "gwt_log_scope", parent: None, "machine_runtime_event")
+                    .entered()
+            })
+    }
+
+    pub(super) fn register_project_log_scope(&mut self, tab_id: &str) {
+        let Some(router) = self.project_log_router.as_ref() else {
+            return;
+        };
+        let Some(tab) = self.tab(tab_id) else {
+            return;
+        };
+        match router.register_project(&tab.project_root) {
+            Ok(scope) => {
+                self.project_log_scopes.insert(tab_id.to_string(), scope);
+            }
+            Err(error) => {
+                self.project_log_scopes.remove(tab_id);
+                tracing::warn!(target: "gwt::logging", %error, tab_id, "project log registration failed");
+            }
+        }
+    }
+
     pub(crate) fn project_key_for_tab(
         &self,
         tab_id: &str,
@@ -2927,7 +2984,7 @@ impl AppRuntime {
         );
         let session_state_path = gwt_core::paths::gwt_session_state_path();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let log_dir = gwt_core::paths::gwt_project_logs_dir_for_project_path(&launch_dir);
+        let log_dir = gwt_core::paths::gwt_logs_dir();
         let legacy_target = resolve_project_target(&launch_dir)
             .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
         migrate_legacy_workspace_state(
@@ -2983,6 +3040,8 @@ impl AppRuntime {
             recovery_center_generation: 0,
             session_state_path,
             log_dir,
+            project_log_router: None,
+            project_log_scopes: HashMap::new(),
             proxy: AppEventProxy::new(proxy),
             blocking_tasks,
             sessions_dir,
@@ -7335,11 +7394,138 @@ impl AppRuntime {
         vec![OutboundEvent::reply(client_id, event)]
     }
 
+    fn frontend_project_log_scope(
+        &self,
+        event: &FrontendEvent,
+    ) -> Option<gwt_core::logging::ProjectLogScope> {
+        self.frontend_project_log_tab_id(event)
+            .and_then(|id| self.project_log_scope_for_tab(id))
+            .cloned()
+    }
+
+    fn frontend_project_log_tab_id<'a>(&'a self, event: &'a FrontendEvent) -> Option<&'a str> {
+        match event {
+            FrontendEvent::LoadLogs {
+                scope: gwt::LogScopeSelection::Global,
+                ..
+            } => None,
+            FrontendEvent::RebuildIndexCell { project_root, .. }
+            | FrontendEvent::RefreshIndexStatus { project_root } => self
+                .tabs
+                .iter()
+                .find(|tab| tab.project_root == Path::new(project_root))
+                .map(|tab| tab.id.as_str()),
+            FrontendEvent::LaunchWizardAction { .. } => self
+                .launch_wizard
+                .as_ref()
+                .map(|wizard| wizard.tab_id.as_str()),
+            FrontendEvent::SelectProjectTab { tab_id }
+            | FrontendEvent::CloseProjectTab { tab_id }
+            | FrontendEvent::StartMigration { tab_id }
+            | FrontendEvent::SkipMigration { tab_id }
+            | FrontendEvent::QuitMigration { tab_id } => Some(tab_id.as_str()),
+            FrontendEvent::StartupTerminalReady { id, .. }
+            | FrontendEvent::FocusWindow { id, .. }
+            | FrontendEvent::DockWindowTab { id, .. }
+            | FrontendEvent::ActivateWindowTab { id, .. }
+            | FrontendEvent::DetachWindowTab { id, .. }
+            | FrontendEvent::PlaceAgentWindowInKanban { id, .. }
+            | FrontendEvent::MoveAgentKanbanCard { id, .. }
+            | FrontendEvent::UndockAgentWindow { id, .. }
+            | FrontendEvent::DockAgentWindowToIssue { id, .. }
+            | FrontendEvent::SetAgentKanbanCardCollapsed { id, .. }
+            | FrontendEvent::UpdateTerminalGrid { id, .. }
+            | FrontendEvent::UpdateWindowGeometry { id, .. }
+            | FrontendEvent::CloseWindow { id, .. }
+            | FrontendEvent::RecoverRestoredWindow { id, .. }
+            | FrontendEvent::StopWindow { id, .. }
+            | FrontendEvent::RestartWindow { id, .. }
+            | FrontendEvent::TerminalInput { id, .. }
+            | FrontendEvent::PasteImage { id, .. }
+            | FrontendEvent::PasteImageUploaded { id, .. }
+            | FrontendEvent::AttachFiles { id, .. }
+            | FrontendEvent::LoadFileTree { id, .. }
+            | FrontendEvent::ListFileTreeWorktrees { id, .. }
+            | FrontendEvent::SelectFileTreeWorktree { id, .. }
+            | FrontendEvent::LoadFileContent { id, .. }
+            | FrontendEvent::SaveFileContent { id, .. }
+            | FrontendEvent::LoadBranches { id, .. }
+            | FrontendEvent::RequestRemoteStartWorkBranches { id, .. }
+            | FrontendEvent::LoadBoard { id, .. }
+            | FrontendEvent::LoadBoardHistory { id, .. }
+            | FrontendEvent::LoadProfile { id, .. }
+            | FrontendEvent::LoadLogs { id, .. }
+            | FrontendEvent::LoadProcessConsole { id, .. }
+            | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::SearchKnowledgeBridge { id, .. }
+            | FrontendEvent::SearchProjectIndex { id, .. }
+            | FrontendEvent::RequestWorkAdvisory { id, .. }
+            | FrontendEvent::SelectKnowledgeBridgeEntry { id, .. }
+            | FrontendEvent::UpdateKnowledgeBridgePhase { id, .. }
+            | FrontendEvent::RunBranchCleanup { id, .. }
+            | FrontendEvent::SyncBranchCleanup { id, .. }
+            | FrontendEvent::ClearBranchCleanupStatus { id, .. }
+            | FrontendEvent::PostBoardEntry { id, .. }
+            | FrontendEvent::OpenBoardOriginAgent { id, .. }
+            | FrontendEvent::SelectProfile { id, .. }
+            | FrontendEvent::CreateProfile { id, .. }
+            | FrontendEvent::SetActiveProfile { id, .. }
+            | FrontendEvent::SaveProfile { id, .. }
+            | FrontendEvent::DeleteProfile { id, .. }
+            | FrontendEvent::OpenIssueLaunchWizard { id, .. }
+            | FrontendEvent::ResumeBranchLatestAgent { id, .. }
+            | FrontendEvent::OpenLaunchWizard { id, .. }
+            | FrontendEvent::OpenReleaseNotes { id, .. } => self
+                .window_lookup
+                .get(id)
+                .map(|address| address.tab_id.as_str()),
+            FrontendEvent::PmPaneSendInput { window_id, .. } => self
+                .window_lookup
+                .get(window_id)
+                .map(|address| address.tab_id.as_str()),
+            FrontendEvent::OpenStartWorkInAgentKanban { board_id, .. }
+            | FrontendEvent::OpenAgentKanbanLaunchWizard { board_id, .. } => self
+                .window_lookup
+                .get(board_id)
+                .map(|address| address.tab_id.as_str()),
+            FrontendEvent::PaneSendInput { session_id, .. }
+            | FrontendEvent::ResumeWorkspaceAgent { session_id, .. } => self
+                .active_agent_sessions
+                .iter()
+                .find(|(_, session)| session.session_id == *session_id)
+                .and_then(|(window_id, _)| self.window_lookup.get(window_id))
+                .map(|address| address.tab_id.as_str()),
+            // These operations explicitly target the currently displayed workspace.
+            FrontendEvent::CreateWindow { .. }
+            | FrontendEvent::OpenActiveWorkLaunchWizard { .. }
+            | FrontendEvent::RunWorkspaceCleanup { .. }
+            | FrontendEvent::CycleFocus { .. }
+            | FrontendEvent::ArrangeWindows { .. }
+            | FrontendEvent::StopAllWindows { .. }
+            | FrontendEvent::SaveUiTrace { .. }
+            | FrontendEvent::OpenPmAgent { .. }
+            | FrontendEvent::RestartPmAgent
+            | FrontendEvent::ListIssueMonitor
+            | FrontendEvent::IssueMonitorLaunchNow { .. }
+            | FrontendEvent::IssueMonitorQueuePush { .. }
+            | FrontendEvent::IssueMonitorQueueRemove { .. }
+            | FrontendEvent::IssueMonitorRequeue { .. }
+            | FrontendEvent::IssueMonitorConfigureIssue { .. }
+            | FrontendEvent::QuickRegisterIssue { .. } => self.active_tab_id.as_deref(),
+            // Settings, updates and project-picker operations remain machine diagnostics.
+            _ => None,
+        }
+    }
+
     pub(crate) fn handle_frontend_event(
         &mut self,
         client_id: ClientId,
         event: FrontendEvent,
     ) -> Vec<OutboundEvent> {
+        let project_scope = self.frontend_project_log_scope(&event);
+        let _project_scope = project_scope.as_ref().map(|scope| scope.enter()).unwrap_or_else(|| {
+            tracing::trace_span!(target: "gwt_log_scope", parent: None, "machine_frontend_event").entered()
+        });
         log_frontend_user_action(&client_id, &event);
         match event {
             FrontendEvent::FrontendReady => {
@@ -7646,7 +7832,9 @@ impl AppRuntime {
                 all,
             ),
             FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
-            FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
+            FrontendEvent::LoadLogs { id, scope } => {
+                self.load_logs_scoped_events(&client_id, &id, scope)
+            }
             FrontendEvent::LoadKnowledgeBridge {
                 id,
                 knowledge_kind,
@@ -9064,6 +9252,15 @@ impl AppRuntime {
                 .to_string(),
             title: tab.title.clone(),
             project_root: tab.project_root.display().to_string(),
+            project_scope: self
+                .project_log_scope_for_tab(&tab.id)
+                .map(|scope| scope.as_str().to_string())
+                .or_else(|| {
+                    self.project_tab_incarnations
+                        .get(&tab.id)
+                        .map(|entry| entry.project_key.as_str().to_string())
+                })
+                .unwrap_or_default(),
             kind: tab.kind,
             workspace,
             running_agent_count: running_agents.len() as u32,

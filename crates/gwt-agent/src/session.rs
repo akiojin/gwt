@@ -4725,6 +4725,7 @@ display_name = "Claude Code"
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),
@@ -4982,6 +4983,7 @@ display_name = "Claude Code"
             vec![
                 "--no-alt-screen".to_string(),
                 "--config=features.default_mode_request_user_input=true".to_string(),
+                "--config=suppress_unstable_features_warning=true".to_string(),
                 "--model=gpt-5.4".to_string(),
                 "resume".to_string(),
                 "sess-legacy".to_string(),
