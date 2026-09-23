@@ -16162,6 +16162,11 @@ impl IssueMonitorState {
                 None => (IssueMonitorIdleKind::BindingDead, false, None),
                 Some(observed) => match observed.status {
                     WindowState::Stopped => (IssueMonitorIdleKind::BindingDead, true, None),
+                    // SPEC #3590 FR-003: an Error pane is terminal, so it no
+                    // longer occupies a slot. A PTY reader failure reports it
+                    // without a confirmed exit and no `agent_failed` follows.
+                    // The pane is a diagnostic to keep, so only the slot goes.
+                    WindowState::Error => (IssueMonitorIdleKind::BindingDead, false, None),
                     WindowState::Idle => {
                         if observed.review_dispatch && self.review_verdict_published(*issue_number)
                         {
@@ -16195,12 +16200,8 @@ impl IssueMonitorState {
                             (IssueMonitorIdleKind::StuckUnknown, true, None)
                         }
                     }
-                    // Running / Starting / Waiting / Error are never idle
-                    // (AC-6); an Error pane is a diagnostic to keep.
-                    WindowState::Running
-                    | WindowState::Starting
-                    | WindowState::Waiting
-                    | WindowState::Error => continue,
+                    // Running / Starting / Waiting are never idle (AC-6).
+                    WindowState::Running | WindowState::Starting | WindowState::Waiting => continue,
                 },
             };
             // Issue #4131: a dead binding whose execution never settled is
@@ -32801,6 +32802,39 @@ mod tests {
             Some("tab-1::successor")
         );
         assert!(outcome.released.is_empty());
+    }
+
+    /// SPEC #3590 FR-003: only a live launch occupies a slot. A bound pane in
+    /// Error is `Terminal` in the row's own runtime consistency, yet a PTY
+    /// reader failure reports it without a confirmed exit, so no
+    /// `agent_failed` ever arrives. The slot is returned in either Monitor
+    /// mode; the pane stays on screen as the diagnostic it is.
+    #[test]
+    fn a_bound_error_pane_returns_its_slot_and_keeps_the_pane() {
+        for autonomous_mode in [false, true] {
+            let mut monitor = launched_cohort(&[(42, "tab-1::agent")]);
+            monitor.set_autonomous_mode(autonomous_mode);
+            monitor.record_window_snapshot(idle_snapshot(
+                IDLE_NOW,
+                vec![idle_observation(
+                    "tab-1::agent",
+                    Some(42),
+                    WindowState::Error,
+                    false,
+                )],
+            ));
+            let outcome = monitor.reconcile_idle_windows(
+                &settlements(&[(42, IssueMonitorExecutionSettlement::Active)]),
+                IDLE_NOW,
+            );
+            assert_eq!(outcome.released, vec![42], "autonomous={autonomous_mode}");
+            assert_eq!(outcome.requeued, vec![42], "interrupted work is requeued");
+            assert!(
+                outcome.pane_closes.is_empty(),
+                "the Error pane is a diagnostic and stays on screen"
+            );
+            assert_eq!(monitor.active_count(), 0);
+        }
     }
 
     #[test]
