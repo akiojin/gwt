@@ -65,7 +65,7 @@ fn release_unabortable_build(worktree: &Path, current_session_id: Option<&str>) 
         return false;
     };
     // The recovery probe describes the Blocked-only abort path. In Active
-    // executions it also returns unavailable/retryable:false (requires_blocked),
+    // executions it also returns unavailable/retryable:false (blocked_build_abort_recovery_not_applicable),
     // which must never exempt an ordinary unfinished build from Stop.
     if !state.active
         || state.session_id != session
