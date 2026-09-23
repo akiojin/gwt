@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>gwt — Project not found</title>
+    <link rel="icon" href="data:," />
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("gwt:ui:theme");
+          var pref = stored === "dark" || stored === "light" ? stored : "auto";
+          var effective =
+            pref === "auto"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : pref;
+          document.documentElement.setAttribute("data-theme", effective);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles/tokens.css" />
+    <link rel="stylesheet" href="/styles/typography.css" />
+    <link rel="stylesheet" href="/styles/components.css" />
+    <link rel="stylesheet" href="/styles/app.css" />
+  </head>
+  <body class="route-body">
+    <main class="route-not-found" data-route-not-found>
+      <h1 class="route-not-found__title">Project not found</h1>
+      <p class="route-not-found__copy">
+        This project URL does not match an open or recent gwt project.
+      </p>
+      <a class="wizard-button primary route-not-found__home" href="/">Go to Hub</a>
+    </main>
+  </body>
+</html>

@@ -2,6 +2,7 @@
 import { expect, test } from "@playwright/test";
 import { basename, join } from "node:path";
 import {
+  sendLiveGwtEvent,
   gotoLiveGwt,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
@@ -63,9 +64,9 @@ test.describe("Project Manager Settings", () => {
         await expect(sharedMount).toBeDisabled();
 
         const refreshCursor = await messageCursor(page);
-        await page.locator('.project-tab.active[aria-current="page"]').click({
-          position: { x: 20, y: 20 },
-        });
+        // Issue #4538: a Project tab re-hydrates through its own scope
+        // (re-selecting the bound tab is a no-op in a per-project URL).
+        await sendLiveGwtEvent(page, { kind: "frontend_ready" });
         await waitForPmInterval(page, refreshCursor, originalInterval);
         await expect(interval).toHaveValue(originalInterval);
         await expect(interval).toBeEnabled();

@@ -4293,7 +4293,9 @@ impl AppRuntime {
                 session
                     .wizard
                     .mark_launch_materialization_pending("Preparing worktree...");
-                self.pending_launch_wizard_materializations
+                self.project_state_mut(context)
+                    .expect("current wizard project")
+                    .pending_launch_wizard_materializations
                     .insert(session.wizard_id.clone(), session.clone());
                 self.proxy
                     .send(UserEvent::LaunchWizardLaunchMaterializationRequested {
@@ -4319,10 +4321,11 @@ impl AppRuntime {
         config: LaunchWizardLaunchRequest,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
-        let Some(pending_session) = self
-            .pending_launch_wizard_materializations
-            .remove(&wizard_id)
-        else {
+        let Some(pending_session) = self.project_states.values_mut().find_map(|state| {
+            state
+                .pending_launch_wizard_materializations
+                .remove(&wizard_id)
+        }) else {
             return Vec::new();
         };
         let context = pending_session.project_context.clone();

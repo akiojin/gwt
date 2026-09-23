@@ -143,6 +143,7 @@ pub fn app_state_view_from_parts(
                 path: project.path.display().to_string(),
                 title: project.title.clone(),
                 kind: project.kind,
+                project_key: None,
             })
             .collect(),
     }

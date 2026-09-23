@@ -3809,7 +3809,10 @@ impl AppRuntime {
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
         // SPEC-3431 FR-001: a PM launch registers its session once it exists.
         // Removed unconditionally so a failed launch leaves no stale marker.
-        let pending_pm_project_root = self.pending_pm_launches.remove(&window_id);
+        let pending_pm_project_root = self
+            .project_states
+            .values_mut()
+            .find_map(|state| state.pending_pm_launches.remove(&window_id));
         // Issue #4145 AC-1: `inflight_launches` already stamps the spawn
         // request, so the pane-create route is the span from that stamp to this
         // completion — worktree resolution, Docker probing, runner health

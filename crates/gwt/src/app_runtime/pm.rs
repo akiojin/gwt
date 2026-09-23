@@ -435,7 +435,10 @@ impl AppRuntime {
             return Vec::new();
         }
         let project_root = tab.project_root.clone();
-        if trigger != PmEnsureTrigger::Restart && self.pending_pm_closes.contains_key(&project_root)
+        if trigger != PmEnsureTrigger::Restart
+            && self
+                .project_state_for_root(&project_root)
+                .is_some_and(|state| state.pending_pm_closes.contains_key(&project_root))
         {
             tracing::info!(
                 project_root = %project_root.display(),
@@ -790,15 +793,18 @@ impl AppRuntime {
         inbox: &[gwt::IssueMonitorInboxItem],
         now: &str,
     ) -> Option<PmWakeDecision> {
+        let context = self.project_context_for_root(project_root)?;
         let signals = pm_wake_signals(inbox);
-        let Some(seen) = self.pm_wake_seen.get(project_root) else {
-            self.pm_wake_seen
+        let Some(seen) = self.project_state(&context)?.pm_wake_seen.get(project_root) else {
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         };
         let fresh: Vec<String> = signals.difference(seen).cloned().collect();
         if fresh.is_empty() {
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         }
@@ -810,7 +816,8 @@ impl AppRuntime {
             .map(|prefs| prefs.enabled)
             .unwrap_or(false);
         if !monitor_enabled {
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         }
@@ -824,13 +831,15 @@ impl AppRuntime {
         };
         let Some(registration) = prefs.registration else {
             // No PM to wake; a later PM start reads status in its bootstrap.
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         };
         let Some(window_id) = self.live_pm_window_id(&registration.session_id) else {
             // A dead PM is the crash-resume path's job, never the wake's.
-            self.pm_wake_seen
+            self.project_state_mut(&context)?
+                .pm_wake_seen
                 .insert(project_root.to_path_buf(), signals);
             return None;
         };
@@ -845,7 +854,8 @@ impl AppRuntime {
             // next snapshot.
             return None;
         }
-        self.pm_wake_seen
+        self.project_state_mut(&context)?
+            .pm_wake_seen
             .insert(project_root.to_path_buf(), signals);
         // Re-arm the budget and stamp the wake clock: new actionable work is
         // exactly what the park was waiting for, and the stamp keeps the
@@ -1725,11 +1735,17 @@ impl AppRuntime {
             .map(|pane| pane.has_unsent_user_input())
             .unwrap_or(false);
         if unsent {
-            self.pending_pm_wakes
+            let state = self
+                .project_state_for_root_mut(&decision.project_root)
+                .ok_or_else(|| "PM wake project is closed".to_string())?;
+            state
+                .pending_pm_wakes
                 .insert(decision.window_id.clone(), decision.clone());
             return Ok(PmWakeWrite::Deferred);
         }
-        self.pending_pm_wakes.remove(&decision.window_id);
+        if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+            state.pending_pm_wakes.remove(&decision.window_id);
+        }
         super::pty_io::write_pane_input_then_submit(&pane, &decision.delivery_prompt())?;
         Ok(PmWakeWrite::Injected)
     }
@@ -1738,7 +1754,12 @@ impl AppRuntime {
     /// or cleared. Missing pending entries are a no-op so every pane submit
     /// can call this cheaply.
     pub(crate) fn flush_pending_pm_wake(&mut self, window_id: &str) {
-        let Some(decision) = self.pending_pm_wakes.get(window_id).cloned() else {
+        let Some(decision) = self
+            .project_states
+            .values()
+            .find_map(|state| state.pending_pm_wakes.get(window_id))
+            .cloned()
+        else {
             return;
         };
         if self.pane_has_unsent_user_input(window_id) {
@@ -1912,19 +1933,29 @@ impl AppRuntime {
         }
     }
 
+    pub(super) fn pm_session_for_root(&self, project_root: &Path) -> Option<&String> {
+        self.project_state_for_root(project_root)?
+            .pm_sessions
+            .get(project_root)
+    }
+
     /// Keep the per-broadcast PM marker in step with the durable record.
     pub(super) fn sync_pm_session_cache(
         &mut self,
         project_root: &Path,
         registration: Option<&PmRegistration>,
     ) {
+        let Some(state) = self.project_state_for_root_mut(project_root) else {
+            return;
+        };
         match registration {
             Some(registration) => {
-                self.pm_sessions
+                state
+                    .pm_sessions
                     .insert(project_root.to_path_buf(), registration.session_id.clone());
             }
             None => {
-                self.pm_sessions.remove(project_root);
+                state.pm_sessions.remove(project_root);
             }
         }
     }
@@ -2062,9 +2093,12 @@ impl AppRuntime {
                     .collect()
             })
             .unwrap_or_default();
-        for combined in new_ids {
-            self.pending_pm_launches
-                .insert(combined, project_root.to_path_buf());
+        if let Some(state) = self.project_state_for_root_mut(project_root) {
+            for combined in new_ids {
+                state
+                    .pending_pm_launches
+                    .insert(combined, project_root.to_path_buf());
+            }
         }
     }
 
@@ -2125,7 +2159,10 @@ impl AppRuntime {
             return Vec::new();
         };
         let project_root = continuation.project_root().to_path_buf();
-        if !self
+        let Some(state) = self.project_state_mut(&context) else {
+            return Vec::new();
+        };
+        if !state
             .pending_pm_worktree_preparations
             .insert(project_root.clone())
         {
@@ -2146,7 +2183,9 @@ impl AppRuntime {
         if let Err(error) = spawned {
             // Nothing will report back, so release the gate here instead of
             // leaving the repository permanently unpreparable.
-            self.pending_pm_worktree_preparations.remove(&project_root);
+            if let Some(state) = self.project_state_for_root_mut(&project_root) {
+                state.pending_pm_worktree_preparations.remove(&project_root);
+            }
             return self.pm_worktree_preparation_failed_events(&project_root, &error);
         }
         Vec::new()
@@ -2158,7 +2197,11 @@ impl AppRuntime {
         continuation: PmWorktreeContinuation,
         result: Result<PathBuf, String>,
     ) -> Vec<OutboundEvent> {
-        self.pending_pm_worktree_preparations
+        let Some(state) = self.project_state_for_root_mut(continuation.project_root()) else {
+            return Vec::new();
+        };
+        state
+            .pending_pm_worktree_preparations
             .remove(continuation.project_root());
         let tab_id = continuation.tab_id().to_string();
         let mut events = match result {

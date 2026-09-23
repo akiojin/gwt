@@ -1885,6 +1885,13 @@ enum UserEvent {
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     ProjectNavigationPrepared(Box<ProjectNavigationPrepared>),
+    /// Issue #4538: Recent path → ProjectKey resolution for `/p/<hash>`.
+    RecentProjectKeysResolved(app_runtime::RecentProjectKeysResolved),
+    /// Issue #4538 AC-4: authenticated `gwt open <path>` control request.
+    ControlProjectOpen {
+        path: PathBuf,
+        reply: app_runtime::ProjectOpenReply,
+    },
     Dispatch(Vec<OutboundEvent>),
     AgentBackendConnectionProbeComplete {
         client_id: ClientId,
@@ -3398,8 +3405,11 @@ mod tests {
         // URL (the browser URL); the previous `webview_url` mirror was
         // removed alongside the wry WebView path.
         assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
+        // Issue #4538: the single entrypoint is the route bootstrap, which
+        // loads /app.js for Project routes.
         assert!(
-            html.contains("<script type=\"module\" src=\"/app.js\"></script>"),
+            html.contains("<script type=\"module\" src=\"/frontend-bootstrap.js\"></script>")
+                && include_str!("../web/frontend-bootstrap.js").contains("\"/app.js\""),
             "expected browser and native front door modes to point at the same embedded frontend bundle entrypoint",
         );
         assert!(
@@ -3815,6 +3825,8 @@ mod tests {
                 let commit = runtime.handle_active_work_projection_prepared(*completion);
                 if commit.prepared_dispatch.is_some() {
                     return runtime
+                        .project_state_for_tab(&tab_id)
+                        .unwrap()
                         .active_work_projection_cache
                         .borrow()
                         .get(&tab_id)
@@ -3858,6 +3870,7 @@ mod tests {
             next_project_incarnation,
             project_navigation_request: 0,
             pending_project_navigation: None,
+            project_route: Default::default(),
             recent_projects: Vec::new(),
             profile_selections: HashMap::new(),
             profile_config_path: Some(temp_root.join("profile-config.toml")),
@@ -3877,7 +3890,6 @@ mod tests {
             sessions_dir,
             launch_wizard_cache,
 
-            pending_launch_wizard_materializations: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
@@ -3886,7 +3898,6 @@ mod tests {
             // Issue #3676 AC-2: fail-open in tests so ambient credential
             // state never decides a launch.
             issue_monitor_provider_auth_probe: |_| gwt::issue_monitor::ProviderAuthState::Unknown,
-            issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             daemon_supervisor: gwt::daemon_supervisor::DaemonSupervisor::disabled(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
@@ -3895,15 +3906,9 @@ mod tests {
 
             inflight_launches: HashMap::new(),
             project_open_started: None,
-            pending_pm_launches: HashMap::new(),
-            pending_pm_closes: HashMap::new(),
-            pm_sessions: HashMap::new(),
-            pm_wake_seen: HashMap::new(),
-            pending_pm_wakes: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
             startup_worktree_inventories: HashMap::new(),
-            pending_pm_worktree_preparations: std::collections::HashSet::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_restore_log: None,
             pending_restore_summaries: Vec::new(),
@@ -3916,7 +3921,6 @@ mod tests {
             terminal_close_candidates: HashMap::new(),
             terminal_convergence_scan_in_flight: false,
             terminal_close_grace: std::time::Duration::from_secs(60),
-            work_merged_branches: HashMap::new(),
             work_known_branch_refs: HashMap::new(),
             work_dirty_branches: HashMap::new(),
             work_live_process_branches: HashMap::new(),
@@ -3927,11 +3931,6 @@ mod tests {
             session_ledger_cache: Arc::new(Mutex::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             )),
-            work_items_cache: Arc::new(Mutex::new(
-                gwt_core::workspace_projection::WorkItemsCache::new(),
-            )),
-            active_work_projection_cache: std::cell::RefCell::new(HashMap::new()),
-            active_work_projection_payload_cache: std::cell::RefCell::new(HashMap::new()),
             active_work_projection_refresh: std::cell::RefCell::new(
                 super::app_runtime::ActiveWorkProjectionRefreshBroker::default(),
             ),
@@ -3943,6 +3942,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
             window_approval_waiting: std::collections::HashMap::new(),
             approval_settle_epoch: 0,
@@ -3953,6 +3953,7 @@ mod tests {
             released_provider_quota_notices: std::collections::HashMap::new(),
             provider_usage_accounts: Vec::new(),
             last_agent_activity: std::collections::HashMap::new(),
+            last_issue_monitor_heartbeat: std::collections::HashMap::new(),
             agent_capability_issuer: None,
             agent_capability_tokens: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -9649,6 +9650,7 @@ fn main() -> std::io::Result<()> {
         clients.clone(),
         pty_writers.clone(),
         attachment_uploads,
+        Some(tray_lock_handle.control_token().to_string()),
     )
     .expect("embedded server");
     debug_assert_eq!(server.bound_port(), prepared_port);
@@ -10504,6 +10506,14 @@ fn main() -> std::io::Result<()> {
                     #[cfg(unix)]
                     board_daemon_subscribers.sync(&app, proxy.clone());
                 }
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RecentProjectKeysResolved(resolved)) => {
+                let events = app.handle_recent_project_keys_resolved(resolved);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ControlProjectOpen { path, reply }) => {
+                let events = app.control_project_open_events(path, reply);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {

@@ -3686,7 +3686,10 @@ impl AppRuntime {
         tab_id: &str,
         target: super::DispatchTarget,
     ) -> bool {
-        let payload = self
+        let Some(state) = self.project_state_for_tab(tab_id) else {
+            return false;
+        };
+        let payload = state
             .active_work_projection_payload_cache
             .borrow()
             .get(tab_id)
@@ -3726,9 +3729,18 @@ impl AppRuntime {
             window_pty_statuses: self.window_pty_statuses.clone(),
             sessions_dir: self.sessions_dir.clone(),
             session_ledger_cache: self.active_work_session_ledger_cache.clone(),
-            work_items_cache: self.work_items_cache.clone(),
+            work_items_cache: self
+                .project_state_for_tab(&tab.id)
+                .expect("open project state")
+                .work_items_cache
+                .clone(),
             work_known_branch_refs: self.work_known_branch_refs.get(&project_root).cloned(),
-            work_merged_branches: self.work_merged_branches.get(&project_root).cloned(),
+            work_merged_branches: self
+                .project_state_for_tab(&tab.id)
+                .expect("open project state")
+                .work_merged_branches
+                .get(&project_root)
+                .cloned(),
             work_dirty_branches: self.work_dirty_branches.get(&project_root).cloned(),
             work_live_process_branches: self.work_live_process_branches.get(&project_root).cloned(),
             work_cleanup_ready_branches: self
@@ -3902,13 +3914,17 @@ impl AppRuntime {
         if accept {
             match prepared.result {
                 Ok(Some(prepared_projection)) => {
-                    self.active_work_projection_payload_cache
+                    self.project_state_for_tab(&prepared.tab_id)
+                        .expect("open project state")
+                        .active_work_projection_payload_cache
                         .borrow_mut()
                         .insert(
                             prepared.tab_id.clone(),
                             prepared_projection.dispatch.payload.clone(),
                         );
-                    self.active_work_projection_cache
+                    self.project_state_for_tab(&prepared.tab_id)
+                        .expect("open project state")
+                        .active_work_projection_cache
                         .borrow_mut()
                         .insert(prepared.tab_id.clone(), prepared_projection.projection);
                     commit.prepared_dispatch = Some(prepared_projection.dispatch);
@@ -3946,10 +3962,14 @@ impl AppRuntime {
                 .ok()
                 .flatten()?;
         let view = prepared.projection;
-        self.active_work_projection_payload_cache
+        self.project_state_for_tab(&tab.id)
+            .expect("open project state")
+            .active_work_projection_payload_cache
             .borrow_mut()
             .insert(tab.id.clone(), prepared.dispatch.payload);
-        self.active_work_projection_cache
+        self.project_state_for_tab(&tab.id)
+            .expect("open project state")
+            .active_work_projection_cache
             .borrow_mut()
             .insert(tab.id.clone(), view.clone());
         Some(view)
@@ -3980,7 +4000,10 @@ impl AppRuntime {
             }
         }
 
-        let mut cache = self.active_work_projection_cache.borrow_mut();
+        let Some(state) = self.project_state_for_tab(tab_id) else {
+            return;
+        };
+        let mut cache = state.active_work_projection_cache.borrow_mut();
         let Some(projection) = cache.get_mut(tab_id) else {
             return;
         };
@@ -4090,7 +4113,8 @@ impl AppRuntime {
             };
         }
         drop(cache);
-        self.active_work_projection_payload_cache
+        state
+            .active_work_projection_payload_cache
             .borrow_mut()
             .remove(tab_id);
     }
@@ -4113,7 +4137,11 @@ impl AppRuntime {
         else {
             return;
         };
-        let mut cache = self.active_work_projection_cache.borrow_mut();
+        let mut cache = self
+            .project_state_for_tab(&tab_id)
+            .expect("open project state")
+            .active_work_projection_cache
+            .borrow_mut();
         if let Some(projection) = cache.get_mut(&tab_id) {
             merge_workspace_projection_membership_cache_only(projection, project_root, fresh);
         } else {
@@ -4140,7 +4168,9 @@ impl AppRuntime {
         // structured snapshot. Keep the two caches coherent: until the latest
         // background generation commits, FrontendReady/tab-change must use the
         // bounded structured fallback instead of replaying pre-patch bytes.
-        self.active_work_projection_payload_cache
+        self.project_state_for_tab(&tab_id)
+            .expect("open project state")
+            .active_work_projection_payload_cache
             .borrow_mut()
             .remove(&tab_id);
     }
@@ -4172,12 +4202,20 @@ impl AppRuntime {
         project_root: &Path,
         project_still_open: bool,
     ) {
-        self.active_work_projection_cache
-            .borrow_mut()
-            .remove(tab_id);
-        self.active_work_projection_payload_cache
-            .borrow_mut()
-            .remove(tab_id);
+        if let Some(state) = self
+            .project_states
+            .values()
+            .find(|state| state.context.tab_id == tab_id)
+        {
+            state
+                .active_work_projection_cache
+                .borrow_mut()
+                .remove(tab_id);
+            state
+                .active_work_projection_payload_cache
+                .borrow_mut()
+                .remove(tab_id);
+        }
 
         let mut broker = self.active_work_projection_refresh.borrow_mut();
         if project_still_open {
@@ -4210,18 +4248,23 @@ impl AppRuntime {
     fn drain_pending_work_items_cache_evictions(&self) {
         use std::sync::TryLockError;
 
-        let mut cache = match self.work_items_cache.try_lock() {
-            Ok(cache) => cache,
-            Err(TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(TryLockError::WouldBlock) => return,
-        };
-        let pending = {
-            let mut broker = self.active_work_projection_refresh.borrow_mut();
-            std::mem::take(&mut broker.pending_cache_evictions)
-        };
-        for project_root in pending {
-            cache.evict(&project_root);
-        }
+        let mut broker = self.active_work_projection_refresh.borrow_mut();
+        broker.pending_cache_evictions.retain(|root| {
+            let Some(state) = self
+                .project_states
+                .values()
+                .find(|state| projection_worktree_paths_match(&state.context.project_root, root))
+            else {
+                return false;
+            };
+            let mut cache = match state.work_items_cache.try_lock() {
+                Ok(cache) => cache,
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(TryLockError::WouldBlock) => return true,
+            };
+            cache.evict(root);
+            false
+        });
     }
 
     /// Issue #4406: ask the event loop to rebuild `project_root`'s Active Work
@@ -4264,7 +4307,11 @@ impl AppRuntime {
             return Vec::new();
         }
         {
-            let mut cache = self.active_work_projection_cache.borrow_mut();
+            let mut cache = self
+                .project_state_for_tab(&tab_id)
+                .expect("open project state")
+                .active_work_projection_cache
+                .borrow_mut();
             match view.as_ref() {
                 Some(view) => {
                     cache.insert(tab_id.clone(), view.clone());
@@ -4303,10 +4350,12 @@ impl AppRuntime {
         tab_id: &str,
     ) -> Option<OutboundEvent> {
         let tab = self.tab(tab_id)?;
-        let has_cached_projection = self
-            .active_work_projection_cache
-            .borrow()
-            .contains_key(tab_id);
+        let has_cached_projection = self.project_state_for_tab(tab_id).is_some_and(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .contains_key(tab_id)
+        });
         let has_live_session = self
             .active_agent_sessions
             .values()
@@ -4314,11 +4363,13 @@ impl AppRuntime {
         if !has_cached_projection && !has_live_session {
             return None;
         }
-        let cached_projection = self
-            .active_work_projection_cache
-            .borrow()
-            .get(tab_id)
-            .map(bounded_active_work_projection_snapshot);
+        let cached_projection = self.project_state_for_tab(tab_id).and_then(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .get(tab_id)
+                .map(bounded_active_work_projection_snapshot)
+        });
         let projection = cached_projection
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
         Some(OutboundEvent::project(
@@ -4338,11 +4389,13 @@ impl AppRuntime {
         tab_id: &str,
     ) -> Option<OutboundEvent> {
         let tab = self.tab(tab_id)?;
-        let cached_projection = self
-            .active_work_projection_cache
-            .borrow()
-            .get(tab_id)
-            .map(bounded_active_work_projection_snapshot);
+        let cached_projection = self.project_state_for_tab(tab_id).and_then(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .get(tab_id)
+                .map(bounded_active_work_projection_snapshot)
+        });
         let projection = cached_projection
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
         Some(OutboundEvent::project(
@@ -4434,7 +4487,12 @@ impl AppRuntime {
                 .collect(),
             sessions_dir: self.sessions_dir.clone(),
             known_branch_refs: self.work_known_branch_refs.get(&tab.project_root).cloned(),
-            merged_branches: self.work_merged_branches.get(&tab.project_root).cloned(),
+            merged_branches: self
+                .project_state_for_tab(tab_id)
+                .expect("open project state")
+                .work_merged_branches
+                .get(&tab.project_root)
+                .cloned(),
             cleanup_ready_branches: self
                 .work_cleanup_ready_branches
                 .get(&tab.project_root)
@@ -4452,7 +4510,12 @@ impl AppRuntime {
                 .borrow()
                 .get(&tab.project_root)
                 .cloned(),
-            work_items_cache: Arc::clone(&self.work_items_cache),
+            work_items_cache: Arc::clone(
+                &self
+                    .project_state_for_tab(tab_id)
+                    .expect("open project state")
+                    .work_items_cache,
+            ),
             session_ledger_cache: Arc::clone(&self.session_ledger_cache),
         }
     }
