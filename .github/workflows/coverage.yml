@@ -59,15 +59,25 @@ jobs:
       # check-coverage-threshold.mjs). The remaining domain crates are
       # gated by an 80% floor as a ratchet (measured ~83% on 2026-06-10);
       # raise the floor toward 90% as their test suites grow.
+      # coverage-summary.mjs runs the tests, then reads every raw profile
+      # before aggregating, so a truncated profile is reported apart from a
+      # test failure and re-aggregated once, on record (Issue #4628).
       - name: Generate workspace summary
-        run: cargo llvm-cov --workspace --all-features --json --summary-only --output-path target/coverage-summary.json
+        run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features
         timeout-minutes: 20
       - name: Enforce coverage threshold (gwt-core + gwt @ 90%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"
       - name: Enforce coverage floor (domain crates @ 80%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"
+      # Follow the summary's recorded recovery: the strict merge would refuse
+      # the same truncated profile the summary already left out.
       - name: Generate lcov
-        run: cargo llvm-cov report --lcov --output-path lcov.info
+        run: |
+          failure_mode=()
+          if [ -f target/coverage-summary.json.profiles.json ]; then
+            failure_mode=(--failure-mode all)
+          fi
+          cargo llvm-cov report "${failure_mode[@]}" --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
         uses: codecov/codecov-action@v7
