@@ -108,10 +108,11 @@ pub fn render_settlement_comment(
     body
 }
 
-/// Shared delivery check for Issue close callers. A conflict is advisory:
+/// Shared delivery check for merge settlements. A conflict is advisory:
 /// an equivalent change may have landed in a
 /// different PR. Unknown delivery must remain visible as a warning, too.
-pub fn issue_close_delivery_warning(repo_path: &Path, issue_number: u64) -> Option<String> {
+/// `stage` names the check in the warning (close 前検査 / merge 後検査).
+pub fn issue_delivery_warning(repo_path: &Path, issue_number: u64, stage: &str) -> Option<String> {
     let repo_path = gwt_git::worktree::main_worktree_root(repo_path)
         .unwrap_or_else(|_| repo_path.to_path_buf());
     let check = || -> Result<Vec<String>, String> {
@@ -183,7 +184,7 @@ pub fn issue_close_delivery_warning(repo_path: &Path, issue_number: u64) -> Opti
         ),
         Err(error) => format!("配信状態を確認できませんでした: {error}\n\n必要な変更が develop に配信済みか確認してください。"),
     };
-    Some(format!("<!-- gwt-issue-close-delivery-warning v1 -->\n\n警告: Issue #{issue_number} の close 前検査で、{detail}"))
+    Some(format!("<!-- gwt-issue-close-delivery-warning v1 -->\n\n警告: Issue #{issue_number} の{stage}で、{detail}"))
 }
 
 /// Run one settlement against GitHub. Idempotent per delivery: a retry that
@@ -218,8 +219,24 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             already_closed: true,
         });
     }
-    if wants_close {
-        if let Some(warning) = issue_close_delivery_warning(repo_path, issue_number) {
+    let marker = settlement_marker(pr_number, merge_sha);
+    let already_commented = settlement_already_commented(
+        snapshot
+            .comments
+            .iter()
+            .map(|comment| comment.body.as_str()),
+        &marker,
+    );
+    // A close re-checks on every attempt; other settlements check once per
+    // merge so an unpushed owner commit is surfaced before it is stranded
+    // (Issue #4615).
+    if wants_close || !already_commented {
+        let stage = if wants_close {
+            "close 前検査"
+        } else {
+            "merge 後検査"
+        };
+        if let Some(warning) = issue_delivery_warning(repo_path, issue_number, stage) {
             if !snapshot
                 .comments
                 .iter()
@@ -231,14 +248,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             }
         }
     }
-    let marker = settlement_marker(pr_number, merge_sha);
-    let commented = if settlement_already_commented(
-        snapshot
-            .comments
-            .iter()
-            .map(|comment| comment.body.as_str()),
-        &marker,
-    ) {
+    let commented = if already_commented {
         false
     } else {
         client.create_comment_mutation(
@@ -561,16 +571,70 @@ mod tests {
             repo.path(),
             &["update-ref", "refs/heads/work/issue-42", &head],
         );
-        let warning = issue_close_delivery_warning(repo.path(), 42).expect("local source warning");
+        let warning =
+            issue_delivery_warning(repo.path(), 42, "close 前検査").expect("local source warning");
         assert!(warning.contains("`refs/heads/work/issue-42`"));
         assert!(!warning.contains("refs/remotes/origin/work/issue-42"));
+    }
+
+    #[test]
+    fn unmet_settlement_warns_once_about_an_unlanded_local_commit() {
+        // Issue #4615 AC-4: #4614 merged with unmet AC while its fix commit
+        // existed only on the local owner branch. Every merge settlement, not
+        // only a close, must surface that the commit can be stranded.
+        let repo = delivery_repo();
+        let head = push_unlanded_commit(repo.path(), "source.rs");
+        git(
+            repo.path(),
+            &[
+                "--git-dir=origin.git",
+                "update-ref",
+                "-d",
+                "refs/heads/work/issue-42",
+            ],
+        );
+        git(
+            repo.path(),
+            &["update-ref", "refs/heads/work/issue-42", &head],
+        );
+        let client = FakeIssueClient::new();
+        seed_open_issue(&client, 42, vec![]);
+        let action = MergedIssueSettlementAction::UnmetAcceptance {
+            unmet: vec!["AC-1".to_string()],
+        };
+        let settle = || {
+            settle_merged_issue(
+                &client,
+                &repository(),
+                repo.path(),
+                42,
+                7,
+                Some("abc123"),
+                &action,
+            )
+            .expect("settled")
+        };
+        settle();
+        let comments = client.comments(IssueNumber(42));
+        assert_eq!(comments.len(), 2, "warning + settlement comment");
+        assert!(
+            comments[0].body.contains("merge 後検査"),
+            "{}",
+            comments[0].body
+        );
+        assert!(comments[0].body.contains("`refs/heads/work/issue-42`"));
+        assert!(comments[0].body.contains(&head));
+
+        // A retry after the settlement landed must not repeat the warning.
+        settle();
+        assert_eq!(client.comments(IssueNumber(42)).len(), 2);
     }
 
     #[test]
     fn close_ignores_bookkeeping_but_warns_when_remote_coverage_is_unknown() {
         let repo = delivery_repo();
         push_unlanded_commit(repo.path(), ".gwt/state");
-        assert!(issue_close_delivery_warning(repo.path(), 42).is_none());
+        assert!(issue_delivery_warning(repo.path(), 42, "close 前検査").is_none());
         git(
             repo.path(),
             &[
@@ -579,7 +643,7 @@ mod tests {
                 "+refs/heads/develop:refs/remotes/origin/develop",
             ],
         );
-        assert!(issue_close_delivery_warning(repo.path(), 42).is_some());
+        assert!(issue_delivery_warning(repo.path(), 42, "close 前検査").is_some());
     }
 
     #[test]
