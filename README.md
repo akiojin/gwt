@@ -14,7 +14,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 ## Why gwt
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
-  `Grok Build`, `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`,
+  `Grok Build`, `Antigravity CLI`, `OpenCode`, `Copilot`,
   and custom agents from a shared canvas.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
@@ -101,8 +101,10 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
   curl -fsSL https://antigravity.google/cli/install.sh | bash
   ```
 
-  Gemini CLI remains available in gwt as a legacy option for eligible
-  Standard/Enterprise or API-key workflows.
+  Gemini CLI is no longer a built-in agent. Legacy Gemini settings and saved
+  sessions are ignored with a warning naming the unavailable entry; the files
+  are left unchanged. User-defined external commands remain supported through
+  custom agents.
 
   Grok Build is provided by xAI's official `grok` command. Install it with
   `npm install -g @xai-official/grok`, then authenticate on first launch or set
@@ -127,10 +129,18 @@ the tray menu:
   `http://127.0.0.1:<port>/`. The same URL can be opened in any other
   browser too.
 - **Copy URL** — copies the running tray process URL to the OS clipboard.
+- **Projects** — opens a project URL from the open projects followed by Recent,
+  with running and error counts. The tray icon shows an error badge while an
+  open project has an agent error.
 - **About GWT** — opens the browser About / Version surface for the
   running tray process.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
   PTY children down in order.
+
+Project browser tabs show agent RUN / BLOCK counts in their titles and a
+status favicon. BLOCK includes waiting, stopped, and error states; shell
+windows are excluded. An unread marker clears when the project tab is visible
+and focused. Hub metadata stays fixed.
 
 The root URL `http://127.0.0.1:<port>/` is the **Hub**: Open Folder, Clone
 from GitHub, Recent projects, and the currently open projects. Every project

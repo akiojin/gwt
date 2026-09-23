@@ -191,7 +191,6 @@ pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
         AgentId::GrokBuild => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
         | AgentId::Antigravity
-        | AgentId::Gemini
         | AgentId::OpenCode
         | AgentId::OpenClaw
         | AgentId::Hermes
@@ -1662,9 +1661,6 @@ impl AgentLaunchBuilder {
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
             }
-            AgentId::Gemini => {
-                self.build_gemini_args(&mut args);
-            }
             AgentId::OpenCode => {
                 self.build_opencode_args(&mut args, &mut env_vars);
             }
@@ -2042,17 +2038,6 @@ impl AgentLaunchBuilder {
             .map(|dir| dir.to_string_lossy().into_owned())
     }
 
-    fn build_gemini_args(&self, args: &mut Vec<String>) {
-        if let Some(ref model) = self.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-
-        if self.skip_permissions {
-            args.push("--yolo".to_string());
-        }
-    }
-
     fn build_grok_build_args(&self, args: &mut Vec<String>) {
         args.extend(canonical_launch_args(&AgentId::GrokBuild));
 
@@ -2301,12 +2286,11 @@ mod tests {
 
     #[test]
     fn canonical_launch_args_for_agents_without_defaults_is_empty() {
-        // Claude/Gemini/OpenCode/Copilot/Custom have no agent-neutral positional
+        // Claude/OpenCode/Copilot/Custom have no agent-neutral positional
         // defaults today. Agent-specific env vars and conditional args belong in
         // the agent-specific builder, not the canonical default list.
         assert!(canonical_launch_args(&AgentId::ClaudeCode).is_empty());
         assert!(canonical_launch_args(&AgentId::Antigravity).is_empty());
-        assert!(canonical_launch_args(&AgentId::Gemini).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenCode).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenClaw).is_empty());
         assert!(canonical_launch_args(&AgentId::Hermes).is_empty());
@@ -2774,16 +2758,6 @@ mod tests {
     }
 
     #[test]
-    fn build_gemini_skip_permissions_adds_yolo() {
-        let config = AgentLaunchBuilder::new(AgentId::Gemini)
-            .skip_permissions(true)
-            .build();
-
-        assert!(config.args.contains(&"--yolo".to_string()));
-        assert!(config.skip_permissions);
-    }
-
-    #[test]
     fn build_antigravity_maps_model_skip_permissions_and_resume_id() {
         let agent_id = crate::types::resolve_agent_id("agy").expect("Antigravity must resolve");
         let config = AgentLaunchBuilder::new(agent_id)
@@ -3002,7 +2976,6 @@ mod tests {
         for agent in [
             AgentId::ClaudeCode,
             AgentId::GrokBuild,
-            AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,
@@ -3177,17 +3150,6 @@ mod tests {
     }
 
     #[test]
-    fn build_gemini_with_model() {
-        let config = AgentLaunchBuilder::new(AgentId::Gemini)
-            .model("gemini-3-flash-preview")
-            .build();
-
-        assert_eq!(config.command, "gemini");
-        assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"gemini-3-flash-preview".to_string()));
-    }
-
-    #[test]
     fn env_override_wins() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .env("TERM", "dumb")
@@ -3307,17 +3269,6 @@ mod tests {
         assert!(spec_arg
             .unwrap()
             .contains("@anthropic-ai/claude-code@latest"));
-    }
-
-    #[test]
-    fn resolve_runner_latest_uses_official_gemini_package() {
-        let runner = resolve_runner(&AgentId::Gemini, "latest");
-        assert!(!runner.executable.is_empty());
-        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
-        assert_eq!(
-            spec_arg.map(String::as_str),
-            Some("@google/gemini-cli@latest")
-        );
     }
 
     #[test]

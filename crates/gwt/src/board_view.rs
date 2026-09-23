@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn resolve_window_agent_color_prefers_explicit_agent_id() {
         let mut window = sample_window(WindowPreset::Agent, WindowProcessStatus::Running);
-        window.agent_id = Some("gemini".into());
+        window.agent_id = Some("hermes".into());
         assert_eq!(
             resolve_window_agent_color(&window),
             Some(gwt_agent::AgentColor::Magenta),

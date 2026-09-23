@@ -4268,6 +4268,8 @@ fn sample_runtime_with_events(
         tabs,
         active_tab_id: active_tab_id.map(str::to_owned),
         project_states: super::initial_project_states(&project_tab_incarnations),
+        project_aggregates: HashMap::new(),
+        next_project_aggregate_revision: 0,
         project_tab_incarnations,
         next_project_incarnation,
         project_navigation_request: 0,
@@ -35795,7 +35797,7 @@ fn app_runtime_resume_workspace_agent_metadata_only_nonpicker_never_starts_new_w
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let mut session =
-        gwt_agent::Session::new(&repo, "work/metadata-only", gwt_agent::AgentId::Gemini);
+        gwt_agent::Session::new(&repo, "work/metadata-only", gwt_agent::AgentId::Copilot);
     session.id = "session-metadata-only".to_string();
     session.agent_session_id = None;
     session.save(&runtime.sessions_dir).expect("save session");
@@ -78173,3 +78175,5 @@ fn reopened_project_releases_old_pm_and_scan_worker_gates() {
 include!("pm_project_state_tests.rs");
 
 include!("project_owned_state_tests.rs");
+
+include!("project_aggregate_tests.rs");

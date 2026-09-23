@@ -415,7 +415,7 @@ test("Status strip compacts three providers while keeping the full accessible su
         state: { kind: "ok" },
       },
       {
-        provider: "gemini",
+        provider: "custom_provider",
         windows: [{ kind: "weekly", used_percent: 95 }],
         state: { kind: "ok" },
       },
@@ -425,16 +425,16 @@ test("Status strip compacts three providers while keeping the full accessible su
   const strip = document.getElementById("op-strip-usage");
   const visibleSummaries = strip.querySelectorAll(".op-usage-sum");
   assert.equal(visibleSummaries.length, 1);
-  assert.equal(visibleSummaries[0].dataset.provider, "gemini");
-  assert.equal(visibleSummaries[0].textContent.trim(), "GE 95%");
+  assert.equal(visibleSummaries[0].dataset.provider, "custom_provider");
+  assert.equal(visibleSummaries[0].textContent.trim(), "CU 95%");
   assert.equal(strip.querySelector(".op-usage-more").textContent, "+2");
   assert.equal(
     strip.getAttribute("aria-label"),
-    "Provider usage: Codex 40% normal, Claude Code 70% normal, GE 95% danger",
+    "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
   );
   assert.equal(
     strip.title,
-    "Provider usage: Codex 40% normal, Claude Code 70% normal, GE 95% danger",
+    "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
   );
 });
 

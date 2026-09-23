@@ -29,6 +29,7 @@ const ROOT_MODULES = new Set([
   "agent-kanban-surface.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
+  "project-page-metadata.js",
   // SPEC #3206 — shared floating-toast primitive (alerts + notification history).
   "toast-host.js",
   // SPEC #3206 v2 — notification center (bell + unread badge + drawer).

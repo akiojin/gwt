@@ -32,7 +32,7 @@ use tao::{
 };
 use tokio::runtime::Runtime;
 use tray_icon::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     TrayIconBuilder,
 };
 use uuid::Uuid;
@@ -227,6 +227,49 @@ fn load_tray_icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let img = reader.decode().ok()?.to_rgba8();
     let (w, h) = (img.width(), img.height());
     Some((img.into_raw(), w, h))
+}
+
+/// Derive the error badge from the existing icon; recovery uses its original
+/// pixels. Decode once at startup rather than inside the dispatch hot path.
+fn load_tray_icon_rgba_for_state(has_error: bool) -> Option<(Vec<u8>, u32, u32)> {
+    let (mut rgba, width, height) = load_tray_icon_rgba()?;
+    if has_error {
+        let radius = (width.min(height) / 4).max(1) as i64;
+        let cx = i64::from(width) - radius;
+        let cy = i64::from(height) - radius;
+        for y in 0..height {
+            for x in 0..width {
+                let dx = i64::from(x) - cx;
+                let dy = i64::from(y) - cy;
+                if dx * dx + dy * dy <= radius * radius {
+                    let offset = ((y * width + x) * 4) as usize;
+                    let mark = dx.abs() <= (radius / 6).max(1)
+                        && ((dy >= -radius / 2 && dy <= radius / 6)
+                            || (dy >= radius / 3 && dy <= radius / 2));
+                    rgba[offset..offset + 4].copy_from_slice(if mark {
+                        &[255, 255, 255, 255]
+                    } else {
+                        &[208, 32, 40, 255]
+                    });
+                }
+            }
+        }
+    }
+    Some((rgba, width, height))
+}
+
+/// Called only from tao's MainEventsCleared handler. Retain the submenu handle
+/// installed in the root menu; publish ids only after every mutation succeeds.
+fn apply_tray_projects(
+    submenu: &Submenu,
+    generation: &gwt::cli::tray::menu::TrayMenuGeneration,
+) -> Result<(), tray_icon::menu::Error> {
+    while submenu.remove_at(0).is_some() {}
+    for item in &generation.items {
+        submenu.append(&MenuItem::with_id(&item.id, &item.label, true, None))?;
+    }
+    submenu.set_enabled(!generation.items.is_empty());
+    Ok(())
 }
 
 fn logging_dir_for_startup_path(_startup_path: &Path) -> PathBuf {
@@ -2006,6 +2049,39 @@ enum UserEvent {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     include!("project_refresh_generation_tests.rs");
+
+    #[test]
+    fn tray_error_icon_changes_and_recovers_original_pixels() {
+        let normal = super::load_tray_icon_rgba().expect("embedded icon");
+        let error = super::load_tray_icon_rgba_for_state(true).expect("error icon");
+        assert_eq!((normal.1, normal.2), (error.1, error.2));
+        assert_ne!(normal.0, error.0);
+        assert_eq!(super::load_tray_icon_rgba_for_state(false).unwrap(), normal);
+    }
+
+    #[test]
+    fn tray_projects_are_one_retained_submenu_in_the_tao_loop() {
+        let source = include_str!("main.rs");
+        let menu = source
+            .rsplit_once("let tray_menu = Menu::new();")
+            .unwrap()
+            .1;
+        let menu = menu.split("// Phase 4 Q7:").next().unwrap();
+        assert_eq!(menu.matches("Submenu::new(\"Projects\"").count(), 1);
+        let ordered = [
+            "&tray_open,",
+            "&tray_copy_url,",
+            "&tray_projects,",
+            "&tray_about,",
+            "&tray_quit,",
+        ];
+        let positions: Vec<_> = ordered
+            .iter()
+            .map(|needle| menu.find(needle).unwrap())
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(source.contains("Event::MainEventsCleared => {"));
+    }
 
     // Handler unit tests inspect the payload; ingress-generation rejection is covered
     // separately through accept_project_completion in async_project_tests.rs.
@@ -3892,6 +3968,8 @@ mod tests {
             project_navigation_request: 0,
             pending_project_navigation: None,
             project_route: Default::default(),
+            project_aggregates: Default::default(),
+            next_project_aggregate_revision: 0,
             recent_projects: Vec::new(),
             profile_selections: HashMap::new(),
             profile_config_path: Some(temp_root.join("profile-config.toml")),
@@ -9757,10 +9835,17 @@ fn main() -> std::io::Result<()> {
     );
     let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
+    let tray_projects = Submenu::new("Projects", false);
+    let mut tray_generation = gwt::cli::tray::menu::TrayMenuGeneration::new(
+        0,
+        gwt::cli::tray::menu::TraySnapshot::default(),
+        &browser_url,
+    );
     tray_menu
         .append_items(&[
             &tray_open,
             &tray_copy_url,
+            &tray_projects,
             &PredefinedMenuItem::separator(),
             &tray_about,
             &PredefinedMenuItem::separator(),
@@ -9773,9 +9858,13 @@ fn main() -> std::io::Result<()> {
     // AppIndicator extension). Treat that as best-effort — the
     // embedded server still runs and `gwt open` (Phase 6) can still
     // surface the URL.
-    let tray_icon_handle = load_tray_icon_rgba()
-        .and_then(|(rgba, w, h)| {
-            let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
+    let tray_normal_icon = load_tray_icon_rgba_for_state(false)
+        .and_then(|(rgba, w, h)| tray_icon::Icon::from_rgba(rgba, w, h).ok());
+    let tray_error_icon = load_tray_icon_rgba_for_state(true)
+        .and_then(|(rgba, w, h)| tray_icon::Icon::from_rgba(rgba, w, h).ok());
+    let mut tray_has_error = false;
+    let tray_icon_handle = tray_normal_icon.clone()
+        .and_then(|icon| {
             TrayIconBuilder::new()
                 .with_tooltip(format!("{APP_NAME} — open the browser UI"))
                 .with_menu(Box::new(tray_menu))
@@ -10885,9 +10974,32 @@ fn main() -> std::io::Result<()> {
                         }
                     }
                     None => {
-                        // Unknown menu ids can arrive from platform
-                        // integrations; ignore them so the tray loop
-                        // remains resilient.
+                        if let Some(action) = tray_generation.resolve(event.id.as_ref()) {
+                            if let Err(error) = gwt::cli::tray::open_browser_for_url(&action.url) {
+                                tracing::warn!(target: "gwt_tray", %error, "tray Project menu failed to launch the default browser");
+                            }
+                        }
+                    }
+                }
+            }
+            Event::MainEventsCleared => {
+                clients.dispatch(app.refresh_project_aggregates());
+                if let Some(tray_icon) = &tray_icon_handle {
+                    let snapshot = app.tray_snapshot();
+                    let has_error = snapshot.has_error();
+                    if let Err(error) = tray_generation.rebuild(snapshot, &browser_url, |next| {
+                        apply_tray_projects(&tray_projects, next)
+                    }) {
+                        tracing::warn!(target: "gwt_tray", %error, "tray Projects rebuild failed");
+                    }
+                    if has_error != tray_has_error {
+                        let icon = if has_error { &tray_error_icon } else { &tray_normal_icon };
+                        if let Some(icon) = icon {
+                            match tray_icon.set_icon(Some(icon.clone())) {
+                                Ok(()) => tray_has_error = has_error,
+                                Err(error) => tracing::warn!(target: "gwt_tray", %error, "tray error icon update failed"),
+                            }
+                        }
                     }
                 }
             }
