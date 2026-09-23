@@ -1,6 +1,278 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.102.0] - 2026-09-23
+
+### Bug Fixes
+
+- **execution:** Work 不成立時の build lifecycle 孤児化を防止
+- **execution:** 旧 Host の terminalization schema 拒否を回復する
+- **verify:** Derive matrix に CI の rustdoc gate を含める
+- **execution:** Reopen が消費した verify 記録を配信ゲートで有効に保つ
+- **verify:** テスト後に通常の gwtd 成果物を復元する
+- **verify:** Gwtd 成果物の回帰を実成果物の状態で CI に固定する
+- **hooks:** Identity gate 中でも復旧操作と memory 記録を通し、拒否文に脱出手順を載せる
+- **pty:** Pane close finalizer で ConPTY master を閉じてから reader を join する
+- **verify:** Nightly Windows ゲートの --bin gwt 復帰に derivation 契約を追従させる
+- **test:** デッドロック解消で露出した Windows 固有の 2 件を扱う
+- **workspace:** 他ホストの execution container で workspace.update が恒久 409 になるのを直す
+- **worktree:** Daemon の build artifact 自動回収が project root から worktree を列挙できるようにする
+- **coordination:** Typed refusal で execution 系の誤 escalation を止める
+- **hooks:** Committed .codex/hooks.json の gwtd fallback を canonical に戻す
+- **workspace:** Gwt 自身の書き込みを dirty 判定から外し CLEAN UP READY を実態に合わせる
+- **hook:** 時間予算テストの budget を 200ms へ引き上げてテスト衛生ゲートを満たす
+- **workspace:** Work 生成時に owner を書き、owner 未設定の Work を復旧可能にする
+- **test:** Store consolidation の fixture を自前の gwt home に隔離する
+- **ui:** Keep clone modal above project overlays
+- **ui:** Tokenize the remaining overlay and system z-index tiers
+- **test:** #[cfg(test)] mod で外部宣言されたテストファイルを衛生ゲートの走査対象にする
+- **test:** Env_lock を再入可能にし同一スレッドの二重取得によるデッドロックを解消
+- **agent:** Launch pipeline test の LaunchConfig に explicit_follow_up を足す
+- **test:** Delivered-owner launch テストに gwt home を固定する
+- **json:** 未知の params キーを黙って捨てず拒否する
+- **verify:** Daemon 委譲パスにも先頭 KEY=value を環境として渡す
+- **verify:** Daemon 起動の lease holder を stalled と誤報しない
+- **verify:** Rustdoc の intra-doc link 解決エラーを解消する
+- **pane:** Provider API エラーで終了したターンを waiting として報告する
+- **issue:** Create で receipt を発行し、専用の復旧経路と理由付き拒否文言を追加する
+- **issue:** Issue.cache.repair を operation catalog に登録し rustdoc gate を通す
+- **verify:** Rustdoc の private link と CI Rust gate ミラーを修正する
+- **execution:** No_action を知らない gwtd の Stop hook が settle 済み実行を止めないようにする
+- **worktree:** Tracked launch ガードが PID 再利用で終了済み launch を永久保護するのを止める
+- **issue-monitor:** 終了窓の回収と admission 判定を整合する
+- **execution:** Hostの応答形式に合わせてWork拒否診断を保持
+- **execution:** Permission_decision を ECR の body hash から除外する
+- **execution:** Permission_decision を hash からのみ除外し、保存は続ける
+- **test:** Managed launch lifecycle E2E の HOME 差し替えレースを解消する
+- **test:** Busy budget 消化を停止時計で検証する
+- **execution:** 旧HostのWork確認404でも権限検証付きで開始する
+- **docker:** 検出probeの無期限待ちとテストのdaemon依存を解消
+- **index:** 再構築の引数生成からテスト用env依存を分離する
+- **hook:** Identity gateでensureとblockedの復旧経路を許可
+- **issue-spec:** セクション索引の競合と欠落参照を防ぐ
+- **hooks:** Abort不能なbuildの停止を許可して未閉状態を記録する
+- **launch:** Codex起動時の不安定機能警告を共通引数で抑止
+- **board:** Escalation でない Board entry を resolves に渡したとき retry を案内しない
+- **monitor:** Issue.monitor.requeue の reason を再投入窓の launch prompt に届ける
+- **monitor:** 再投入するIssue worktreeのbaseを安全に更新する
+- **worktree-gc:** 閉じた pane の sidecar が worktree の build cache を永久に保護する問題を修正する
+- **worktree-gc:** Clippy 指摘（不要な変換と禁止された Command::new）を解消する
+- **test:** Windows agent launch E2E を Hub bootstrap 契約(hub_state)に合わせる
+- **workspace:** 拒否メッセージに下位原因を保持する
+- **workspace:** Workspace.ensure 拒否文面で復旧案内を重複させない
+- **verify:** 孤児化した canonical verification lease を検出して回収できるようにする
+- **test:** PTY start-gate ヘルパーを coverage profile を書かずに終了させる
+- **ci:** Coverage 集計前に raw profile を検査し、切り詰めをテスト失敗と区別する
+- **ci:** Coverage report にはパッケージ範囲とビルドプロファイルだけを渡す
+- **verify:** Crates/gwt/web 外のスクリプトを UI surface と判定しない
+- **execution:** Blocked専用recovery probeの診断文面を明確化する
+- **issue-monitor:** Hold 中の provider を空き候補より優先せず、provider の hold を Issue の待機に変換しない
+- **app-runtime:** 状態のないキャッシュ参照と同一プロジェクトの別名を扱う
+- **issue-monitor:** Operator の stop / failover を window 不一致で拒否しない
+- **execution:** 記帳ゲートで配信済み作業の終了を拒否しない
+- **issue-monitor:** 出力も止まった稼働窓の stuck launch を解放して再投入する
+- **issue-monitor:** 公開 doc から private 項目への intra-doc link を外す
+- **test:** PTY fixtureを回収しテスト単位のタイムアウトを導入
+- **issue-monitor:** Exit 未確認の Error pane が枠を占有し続けないようにする
+- **workspace:** 同じ worktree に残る他 owner の Work で PR 記帳を曖昧扱いしない
+- **issue-monitor:** Merge 後の全 settlement で未配信 commit を警告する
+- **persistence:** Discarded な Work 行を PR metadata 記録の照合候補から除外
+- **test:** Nextestのprocess groupで終了済みPIDを正しく模擬
+- **board:** Board.show で escalation の解決状態と未解決絞り込みを返す
+- **test:** Index repair テストを隔離し失敗原因を記録する
+- **web:** 接続公開前に集約メタデータをリセットする
+- **verify:** 進捗中の検証 lease を自動更新する
+- **work:** Genesis補償の終了状態をローカルログへ永続化
+
+### Documentation
+
+- Issue.monitor.status の spotlight フィールドを README に追記する
+- **hook:** Private な Lookup への rustdoc リンクを平文にする
+- **gwt-git:** 公開 doc から private item への intra-doc link を外す
+
+### Features
+
+- **diagnostics:** Mds_stores の CPU をホスト診断として観測可能にする
+- **release:** 稼働中バイナリの世代を release.status で報告する
+- **gui:** RuntimeHook dispatch に stage 単位の attribution を追加する
+- **spec-lint:** SPEC artifact の機械 lint を Inspection 前段のゲートにする
+- **gui:** Add persistent FleetView minimap toggle
+- **hook:** Deny 出力に Known workarounds 節を同梱する
+- **execution:** Delivered-owner Inspection と Git を触らない execution.no_action
+- **launch:** Provider 横断の Permission Mode Decision と forced-skip 起動契約を追加する
+- **project-identity:** ProjectKey 検証と重複 root collapse・レガシー active_tab_id 移行
+- **execution:** Host contract preflight を execution authority 要求の前に必須化する
+- **launch:** Permission prompt regression を記録して settlement を止める
+- **launch:** Permission-readiness で起動を事前ブロックする
+- **scope:** 接続とPTY入力をプロジェクト所有権に束縛する
+- **web:** Per-project URL・Hub ページ・gwt open [path] を追加
+- **web:** Project の明示終了と再接続を整備し旧切替 UI を撤去
+- **ui:** 状態通知の入力とネイティブ権限照会を明確化
+- **ui:** プロジェクト集約状態とトレイを表示
+
+### Miscellaneous Tasks
+
+- **work:** 既存の起動時設定と作業履歴を同期前に保全
+- **work:** #3698 の受け入れ条件監査を記録
+- **work:** #3698 の work event shard を記帳する
+- **work:** 作業記帳イベントを記録
+- **rescue:** Window 消失前の未コミット実装を退避 (#3775)
+- **work:** Runtime 書き換えの .codex/hooks.json を develop 版へ戻し work event shard を記帳 (#3775)
+- **work:** Browser check で書き換わった .codex/hooks.json を develop 版へ戻し work event shard を記帳 (#3775)
+- **work:** PR #4572 作成に伴う work event shard を記帳 (#3775)
+- **work:** #4523 の Work イベントシャードを記録する
+- **work:** #4523 の PR 作成イベントシャードを記録する
+- **work:** #4386 の work event shard を記録する
+- **work:** Issue 4317の作業イベントshardを記録
+- **work:** Issue 4317の検証前receiptを記録
+- **work:** Phase 2 実装中に生成された work event 記録を追加する
+- **work:** Phase 2 配信時点の work event 記録を追加する
+- **work:** Issue 4317の完了receiptを記録
+- **work:** #4522 の work event shard を記録する
+- **work:** #4522 の完了 receipt を記録する
+- **work:** Issue 4533 の完了receiptを記録
+- **work:** #4406 の Work event shard を記録する
+- **work:** #4014 の Work event を記録する
+- **work:** 一時診断 workflow を削除し #4014 の Work event を記録する
+- **work:** Work event shard を記録する
+- **work:** Work event shard と SPEC 記帳を記録する
+- **clippy:** Startup.rs の nonminimal_bool 4 件を解消する
+- **work:** #3795 の配信準備に伴う work event shards を記録する
+- **rescue:** Window 消失前の未コミット実装を退避 (#3696)
+- **work:** #3696 の PR handoff までの Work event を記録する
+- **work:** Work event shard を記録する
+- **work:** Issue #4009 の Work event shard を記録する
+- **work:** #4542 の terminal Work update を記録する
+- **work:** #4542 の Work event shard を記録する
+- **work:** Issue #4009 の Work event shard を記録する
+- **work:** 作業記帳イベントを記録
+- **work:** 完了記帳イベントを記録
+- **work:** Issue #4283 の Work event shard を記録する
+- **work:** Work event receipt を記録する
+- **work:** Record work event receipt for issue #3753
+- **work:** #3753 の work event receipt を記帳する
+- **work:** Work event shard を記録する
+- **work:** Work event shard を記録する
+- **work:** Work event shard を記録する
+- **work:** Terminal Work event の receipt を記録する
+- **work:** #3753 の verify / PR 作成時の work event receipt を記帳する
+- **work:** #3753 の settle 時の work event receipt を記帳する
+- **work:** #4316 の記帳イベントを記録する
+- **work:** #4316 の検証と PR 記帳イベントを記録する
+- **work:** Work event の receipt を記録する
+- **work:** 完了記帳イベントを記録
+- **work:** #4581 の verify / PR 作成時の work event receipt を記帳する
+- **work:** #3698 の実行記録 receipt を記帳する
+- **work:** Work event の receipt を記録する
+- **work:** Work event の receipt を記録する
+- **work:** #4584 の Work event receipt を記帳する
+- **work:** #4392 の citation 世代の Work event を記録する
+- **work:** #4392 の PR 配信時の Work event を記録する
+- **work:** Issue #4535 の Work event を記録する
+- **work:** Issue #4590 の Work receipt を記録する
+- **work:** #4546 の Work event receipt を記帳する
+- **work:** #4546 の Work event receipt を記帳する
+- **work:** PR #4603 の関連情報を記録する
+- **work:** #4544 の実装時の Work event を記録する
+- **work:** #4544 の検証時の Work event を記録する
+- **work:** #4544 の配信時の Work event を記録する
+- **work:** PR #4604 の関連情報を記録する
+- **work:** Windows検証追補PRの履歴を保存する
+- **work:** Issue 3920のPR連携履歴を保存する
+- **work:** Issue3983のPR引継ぎを記録する
+- **work:** Issue 4613のPR連携履歴を保存する
+- **rescue:** Window 消失前の未コミット実装を退避 (#3617)
+- **work:** ログ分離の検証結果と引渡し状態を記録
+- **work:** Issue3617のPR連携記録を保存する
+- **work:** Issue4623の実行引継ぎ記録を保存する
+- **work:** 警告抑止の実装と検証記録を更新
+- **work:** Issue4623のPR作成記録を保存する
+- **work:** #3590 の実行記録シャードを追加
+- **work:** Issue4537の作業記録を保存する
+- **work:** Issue4537のPR作成記録を保存する
+- **work:** Issue4630の作業記録を保存する
+- **work:** Issue4630の作業記録を保存する
+- **work:** Issue4630の完了記録を保存する
+- **work:** Issue4624のPR連携記録を保存する
+- **work:** Issue4624の完了記録を保存する
+- **work:** 拒否理由保持の再開と配信計画を記録する
+- **work:** Issue4607の作業イベントを記録する
+- **work:** Issue4607の完了イベントを記録する
+- **work:** Issue4625の作業記録を保存する
+- **work:** Issue4633の作業記録を保存する
+- **work:** Issue4633の完了記録を保存する
+- **work:** Issue4628のWork記録を保存する
+- **work:** #4637 の Work イベントを記録
+- **work:** #4636 の Work event を記録
+- **work:** #4618 の Work event を記録
+- **work:** #3590 の Work イベントを記録
+- **work:** #3590 の終端 Work イベントを記録
+- **work:** #3590 の Work event を記録
+- **work:** #4608 の Work event receipt を記帳する
+- **work:** #4538 の Work イベントを記録
+- **work:** #4538 の PR 作成記録を保存する
+- **work:** Issue 3845の検証配送状態を記録
+- **work:** #3590 の Work event を記録
+- **work:** #3590 の Work event を記録
+- **work:** #4615 の Work イベントを記録する
+- **work:** Issue #4606 の Work イベントを記録
+- **work:** Issue #4539 の PR 配送情報を記録
+- **web:** 撤去済みモジュールを CI 構文検査一覧から除く
+- **work:** #4245 のブランチ監査と退避結果を記録
+- **agent:** Gemini 組み込みエージェントを撤去し旧設定の読込を保護
+- **work:** Issue #4660 の PR 配送情報を記録
+- **work:** Watcher受信期限の検証結果を記帳する
+- **work:** PR作成後の配送記録を保存
+
+### Performance
+
+- **gui:** Managed asset ロックを worktree 単位にし pane 生成の待ち行列を解消する
+
+### Refactor
+
+- **runtime:** Projectごとに状態と非同期配信を分離する
+- **app-runtime:** 残存するプロジェクト状態と全体配信の契約を分離する
+
+### Styling
+
+- **diagnostics:** Spotlight テストに cargo fmt を適用する
+- **pty:** マージ解決後の rustfmt 差分を整える
+- **workspace:** Cargo fmt で #4479 の追加テストを整形する
+- **gwt:** Cargo fmt を適用する
+- **test:** Managed launch lifecycle E2E に cargo fmt を適用する
+
+### Testing
+
+- **e2e:** Cover project open entry surfaces
+- **hygiene:** テスト衛生ゲートを追加し flake 機序 (A)(B) を書いた時点で落とす
+- **hygiene:** 遅延応答の判定を壁時計の競争から deadline 経過の観測に変える
+- **gui:** CPU 正規化の headed E2E を両テーマで実測する (#3775)
+- **verification-lease:** 両ロックの解放観測で並列 flake を防ぐ
+- **execution:** 完了テストの準備から不正なbuild開始の前提を除去
+- **scope:** 実PTY検証で対象ウィンドウと入力準備を確認する
+- **scope:** Windows実接続fixtureをProjectへ再接続する
+- **issue-spec:** ロック競合の判定をWindowsに対応させる
+- **runtime:** Project分離テストのHOMEを隔離する
+- **logging:** RuntimeテストのHOME隔離とlintを修正
+- **daemon:** 150件キューの読み取り回数テストを実時間deadlineから切り離す
+- **verify:** CI の real-binary テスト群に open_cli_integration を反映
+- **web:** Front door 契約テストを route bootstrap の entrypoint に合わせる
+- **release:** Frontend bundle チェックを route bootstrap の entrypoint に合わせる
+- **web:** Project Tabs 撤去後の既存 E2E を現行経路へ更新
+- **e2e:** 実端末応答の計測から自動入力時間を除外
+- **runtime:** 集約状態テストのHOMEを分離する
+- **index:** 実測したFSEvents配送遅延に受信期限を合わせる
+
+### Ci
+
+- **lint:** MacOS runner の clippy job を追加して CI の緑と配信可否を一致させる
+- **test:** #4014 の Windows ハング箇所を特定する一時診断 workflow を追加する
+- **test:** 診断 workflow の run スカラーをブロック化して YAML パースを通す
+- 子プロセスの取りこぼしと不安定なテスト結果を CI で落とす
+- Flake 検出の対象をクレートから test target に絞り実測で予算内に収める
+- Flake 検出が自分でディスクを埋め、検出結果を環境障害に負けさせないようにする
+- Windows agent launch E2E の非 ignore 契約テストを実行する
+
 ## [9.101.1] - 2026-09-21
 
 ### Bug Fixes
