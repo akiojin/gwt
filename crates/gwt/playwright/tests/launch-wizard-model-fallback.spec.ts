@@ -59,7 +59,7 @@ test.describe("Launch Wizard — retired model fallback notice", () => {
     await installWorkspaceFixture(page);
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
     await injectWizard(page, CODEX_WIZARD);
     const modal = page.locator("#wizard-modal");
@@ -97,7 +97,7 @@ test.describe("Launch Wizard — retired model fallback notice", () => {
     await installWorkspaceFixture(page);
     await page.goto(APP_URL);
     await keepLaunchWizardModalVisible(page);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
     await injectWizard(page, { ...CODEX_WIZARD, model_fallback_notice: null });
     const modal = page.locator("#wizard-modal");

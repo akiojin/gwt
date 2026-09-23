@@ -1,9 +1,12 @@
 /* SPEC-3431 FR-132 — live Project Manager Settings verification. */
 import { expect, test } from "@playwright/test";
-import { basename, join } from "node:path";
+import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import {
   sendLiveGwtEvent,
   gotoLiveGwt,
+  openLiveGwtProject,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
 
@@ -32,6 +35,7 @@ test.describe("Project Manager Settings", () => {
       });
 
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await openLiveGwtProject(page, PROJECT_ROOT);
       await expectActiveProject(page);
       await openProjectManagerSettings(page);
       const sharedMount = await mountSharedPmSettings(page);
@@ -138,14 +142,24 @@ test.describe("Project Manager Settings", () => {
 });
 
 const PROJECT_ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? "";
-const PROJECT_NAME = basename(PROJECT_ROOT);
-
 async function expectActiveProject(page: any): Promise<void> {
   expect(PROJECT_ROOT).not.toBe("");
-  const active = page.locator('.project-tab.active[aria-current="page"]');
-  await expect(active).toHaveCount(1, { timeout: 10_000 });
-  await expect(active).toHaveAttribute("data-project-root", PROJECT_ROOT);
-  await expect(active.locator(".project-tab-label")).toHaveText(PROJECT_NAME);
+  const projectKey = new URL(page.url()).pathname.match(/^\/p\/([0-9a-f]{16})$/)?.[1];
+  expect(projectKey, "PM Settings must stay bound to a Project route").toBeTruthy();
+  await expect(page.locator("#close-project-button")).toBeVisible();
+  const projectRoot = await page.waitForFunction((key: string) => {
+    const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+      entry.payload?.kind === "workspace_state"
+      && entry.payload.workspace.tabs.length === 1
+      && entry.payload.workspace.tabs[0].project_key === key);
+    return state?.payload.workspace.tabs[0].project_root;
+  }, projectKey).then((handle: any) => handle.jsonValue());
+  // Recent reopen canonicalizes a worktree to its repository root. Accept
+  // those two identities, never the helper's unrelated Recent fallback.
+  const commonDirectory = execFileSync("git", ["-C", PROJECT_ROOT, "rev-parse",
+    "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
+  expect([realpathSync(PROJECT_ROOT), dirname(realpathSync(commonDirectory))])
+    .toContain(realpathSync(projectRoot));
 }
 
 async function mountSharedPmSettings(page: any): Promise<any> {
