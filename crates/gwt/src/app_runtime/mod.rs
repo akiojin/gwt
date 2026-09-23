@@ -3191,7 +3191,12 @@ impl AppRuntime {
     }
 
     pub(crate) fn project_state_for_tab(&self, tab_id: &str) -> Option<&ProjectRuntimeState> {
-        self.project_state(&self.project_context(tab_id)?)
+        // Immediate lookups follow the tab's ProjectKey, including legacy
+        // aliases. Captured async contexts still use project_state's exact
+        // generation check.
+        self.project_states
+            .get(self.project_key_for_tab(tab_id)?)
+            .filter(|state| self.project_context_is_current(&state.context))
     }
 
     #[cfg(test)]
@@ -3199,7 +3204,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
     ) -> Option<&mut ProjectRuntimeState> {
-        let context = self.project_context(tab_id)?;
+        let context = self.project_state_for_tab(tab_id)?.context.clone();
         self.project_state_mut(&context)
     }
 

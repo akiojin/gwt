@@ -3686,9 +3686,10 @@ impl AppRuntime {
         tab_id: &str,
         target: super::DispatchTarget,
     ) -> bool {
-        let payload = self
-            .project_state_for_tab(tab_id)
-            .expect("open project state")
+        let Some(state) = self.project_state_for_tab(tab_id) else {
+            return false;
+        };
+        let payload = state
             .active_work_projection_payload_cache
             .borrow()
             .get(tab_id)
@@ -3999,11 +4000,10 @@ impl AppRuntime {
             }
         }
 
-        let mut cache = self
-            .project_state_for_tab(tab_id)
-            .expect("open project state")
-            .active_work_projection_cache
-            .borrow_mut();
+        let Some(state) = self.project_state_for_tab(tab_id) else {
+            return;
+        };
+        let mut cache = state.active_work_projection_cache.borrow_mut();
         let Some(projection) = cache.get_mut(tab_id) else {
             return;
         };
@@ -4113,8 +4113,7 @@ impl AppRuntime {
             };
         }
         drop(cache);
-        self.project_state_for_tab(tab_id)
-            .expect("open project state")
+        state
             .active_work_projection_payload_cache
             .borrow_mut()
             .remove(tab_id);
@@ -4351,12 +4350,12 @@ impl AppRuntime {
         tab_id: &str,
     ) -> Option<OutboundEvent> {
         let tab = self.tab(tab_id)?;
-        let has_cached_projection = self
-            .project_state_for_tab(tab_id)
-            .expect("open project state")
-            .active_work_projection_cache
-            .borrow()
-            .contains_key(tab_id);
+        let has_cached_projection = self.project_state_for_tab(tab_id).is_some_and(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .contains_key(tab_id)
+        });
         let has_live_session = self
             .active_agent_sessions
             .values()
@@ -4364,13 +4363,13 @@ impl AppRuntime {
         if !has_cached_projection && !has_live_session {
             return None;
         }
-        let cached_projection = self
-            .project_state_for_tab(tab_id)
-            .expect("open project state")
-            .active_work_projection_cache
-            .borrow()
-            .get(tab_id)
-            .map(bounded_active_work_projection_snapshot);
+        let cached_projection = self.project_state_for_tab(tab_id).and_then(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .get(tab_id)
+                .map(bounded_active_work_projection_snapshot)
+        });
         let projection = cached_projection
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
         Some(OutboundEvent::project(
@@ -4390,13 +4389,13 @@ impl AppRuntime {
         tab_id: &str,
     ) -> Option<OutboundEvent> {
         let tab = self.tab(tab_id)?;
-        let cached_projection = self
-            .project_state_for_tab(tab_id)
-            .expect("open project state")
-            .active_work_projection_cache
-            .borrow()
-            .get(tab_id)
-            .map(bounded_active_work_projection_snapshot);
+        let cached_projection = self.project_state_for_tab(tab_id).and_then(|state| {
+            state
+                .active_work_projection_cache
+                .borrow()
+                .get(tab_id)
+                .map(bounded_active_work_projection_snapshot)
+        });
         let projection = cached_projection
             .unwrap_or_else(|| self.in_memory_active_work_projection_for_tab(tab_id, tab));
         Some(OutboundEvent::project(
